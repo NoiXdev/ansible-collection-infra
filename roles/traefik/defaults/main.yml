@@ -23,6 +23,8 @@ traefik_address: 172.31.255.254
 #   tls: terminate TLS with the cert resolver
 #   as_default: routers without an explicit entrypoint use it
 #   redirect_to: redirect HTTP to this entrypoint (to its host_port when set)
+#   middlewares: middlewares every router on this entrypoint gets, e.g.
+#                [name@file]; not allowed together with redirect_to
 traefik_entrypoints:
   - name: web
     port: 80
@@ -40,6 +42,10 @@ traefik_dns_env: {}
 # - main: example.com
 #   sans: ["*.example.com"]
 traefik_cert_domains: []
+
+# Keep the routers of containers without a healthy server; they answer 503
+# instead of disappearing.
+traefik_docker_allow_empty_services: false
 
 # Extra files for the file provider: {file name: YAML content}.
 traefik_dynamic_files: {}

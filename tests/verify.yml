@@ -52,6 +52,21 @@
       until: verify_redirect.status in [301, 308]
       failed_when: verify_redirect.location | default('') != 'https://nobody.test:18081/x'
 
+    - name: Read the static configuration
+      ansible.builtin.slurp:
+        src: /opt/traefik/traefik.yml
+      register: verify_static
+
+    - name: Static configuration has entrypoint middlewares and allowEmptyServices
+      ansible.builtin.assert:
+        that:
+          - verify_static_cfg.providers.docker.allowEmptyServices is sameas true
+          - verify_static_cfg.entryPoints.alt.http.middlewares == ['test-header@file']
+          - verify_static_cfg.entryPoints.web.http is not defined
+        quiet: true
+      vars:
+        verify_static_cfg: "{{ verify_static.content | b64decode | from_yaml }}"
+
     - name: Worker endpoint is published
       ansible.builtin.wait_for:
         host: 127.0.0.1

@@ -29,8 +29,12 @@ entryPoints:
 {% endif %}
           scheme: https
           permanent: true
-{% elif ep.tls | default(false) %}
+{% elif ep.tls | default(false) or ep.middlewares | default([]) | length > 0 %}
     http:
+{% if ep.middlewares | default([]) | length > 0 %}
+      middlewares: {{ ep.middlewares | to_json }}
+{% endif %}
+{% if ep.tls | default(false) %}
       tls:
         certResolver: dns
 {% if traefik_cert_domains | length > 0 %}
@@ -46,6 +50,7 @@ entryPoints:
 {% endfor %}
 {% endif %}
 {% endif %}
+{% endif %}
 {% endfor %}
 
 providers:
@@ -53,6 +58,9 @@ providers:
     endpoint: tcp://socket-proxy:2375
     exposedByDefault: false
     network: {{ traefik_network }}
+{% if traefik_docker_allow_empty_services %}
+    allowEmptyServices: true
+{% endif %}
   file:
     directory: /etc/traefik/dynamic
     watch: true

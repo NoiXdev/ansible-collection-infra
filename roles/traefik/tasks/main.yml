@@ -6,6 +6,14 @@
     quiet: true
   when: traefik_entrypoints | selectattr('tls', 'defined') | selectattr('tls') | list | length > 0
 
+- name: Check the entrypoints
+  ansible.builtin.assert:
+    that:
+      - traefik_entrypoints | selectattr('redirect_to', 'defined') | selectattr('redirect_to')
+        | selectattr('middlewares', 'defined') | selectattr('middlewares') | list | length == 0
+    fail_msg: An entrypoint with redirect_to cannot have middlewares.
+    quiet: true
+
 - name: Create the Traefik directories
   ansible.builtin.file:
     path: "{{ item.path }}"

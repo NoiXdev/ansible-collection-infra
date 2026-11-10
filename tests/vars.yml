@@ -11,11 +11,21 @@ traefik_entrypoints:
     port: 8081
     host_port: 18081
     bind: [127.0.0.1]
+    middlewares: [test-header@file]
   # Redirects to alt's host port, not its container port.
   - name: alt-redirect
     port: 8082
     bind: [127.0.0.1]
     redirect_to: alt
+traefik_docker_allow_empty_services: true
+traefik_dynamic_files:
+  test.yml:
+    http:
+      middlewares:
+        test-header:
+          headers:
+            customResponseHeaders:
+              X-Test-Entrypoint: alt
 
 portainer_host: portainer.test
 portainer_agent_secret: test-agent-secret-0000000000000000
