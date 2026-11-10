@@ -18,10 +18,15 @@ entryPoints:
     asDefault: true
 {% endif %}
 {% if ep.redirect_to | default('') %}
+{% set target = traefik_entrypoints | selectattr('name', 'equalto', ep.redirect_to) | first | default({}) %}
     http:
       redirections:
         entryPoint:
+{% if target.host_port is defined and target.host_port | int != target.port | int %}
+          to: ":{{ target.host_port }}"
+{% else %}
           to: {{ ep.redirect_to }}
+{% endif %}
           scheme: https
           permanent: true
 {% elif ep.tls | default(false) %}

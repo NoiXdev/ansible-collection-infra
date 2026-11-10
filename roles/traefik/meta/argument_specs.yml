@@ -43,7 +43,12 @@ argument_specs:
       traefik_entrypoints:
         type: list
         elements: dict
-        description: Entrypoints; see defaults/main.yml for the keys.
+        description:
+          - Entrypoints; see defaults/main.yml for the keys.
+          - Keys are name, port, host_port, bind, protocol, tls, as_default and redirect_to.
+          - host_port publishes the container port on another host port, so two entrypoints
+            can share a host port on different bind addresses. A redirect to such an
+            entrypoint goes to its host_port.
       traefik_acme_email:
         type: str
         description: ACME account e-mail; required when an entrypoint terminates TLS.

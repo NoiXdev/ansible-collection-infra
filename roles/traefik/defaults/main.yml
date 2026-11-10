@@ -15,12 +15,14 @@ traefik_network_range: 172.31.255.0/25
 traefik_address: 172.31.255.254
 
 # - name: entrypoint name
-#   port: container and host port
+#   port: container port (and host port unless host_port is set)
+#   host_port: port published on the host (default: port); lets two
+#              entrypoints share a host port on different bind addresses
 #   bind: host addresses to publish on (empty: all)
 #   protocol: tcp or udp
 #   tls: terminate TLS with the cert resolver
 #   as_default: routers without an explicit entrypoint use it
-#   redirect_to: redirect HTTP to this entrypoint
+#   redirect_to: redirect HTTP to this entrypoint (to its host_port when set)
 traefik_entrypoints:
   - name: web
     port: 80

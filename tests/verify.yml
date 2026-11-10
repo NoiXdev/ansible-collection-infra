@@ -30,6 +30,28 @@
       delay: 2
       until: verify_portainer.status in [200, 307]
 
+    - name: Traefik answers on a separate host port
+      ansible.builtin.uri:
+        url: http://127.0.0.1:18081/
+        headers: { Host: nobody.test }
+        status_code: [404]
+      register: verify_host_port
+      retries: 15
+      delay: 2
+      until: verify_host_port.status == 404
+
+    - name: A redirect goes to the target's host port
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8082/x
+        headers: { Host: nobody.test }
+        follow_redirects: none
+        status_code: [301, 308]
+      register: verify_redirect
+      retries: 15
+      delay: 2
+      until: verify_redirect.status in [301, 308]
+      failed_when: verify_redirect.location | default('') != 'https://nobody.test:18081/x'
+
     - name: Worker endpoint is published
       ansible.builtin.wait_for:
         host: 127.0.0.1

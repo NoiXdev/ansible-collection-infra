@@ -19,9 +19,9 @@ services:
 {% for ep in traefik_entrypoints %}
 {% set suffix = '/udp' if ep.protocol | default('tcp') == 'udp' else '' %}
 {% for addr in ep.bind | default([]) %}
-      - "{{ addr }}:{{ ep.port }}:{{ ep.port }}{{ suffix }}"
+      - "{{ addr }}:{{ ep.host_port | default(ep.port) }}:{{ ep.port }}{{ suffix }}"
 {% else %}
-      - "{{ ep.port }}:{{ ep.port }}{{ suffix }}"
+      - "{{ ep.host_port | default(ep.port) }}:{{ ep.port }}{{ suffix }}"
 {% endfor %}
 {% endfor %}
     volumes:

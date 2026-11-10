@@ -6,6 +6,16 @@ traefik_entrypoints:
     port: 80
     bind: [127.0.0.1]
     as_default: true
+  # Container port 8081, published on host port 18081.
+  - name: alt
+    port: 8081
+    host_port: 18081
+    bind: [127.0.0.1]
+  # Redirects to alt's host port, not its container port.
+  - name: alt-redirect
+    port: 8082
+    bind: [127.0.0.1]
+    redirect_to: alt
 
 portainer_host: portainer.test
 portainer_agent_secret: test-agent-secret-0000000000000000
