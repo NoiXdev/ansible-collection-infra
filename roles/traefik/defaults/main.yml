@@ -43,8 +43,8 @@ traefik_dns_env: {}
 #   sans: ["*.example.com"]
 traefik_cert_domains: []
 
-# Keep the routers of containers without a healthy server; they answer 503
-# instead of disappearing.
+# Keep the routers of containers without a healthy server instead of dropping
+# them; Traefik v3 answers those requests with 500, not 503.
 traefik_docker_allow_empty_services: false
 
 # Error pages: a service that serves /<code>.html. The role runs

@@ -8,7 +8,7 @@
 - `traefik`: entrypoints take `middlewares`, which every router on the entrypoint gets; not
   allowed together with `redirect_to`.
 - `traefik`: `traefik_docker_allow_empty_services` sets the Docker provider's
-  `allowEmptyServices`, so containers without a healthy server keep their router and answer 503.
+  `allowEmptyServices`, so containers without a healthy server keep their router (Traefik v3 answers them with 500, not 503).
 - `traefik`: optional error pages (`traefik_error_pages_*`, off by default). The role writes
   `dynamic/error-pages.yml` with the middlewares `error-pages-errors` and
   `error-pages-compress`, which it attaches to the listed entrypoints, routers that answer with

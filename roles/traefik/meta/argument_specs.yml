@@ -76,7 +76,8 @@ argument_specs:
         type: bool
         description: >-
           Docker provider allowEmptyServices: keep the routers of containers without
-          a healthy server, so they answer 503 instead of disappearing.
+          a healthy server instead of dropping them. Traefik v3 answers those requests
+          with 500, which the default error-pages status range (502-504) does not catch.
       traefik_error_pages_enabled:
         type: bool
         description:
