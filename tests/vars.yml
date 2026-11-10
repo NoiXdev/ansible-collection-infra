@@ -18,6 +18,21 @@ traefik_entrypoints:
     bind: [127.0.0.1]
     redirect_to: alt
 traefik_docker_allow_empty_services: true
+traefik_error_pages_enabled: true
+traefik_error_pages_env:
+  THEME: terminal
+  LANGUAGES: en
+  SHOW_DETAILS: "false"
+traefik_error_pages_entrypoints: [web]
+traefik_error_pages_routes:
+  - name: guard
+    entrypoints: [web]
+    rule: "HostRegexp(`^(.+\\.)?internal\\.test$`)"
+    priority: 2
+    page: internal
+  - name: catchall
+    entrypoints: [web, alt]
+    page: "404"
 traefik_dynamic_files:
   test.yml:
     http:

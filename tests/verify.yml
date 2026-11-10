@@ -62,10 +62,121 @@
         that:
           - verify_static_cfg.providers.docker.allowEmptyServices is sameas true
           - verify_static_cfg.entryPoints.alt.http.middlewares == ['test-header@file']
-          - verify_static_cfg.entryPoints.web.http is not defined
+          - verify_static_cfg.entryPoints.web.http.middlewares
+            == ['error-pages-compress@file', 'error-pages-errors@file']
+          - verify_static_cfg.entryPoints['alt-redirect'].http.middlewares is not defined
         quiet: true
       vars:
         verify_static_cfg: "{{ verify_static.content | b64decode | from_yaml }}"
+
+    - name: The error pages container is healthy and locked down
+      ansible.builtin.command:
+        cmd: >-
+          docker inspect -f '{{ '{{' }}.State.Health.Status{{ '}}' }} {{ '{{' }}.Config.User{{ '}}' }}
+          {{ '{{' }}.HostConfig.ReadonlyRootfs{{ '}}' }}'
+          traefik-error-pages-1
+      register: verify_ep_container
+      retries: 30
+      delay: 2
+      until: verify_ep_container.stdout is match('healthy ')
+      changed_when: false
+      failed_when: verify_ep_container.stdout != 'healthy 65532:65532 true'
+
+    - name: The error pages container keeps its maintenance flag in a volume
+      ansible.builtin.command:
+        cmd: docker exec traefik-error-pages-1 /error-pages maintenance status
+      register: verify_ep_maintenance
+      changed_when: false
+      failed_when: verify_ep_maintenance.rc != 0 or verify_ep_maintenance.stdout != 'off'
+
+    - name: An unknown host gets the 404 page
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers: { Host: nobody.test }
+        status_code: [404]
+        return_content: true
+      register: verify_ep_404
+      retries: 15
+      delay: 2
+      until: verify_ep_404.status == 404 and 'ep-theme-terminal' in verify_ep_404.content
+      failed_when: >-
+        verify_ep_404.status != 404
+        or 'ep-theme-terminal' not in verify_ep_404.content
+        or 'sha256-' not in verify_ep_404.content_security_policy | default('')
+
+    - name: A guarded host gets the internal page
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers: { Host: db.internal.test }
+        status_code: [403]
+        return_content: true
+      register: verify_ep_internal
+      failed_when: >-
+        verify_ep_internal.status != 403
+        or 'ep-theme-terminal' not in verify_ep_internal.content
+
+    # uri cannot return a compressed body, so read only the headers.
+    - name: Error pages are compressed
+      ansible.builtin.command:
+        cmd: >-
+          python3 -I -c "import http.client as h;
+          c = h.HTTPConnection('127.0.0.1');
+          c.request('GET', '/', headers={'Host': 'nobody.test', 'Accept-Encoding': 'gzip'});
+          r = c.getresponse(); print(r.status, r.getheader('Content-Encoding'))"
+      register: verify_ep_gzip
+      changed_when: false
+      failed_when: verify_ep_gzip.stdout != '404 gzip'
+
+    - name: A refused backend gets the 502 page
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers: { Host: broken.test }
+        status_code: [502]
+        return_content: true
+      register: verify_ep_502
+      retries: 15
+      delay: 2
+      until: verify_ep_502.status == 502
+      failed_when: verify_ep_502.status != 502 or 'ep-theme-terminal' not in verify_ep_502.content
+
+    # allowEmptyServices keeps the router of an unhealthy container (without it
+    # the host falls through to the catch-all: 404). Traefik v3.7 then renders
+    # the service with one server without a URL and answers 500, which
+    # traefik_error_pages_status does not cover by default; a 503 must still
+    # get the page.
+    - name: An unhealthy backend keeps its router
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers: { Host: unhealthy.test }
+        status_code: [500, 503]
+        return_content: true
+      register: verify_ep_unhealthy
+      retries: 15
+      delay: 2
+      until: verify_ep_unhealthy.status in [500, 503]
+      failed_when: >-
+        verify_ep_unhealthy.status not in [500, 503]
+        or (verify_ep_unhealthy.status == 503 and 'ep-theme-terminal' not in verify_ep_unhealthy.content)
+
+    - name: API clients get JSON
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers: { Host: nobody.test, Accept: application/json }
+        status_code: [404]
+      register: verify_ep_json
+      failed_when: verify_ep_json.status != 404 or verify_ep_json.json.code | default(0) != 404
+
+    - name: The catch-all also serves an entrypoint without the errors middleware
+      ansible.builtin.uri:
+        url: http://127.0.0.1:18081/
+        headers: { Host: nobody.test }
+        status_code: [404]
+        return_content: true
+      register: verify_ep_alt
+      failed_when: >-
+        verify_ep_alt.status != 404
+        or 'ep-theme-terminal' not in verify_ep_alt.content
+        or verify_ep_alt.x_test_entrypoint | default('') != 'alt'
 
     - name: Worker endpoint is published
       ansible.builtin.wait_for:

@@ -6,3 +6,57 @@
     - noixdev.infra.traefik
     - noixdev.infra.portainer
     - noixdev.infra.pulsix_manager
+
+# Error pages fixtures: a backend that refuses connections (502) and one that
+# never gets healthy (503). The error pages container comes with the role.
+- name: Error pages fixtures
+  hosts: all
+  vars_files: [vars.yml]
+  vars:
+    fixtures_dir: /opt/ep-fixtures
+  tasks:
+    - name: Create the fixtures directory
+      ansible.builtin.file:
+        path: "{{ fixtures_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the fixtures compose file
+      ansible.builtin.copy:
+        dest: "{{ fixtures_dir }}/compose.yaml"
+        content: "{{ fixtures_compose | to_nice_yaml(indent=2) }}"
+        mode: "0644"
+      vars:
+        fixtures_compose:
+          services:
+            ep-broken:
+              image: traefik/whoami:v1.10.3
+              labels:
+                traefik.enable: "true"
+                traefik.http.routers.ep-broken.rule: Host(`broken.test`)
+                traefik.http.services.ep-broken.loadbalancer.server.port: "9999"
+              restart: unless-stopped
+              networks: [proxy]
+            ep-unhealthy:
+              image: traefik/whoami:v1.10.3
+              labels:
+                traefik.enable: "true"
+                traefik.http.routers.ep-unhealthy.rule: Host(`unhealthy.test`)
+                traefik.http.services.ep-unhealthy.loadbalancer.server.port: "80"
+              healthcheck:
+                test: ["CMD", "/does-not-exist"]
+                interval: 2s
+                retries: 1
+              restart: unless-stopped
+              networks: [proxy]
+          networks:
+            proxy:
+              name: "{{ traefik_network | default('proxy') }}"
+              external: true
+
+    - name: Start the error pages fixtures
+      community.docker.docker_compose_v2:
+        project_src: "{{ fixtures_dir }}"
+        project_name: ep-fixtures
+        state: present
+        pull: missing

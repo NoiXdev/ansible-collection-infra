@@ -1,0 +1,40 @@
+---
+# Turning error pages off removes the entrypoint middlewares and the file.
+- name: Error pages turned off
+  hosts: all
+  vars_files: [vars.yml]
+  tasks:
+    - name: Read the static configuration
+      ansible.builtin.slurp:
+        src: /opt/traefik/traefik.yml
+      register: disabled_static
+
+    - name: Look for the error pages configuration
+      ansible.builtin.stat:
+        path: /opt/traefik/dynamic/error-pages.yml
+      register: disabled_file
+
+    - name: Look for the error pages container
+      ansible.builtin.command:
+        cmd: docker ps -aq --filter name=traefik-error-pages
+      register: disabled_container
+      changed_when: false
+
+    - name: Nothing refers to error pages any more
+      ansible.builtin.assert:
+        that:
+          - not disabled_file.stat.exists
+          - disabled_container.stdout == ''
+          - "'error-pages' not in disabled_static.content | b64decode"
+          - (disabled_static.content | b64decode | from_yaml).entryPoints.alt.http.middlewares
+            == ['test-header@file']
+        quiet: true
+
+    - name: Routers on the entrypoint still work
+      ansible.builtin.uri:
+        url: http://127.0.0.1/healthz
+        headers: { Host: pulsix.test }
+      register: disabled_routed
+      retries: 15
+      delay: 2
+      until: disabled_routed.status == 200

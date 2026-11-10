@@ -1,0 +1,16 @@
+---
+# The traefik role must reject error pages routes on unknown or redirect
+# entrypoints before it touches the host.
+- name: Error pages on a redirect entrypoint
+  hosts: all
+  roles:
+    - role: noixdev.infra.traefik
+      vars:
+        traefik_dir: /opt/traefik-invalid
+        traefik_entrypoints:
+          - { name: web, port: 80, redirect_to: websecure }
+          - { name: websecure, port: 443 }
+        traefik_error_pages_enabled: true
+        traefik_error_pages_entrypoints: [web]
+        traefik_error_pages_routes:
+          - { name: catchall, entrypoints: [nope], page: "404" }

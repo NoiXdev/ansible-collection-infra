@@ -42,4 +42,18 @@ fi
 grep -q "No enrollment token for: edge-1" "$out/no-token.log" \
   || { cat "$out/no-token.log" >&2; exit 1; }
 
+echo "== invalid error pages settings must fail"
+if play "$here/error_pages_invalid.yml" >"$out/error-pages-invalid.log" 2>&1; then
+  echo "traefik accepted error pages on a redirect or unknown entrypoint" >&2
+  exit 1
+fi
+grep -q "Error pages entrypoints must exist" "$out/error-pages-invalid.log" \
+  || { cat "$out/error-pages-invalid.log" >&2; exit 1; }
+docker exec "$host" test ! -e /opt/traefik-invalid \
+  || { echo "traefik touched the host before checking its settings" >&2; exit 1; }
+
+echo "== turning error pages off cleans up"
+play "$here/converge.yml" -e '{"traefik_error_pages_enabled": false}' >"$out/error-pages-off.log"
+play "$here/error_pages_disabled.yml"
+
 echo "== all tests passed"
