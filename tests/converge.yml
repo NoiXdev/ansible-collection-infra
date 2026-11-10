@@ -1,0 +1,8 @@
+---
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  roles:
+    - noixdev.infra.traefik
+    - noixdev.infra.portainer
+    - noixdev.infra.pulsix_manager

@@ -1,0 +1,7 @@
+---
+- name: Restart traefik
+  community.docker.docker_compose_v2:
+    project_src: "{{ traefik_dir }}"
+    project_name: "{{ traefik_project }}"
+    services: [traefik]
+    state: restarted

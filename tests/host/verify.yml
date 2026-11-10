@@ -1,0 +1,32 @@
+---
+- name: Verify the host roles
+  hosts: testhost
+  gather_facts: true
+  vars:
+    host_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
+  tasks:
+    - name: Read the state
+      ansible.builtin.command:
+        cmd: "{{ item }}"
+      loop:
+        - ip route show 192.0.2.0/24
+        - systemctl is-active ssh.service docker.service tailscaled.service
+        - systemctl is-enabled ssh.socket
+        - ss -Htln sport = :22
+        - docker info --format {{ '{{' }}.LoggingDriver{{ '}}' }}
+        - timedatectl show -p Timezone --value
+      register: host_state
+      changed_when: false
+      failed_when: false
+
+    - name: Check it
+      ansible.builtin.assert:
+        that:
+          - "'via' in host_state.results[0].stdout"
+          - host_state.results[1].stdout_lines == ['active', 'active', 'active']
+          - host_state.results[2].stdout == 'masked'
+          - host_state.results[3].stdout_lines | length == 1
+          - (host_ip ~ ':22') in host_state.results[3].stdout
+          - host_state.results[4].stdout == 'local'
+          - host_state.results[5].stdout == 'Europe/Berlin'
+        fail_msg: "{{ host_state.results | map(attribute='stdout') | list }}"

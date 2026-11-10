@@ -1,0 +1,8 @@
+---
+tailscale_auth_key: ""
+tailscale_hostname: "{{ inventory_hostname_short }}"
+tailscale_advertise_routes: []
+tailscale_accept_routes: false
+tailscale_accept_dns: false
+tailscale_advertise_tags: []
+tailscale_ssh: false

@@ -1,0 +1,27 @@
+---
+- name: Require an auth key to join
+  ansible.builtin.assert:
+    that: tailscale_auth_key | length > 0
+    fail_msg: The node is not logged in to Tailscale and tailscale_auth_key is empty.
+    quiet: true
+
+- name: Join the tailnet with the auth key
+  block:
+    - name: Write the auth key to a temporary file
+      ansible.builtin.copy:
+        dest: /run/tailscale-authkey
+        content: "{{ tailscale_auth_key }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Log in
+      ansible.builtin.command:
+        argv: "{{ tailscale_up_argv }}"
+      changed_when: true
+  always:
+    - name: Remove the auth key file
+      ansible.builtin.file:
+        path: /run/tailscale-authkey
+        state: absent

@@ -1,0 +1,49 @@
+# {{ ansible_managed }}
+services:
+  socket-proxy:
+    image: {{ traefik_socket_proxy_image }}
+    environment:
+      CONTAINERS: "1"
+      NETWORKS: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [socket]
+    restart: unless-stopped
+
+  traefik:
+    image: {{ traefik_image }}
+    depends_on: [socket-proxy]
+    env_file: [dns.env]
+    ports:
+{% for ep in traefik_entrypoints %}
+{% set suffix = '/udp' if ep.protocol | default('tcp') == 'udp' else '' %}
+{% for addr in ep.bind | default([]) %}
+      - "{{ addr }}:{{ ep.port }}:{{ ep.port }}{{ suffix }}"
+{% else %}
+      - "{{ ep.port }}:{{ ep.port }}{{ suffix }}"
+{% endfor %}
+{% endfor %}
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - ./acme:/acme
+    networks:
+      socket: {}
+      proxy:
+        ipv4_address: {{ traefik_address }}
+    restart: unless-stopped
+
+networks:
+  socket:
+    internal: true
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ traefik_mtu }}"
+  proxy:
+    name: {{ traefik_network }}
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ traefik_mtu }}"
+    ipam:
+      config:
+        - subnet: {{ traefik_network_subnet }}
+          ip_range: {{ traefik_network_range }}

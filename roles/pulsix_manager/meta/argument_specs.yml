@@ -1,0 +1,77 @@
+---
+argument_specs:
+  main:
+    short_description: Pulsix manager with its database and local workers
+    description:
+      - Deploys the manager, its TimescaleDB and any number of local workers as one compose project.
+      - Local workers enroll themselves through the manager CLI once the setup wizard has created the first organization.
+    options:
+      pulsix_manager_version:
+        type: str
+        description: Image tag of the manager and worker images (no leading v).
+      pulsix_manager_image:
+        type: str
+        description: Manager image without tag.
+      pulsix_manager_worker_image:
+        type: str
+        description: Worker image without tag.
+      pulsix_manager_db_image:
+        type: str
+        description: TimescaleDB image; keep it on the version the Pulsix release names.
+      pulsix_manager_dir:
+        type: path
+        description: Directory of the compose project.
+      pulsix_manager_project:
+        type: str
+        description: Compose project name.
+      pulsix_manager_mtu:
+        type: int
+        description: MTU of the compose network.
+      pulsix_manager_db_password:
+        type: str
+        required: true
+        description: Database password (openssl rand -hex 32). Keep it in a vault.
+      pulsix_manager_master_key:
+        type: str
+        required: true
+        description: Master key (openssl rand -hex 32). Encrypts secrets and backups. Keep it in a vault and outside the backups.
+      pulsix_manager_public_url:
+        type: str
+        required: true
+        description: URL users reach the web interface at.
+      pulsix_manager_status_domain:
+        type: str
+        description: Domain of public status pages.
+      pulsix_manager_grpc_server_name:
+        type: str
+        description: Name in the worker endpoint's certificate; every worker must use the same value.
+      pulsix_manager_grpc_bind:
+        type: list
+        elements: str
+        description: Host addresses the worker endpoint 8444 is published on, for remote workers.
+      pulsix_manager_http_bind:
+        type: list
+        elements: str
+        description: Host addresses the web interface 8080 is published on.
+      pulsix_manager_host:
+        type: str
+        description: Host name Traefik routes to the web interface.
+      pulsix_manager_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      pulsix_manager_traefik_entrypoint:
+        type: str
+        description: Traefik entrypoint for the route; empty uses Traefik's default.
+      pulsix_manager_trusted_proxies:
+        type: str
+        description: PULSIX_TRUSTED_PROXIES (CIDRs or addresses, comma separated).
+      pulsix_manager_workers:
+        type: list
+        elements: dict
+        description: Local workers; see defaults/main.yml for the keys.
+      pulsix_manager_extra_env:
+        type: dict
+        description: Further manager environment variables.
+      pulsix_manager_print_setup_token:
+        type: bool
+        description: Print the setup token while the setup wizard is not completed.

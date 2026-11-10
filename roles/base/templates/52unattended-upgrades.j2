@@ -1,0 +1,4 @@
+// {{ ansible_managed }}
+Unattended-Upgrade::Automatic-Reboot "{{ base_unattended_reboot | ternary('true', 'false') }}";
+Unattended-Upgrade::Automatic-Reboot-Time "{{ base_unattended_reboot_time }}";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";

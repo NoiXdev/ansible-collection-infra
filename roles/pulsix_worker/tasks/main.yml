@@ -1,0 +1,87 @@
+---
+- name: Check the worker settings
+  ansible.builtin.assert:
+    that:
+      - pulsix_worker_manager_addr is match('^[^:]+:[0-9]+$')
+      - pulsix_worker_instances | length > 0
+      - pulsix_worker_instances | map(attribute='name') | list | unique | length == pulsix_worker_instances | length
+      - pulsix_worker_instances | map(attribute='name') | reject('match', '^[a-z0-9][a-z0-9-]{0,62}$') | list | length == 0
+    fail_msg: >-
+      pulsix_worker_manager_addr (host:port) and at least one worker are required; worker names must
+      be unique, 1-63 lowercase letters, digits or hyphens.
+    quiet: true
+
+- name: Create the worker directory
+  ansible.builtin.file:
+    path: "{{ pulsix_worker_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create each worker's data directory
+  ansible.builtin.file:
+    path: "{{ pulsix_worker_dir }}/{{ item.name }}"
+    state: directory
+    owner: "{{ pulsix_worker_uid }}"
+    group: "{{ pulsix_worker_uid }}"
+    mode: "0700"
+  loop: "{{ pulsix_worker_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Look for each worker's identity
+  ansible.builtin.stat:
+    path: "{{ pulsix_worker_dir }}/{{ item.name }}/identity/cert.pem"
+  loop: "{{ pulsix_worker_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: pulsix_worker_identity
+
+- name: Sort the workers by enrollment state
+  ansible.builtin.set_fact:
+    pulsix_worker_unenrolled: >-
+      {{ pulsix_worker_identity.results | rejectattr('stat.exists') | map(attribute='item.name') | list }}
+
+- name: Require a token for every worker without identity
+  ansible.builtin.assert:
+    that: pulsix_worker_unenrolled | difference(pulsix_worker_enroll_tokens.keys() | list) | length == 0
+    fail_msg: >-
+      No enrollment token for: {{ pulsix_worker_unenrolled | difference(pulsix_worker_enroll_tokens.keys() | list) | join(', ') }}.
+      Create one per worker in Pulsix (Workers, Add worker, pick the zone, use the same name)
+      and pass them within the hour as pulsix_worker_enroll_tokens.
+    quiet: true
+
+- name: Write the compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ pulsix_worker_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+
+# Tokens reach docker compose only through the process environment; the
+# compose file names the variables, not the values.
+- name: Start the workers
+  community.docker.docker_compose_v2:
+    project_src: "{{ pulsix_worker_dir }}"
+    project_name: "{{ pulsix_worker_project }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+  environment: "{{ pulsix_worker_token_env }}"
+  vars:
+    pulsix_worker_token_env: >-
+      {{ dict(pulsix_worker_unenrolled
+              | map('regex_replace', '-', '_') | map('upper') | map('regex_replace', '^', 'PULSIX_ENROLL_TOKEN_')
+              | zip(pulsix_worker_unenrolled | map('extract', pulsix_worker_enroll_tokens))) }}
+  no_log: true
+
+- name: Wait for new workers to enroll
+  ansible.builtin.wait_for:
+    path: "{{ pulsix_worker_dir }}/{{ item }}/identity/cert.pem"
+    timeout: "{{ pulsix_worker_enroll_timeout }}"
+    msg: >-
+      Worker {{ item }} did not enroll. Check `docker compose logs worker-{{ item }}`
+      in {{ pulsix_worker_dir }}; a used or expired token needs a new one.
+  loop: "{{ pulsix_worker_unenrolled }}"

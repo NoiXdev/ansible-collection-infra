@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+services:
+  agent:
+    image: portainer/agent:{{ portainer_version }}
+    env_file: [portainer.env]
+    ports:
+{% for addr in portainer_agent_bind %}
+      - "{{ addr }}:9001:9001"
+{% endfor %}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/volumes:/var/lib/docker/volumes
+      - /:/host
+    restart: unless-stopped
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ portainer_mtu }}"

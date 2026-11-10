@@ -1,0 +1,43 @@
+---
+traefik_image: traefik:v3.7.17
+traefik_socket_proxy_image: tecnativa/docker-socket-proxy:v0.5.0
+traefik_dir: /opt/traefik
+traefik_project: traefik
+traefik_log_level: INFO
+traefik_access_log: false
+traefik_mtu: 1500
+
+# Shared network for the containers Traefik routes to. Traefik gets a fixed
+# address on it, outside ip_range, so a backend can trust exactly it.
+traefik_network: proxy
+traefik_network_subnet: 172.31.255.0/24
+traefik_network_range: 172.31.255.0/25
+traefik_address: 172.31.255.254
+
+# - name: entrypoint name
+#   port: container and host port
+#   bind: host addresses to publish on (empty: all)
+#   protocol: tcp or udp
+#   tls: terminate TLS with the cert resolver
+#   as_default: routers without an explicit entrypoint use it
+#   redirect_to: redirect HTTP to this entrypoint
+traefik_entrypoints:
+  - name: web
+    port: 80
+    redirect_to: websecure
+  - name: websecure
+    port: 443
+    tls: true
+    as_default: true
+
+traefik_acme_email: ""
+traefik_acme_ca_server: https://acme-v02.api.letsencrypt.org/directory
+traefik_dns_provider: hetzner
+traefik_dns_resolvers: [1.1.1.1:53, 9.9.9.9:53]
+traefik_dns_env: {}
+# - main: example.com
+#   sans: ["*.example.com"]
+traefik_cert_domains: []
+
+# Extra files for the file provider: {file name: YAML content}.
+traefik_dynamic_files: {}

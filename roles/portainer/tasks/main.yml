@@ -1,0 +1,48 @@
+---
+- name: Check the agent settings
+  ansible.builtin.assert:
+    that:
+      - portainer_agent_bind | length > 0
+      - portainer_agent_secret | length > 0
+    fail_msg: An agent needs portainer_agent_bind and portainer_agent_secret.
+    quiet: true
+  when: portainer_mode == 'agent'
+
+- name: Create the Portainer directory
+  ansible.builtin.file:
+    path: "{{ portainer_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the secret environment
+  ansible.builtin.copy:
+    dest: "{{ portainer_dir }}/portainer.env"
+    content: |
+      # Managed by Ansible
+      {% if portainer_agent_secret %}
+      AGENT_SECRET={{ portainer_agent_secret }}
+      {% endif %}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  register: portainer_env
+
+- name: Write the compose file
+  ansible.builtin.template:
+    src: "compose.{{ portainer_mode }}.yaml.j2"
+    dest: "{{ portainer_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start Portainer
+  community.docker.docker_compose_v2:
+    project_src: "{{ portainer_dir }}"
+    project_name: "{{ portainer_project }}"
+    state: present
+    pull: missing
+    recreate: "{{ 'always' if portainer_env is changed else 'auto' }}"
+    remove_orphans: true

@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+Port {{ base_sshd_port }}
+{% for address in base_sshd_listen_addresses %}
+ListenAddress {{ address }}
+{% endfor %}
+{% if base_sshd_hardening %}
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+X11Forwarding no
+{% endif %}

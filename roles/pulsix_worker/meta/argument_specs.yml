@@ -1,0 +1,43 @@
+---
+argument_specs:
+  main:
+    short_description: Remote Pulsix workers enrolled with one-time tokens
+    description:
+      - Runs any number of Pulsix workers on a host that is not the manager's.
+      - A worker enrolls once with a one-time token. The token carries the
+        manager CA's fingerprint, so the worker pins the CA before it first
+        connects, and its private key never leaves this host.
+      - A worker that already has an identity needs no token.
+    options:
+      pulsix_worker_version:
+        type: str
+        description: Worker image tag (no leading v); keep it on the manager's version.
+      pulsix_worker_image:
+        type: str
+        description: Worker image without tag.
+      pulsix_worker_dir:
+        type: path
+        description: Directory of the compose project; each worker keeps its identity and data in a 0700 subdirectory.
+      pulsix_worker_project:
+        type: str
+        description: Compose project name.
+      pulsix_worker_mtu:
+        type: int
+        description: MTU of the compose network.
+      pulsix_worker_manager_addr:
+        type: str
+        required: true
+        description: The manager's worker endpoint, host:8444.
+      pulsix_worker_server_name:
+        type: str
+        description: The manager's PULSIX_GRPC_SERVER_NAME.
+      pulsix_worker_instances:
+        type: list
+        elements: dict
+        description: Workers on this host; see defaults/main.yml for the keys.
+      pulsix_worker_enroll_tokens:
+        type: dict
+        description: One-time tokens by worker name, for workers without identity. Pass at run time.
+      pulsix_worker_enroll_timeout:
+        type: int
+        description: Seconds to wait for a new worker's identity after the start.

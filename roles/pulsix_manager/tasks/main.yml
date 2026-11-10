@@ -1,0 +1,83 @@
+---
+- name: Check the manager settings
+  ansible.builtin.assert:
+    that:
+      - pulsix_manager_db_password | string | length >= 32
+      - pulsix_manager_master_key | string is match('^[0-9a-fA-F]{64}$')
+      - pulsix_manager_public_url is match('^https?://')
+      - pulsix_manager_public_url is not match('^https?://(\\[[0-9a-fA-F:]+\\]|[0-9.]+)(:|/|$)')
+      - pulsix_manager_workers | map(attribute='name') | list | unique | length == pulsix_manager_workers | length
+      - pulsix_manager_workers | map(attribute='name') | reject('match', '^[a-z0-9][a-z0-9-]{0,62}$') | list | length == 0
+    fail_msg: >-
+      pulsix_manager_db_password (32+ chars), pulsix_manager_master_key (64 hex chars) and
+      pulsix_manager_public_url (a host name, not an IP address: passkeys
+      need a domain) are required; worker names must be unique, 1-63
+      lowercase letters, digits or hyphens.
+    quiet: true
+
+- name: Create the Pulsix directory
+  ansible.builtin.file:
+    path: "{{ pulsix_manager_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the secret environment
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ pulsix_manager_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Write the compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ pulsix_manager_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start Pulsix
+  community.docker.docker_compose_v2:
+    project_src: "{{ pulsix_manager_dir }}"
+    project_name: "{{ pulsix_manager_project }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+
+# The manager image has no shell or HTTP client; a manager that cannot
+# start shows up as "Restarting" or as an uptime that never grows.
+- name: Wait for the manager to stay up
+  ansible.builtin.command:
+    cmd: docker compose ps manager --format "{{ '{{' }}.Status{{ '}}' }}"
+    chdir: "{{ pulsix_manager_dir }}"
+  register: pulsix_manager_status
+  changed_when: false
+  retries: 20
+  delay: 3
+  until: pulsix_manager_status.stdout is match('Up ([1-9][0-9] seconds|About|[0-9]+ (minutes?|hours?|days?|weeks?|months?))')
+
+- name: Read the setup state
+  ansible.builtin.command:
+    cmd: docker compose run --rm --no-deps cli setup-token
+    chdir: "{{ pulsix_manager_dir }}"
+  register: pulsix_manager_setup_token
+  changed_when: false
+  no_log: true
+  retries: 10
+  delay: 3
+  until: pulsix_manager_setup_token.rc == 0
+
+- name: Show the setup token
+  ansible.builtin.debug:
+    msg:
+      - The setup wizard is not completed yet. Open the link, finish the wizard,
+        then run this role again; the local workers enroll as soon as the first
+        organization exists.
+      - "{{ pulsix_manager_setup_token.stdout_lines }}"
+  when:
+    - pulsix_manager_print_setup_token
+    - "'already completed' not in pulsix_manager_setup_token.stdout"

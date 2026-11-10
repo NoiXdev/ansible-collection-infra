@@ -1,0 +1,69 @@
+---
+- name: Require an ACME e-mail for TLS entrypoints
+  ansible.builtin.assert:
+    that: traefik_acme_email | length > 0
+    fail_msg: traefik_acme_email is required when an entrypoint has tls enabled.
+    quiet: true
+  when: traefik_entrypoints | selectattr('tls', 'defined') | selectattr('tls') | list | length > 0
+
+- name: Create the Traefik directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ traefik_dir }}", mode: "0750" }
+    - { path: "{{ traefik_dir }}/acme", mode: "0700" }
+    - { path: "{{ traefik_dir }}/dynamic", mode: "0755" }
+
+- name: Write the DNS provider environment
+  ansible.builtin.copy:
+    dest: "{{ traefik_dir }}/dns.env"
+    content: |
+      # Managed by Ansible
+      {% for key, value in traefik_dns_env.items() %}
+      {{ key }}={{ value }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart traefik
+
+- name: Write the static configuration
+  ansible.builtin.template:
+    src: traefik.yml.j2
+    dest: "{{ traefik_dir }}/traefik.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart traefik
+
+- name: Write the dynamic configuration files
+  ansible.builtin.copy:
+    dest: "{{ traefik_dir }}/dynamic/{{ item.key }}"
+    content: "{{ item.value if item.value is string else item.value | to_nice_yaml(indent=2) }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ traefik_dynamic_files | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Write the compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ traefik_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start Traefik
+  community.docker.docker_compose_v2:
+    project_src: "{{ traefik_dir }}"
+    project_name: "{{ traefik_project }}"
+    state: present
+    pull: missing
+    remove_orphans: true

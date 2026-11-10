@@ -1,0 +1,4 @@
+tests/output/
+*.tar.gz
+.DS_Store
+.ansible/

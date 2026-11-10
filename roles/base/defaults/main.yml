@@ -1,0 +1,28 @@
+---
+base_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - htop
+  - jq
+  - rsync
+  - unattended-upgrades
+base_timezone: Etc/UTC
+base_swap_size_mb: 0
+base_swap_file: /swapfile
+base_swappiness: 10
+base_journald_max_use: 500M
+base_unattended_upgrades: true
+base_unattended_reboot: false
+base_unattended_reboot_time: "04:00"
+base_sshd_hardening: true
+base_sshd_listen_addresses: []
+base_sshd_port: 22
+
+# Lets services bind addresses that are not up yet (e.g. a private IP at
+# boot). Always on when base_sshd_listen_addresses is set.
+base_nonlocal_bind: false
+
+# Static routes added at boot: [{to: CIDR, via: gateway}]. The interface is
+# the one the gateway is reached through.
+base_static_routes: []

@@ -1,0 +1,21 @@
+---
+pulsix_worker_version: 0.1.0-rc.1
+pulsix_worker_image: noixdev/pulsix-worker
+pulsix_worker_dir: /opt/pulsix-worker
+pulsix_worker_project: pulsix-worker
+pulsix_worker_mtu: 1500
+
+# The manager's worker endpoint (host:8444) and the name in its certificate.
+pulsix_worker_manager_addr: ""
+pulsix_worker_server_name: pulsix-manager
+
+# Workers on this host. Keys: name (required), max_concurrent,
+# claim_interval, play_uid (default 65533; "" runs playbooks as the worker).
+# The zone is part of the enrollment token, not of this list.
+pulsix_worker_instances: []
+
+# One-time enrollment tokens (pxw1.…) for workers that have no identity
+# yet, by worker name. Pass them at run time, never store them:
+#   -e '{"pulsix_worker_enroll_tokens": {"core-1": "pxw1.…"}}'
+pulsix_worker_enroll_tokens: {}
+pulsix_worker_enroll_timeout: 120

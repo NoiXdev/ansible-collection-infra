@@ -1,0 +1,24 @@
+---
+namespace: noixdev
+name: infra
+version: 0.1.0
+readme: README.md
+authors:
+  - NoiXdev
+description: Reusable, tested Ansible roles for Docker-based servers
+license:
+  - MIT
+tags:
+  - docker
+  - infrastructure
+  - linux
+dependencies:
+  community.docker: ">=4.0.0"
+  ansible.posix: ">=1.5.0"
+  community.general: ">=8.0.0"
+repository: https://github.com/NoiXdev/ansible-collection-infra
+issues: https://github.com/NoiXdev/ansible-collection-infra/issues
+build_ignore:
+  - .git
+  - .github
+  - tests/output

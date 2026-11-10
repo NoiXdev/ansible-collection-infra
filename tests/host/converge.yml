@@ -1,0 +1,26 @@
+---
+- name: Converge the host roles
+  hosts: testhost
+  vars:
+    base_timezone: Europe/Berlin
+    base_sshd_listen_addresses: ["{{ ansible_facts['default_ipv4']['address'] }}"]
+    base_static_routes:
+      - to: 192.0.2.0/24
+        via: "{{ ansible_facts['default_ipv4']['gateway'] }}"
+    docker_mtu: 1450
+  roles:
+    - noixdev.infra.base
+    - noixdev.infra.docker
+
+- name: Install Tailscale without joining
+  hosts: testhost
+  tasks:
+    - name: Run the tailscale role without an auth key
+      block:
+        - name: Include the tailscale role
+          ansible.builtin.include_role:
+            name: noixdev.infra.tailscale
+      rescue:
+        - name: Expect the missing auth key, nothing else
+          ansible.builtin.assert:
+            that: "'tailscale_auth_key is empty' in ansible_failed_result.msg"

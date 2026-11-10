@@ -1,0 +1,69 @@
+---
+argument_specs:
+  main:
+    short_description: Standalone Traefik with DNS-01 certificates
+    description:
+      - Runs Traefik and a read-only Docker socket proxy as one compose project.
+      - Containers join the shared network and opt in with traefik.enable=true.
+    options:
+      traefik_image:
+        type: str
+        description: Traefik image.
+      traefik_socket_proxy_image:
+        type: str
+        description: Docker socket proxy image; Traefik never sees the socket itself.
+      traefik_dir:
+        type: path
+        description: Directory of the compose project and its state.
+      traefik_project:
+        type: str
+        description: Compose project name.
+      traefik_log_level:
+        type: str
+        choices: [DEBUG, INFO, WARN, ERROR]
+        description: Traefik log level.
+      traefik_access_log:
+        type: bool
+        description: Write an access log to stdout.
+      traefik_mtu:
+        type: int
+        description: MTU of the compose networks (1450 on Hetzner private networks).
+      traefik_network:
+        type: str
+        description: Name of the shared network.
+      traefik_network_subnet:
+        type: str
+        description: Subnet of the shared network.
+      traefik_network_range:
+        type: str
+        description: Part of the subnet Docker assigns from; must not contain traefik_address.
+      traefik_address:
+        type: str
+        description: Fixed address of Traefik on the shared network.
+      traefik_entrypoints:
+        type: list
+        elements: dict
+        description: Entrypoints; see defaults/main.yml for the keys.
+      traefik_acme_email:
+        type: str
+        description: ACME account e-mail; required when an entrypoint terminates TLS.
+      traefik_acme_ca_server:
+        type: str
+        description: ACME directory (use the staging directory for tests).
+      traefik_dns_provider:
+        type: str
+        description: lego DNS provider for the DNS-01 challenge.
+      traefik_dns_env:
+        type: dict
+        description: Environment for the DNS provider (API tokens); written to a 0600 file.
+      traefik_dns_resolvers:
+        type: list
+        elements: str
+        description: Resolvers used to check DNS propagation.
+      traefik_cert_domains:
+        type: list
+        elements: dict
+        description: Certificates requested on TLS entrypoints (main, sans).
+      traefik_dynamic_files:
+        type: dict
+        description: File-provider files, name to YAML content.

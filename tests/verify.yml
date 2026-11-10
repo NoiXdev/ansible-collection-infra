@@ -1,0 +1,177 @@
+---
+- name: Verify
+  hosts: all
+  vars_files: [vars.yml]
+  tasks:
+    - name: Manager answers health checks
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/healthz
+      register: verify_health
+      retries: 30
+      delay: 2
+      until: verify_health.status == 200
+
+    - name: Traefik routes the manager
+      ansible.builtin.uri:
+        url: http://127.0.0.1/healthz
+        headers: { Host: pulsix.test }
+      register: verify_routed
+      retries: 15
+      delay: 2
+      until: verify_routed.status == 200
+
+    - name: Traefik routes Portainer
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers: { Host: portainer.test }
+        status_code: [200, 307]
+      register: verify_portainer
+      retries: 15
+      delay: 2
+      until: verify_portainer.status in [200, 307]
+
+    - name: Worker endpoint is published
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8444
+        timeout: 30
+
+    - name: Read the setup token
+      ansible.builtin.command:
+        cmd: docker compose run --rm --no-deps cli setup-token
+        chdir: /opt/pulsix
+      register: verify_setup
+      changed_when: false
+
+    - name: Complete the setup wizard
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/api/v1/setup/complete
+        method: POST
+        body_format: json
+        body:
+          admin_email: test@example.test
+          admin_password: correct horse battery staple
+          admin_name: Test
+          org_slug: test
+          org_name: Test
+          setup_token: "{{ verify_setup.stdout | regex_search('Setup token: *(\\S+)', '\\1') | first }}"
+        status_code: [200, 201]
+      when: "'already completed' not in verify_setup.stdout"
+
+    - name: Local workers enroll
+      ansible.builtin.command:
+        cmd: "docker compose exec -T worker-{{ item.name }} test -s /etc/pulsix-worker/cert.pem"
+        chdir: /opt/pulsix
+      register: verify_bundle
+      retries: 30
+      delay: 3
+      until: verify_bundle.rc == 0
+      changed_when: false
+      loop: "{{ pulsix_manager_workers }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Local workers stay up
+      ansible.builtin.command:
+        cmd: "docker inspect -f '{{ '{{' }}.State.Status{{ '}}' }} {{ '{{' }}.RestartCount{{ '}}' }}' pulsix-worker-{{ item.name }}-1"
+      register: verify_state
+      changed_when: false
+      failed_when: verify_state.stdout != 'running 0'
+      loop: "{{ pulsix_manager_workers }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Max concurrency reaches the worker
+      ansible.builtin.command:
+        cmd: docker inspect -f '{{ '{{' }}json .Config.Env{{ '}}' }}' pulsix-worker-ctl-2-1
+      register: verify_env
+      changed_when: false
+      failed_when: "'PULSIX_MAX_CONCURRENT=2' not in verify_env.stdout"
+
+    - name: Local workers report in
+      ansible.builtin.command:
+        cmd: >-
+          docker compose exec -T db psql -U pulsix -d pulsix -tA
+          -c "SELECT count(*) FROM workers WHERE name = '{{ item.name }}' AND last_seen IS NOT NULL"
+        chdir: /opt/pulsix
+      register: verify_seen
+      retries: 20
+      delay: 3
+      until: verify_seen.stdout == '1'
+      changed_when: false
+      loop: "{{ pulsix_manager_workers }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+# A remote worker over the published endpoint. Its identity is seeded from
+# the manager CLI's bundle, standing in for a redeemed token (minting a
+# token needs an interactive browser session): the role must treat it as
+# enrolled, and the worker must reach the manager through host:8444 with
+# the endpoint's server name.
+- name: Verify a remote worker
+  hosts: all
+  vars:
+    remote_dir: /opt/pulsix-remote
+    remote_name: edge-2
+  tasks:
+    - name: Issue a bundle for the remote worker
+      ansible.builtin.command:
+        cmd: "docker compose run --rm --no-deps cli worker add --zone default --name {{ remote_name }}"
+        chdir: /opt/pulsix
+        creates: "{{ remote_dir }}/{{ remote_name }}/identity/cert.pem"
+      register: verify_bundle_out
+      no_log: true
+
+    - name: Seed the remote worker's identity
+      when: "'BEGIN' in verify_bundle_out.stdout | default('')"
+      block:
+        - name: Create the identity directory
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: "65532"
+            group: "65532"
+            mode: "0700"
+          loop:
+            - "{{ remote_dir }}"
+            - "{{ remote_dir }}/{{ remote_name }}"
+            - "{{ remote_dir }}/{{ remote_name }}/identity"
+
+        - name: Write the identity files
+          ansible.builtin.copy:
+            dest: "{{ remote_dir }}/{{ remote_name }}/identity/{{ item.0 }}"
+            content: "{{ item.1 }}\n"
+            owner: "65532"
+            group: "65532"
+            mode: "0600"
+          loop: "{{ ['cert.pem', 'key.pem', 'ca.pem'] | zip(verify_pem_blocks) | list }}"
+          vars:
+            verify_pem_blocks: "{{ verify_bundle_out.stdout | regex_findall('-----BEGIN [A-Z ]+-----[\\s\\S]*?-----END [A-Z ]+-----') }}"
+          no_log: true
+
+    - name: Find the host address
+      ansible.builtin.command:
+        cmd: hostname -i
+      register: verify_host_ip
+      changed_when: false
+
+    - name: Run the remote worker role
+      ansible.builtin.include_role:
+        name: noixdev.infra.pulsix_worker
+      vars:
+        pulsix_worker_dir: "{{ remote_dir }}"
+        pulsix_worker_manager_addr: "{{ verify_host_ip.stdout | trim }}:8444"
+        pulsix_worker_instances:
+          - name: "{{ remote_name }}"
+
+    - name: Remote worker reports in
+      ansible.builtin.command:
+        cmd: >-
+          docker compose exec -T db psql -U pulsix -d pulsix -tA
+          -c "SELECT count(*) FROM workers WHERE name = '{{ remote_name }}' AND last_seen IS NOT NULL"
+        chdir: /opt/pulsix
+      register: verify_remote_seen
+      retries: 20
+      delay: 3
+      until: verify_remote_seen.stdout == '1'
+      changed_when: false

@@ -1,0 +1,41 @@
+---
+argument_specs:
+  main:
+    short_description: Portainer server or agent
+    options:
+      portainer_mode:
+        type: str
+        choices: [server, agent]
+        description: Run the Portainer server or an agent a server connects to.
+      portainer_version:
+        type: str
+        description: Version of both images; server and agents must match.
+      portainer_dir:
+        type: path
+        description: Directory of the compose project.
+      portainer_project:
+        type: str
+        description: Compose project name.
+      portainer_mtu:
+        type: int
+        description: MTU of the compose network.
+      portainer_agent_secret:
+        type: str
+        description: Shared secret of server and agents (AGENT_SECRET). Keep it in a vault.
+      portainer_host:
+        type: str
+        description: Server only. Host name Traefik routes to the UI; empty adds no route.
+      portainer_traefik_network:
+        type: str
+        description: Server only. External network Traefik routes on.
+      portainer_traefik_entrypoint:
+        type: str
+        description: Server only. Traefik entrypoint for the route; empty uses Traefik's default.
+      portainer_bind:
+        type: list
+        elements: str
+        description: Server only. Addresses the UI port 9443 is published on.
+      portainer_agent_bind:
+        type: list
+        elements: str
+        description: Agent only. Addresses the agent port 9001 is published on.

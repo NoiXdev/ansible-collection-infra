@@ -1,0 +1,86 @@
+---
+- name: Install what the apt repository module needs
+  ansible.builtin.apt:
+    name: python3-debian
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the Tailscale apt key
+  ansible.builtin.get_url:
+    url: "https://pkgs.tailscale.com/stable/{{ ansible_facts['distribution'] | lower }}/{{ ansible_facts['distribution_release'] }}.noarmor.gpg"
+    dest: /etc/apt/keyrings/tailscale.gpg
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Add the Tailscale apt repository
+  ansible.builtin.deb822_repository:
+    name: tailscale
+    types: [deb]
+    uris: "https://pkgs.tailscale.com/stable/{{ ansible_facts['distribution'] | lower }}"
+    suites: ["{{ ansible_facts['distribution_release'] }}"]
+    components: [main]
+    signed_by: /etc/apt/keyrings/tailscale.gpg
+
+- name: Install Tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: present
+    update_cache: true
+
+- name: Enable IP forwarding for subnet routing
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "1"
+    sysctl_file: /etc/sysctl.d/60-tailscale.conf
+  loop:
+    - net.ipv4.ip_forward
+    - net.ipv6.conf.all.forwarding
+  when: tailscale_advertise_routes | length > 0
+
+- name: Start tailscaled
+  ansible.builtin.systemd_service:
+    name: tailscaled
+    state: started
+    enabled: true
+
+- name: Read the node state
+  ansible.builtin.command:
+    cmd: tailscale status --json
+  register: tailscale_status
+  changed_when: false
+  failed_when: false
+
+- name: Join the tailnet
+  ansible.builtin.include_tasks: join.yml
+  when: >-
+    tailscale_status.rc != 0
+    or (tailscale_status.stdout | from_json).BackendState != 'Running'
+
+- name: Read the node preferences
+  ansible.builtin.command:
+    cmd: tailscale debug prefs
+  register: tailscale_prefs_raw
+  changed_when: false
+
+- name: Apply the node preferences
+  ansible.builtin.command:
+    argv: "{{ tailscale_set_argv }}"
+  vars:
+    tailscale_prefs: "{{ tailscale_prefs_raw.stdout | from_json }}"
+  when: >-
+    (tailscale_prefs.AdvertiseRoutes | default([], true) | sort) != (tailscale_advertise_routes | sort)
+    or tailscale_prefs.RouteAll | default(false) != tailscale_accept_routes
+    or tailscale_prefs.CorpDNS | default(true) != tailscale_accept_dns
+    or tailscale_prefs.Hostname | default('') != tailscale_hostname
+    or tailscale_prefs.RunSSH | default(false) != tailscale_ssh
+  changed_when: true

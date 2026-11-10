@@ -1,0 +1,39 @@
+# {{ ansible_managed }}
+services:
+  portainer:
+    image: portainer/portainer-ce:{{ portainer_version }}
+    env_file: [portainer.env]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+{% if portainer_bind | length > 0 %}
+    ports:
+{% for addr in portainer_bind %}
+      - "{{ addr }}:9443:9443"
+{% endfor %}
+{% endif %}
+{% if portainer_host %}
+    networks: [default, proxy]
+    labels:
+      - traefik.enable=true
+      - "traefik.http.routers.portainer.rule=Host(`{{ portainer_host }}`)"
+{% if portainer_traefik_entrypoint %}
+      - traefik.http.routers.portainer.entrypoints={{ portainer_traefik_entrypoint }}
+{% endif %}
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - traefik.http.services.portainer.loadbalancer.server.port=9000
+{% endif %}
+    restart: unless-stopped
+
+volumes:
+  portainer-data:
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ portainer_mtu }}"
+{% if portainer_host %}
+  proxy:
+    name: {{ portainer_traefik_network }}
+    external: true
+{% endif %}

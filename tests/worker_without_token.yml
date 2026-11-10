@@ -1,0 +1,10 @@
+---
+- name: Remote worker without identity and token
+  hosts: all
+  roles:
+    - role: noixdev.infra.pulsix_worker
+      vars:
+        pulsix_worker_dir: /opt/pulsix-remote
+        pulsix_worker_manager_addr: 127.0.0.1:8444
+        pulsix_worker_instances:
+          - name: edge-1

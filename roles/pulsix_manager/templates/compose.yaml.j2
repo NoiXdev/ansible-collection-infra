@@ -1,0 +1,151 @@
+# {{ ansible_managed }}
+# Secrets come from .env next to this file (compose interpolation).
+x-manager-env: &manager-env
+  PULSIX_DATABASE_URL: "postgres://pulsix:${DB_PASSWORD:?}@db:5432/pulsix?sslmode=disable"
+  PULSIX_MASTER_KEY: "${PULSIX_MASTER_KEY:?}"
+  PULSIX_PUBLIC_URL: "{{ pulsix_manager_public_url }}"
+  PULSIX_GRPC_SERVER_NAME: "{{ pulsix_manager_grpc_server_name }}"
+
+x-manager-base: &manager-base
+  image: {{ pulsix_manager_image }}:{{ pulsix_manager_version }}
+  environment:
+    <<: *manager-env
+    PULSIX_STATUS_DOMAIN: "{{ pulsix_manager_status_domain }}"
+    PULSIX_GRPC_LISTEN: ":8444"
+    PULSIX_EMBEDDED_WORKER: "0"
+{% if pulsix_manager_trusted_proxies %}
+    PULSIX_TRUSTED_PROXIES: "{{ pulsix_manager_trusted_proxies }}"
+{% endif %}
+{% for key, value in pulsix_manager_extra_env.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}
+  volumes:
+    - pulsix-backups:/var/lib/pulsix/backups
+
+services:
+  db:
+    image: {{ pulsix_manager_db_image }}
+    environment:
+      POSTGRES_DB: pulsix
+      POSTGRES_USER: pulsix
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?}"
+    volumes:
+      - pulsix-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulsix -d pulsix"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  manager:
+    <<: *manager-base
+    depends_on:
+      db:
+        condition: service_healthy
+{% if (pulsix_manager_http_bind + pulsix_manager_grpc_bind) | length > 0 %}
+    ports:
+{% for addr in pulsix_manager_http_bind %}
+      - "{{ addr }}:8080:8080"
+{% endfor %}
+{% for addr in pulsix_manager_grpc_bind %}
+      - "{{ addr }}:8444:8444"
+{% endfor %}
+{% endif %}
+{% if pulsix_manager_host %}
+    networks: [default, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network={{ pulsix_manager_traefik_network }}
+      - "traefik.http.routers.pulsix.rule=Host(`{{ pulsix_manager_host }}`)"
+{% if pulsix_manager_traefik_entrypoint %}
+      - traefik.http.routers.pulsix.entrypoints={{ pulsix_manager_traefik_entrypoint }}
+{% endif %}
+      - traefik.http.services.pulsix.loadbalancer.server.port=8080
+{% endif %}
+    init: true
+    restart: unless-stopped
+
+  # One-off commands: docker compose run --rm cli <backup|restore|worker add|setup-token>
+  cli:
+    <<: *manager-base
+    profiles: [cli]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+{% for w in pulsix_manager_workers %}
+{% set play_uid = w.play_uid | default('65533') | string %}
+
+  worker-{{ w.name }}-enroll:
+    image: {{ pulsix_manager_image }}:{{ pulsix_manager_version }}
+    depends_on:
+      db:
+        condition: service_healthy
+      manager:
+        condition: service_started
+    command:
+      - worker
+      - add
+      - --zone={{ w.zone | default('default') }}
+      - --org={{ w.org | default('') }}
+      - --name={{ w.name }}
+      - --bundle-dir=/var/lib/pulsix/worker-bundle
+      - --wait
+      - --replace
+    environment: *manager-env
+    volumes:
+      - worker-{{ w.name }}-bundle:/var/lib/pulsix/worker-bundle
+    restart: on-failure:3
+
+  worker-{{ w.name }}:
+    image: {{ pulsix_manager_worker_image }}:{{ pulsix_manager_version }}
+    depends_on:
+      worker-{{ w.name }}-enroll:
+        condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until [ -s /etc/pulsix-worker/cert.pem ] && [ -s /etc/pulsix-worker/key.pem ] && [ -s /etc/pulsix-worker/ca.pem ]; do
+          echo "pulsix-worker: waiting for enrollment (complete the setup wizard first) ..."
+          sleep 5
+        done
+        exec /pulsix-worker
+    environment:
+      PULSIX_MANAGER_ADDR: "manager:8444"
+      PULSIX_MANAGER_SERVER_NAME: "{{ pulsix_manager_grpc_server_name }}"
+      PULSIX_WORKER_CERT: /etc/pulsix-worker/cert.pem
+      PULSIX_WORKER_KEY: /etc/pulsix-worker/key.pem
+      PULSIX_CA_CERT: /etc/pulsix-worker/ca.pem
+      PULSIX_WORKER_PLAY_UID: "{{ play_uid }}"
+{% if w.max_concurrent is defined %}
+      PULSIX_MAX_CONCURRENT: "{{ w.max_concurrent }}"
+{% endif %}
+{% if w.claim_interval is defined %}
+      PULSIX_CLAIM_INTERVAL: "{{ w.claim_interval }}"
+{% endif %}
+    volumes:
+      - worker-{{ w.name }}-bundle:/etc/pulsix-worker
+      - worker-{{ w.name }}-data:/var/lib/pulsix-worker
+    init: true
+    restart: unless-stopped
+{% endfor %}
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ pulsix_manager_mtu }}"
+{% if pulsix_manager_host %}
+  proxy:
+    name: {{ pulsix_manager_traefik_network }}
+    external: true
+{% endif %}
+
+volumes:
+  pulsix-backups:
+  pulsix-db:
+{% for w in pulsix_manager_workers %}
+  worker-{{ w.name }}-bundle:
+  worker-{{ w.name }}-data:
+{% endfor %}

@@ -1,0 +1,40 @@
+---
+pulsix_manager_version: 0.1.0-rc.1
+pulsix_manager_image: noixdev/pulsix-manager
+pulsix_manager_worker_image: noixdev/pulsix-worker
+pulsix_manager_db_image: timescale/timescaledb:2.30.0-pg18
+pulsix_manager_dir: /opt/pulsix
+pulsix_manager_project: pulsix
+pulsix_manager_mtu: 1500
+
+# Secrets: keep them in a vault. Generate each with `openssl rand -hex 32`.
+# Losing pulsix_manager_master_key makes every backup unreadable.
+pulsix_manager_db_password: ""
+pulsix_manager_master_key: ""
+
+pulsix_manager_public_url: ""
+pulsix_manager_status_domain: ""
+pulsix_manager_grpc_server_name: pulsix-manager
+
+# Host addresses the worker endpoint (8444, mTLS) is published on. Empty
+# publishes nothing: only the local workers below can reach it.
+pulsix_manager_grpc_bind: []
+# Host addresses the web interface (8080, plain HTTP) is published on.
+pulsix_manager_http_bind: []
+
+# Route the web interface through Traefik on this host name; empty adds no route.
+pulsix_manager_host: ""
+pulsix_manager_traefik_network: proxy
+pulsix_manager_traefik_entrypoint: ""
+# Proxies whose X-Forwarded-For the manager believes (e.g. Traefik's address).
+pulsix_manager_trusted_proxies: ""
+
+# Workers running next to the manager, enrolled through the manager CLI.
+# Keys: name (required), zone (default "default"), org, max_concurrent,
+# claim_interval, play_uid (default 65533; "" runs playbooks as the worker).
+pulsix_manager_workers:
+  - name: worker-1
+    zone: default
+
+pulsix_manager_extra_env: {}
+pulsix_manager_print_setup_token: true

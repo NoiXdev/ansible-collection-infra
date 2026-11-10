@@ -1,0 +1,16 @@
+---
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+docker_mtu: 1500
+docker_log_driver: local
+docker_log_opts:
+  max-size: 20m
+  max-file: "5"
+docker_address_pools: []
+docker_live_restore: true
+docker_daemon_extra: {}
+docker_users: []

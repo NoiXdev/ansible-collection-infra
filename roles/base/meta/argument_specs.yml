@@ -1,0 +1,61 @@
+---
+argument_specs:
+  main:
+    short_description: Baseline for Debian and Ubuntu servers
+    options:
+      base_packages:
+        type: list
+        elements: str
+        description: Packages installed on every host.
+      base_timezone:
+        type: str
+        description: System time zone.
+      base_swap_size_mb:
+        type: int
+        description: Size of the swap file in MiB; 0 leaves swap alone.
+      base_swap_file:
+        type: path
+        description: Path of the swap file.
+      base_swappiness:
+        type: int
+        description: vm.swappiness while a swap file is managed.
+      base_journald_max_use:
+        type: str
+        description: journald SystemMaxUse.
+      base_unattended_upgrades:
+        type: bool
+        description: Enable unattended security upgrades.
+      base_unattended_reboot:
+        type: bool
+        description: Let unattended-upgrades reboot when an upgrade needs it.
+      base_unattended_reboot_time:
+        type: str
+        description: Time of day for such a reboot.
+      base_sshd_hardening:
+        type: bool
+        description: Key-only login, no root password login.
+      base_sshd_listen_addresses:
+        type: list
+        elements: str
+        description: >-
+          Addresses sshd binds to. Empty keeps the distribution default. When
+          set, socket activation is turned off and net.ipv4.ip_nonlocal_bind
+          is enabled, so sshd starts even before an address is up.
+      base_sshd_port:
+        type: int
+        description: sshd port.
+      base_nonlocal_bind:
+        type: bool
+        default: false
+        description: >-
+          Enable net.ipv4.ip_nonlocal_bind, so services (sshd, published
+          container ports) can bind an address before it is up at boot.
+          Always on when base_sshd_listen_addresses is set.
+      base_static_routes:
+        type: list
+        elements: dict
+        description: >-
+          Routes (to, via) set by a oneshot unit after the network is up, on the
+          interface the gateway is reached through. For example a home LAN
+          behind a private network gateway on a host that also has a public
+          interface.

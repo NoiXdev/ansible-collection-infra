@@ -1,0 +1,10 @@
+---
+tailscale_pref_flags:
+  - "--hostname={{ tailscale_hostname }}"
+  - "--advertise-routes={{ tailscale_advertise_routes | join(',') }}"
+  - "--accept-routes={{ tailscale_accept_routes | string | lower }}"
+  - "--accept-dns={{ tailscale_accept_dns | string | lower }}"
+  - "--advertise-tags={{ tailscale_advertise_tags | join(',') }}"
+  - "--ssh={{ tailscale_ssh | string | lower }}"
+tailscale_up_argv: "{{ ['tailscale', 'up', '--auth-key=file:/run/tailscale-authkey'] + tailscale_pref_flags }}"
+tailscale_set_argv: "{{ ['tailscale', 'set'] + tailscale_pref_flags | reject('match', '^--advertise-tags=') | list }}"

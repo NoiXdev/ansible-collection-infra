@@ -1,0 +1,20 @@
+---
+portainer_mode: server
+portainer_version: 2.45.3
+portainer_dir: /opt/portainer
+portainer_project: portainer
+portainer_mtu: 1500
+
+# Shared secret between the server and every agent. Without it an agent
+# accepts the first server that connects to it.
+portainer_agent_secret: ""
+
+# server: reachable through Traefik on this host name
+portainer_host: ""
+portainer_traefik_network: proxy
+portainer_traefik_entrypoint: ""
+# server: also publish the UI (9443) on these addresses; empty publishes nothing
+portainer_bind: []
+
+# agent: addresses the agent port (9001) is published on; required
+portainer_agent_bind: []

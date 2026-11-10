@@ -1,0 +1,30 @@
+# {{ ansible_managed }}
+# Enrollment tokens are read from the environment of `docker compose up`
+# only; after the first start a worker's identity lives in its directory
+# and the empty variable is ignored.
+services:
+{% for w in pulsix_worker_instances %}
+{% set token_var = 'PULSIX_ENROLL_TOKEN_' ~ (w.name | replace('-', '_') | upper) %}
+  worker-{{ w.name }}:
+    image: {{ pulsix_worker_image }}:{{ pulsix_worker_version }}
+    environment:
+      PULSIX_MANAGER_ADDR: "{{ pulsix_worker_manager_addr }}"
+      PULSIX_MANAGER_SERVER_NAME: "{{ pulsix_worker_server_name }}"
+      PULSIX_ENROLL_TOKEN: "${{ '{' }}{{ token_var }}:-{{ '}' }}"
+      PULSIX_WORKER_PLAY_UID: "{{ w.play_uid | default('65533') }}"
+{% if w.max_concurrent is defined %}
+      PULSIX_MAX_CONCURRENT: "{{ w.max_concurrent }}"
+{% endif %}
+{% if w.claim_interval is defined %}
+      PULSIX_CLAIM_INTERVAL: "{{ w.claim_interval }}"
+{% endif %}
+    volumes:
+      - ./{{ w.name }}:/var/lib/pulsix-worker
+    init: true
+    restart: unless-stopped
+{% endfor %}
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ pulsix_worker_mtu }}"

@@ -1,0 +1,35 @@
+---
+argument_specs:
+  main:
+    short_description: Docker CE with the compose plugin
+    options:
+      docker_packages:
+        type: list
+        elements: str
+        description: Packages installed from the Docker apt repository.
+      docker_mtu:
+        type: int
+        description: >-
+          MTU of the default bridge (1450 on Hetzner private networks).
+          Compose networks need their own driver option; the stacks of this
+          collection set it from the same value.
+      docker_log_driver:
+        type: str
+        description: Default log driver.
+      docker_log_opts:
+        type: dict
+        description: Options of the default log driver.
+      docker_address_pools:
+        type: list
+        elements: dict
+        description: default-address-pools entries (base, size); empty keeps Docker's default.
+      docker_live_restore:
+        type: bool
+        description: Keep containers running while the daemon restarts.
+      docker_daemon_extra:
+        type: dict
+        description: Further daemon.json keys, merged last.
+      docker_users:
+        type: list
+        elements: str
+        description: Users added to the docker group.

@@ -1,0 +1,16 @@
+---
+- name: Restart journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted
+
+- name: Restart ssh
+  ansible.builtin.systemd_service:
+    name: ssh.service
+    state: restarted
+
+- name: Apply static routes
+  ansible.builtin.systemd_service:
+    name: base-routes.service
+    state: restarted
+    daemon_reload: true

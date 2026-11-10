@@ -1,0 +1,24 @@
+---
+- name: Create and enable the swap file
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      fallocate -l {{ base_swap_size_mb }}M {{ base_swap_file }}
+      chmod 0600 {{ base_swap_file }}
+      mkswap {{ base_swap_file }}
+      swapon {{ base_swap_file }}
+    creates: "{{ base_swap_file }}"
+
+- name: Register the swap file
+  ansible.posix.mount:
+    src: "{{ base_swap_file }}"
+    path: none
+    fstype: swap
+    opts: sw
+    state: present
+
+- name: Set swappiness
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "{{ base_swappiness }}"
+    sysctl_file: /etc/sysctl.d/60-swap.conf

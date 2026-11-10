@@ -1,0 +1,68 @@
+# {{ ansible_managed }}
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: {{ traefik_log_level }}
+{% if traefik_access_log %}
+
+accessLog: {}
+{% endif %}
+
+entryPoints:
+{% for ep in traefik_entrypoints %}
+  {{ ep.name }}:
+    address: ":{{ ep.port }}{{ '/udp' if ep.protocol | default('tcp') == 'udp' else '' }}"
+{% if ep.as_default | default(false) %}
+    asDefault: true
+{% endif %}
+{% if ep.redirect_to | default('') %}
+    http:
+      redirections:
+        entryPoint:
+          to: {{ ep.redirect_to }}
+          scheme: https
+          permanent: true
+{% elif ep.tls | default(false) %}
+    http:
+      tls:
+        certResolver: dns
+{% if traefik_cert_domains | length > 0 %}
+        domains:
+{% for d in traefik_cert_domains %}
+          - main: "{{ d.main }}"
+{% if d.sans | default([]) | length > 0 %}
+            sans:
+{% for san in d.sans %}
+              - "{{ san }}"
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endfor %}
+
+providers:
+  docker:
+    endpoint: tcp://socket-proxy:2375
+    exposedByDefault: false
+    network: {{ traefik_network }}
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+{% if traefik_acme_email %}
+
+certificatesResolvers:
+  dns:
+    acme:
+      email: "{{ traefik_acme_email }}"
+      caServer: "{{ traefik_acme_ca_server }}"
+      storage: /acme/acme.json
+      dnsChallenge:
+        provider: {{ traefik_dns_provider }}
+        resolvers:
+{% for r in traefik_dns_resolvers %}
+          - "{{ r }}"
+{% endfor %}
+{% endif %}

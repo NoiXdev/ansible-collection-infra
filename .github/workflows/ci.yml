@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install ansible-core ansible-lint
+      - run: ansible-galaxy collection install community.docker community.general ansible.posix
+      - run: ansible-lint
+
+  e2e:
+    runs-on: ubuntu-24.04
+    needs: lint
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install ansible-core
+      - run: ansible-galaxy collection install community.docker community.general ansible.posix
+      - run: tests/run.sh
+
+  hosts:
+    runs-on: ubuntu-24.04
+    needs: lint
+    strategy:
+      matrix:
+        ubuntu: ["24.04", "26.04"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install ansible-core
+      - run: ansible-galaxy collection install community.docker community.general ansible.posix
+      - run: tests/host/run.sh
+        env:
+          UBUNTU: ${{ matrix.ubuntu }}

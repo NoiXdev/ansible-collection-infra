@@ -1,0 +1,36 @@
+---
+- name: Write the static route script
+  ansible.builtin.template:
+    src: base-routes.sh.j2
+    dest: /usr/local/sbin/base-routes
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Apply static routes
+
+- name: Install the static route unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/base-routes.service
+    content: |
+      [Unit]
+      Description=Static routes managed by Ansible
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=true
+      ExecStart=/usr/local/sbin/base-routes
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply static routes
+
+- name: Enable the static route unit
+  ansible.builtin.systemd_service:
+    name: base-routes.service
+    enabled: true
+    daemon_reload: true

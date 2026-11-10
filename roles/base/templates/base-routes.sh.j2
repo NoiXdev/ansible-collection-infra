@@ -1,0 +1,7 @@
+#!/bin/sh
+# {{ ansible_managed }}
+set -eu
+{% for r in base_static_routes %}
+dev=$(ip -o route get {{ r.via }} | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+ip route replace {{ r.to }} via {{ r.via }} dev "$dev" onlink
+{% endfor %}

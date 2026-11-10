@@ -1,0 +1,31 @@
+---
+argument_specs:
+  main:
+    short_description: Tailscale node, optionally a subnet router
+    options:
+      tailscale_auth_key:
+        type: str
+        description: >-
+          Auth key used only when the node is not logged in yet. Keep it in a
+          vault. It is handed to tailscale through a temporary file, never on
+          the command line.
+      tailscale_hostname:
+        type: str
+        description: Node name in the tailnet.
+      tailscale_advertise_routes:
+        type: list
+        elements: str
+        description: Subnets this node routes into the tailnet; enables IP forwarding.
+      tailscale_accept_routes:
+        type: bool
+        description: Use subnet routes advertised by other nodes.
+      tailscale_accept_dns:
+        type: bool
+        description: Let Tailscale manage DNS on this host.
+      tailscale_advertise_tags:
+        type: list
+        elements: str
+        description: ACL tags (tag:name) the node advertises when it joins; changing them later needs a re-join.
+      tailscale_ssh:
+        type: bool
+        description: Enable Tailscale SSH.

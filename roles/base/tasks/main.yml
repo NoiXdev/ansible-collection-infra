@@ -1,0 +1,65 @@
+---
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Set the time zone
+  community.general.timezone:
+    name: "{{ base_timezone }}"
+
+- name: Create the journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Limit the systemd journal
+  ansible.builtin.template:
+    src: journald.conf.j2
+    dest: /etc/systemd/journald.conf.d/50-size.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart journald
+
+- name: Configure unattended upgrades
+  ansible.builtin.template:
+    src: 52unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/52unattended-upgrades-local
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable periodic apt runs
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "{{ base_unattended_upgrades | ternary('1', '0') }}";
+      APT::Periodic::Unattended-Upgrade "{{ base_unattended_upgrades | ternary('1', '0') }}";
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Allow binding to addresses that are not up yet
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_nonlocal_bind
+    value: "1"
+    sysctl_file: /etc/sysctl.d/60-nonlocal-bind.conf
+  when: base_nonlocal_bind or base_sshd_listen_addresses | length > 0
+
+- name: Manage static routes
+  ansible.builtin.include_tasks: routes.yml
+  when: base_static_routes | length > 0
+
+- name: Manage the swap file
+  ansible.builtin.include_tasks: swap.yml
+  when: base_swap_size_mb > 0
+
+- name: Harden sshd
+  ansible.builtin.include_tasks: sshd.yml
+  when: base_sshd_hardening or base_sshd_listen_addresses | length > 0

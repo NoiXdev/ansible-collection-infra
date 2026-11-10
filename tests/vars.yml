@@ -1,0 +1,25 @@
+---
+# Test-only values; nothing here is a real secret.
+traefik_dir: /opt/traefik
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+    as_default: true
+
+portainer_host: portainer.test
+portainer_agent_secret: test-agent-secret-0000000000000000
+
+pulsix_manager_db_password: "0000000000000000000000000000000000000000000000000000000000000001"
+pulsix_manager_master_key: "0000000000000000000000000000000000000000000000000000000000000002"
+pulsix_manager_public_url: http://localhost:8080
+pulsix_manager_host: pulsix.test
+pulsix_manager_trusted_proxies: 172.31.255.254
+pulsix_manager_http_bind: [127.0.0.1]
+pulsix_manager_grpc_bind: [0.0.0.0]
+pulsix_manager_print_setup_token: false
+pulsix_manager_workers:
+  - name: ctl-1
+  - name: ctl-2
+    zone: default
+    max_concurrent: 2

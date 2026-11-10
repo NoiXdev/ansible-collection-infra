@@ -1,0 +1,67 @@
+---
+- name: Install what the apt repository module needs
+  ansible.builtin.apt:
+    name: python3-debian
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the Docker apt key
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Add the Docker apt repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}"
+    suites: ["{{ ansible_facts['distribution_release'] }}"]
+    components: [stable]
+    signed_by: /etc/apt/keyrings/docker.asc
+    architectures: ["{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}"]
+
+- name: Install Docker
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: true
+
+- name: Write daemon.json
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: "{{ docker_daemon_config | to_nice_json(indent=2) }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    docker_daemon_config: >-
+      {{ {'mtu': docker_mtu, 'log-driver': docker_log_driver, 'log-opts': docker_log_opts,
+          'live-restore': docker_live_restore}
+         | combine({'default-address-pools': docker_address_pools} if docker_address_pools | length > 0 else {})
+         | combine(docker_daemon_extra) }}
+  notify: Restart docker
+
+- name: Start Docker
+  ansible.builtin.systemd_service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Add users to the docker group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
