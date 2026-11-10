@@ -1,0 +1,16 @@
+---
+- name: Read the console state
+  ansible.builtin.command:
+    cmd: cscli console status -o json
+  register: crowdsec_console
+  changed_when: false
+
+# Until the enrollment is accepted in the console, every run sends it again
+# and reports a change.
+- name: Enroll the instance
+  ansible.builtin.command:
+    argv: [cscli, console, enroll, --name, "{{ crowdsec_console_name }}", "{{ crowdsec_console_enroll_key }}"]
+  when: not (crowdsec_console.stdout | from_json).console.enrolled | default(false)
+  changed_when: true
+  no_log: true
+  notify: Restart crowdsec

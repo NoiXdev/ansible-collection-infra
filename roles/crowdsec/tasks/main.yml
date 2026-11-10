@@ -1,0 +1,52 @@
+---
+- name: Check the allowlists
+  ansible.builtin.assert:
+    that: item is string and item is match(crowdsec_ip_pattern)
+    fail_msg: "'{{ item }}' in security_allowlist or crowdsec_allowlist is not an IP address or CIDR."
+    quiet: true
+  loop: "{{ security_allowlist + crowdsec_allowlist }}"
+
+- name: Install the repository
+  ansible.builtin.include_tasks: repository.yml
+
+- name: Install CrowdSec
+  ansible.builtin.apt:
+    name: crowdsec
+    state: present
+    update_cache: true
+
+- name: Set the Local API port
+  ansible.builtin.copy:
+    dest: /etc/crowdsec/config.yaml.local
+    content: |
+      # Managed by Ansible; merged over config.yaml.
+      api:
+        server:
+          listen_uri: 127.0.0.1:{{ crowdsec_lapi_port }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart crowdsec
+
+- name: Point the local clients at the Local API
+  ansible.builtin.lineinfile:
+    path: /etc/crowdsec/local_api_credentials.yaml
+    regexp: "^url:"
+    line: "url: http://127.0.0.1:{{ crowdsec_lapi_port }}/"
+  notify: Restart crowdsec
+
+- name: Configure the collections, logs and allowlist
+  ansible.builtin.include_tasks: detection.yml
+
+- name: Start CrowdSec
+  ansible.builtin.systemd_service:
+    name: crowdsec
+    state: started
+    enabled: true
+
+- name: Configure the firewall bouncer
+  ansible.builtin.include_tasks: bouncer.yml
+
+- name: Enroll in the CrowdSec console
+  ansible.builtin.include_tasks: console.yml
+  when: crowdsec_console_enroll_key | length > 0

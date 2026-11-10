@@ -1,0 +1,60 @@
+---
+argument_specs:
+  main:
+    short_description: fail2ban with nftables bans for sshd and repeat offenders
+    description:
+      - Reads the systemd journal and bans through nftables.
+      - Writes one file, /etc/fail2ban/jail.d/50-noixdev.local; the packaged jail.conf stays untouched.
+    options:
+      security_allowlist:
+        type: list
+        elements: str
+        description: >-
+          Put your management networks here (VPN, private network) so a typo
+          can't lock you out. IP addresses or CIDRs that are never banned.
+          Shared with the crowdsec role; set it once for all hosts.
+      fail2ban_ignoreip:
+        type: list
+        elements: str
+        description: Further addresses or CIDRs that are never banned (loopback by default).
+      fail2ban_packages:
+        type: list
+        elements: str
+        description: Packages installed; nftables provides the ban actions.
+      fail2ban_bantime:
+        type: str
+        description: Default ban duration (fail2ban time abbreviation, e.g. 1h).
+      fail2ban_findtime:
+        type: str
+        description: Window in which fail2ban_maxretry failures lead to a ban.
+      fail2ban_maxretry:
+        type: int
+        description: Failures within fail2ban_findtime before a ban.
+      fail2ban_banaction:
+        type: str
+        description: Ban action of port-based jails.
+      fail2ban_banaction_allports:
+        type: str
+        description: Ban action of jails that block every port (recidive).
+      fail2ban_sshd:
+        type: bool
+        description: Enable the sshd jail.
+      fail2ban_sshd_port:
+        type: str
+        description: Port(s) the sshd jail bans; base_sshd_port when that is defined, else 22.
+      fail2ban_recidive:
+        type: bool
+        description: Enable the recidive jail, which bans repeat offenders on every port.
+      fail2ban_recidive_bantime:
+        type: str
+        description: Ban duration of the recidive jail.
+      fail2ban_recidive_findtime:
+        type: str
+        description: Window in which the recidive jail counts earlier bans.
+      fail2ban_extra_jails:
+        type: list
+        elements: dict
+        description: >-
+          Further jails, each a dict with name and the jail options
+          (enabled, port, filter, logpath, backend, ...). Booleans are
+          written as true/false.

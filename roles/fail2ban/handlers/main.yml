@@ -1,0 +1,12 @@
+---
+# fail2ban reads jail.d as a whole, so a file can only be checked in place.
+# Runs before the reload, so a broken file stops the run with its error.
+- name: Check the fail2ban configuration
+  ansible.builtin.command:
+    cmd: fail2ban-client --test
+  changed_when: false
+
+- name: Reload fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    state: reloaded

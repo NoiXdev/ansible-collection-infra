@@ -1,0 +1,114 @@
+---
+- name: Install the firewall bouncer
+  ansible.builtin.apt:
+    name: "{{ crowdsec_bouncer_package }}"
+    state: present
+
+- name: Look for Docker
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: crowdsec_docker_binary
+  when: crowdsec_bouncer_docker_user is none
+
+- name: Read the registered bouncers
+  ansible.builtin.command:
+    cmd: cscli bouncers list -o json
+  register: crowdsec_bouncers
+  changed_when: false
+
+- name: Read the bouncer configuration
+  ansible.builtin.slurp:
+    src: "{{ crowdsec_bouncer_config }}"
+  register: crowdsec_bouncer_config_file
+  no_log: true
+
+# The key in the configuration is only trusted while the bouncer it belongs
+# to is registered under our name; otherwise a new one is issued.
+- name: Keep the current API key
+  ansible.builtin.set_fact:
+    crowdsec_bouncer_api_key: "{{ (crowdsec_bouncer_config_file.content | b64decode | from_yaml).api_key | default('', true) }}"
+  when: crowdsec_bouncer_name in crowdsec_bouncer_names
+  no_log: true
+
+- name: Register the bouncer
+  when: crowdsec_bouncer_api_key | default('') is not match('^[A-Za-z0-9+/=_-]{16,}$')
+  block:
+    - name: Remove a stale registration
+      ansible.builtin.command:
+        argv: [cscli, bouncers, delete, "{{ crowdsec_bouncer_name }}"]
+      when: crowdsec_bouncer_name in crowdsec_bouncer_names
+      changed_when: true
+
+    - name: Issue an API key
+      ansible.builtin.command:
+        argv: [cscli, -oraw, bouncers, add, "{{ crowdsec_bouncer_name }}"]
+      register: crowdsec_bouncer_added
+      changed_when: true
+      no_log: true
+
+    - name: Use the new API key
+      ansible.builtin.set_fact:
+        crowdsec_bouncer_api_key: "{{ crowdsec_bouncer_added.stdout | trim }}"
+      no_log: true
+
+- name: Remove the registration the package made
+  ansible.builtin.command:
+    argv: [cscli, bouncers, delete, "{{ item }}"]
+  loop: "{{ crowdsec_bouncer_names | select('match', crowdsec_bouncer_package_prefix) | list }}"
+  changed_when: true
+
+- name: Write the bouncer configuration
+  ansible.builtin.template:
+    src: crowdsec-firewall-bouncer.yaml.j2
+    dest: "{{ crowdsec_bouncer_config }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart crowdsec-firewall-bouncer
+
+# The package's purge script deletes the bouncer named here.
+- name: Record the bouncer name
+  ansible.builtin.copy:
+    dest: "{{ crowdsec_bouncer_config }}.id"
+    content: "{{ crowdsec_bouncer_name }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+
+# DOCKER-USER exists only once dockerd runs; the bouncer fails without it.
+- name: Order the bouncer after Docker
+  when: crowdsec_bouncer_docker_user_effective
+  block:
+    - name: Create the bouncer drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/crowdsec-firewall-bouncer.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Start the bouncer after Docker
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/crowdsec-firewall-bouncer.service.d/50-docker.conf
+        content: |
+          # Managed by Ansible
+          [Unit]
+          After=docker.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart crowdsec-firewall-bouncer
+
+- name: Remove the Docker ordering
+  ansible.builtin.file:
+    path: /etc/systemd/system/crowdsec-firewall-bouncer.service.d/50-docker.conf
+    state: absent
+  when: not crowdsec_bouncer_docker_user_effective
+  notify: Restart crowdsec-firewall-bouncer
+
+- name: Start the bouncer
+  ansible.builtin.systemd_service:
+    name: crowdsec-firewall-bouncer
+    state: started
+    enabled: true

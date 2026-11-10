@@ -1,0 +1,75 @@
+---
+- name: Read the installed collections
+  ansible.builtin.command:
+    cmd: cscli collections list -o json
+  register: crowdsec_installed_collections
+  changed_when: false
+
+- name: Install the missing collections
+  ansible.builtin.command:
+    argv: "{{ ['cscli', 'collections', 'install'] + crowdsec_missing_collections }}"
+  vars:
+    crowdsec_missing_collections: >-
+      {{ crowdsec_collections
+         | difference((crowdsec_installed_collections.stdout | from_json).collections | default([], true)
+                      | map(attribute='name')) }}
+  when: crowdsec_missing_collections | length > 0
+  changed_when: true
+  notify: Reload crowdsec
+
+- name: Write the acquisitions
+  ansible.builtin.copy:
+    dest: "/etc/crowdsec/acquis.d/noixdev-{{ item.name }}.yaml"
+    content: |
+      # Managed by Ansible
+      {{ item | dict2items | rejectattr('key', 'equalto', 'name') | items2dict | to_nice_yaml(indent=2) }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ crowdsec_acquisitions }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload crowdsec
+
+- name: Find stale acquisitions
+  ansible.builtin.find:
+    paths: /etc/crowdsec/acquis.d
+    patterns: "{{ ['noixdev-*.yaml'] + (['setup.*.yaml'] if crowdsec_remove_setup_acquisitions else []) }}"
+    excludes: "{{ crowdsec_acquisitions | map(attribute='name') | map('regex_replace', '^(.*)$', 'noixdev-\\1.yaml') | list }}"
+  register: crowdsec_stale_acquisitions
+
+- name: Remove stale acquisitions
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ crowdsec_stale_acquisitions.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  notify: Reload crowdsec
+
+- name: Write the allowlist parser
+  ansible.builtin.copy:
+    dest: /etc/crowdsec/parsers/s02-enrich/noixdev-allowlist.yaml
+    content: |
+      # Managed by Ansible
+      {{ crowdsec_allowlist_parser | to_nice_yaml(indent=2) }}
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    crowdsec_allowlist_parser:
+      name: noixdev/allowlist
+      description: Management networks that are never banned
+      whitelist:
+        reason: security_allowlist or crowdsec_allowlist
+        ip: "{{ crowdsec_allowlist_all | reject('search', '/') | list }}"
+        cidr: "{{ crowdsec_allowlist_all | select('search', '/') | list }}"
+  when: crowdsec_allowlist_all | length > 0
+  notify: Reload crowdsec
+
+- name: Remove the empty allowlist parser
+  ansible.builtin.file:
+    path: /etc/crowdsec/parsers/s02-enrich/noixdev-allowlist.yaml
+    state: absent
+  when: crowdsec_allowlist_all | length == 0
+  notify: Reload crowdsec

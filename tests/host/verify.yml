@@ -30,3 +30,197 @@
           - host_state.results[4].stdout == 'local'
           - host_state.results[5].stdout == 'Europe/Berlin'
         fail_msg: "{{ host_state.results | map(attribute='stdout') | list }}"
+
+- name: Verify the sshd hardening
+  hosts: testhost
+  gather_facts: false
+  tasks:
+    - name: Read the effective sshd configuration
+      ansible.builtin.command:
+        cmd: sshd -T
+      register: verify_sshd
+      changed_when: false
+
+    - name: Check the effective values
+      ansible.builtin.assert:
+        that: item.split('|') | intersect(verify_sshd.stdout_lines) | length > 0
+        fail_msg: "sshd -T lacks '{{ item }}'"
+        quiet: true
+      loop:
+        - passwordauthentication no
+        - kbdinteractiveauthentication no
+        # OpenSSH before 10.0 prints the old name.
+        - permitrootlogin prohibit-password|permitrootlogin without-password
+        - pubkeyauthentication yes
+        - permitemptypasswords no
+        - authenticationmethods publickey
+        - maxauthtries 3
+        - logingracetime 30
+        - maxsessions 10
+        - maxstartups 10:30:60
+        - clientaliveinterval 300
+        - clientalivecountmax 2
+        - allowagentforwarding no
+        - allowtcpforwarding no
+        - permittunnel no
+        - gatewayports no
+        - permituserenvironment no
+        - x11forwarding no
+        - loglevel VERBOSE
+        - allowusers root
+        - kexalgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+        - ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+        - macs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+
+- name: Verify fail2ban
+  hosts: testhost
+  gather_facts: false
+  tasks:
+    - name: Read the jail state
+      ansible.builtin.command:
+        cmd: "fail2ban-client {{ item }}"
+      loop:
+        - status
+        - status sshd
+        - get sshd ignoreip
+        - get sshd bantime
+        - get sshd maxretry
+        - get sshd actions
+        - get recidive bantime
+        - get recidive actions
+      register: verify_f2b
+      changed_when: false
+
+    - name: Check the jails
+      ansible.builtin.assert:
+        that:
+          - "'sshd' in verify_f2b.results[0].stdout"
+          - "'recidive' in verify_f2b.results[0].stdout"
+          - "'Currently banned' in verify_f2b.results[1].stdout"
+          - "'192.0.2.0/24' in verify_f2b.results[2].stdout"
+          - "'2001:db8::/32' in verify_f2b.results[2].stdout"
+          - "'198.51.100.7' in verify_f2b.results[2].stdout"
+          - "'127.0.0.0/8' in verify_f2b.results[2].stdout"
+          - verify_f2b.results[3].stdout == '3600'
+          - verify_f2b.results[4].stdout == '5'
+          - "'nftables-multiport' in verify_f2b.results[5].stdout"
+          - verify_f2b.results[6].stdout == '604800'
+          - "'nftables-allports' in verify_f2b.results[7].stdout"
+        fail_msg: "{{ verify_f2b.results | map(attribute='stdout') | list }}"
+
+    - name: Ban an address through nftables
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -eo pipefail
+          fail2ban-client set sshd banip 198.51.100.30 >/dev/null
+          nft list ruleset | grep -c 198.51.100.30
+          fail2ban-client set sshd unbanip 198.51.100.30 >/dev/null
+      changed_when: false
+
+- name: Verify CrowdSec
+  hosts: testhost
+  gather_facts: false
+  tasks:
+    - name: Read the CrowdSec state
+      ansible.builtin.command:
+        cmd: "{{ item }}"
+      loop:
+        - cscli lapi status
+        - cscli bouncers list -o json
+        - cscli collections list -o json
+        - cscli parsers list -o json
+        - systemctl is-active crowdsec.service crowdsec-firewall-bouncer.service
+        - ls /etc/crowdsec/acquis.d
+        - iptables -S INPUT
+        - iptables -S DOCKER-USER
+        - ss -Htln sport = :8081
+      register: verify_cs
+      changed_when: false
+      failed_when: false
+
+    - name: Check it
+      ansible.builtin.assert:
+        that:
+          - verify_cs.results[0].rc == 0
+          - (verify_cs.results[1].stdout | from_json | map(attribute='name') | list) == ['firewall-bouncer']
+          - "'crowdsecurity/linux' in verify_collections"
+          - "'crowdsecurity/sshd' in verify_collections"
+          - "'noixdev/allowlist' in (verify_cs.results[3].stdout | from_json).parsers | map(attribute='name')"
+          - verify_cs.results[4].stdout_lines == ['active', 'active']
+          - verify_cs.results[5].stdout_lines == ['noixdev-sshd.yaml']
+          - "'CROWDSEC_CHAIN' in verify_cs.results[6].stdout"
+          - "'CROWDSEC_CHAIN' in verify_cs.results[7].stdout"
+          - verify_cs.results[8].stdout_lines | length == 1
+        fail_msg: "{{ verify_cs.results | map(attribute='stdout') | list }}"
+      vars:
+        verify_collections: >-
+          {{ (verify_cs.results[2].stdout | from_json).collections
+             | selectattr('status', 'equalto', 'enabled') | map(attribute='name') | list }}
+
+    - name: Explain a log line from an allowlisted and from another address
+      ansible.builtin.command:
+        argv:
+          - cscli
+          - explain
+          - --type
+          - syslog
+          - --log
+          - "Nov 10 10:00:00 host sshd[1234]: Invalid user admin from {{ item }} port 4242"
+      loop: [192.0.2.10, 198.51.100.21]
+      register: verify_explain
+      changed_when: false
+
+    - name: Check that only the allowlisted address is ignored
+      ansible.builtin.assert:
+        that:
+          - "'ignored by whitelist' in verify_explain.results[0].stdout"
+          - "'whitelist' not in verify_explain.results[1].stdout | replace('whitelists', '')"
+          - "'parser success' in verify_explain.results[1].stdout"
+        fail_msg: "{{ verify_explain.results | map(attribute='stdout') | list }}"
+
+    - name: Block a decision in the firewall
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -eo pipefail
+          cscli decisions add -i 198.51.100.20 -d 5m >/dev/null
+          trap 'cscli decisions delete -i 198.51.100.20 >/dev/null' EXIT
+          for _ in $(seq 30); do
+            ipset list -o save | grep 'add crowdsec-blacklists.* 198.51.100.20' >/dev/null && exit 0
+            sleep 1
+          done
+          exit 1
+      changed_when: false
+
+- name: Reject a malformed allowlist
+  hosts: testhost
+  gather_facts: false
+  vars:
+    security_allowlist: [10.0.0.300/8]
+  tasks:
+    - name: Run fail2ban with a bad entry
+      block:
+        - name: Include the fail2ban role
+          ansible.builtin.include_role:
+            name: noixdev.infra.fail2ban
+        - name: Not reached
+          ansible.builtin.fail:
+            msg: fail2ban accepted 10.0.0.300/8
+      rescue:
+        - name: Expect the allowlist check, nothing else
+          ansible.builtin.assert:
+            that: "'not an IP address or CIDR' in ansible_failed_result | to_json"
+
+    - name: Run crowdsec with a bad entry
+      block:
+        - name: Include the crowdsec role
+          ansible.builtin.include_role:
+            name: noixdev.infra.crowdsec
+        - name: Not reached
+          ansible.builtin.fail:
+            msg: crowdsec accepted 10.0.0.300/8
+      rescue:
+        - name: Expect the allowlist check, nothing else
+          ansible.builtin.assert:
+            that: "'not an IP address or CIDR' in ansible_failed_result | to_json"

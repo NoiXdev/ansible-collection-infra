@@ -1,0 +1,32 @@
+# {{ ansible_managed }}
+mode: iptables
+update_frequency: 10s
+log_mode: file
+log_dir: /var/log/
+log_level: info
+log_compression: true
+log_max_size: 100
+log_max_backups: 3
+log_max_age: 30
+api_url: http://127.0.0.1:{{ crowdsec_lapi_port }}/
+api_key: "{{ crowdsec_bouncer_api_key }}"
+insecure_skip_verify: false
+disable_ipv6: false
+deny_action: DROP
+deny_log: false
+supported_decisions_types:
+  - ban
+blacklists_ipv4: crowdsec-blacklists
+blacklists_ipv6: crowdsec6-blacklists
+ipset_type: nethash
+# The bouncer inserts its rule at the top of each chain. DOCKER-USER also
+# covers ports published by Docker, which bypass INPUT.
+iptables_chains:
+{% for chain in crowdsec_bouncer_chains %}
+  - {{ chain }}
+{% endfor %}
+iptables_add_rule_comments: true
+prometheus:
+  enabled: false
+  listen_addr: 127.0.0.1
+  listen_port: 60601

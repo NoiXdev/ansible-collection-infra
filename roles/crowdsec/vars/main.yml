@@ -1,0 +1,16 @@
+---
+crowdsec_bouncer_package: crowdsec-firewall-bouncer-iptables
+crowdsec_bouncer_config: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+# The package registers its own bouncer as cs-firewall-bouncer-<timestamp>.
+crowdsec_bouncer_package_prefix: cs-firewall-bouncer-
+
+# Plain IPv4 or IPv6 address, optionally with a prefix length. Deliberately
+# simple: it catches typos, it does not validate every IPv6 spelling.
+crowdsec_ip_pattern: >-
+  ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(/(3[0-2]|[12]?[0-9]))?$|^[0-9a-fA-F:]*:[0-9a-fA-F:.]*(/(12[0-8]|1[01][0-9]|[1-9]?[0-9]))?$
+crowdsec_allowlist_all: "{{ (security_allowlist + crowdsec_allowlist) | unique }}"
+crowdsec_bouncer_names: "{{ crowdsec_bouncers.stdout | from_json | default([], true) | map(attribute='name') | list }}"
+crowdsec_bouncer_docker_user_effective: >-
+  {{ crowdsec_docker_binary.stat.exists
+     if crowdsec_bouncer_docker_user is none else crowdsec_bouncer_docker_user | bool }}
+crowdsec_bouncer_chains: "{{ ['INPUT'] + (['DOCKER-USER'] if crowdsec_bouncer_docker_user_effective else []) }}"

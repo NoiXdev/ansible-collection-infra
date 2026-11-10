@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host roles (base, docker, tailscale) on a systemd Ubuntu container:
+# Host roles (base, docker, fail2ban, crowdsec, tailscale) on a systemd Ubuntu container:
 # converge twice (the second run must change nothing), then verify.
 set -euo pipefail
 

@@ -1,0 +1,49 @@
+---
+# Management networks (VPN, private network) that must never be banned, so a
+# typo can't lock you out. Shared with the fail2ban role: set it once, for
+# example in group_vars/all.
+security_allowlist: [] # noqa: var-naming[no-role-prefix]
+
+# Never banned either, on top of security_allowlist.
+crowdsec_allowlist: []
+
+crowdsec_apt_url: https://packagecloud.io/crowdsec/crowdsec/any
+crowdsec_apt_suite: any
+crowdsec_apt_key_url: https://packagecloud.io/crowdsec/crowdsec/gpgkey
+crowdsec_apt_key_fingerprint: 6A89E3C2303A901A889971D3376ED5326E93CD0C
+
+crowdsec_collections:
+  - crowdsecurity/linux
+  - crowdsecurity/sshd
+
+# One file per entry in /etc/crowdsec/acquis.d: name, then the acquisition
+# keys as CrowdSec expects them. Traefik access logs, for example (needs
+# Traefik writing its access log to a file the host can read, and the
+# crowdsecurity/traefik collection):
+#   - name: traefik
+#     source: file
+#     filenames: [/opt/traefik/logs/access.log]
+#     labels: {type: traefik}
+crowdsec_acquisitions:
+  - name: sshd
+    source: journalctl
+    journalctl_filter: [_SYSTEMD_UNIT=ssh.service]
+    labels:
+      type: syslog
+
+# The package writes acquis.d/setup.*.yaml for the services it detects on
+# first install. They would read the same logs as crowdsec_acquisitions a
+# second time and count every failure twice.
+crowdsec_remove_setup_acquisitions: true
+
+# Local API port on 127.0.0.1.
+crowdsec_lapi_port: 8080
+
+crowdsec_bouncer_name: firewall-bouncer
+# Also filter traffic to published Docker ports (the DOCKER-USER chain).
+# Empty (null): only when the docker binary exists on the host.
+crowdsec_bouncer_docker_user:
+
+# Enrolls the instance in the CrowdSec console once; accept it there.
+crowdsec_console_enroll_key: ""
+crowdsec_console_name: "{{ inventory_hostname_short }}"

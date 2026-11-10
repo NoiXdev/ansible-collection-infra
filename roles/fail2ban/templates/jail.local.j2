@@ -1,0 +1,31 @@
+# {{ ansible_managed }}
+[DEFAULT]
+backend = systemd
+banaction = {{ fail2ban_banaction }}
+banaction_allports = {{ fail2ban_banaction_allports }}
+bantime = {{ fail2ban_bantime }}
+findtime = {{ fail2ban_findtime }}
+maxretry = {{ fail2ban_maxretry }}
+ignoreip = {{ (fail2ban_ignoreip + security_allowlist) | unique | join(' ') }}
+
+[sshd]
+enabled = {{ fail2ban_sshd | ternary('true', 'false') }}
+port = {{ fail2ban_sshd_port }}
+# ssh.service on Debian and Ubuntu, sshd-session since OpenSSH 9.8.
+journalmatch = _SYSTEMD_UNIT=ssh.service + _SYSTEMD_UNIT=sshd.service + _COMM=sshd + _COMM=sshd-session
+
+[recidive]
+enabled = {{ fail2ban_recidive | ternary('true', 'false') }}
+# Reads fail2ban's own log file, not the journal.
+backend = auto
+logpath = /var/log/fail2ban.log
+banaction = %(banaction_allports)s
+bantime = {{ fail2ban_recidive_bantime }}
+findtime = {{ fail2ban_recidive_findtime }}
+{% for jail in fail2ban_extra_jails %}
+
+[{{ jail.name }}]
+{% for key, value in jail.items() if key != 'name' %}
+{{ key }} = {{ value | ternary('true', 'false') if value is boolean else value }}
+{% endfor %}
+{% endfor %}

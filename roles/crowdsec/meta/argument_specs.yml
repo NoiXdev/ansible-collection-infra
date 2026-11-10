@@ -1,0 +1,82 @@
+---
+argument_specs:
+  main:
+    short_description: CrowdSec agent with the firewall bouncer
+    description:
+      - Installs CrowdSec and its iptables firewall bouncer from the official repository.
+      - The bouncer blocks in INPUT and, with Docker, in DOCKER-USER, so published container ports are covered too.
+    options:
+      security_allowlist:
+        type: list
+        elements: str
+        description: >-
+          Put your management networks here (VPN, private network) so a typo
+          can't lock you out. IP addresses or CIDRs that are never banned
+          (a CrowdSec whitelist parser). Shared with the fail2ban role; set
+          it once for all hosts.
+      crowdsec_allowlist:
+        type: list
+        elements: str
+        description: Further addresses or CIDRs that are never banned by this host's CrowdSec.
+      crowdsec_apt_url:
+        type: str
+        description: URL of the CrowdSec apt repository.
+      crowdsec_apt_suite:
+        type: str
+        description: >-
+          Suite of the repository. "any" carries the same packages for every
+          Debian and Ubuntu release, including ones the per-release suites
+          do not have yet.
+      crowdsec_apt_key_url:
+        type: str
+        description: URL of the repository signing key.
+      crowdsec_apt_key_fingerprint:
+        type: str
+        description: >-
+          Fingerprint the downloaded key must carry; the run stops, and the
+          key file is removed, if it does not.
+      crowdsec_collections:
+        type: list
+        elements: str
+        description: >-
+          Hub collections that must be installed. Collections installed
+          otherwise are left alone.
+      crowdsec_acquisitions:
+        type: list
+        elements: dict
+        description: >-
+          Log sources, one file each in /etc/crowdsec/acquis.d
+          (noixdev-<name>.yaml): name plus the acquisition keys (source,
+          filenames or journalctl_filter, labels). Files of entries removed
+          from the list are deleted. Keep at least one source; CrowdSec does
+          not start without.
+      crowdsec_remove_setup_acquisitions:
+        type: bool
+        description: >-
+          Delete the acquis.d/setup.*.yaml files the package generates on
+          first install, so crowdsec_acquisitions is the only source and no
+          log is read twice.
+      crowdsec_lapi_port:
+        type: int
+        description: >-
+          Port of the Local API on 127.0.0.1 (8080 by default; change it when
+          the host publishes 8080 itself).
+      crowdsec_bouncer_name:
+        type: str
+        description: Name the firewall bouncer is registered under in the Local API.
+      crowdsec_bouncer_docker_user:
+        type: bool
+        description: >-
+          Also block in the DOCKER-USER chain, which covers ports published by
+          Docker, and start the bouncer after docker.service. Unset (null):
+          only when /usr/bin/docker exists when the role runs, so run the
+          docker role first.
+      crowdsec_console_enroll_key:
+        type: str
+        description: >-
+          Enrollment key from app.crowdsec.net. Empty skips enrollment. When
+          set, the instance is enrolled unless it already is; accept it in the
+          console afterwards.
+      crowdsec_console_name:
+        type: str
+        description: Name of the instance in the console.

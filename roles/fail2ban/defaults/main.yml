@@ -1,0 +1,32 @@
+---
+# Management networks (VPN, private network) that must never be banned, so a
+# typo can't lock you out. Shared with the crowdsec role: set it once, for
+# example in group_vars/all.
+security_allowlist: [] # noqa: var-naming[no-role-prefix]
+
+# Never banned either, on top of security_allowlist.
+fail2ban_ignoreip: [127.0.0.1/8, "::1"]
+
+fail2ban_packages: [fail2ban, nftables]
+fail2ban_bantime: 1h
+fail2ban_findtime: 10m
+fail2ban_maxretry: 5
+fail2ban_banaction: nftables-multiport
+fail2ban_banaction_allports: nftables-allports
+
+fail2ban_sshd: true
+fail2ban_sshd_port: "{{ base_sshd_port | default(22) }}"
+
+# Bans hosts that keep coming back, on every port.
+fail2ban_recidive: true
+fail2ban_recidive_bantime: 1w
+fail2ban_recidive_findtime: 1d
+
+# Further jails: [{name: jail, <option>: value, ...}], written as-is into
+# the same file, for example:
+#   - name: nginx-http-auth
+#     enabled: true
+#     port: http,https
+#     backend: auto
+#     logpath: /var/log/nginx/error.log
+fail2ban_extra_jails: []

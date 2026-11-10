@@ -1,0 +1,31 @@
+---
+- name: Check the allowlists
+  ansible.builtin.assert:
+    that: item is string and item is match(fail2ban_ip_pattern)
+    fail_msg: "'{{ item }}' in security_allowlist or fail2ban_ignoreip is not an IP address or CIDR."
+    quiet: true
+  loop: "{{ security_allowlist + fail2ban_ignoreip }}"
+
+- name: Install fail2ban
+  ansible.builtin.apt:
+    name: "{{ fail2ban_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Write the jail configuration
+  ansible.builtin.template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.d/50-noixdev.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Check the fail2ban configuration
+    - Reload fail2ban
+
+- name: Start fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    state: started
+    enabled: true

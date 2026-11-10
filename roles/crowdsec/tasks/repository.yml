@@ -1,0 +1,52 @@
+---
+- name: Install what the repository needs
+  ansible.builtin.apt:
+    name: [ca-certificates, gnupg, python3-debian]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the CrowdSec apt key
+  ansible.builtin.get_url:
+    url: "{{ crowdsec_apt_key_url }}"
+    dest: /etc/apt/keyrings/crowdsec.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the key fingerprints
+  ansible.builtin.command:
+    cmd: gpg --batch --show-keys --with-colons /etc/apt/keyrings/crowdsec.asc
+  register: crowdsec_apt_key
+  changed_when: false
+
+- name: Reject an unexpected key
+  when: crowdsec_apt_key.stdout is not search('^fpr:+' ~ crowdsec_apt_key_fingerprint | upper ~ ':', multiline=True)
+  block:
+    - name: Remove the key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/crowdsec.asc
+        state: absent
+
+    - name: Stop
+      ansible.builtin.fail:
+        msg: >-
+          {{ crowdsec_apt_key_url }} does not carry the key
+          {{ crowdsec_apt_key_fingerprint }}; the key file was removed.
+
+- name: Add the CrowdSec apt repository
+  ansible.builtin.deb822_repository:
+    name: crowdsec
+    types: [deb]
+    uris: "{{ crowdsec_apt_url }}"
+    suites: ["{{ crowdsec_apt_suite }}"]
+    components: [main]
+    signed_by: /etc/apt/keyrings/crowdsec.asc
