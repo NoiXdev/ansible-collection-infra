@@ -1,0 +1,90 @@
+name: Bug Report
+description: A role does not work as expected
+labels: [bug]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much detail as possible.
+
+        **Before you paste anything:** redact hostnames, addresses, tokens, keys and
+        vault contents from your variables and output before they go into a public issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Collection version or tag
+      description: The tag or commit you installed, or the output of `ansible-galaxy collection list noixdev.infra`.
+      placeholder: e.g. v0.2.0
+    validations:
+      required: true
+
+  - type: input
+    id: ansible
+    attributes:
+      label: ansible-core version
+      description: The first line of `ansible --version`.
+      placeholder: e.g. ansible [core 2.18.1]
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Target OS release
+      description: The managed host's distribution and release.
+      placeholder: e.g. Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: role
+    attributes:
+      label: Role
+      description: The role that fails or misbehaves.
+      placeholder: e.g. noixdev.infra.base
+    validations:
+      required: true
+
+  - type: textarea
+    id: vars
+    attributes:
+      label: Variables
+      description: The playbook and variables you use for the role, with secrets and hostnames redacted.
+      render: yaml
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output with -vvv
+      description: The output of the failing run with `-vvv`, redacted. Secrets are hidden by `no_log`, but check anyway.
+      render: text
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else that helps, for example whether the second run changes something.

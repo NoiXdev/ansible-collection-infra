@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-10
 
 - Role `fail2ban`: journal backend, nftables bans, `sshd` and `recidive` jails, extra jails.
 - Role `crowdsec`: CrowdSec and the iptables firewall bouncer from the official repository

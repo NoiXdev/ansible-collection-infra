@@ -1,0 +1,36 @@
+name: Feature Request
+description: Suggest a new role, variable or improvement
+labels: [enhancement]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to make the collection better? Describe it below.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation where you feel something is missing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How would you like it to work? Name the role and, if you can, the variable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approaches you have thought about?
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
