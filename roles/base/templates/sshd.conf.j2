@@ -4,8 +4,36 @@ Port {{ base_sshd_port }}
 ListenAddress {{ address }}
 {% endfor %}
 {% if base_sshd_hardening %}
+
+# Authentication: keys only.
+PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-PermitRootLogin prohibit-password
+PermitEmptyPasswords no
+AuthenticationMethods publickey
+PermitRootLogin {{ base_sshd_permit_root_login }}
+{% if base_sshd_allow_users | length > 0 %}
+AllowUsers {{ base_sshd_allow_users | join(' ') }}
+{% endif %}
+MaxAuthTries {{ base_sshd_max_auth_tries }}
+LoginGraceTime {{ base_sshd_login_grace_time }}
+MaxSessions {{ base_sshd_max_sessions }}
+MaxStartups {{ base_sshd_max_startups }}
+ClientAliveInterval {{ base_sshd_client_alive_interval }}
+ClientAliveCountMax {{ base_sshd_client_alive_count_max }}
+
+# Forwarding and environment.
+AllowAgentForwarding no
+AllowTcpForwarding {{ base_sshd_allow_tcp_forwarding }}
 X11Forwarding no
+PermitTunnel no
+GatewayPorts no
+PermitUserEnvironment no
+
+# Logs key fingerprints, which fail2ban and CrowdSec can use.
+LogLevel VERBOSE
+
+KexAlgorithms {{ base_sshd_kex_algorithms | join(',') }}
+Ciphers {{ base_sshd_ciphers | join(',') }}
+MACs {{ base_sshd_macs | join(',') }}
 {% endif %}

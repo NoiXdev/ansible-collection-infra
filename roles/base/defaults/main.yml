@@ -19,6 +19,33 @@ base_sshd_hardening: true
 base_sshd_listen_addresses: []
 base_sshd_port: 22
 
+# The settings below apply only while base_sshd_hardening is on.
+# prohibit-password: root may log in with a key only.
+base_sshd_permit_root_login: prohibit-password
+# Empty: no AllowUsers line, every user with a key may log in.
+base_sshd_allow_users: []
+base_sshd_max_auth_tries: 3
+base_sshd_login_grace_time: 30
+# Ansible's connection multiplexing opens several sessions per connection.
+base_sshd_max_sessions: 10
+base_sshd_max_startups: "10:30:60"
+base_sshd_client_alive_interval: 300
+base_sshd_client_alive_count_max: 2
+base_sshd_allow_tcp_forwarding: "no"
+# Only algorithms that every supported release (OpenSSH 9.6 and later)
+# accepts; sshd refuses to start on an unknown name.
+base_sshd_kex_algorithms:
+  - sntrup761x25519-sha512@openssh.com
+  - curve25519-sha256
+  - curve25519-sha256@libssh.org
+base_sshd_ciphers:
+  - chacha20-poly1305@openssh.com
+  - aes256-gcm@openssh.com
+  - aes128-gcm@openssh.com
+base_sshd_macs:
+  - hmac-sha2-512-etm@openssh.com
+  - hmac-sha2-256-etm@openssh.com
+
 # Lets services bind addresses that are not up yet (e.g. a private IP at
 # boot). Always on when base_sshd_listen_addresses is set.
 base_nonlocal_bind: false

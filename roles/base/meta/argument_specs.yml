@@ -33,7 +33,12 @@ argument_specs:
         description: Time of day for such a reboot.
       base_sshd_hardening:
         type: bool
-        description: Key-only login, no root password login.
+        description: >-
+          Harden sshd with a drop-in: key-only login, no forwarding of agents,
+          X11 or tunnels, VERBOSE logging (key fingerprints, used by fail2ban
+          and CrowdSec), connection limits and modern algorithms only. The
+          base_sshd_* options below tune it; none of them applies while this
+          is off.
       base_sshd_listen_addresses:
         type: list
         elements: str
@@ -44,6 +49,58 @@ argument_specs:
       base_sshd_port:
         type: int
         description: sshd port.
+      base_sshd_permit_root_login:
+        type: str
+        choices: ["yes", prohibit-password, forced-commands-only, "no"]
+        description: >-
+          PermitRootLogin. The default lets root log in with a key only; set
+          "no" once every play connects as an unprivileged user.
+      base_sshd_allow_users:
+        type: list
+        elements: str
+        description: >-
+          AllowUsers patterns (user or user@host). Empty writes no AllowUsers
+          line. Include the user Ansible connects as, or the next run is
+          locked out.
+      base_sshd_max_auth_tries:
+        type: int
+        description: MaxAuthTries; keep it above the number of keys a client offers.
+      base_sshd_login_grace_time:
+        type: int
+        description: LoginGraceTime in seconds.
+      base_sshd_max_sessions:
+        type: int
+        description: MaxSessions per connection; Ansible's multiplexing needs several.
+      base_sshd_max_startups:
+        type: str
+        description: MaxStartups (start:rate:full) for unauthenticated connections.
+      base_sshd_client_alive_interval:
+        type: int
+        description: ClientAliveInterval in seconds.
+      base_sshd_client_alive_count_max:
+        type: int
+        description: >-
+          ClientAliveCountMax; an idle, unresponsive session is closed after
+          interval times count seconds.
+      base_sshd_allow_tcp_forwarding:
+        type: str
+        choices: ["yes", "no", all, local, remote]
+        description: AllowTcpForwarding; "local" is enough for ssh -L tunnels to private services.
+      base_sshd_kex_algorithms:
+        type: list
+        elements: str
+        description: >-
+          KexAlgorithms. The default works on OpenSSH 9.6 (Ubuntu 24.04) and
+          later; add mlkem768x25519-sha256 first where every host runs
+          OpenSSH 9.9 or later.
+      base_sshd_ciphers:
+        type: list
+        elements: str
+        description: Ciphers.
+      base_sshd_macs:
+        type: list
+        elements: str
+        description: MACs (only used by non-AEAD ciphers).
       base_nonlocal_bind:
         type: bool
         default: false
