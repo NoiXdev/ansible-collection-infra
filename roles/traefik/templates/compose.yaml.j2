@@ -33,6 +33,34 @@ services:
       proxy:
         ipv4_address: {{ traefik_address }}
     restart: unless-stopped
+{% if traefik_error_pages_enabled and traefik_error_pages_container %}
+
+  error-pages:
+    image: {{ traefik_error_pages_image }}
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+{% if traefik_error_pages_env | length > 0 %}
+    environment:
+{% for key, value in traefik_error_pages_env.items() %}
+      {{ key }}: {{ value | string | to_json }}
+{% endfor %}
+{% endif %}
+    volumes:
+      # Maintenance flag (/error-pages maintenance on|off).
+      - error-pages-data:/data
+    networks:
+      proxy:
+        aliases: [error-pages]
+    deploy:
+      resources:
+        limits:
+          cpus: "{{ traefik_error_pages_cpus }}"
+          memory: {{ traefik_error_pages_memory }}
+          pids: 64
+    restart: unless-stopped
+{% endif %}
 
 networks:
   socket:
@@ -47,3 +75,8 @@ networks:
       config:
         - subnet: {{ traefik_network_subnet }}
           ip_range: {{ traefik_network_range }}
+{% if traefik_error_pages_enabled and traefik_error_pages_container %}
+
+volumes:
+  error-pages-data: {}
+{% endif %}

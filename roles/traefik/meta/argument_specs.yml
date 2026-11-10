@@ -77,6 +77,63 @@ argument_specs:
         description: >-
           Docker provider allowEmptyServices: keep the routers of containers without
           a healthy server, so they answer 503 instead of disappearing.
+      traefik_error_pages_enabled:
+        type: bool
+        description:
+          - Route errors to an error pages service. The role writes dynamic/error-pages.yml with
+            the middlewares error-pages-errors and error-pages-compress, a router
+            error-pages-<name> per route and the service error-pages; disabling removes it.
+          - The role also runs the error pages container unless traefik_error_pages_container is
+            false.
+      traefik_error_pages_container:
+        type: bool
+        description:
+          - Run the error pages container (service error-pages) in the Traefik compose project,
+            read-only, as 65532, with the image's healthcheck and a volume on /data for
+            maintenance mode.
+          - Set to false to run the service elsewhere; then point traefik_error_pages_url at it.
+      traefik_error_pages_image:
+        type: str
+        description: Error pages image (noixdev/error-pages or compatible).
+      traefik_error_pages_env:
+        type: dict
+        description: Environment of the error pages container; replaces the defaults as a whole.
+      traefik_error_pages_cpus:
+        type: str
+        description: CPU limit of the error pages container.
+      traefik_error_pages_memory:
+        type: str
+        description: Memory limit of the error pages container, for example 64M.
+      traefik_error_pages_url:
+        type: str
+        description: URL of the error pages service, which serves /<code>.html; the default is the bundled container.
+      traefik_error_pages_status:
+        type: list
+        elements: str
+        description: Backend statuses (codes or ranges like 502-504) replaced by the matching page.
+      traefik_error_pages_entrypoints:
+        type: list
+        elements: str
+        description:
+          - Entrypoints whose routers all get error-pages-compress (if enabled) and
+            error-pages-errors, before the entrypoint's own middlewares.
+          - Must exist in traefik_entrypoints and must not redirect.
+      traefik_error_pages_compress:
+        type: bool
+        description: Compress responses on those entrypoints, limited to traefik_error_pages_compress_types.
+      traefik_error_pages_compress_types:
+        type: list
+        elements: str
+        description: Content types the compress middleware compresses.
+      traefik_error_pages_routes:
+        type: list
+        elements: dict
+        description:
+          - Routers that always answer with one page, for unknown hosts or names that must not
+            be served on an entrypoint.
+          - Keys are name ([a-z0-9-]+, unique), entrypoints (required), rule (default
+            HostRegexp(`.+`)), priority (default 1; higher wins) and page (a status code or
+            internal, default 404). The page is requested as /<page>.html.
       traefik_dynamic_files:
         type: dict
         description: File-provider files, name to YAML content.

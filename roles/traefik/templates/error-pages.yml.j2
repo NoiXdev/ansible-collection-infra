@@ -1,0 +1,37 @@
+# {{ ansible_managed }}
+# Error pages: the entrypoints listed in traefik_error_pages_entrypoints use
+# error-pages-compress@file and error-pages-errors@file; each route answers
+# with one fixed page.
+http:
+  middlewares:
+    error-pages-errors:
+      errors:
+        status: {{ traefik_error_pages_status | map('string') | list | to_json }}
+        service: error-pages
+        query: "/{status}.html"
+{% if traefik_error_pages_compress %}
+    error-pages-compress:
+      compress:
+        includedContentTypes: {{ traefik_error_pages_compress_types | to_json }}
+{% endif %}
+{% for route in traefik_error_pages_routes %}
+    error-pages-page-{{ route.name }}:
+      replacePath:
+        path: {{ ('/' ~ (route.page | default('404') | string) ~ '.html') | to_json }}
+{% endfor %}
+{% if traefik_error_pages_routes | length > 0 %}
+  routers:
+{% for route in traefik_error_pages_routes %}
+    error-pages-{{ route.name }}:
+      rule: {{ route.rule | default('HostRegexp(`.+`)') | to_json }}
+      priority: {{ route.priority | default(1) | int }}
+      entryPoints: {{ route.entrypoints | to_json }}
+      middlewares: ["error-pages-page-{{ route.name }}"]
+      service: error-pages
+{% endfor %}
+{% endif %}
+  services:
+    error-pages:
+      loadBalancer:
+        servers:
+          - url: {{ traefik_error_pages_url | to_json }}

@@ -20,7 +20,7 @@ are on the documentation site.
 | `base` | Packages, time zone, unattended upgrades, swap, journald limit, sshd hardening |
 | `docker` | Docker CE with the compose plugin and a managed `daemon.json` |
 | `tailscale` | Tailscale node, optionally a subnet router |
-| `traefik` | Standalone Traefik with DNS-01 certificates and a Docker socket proxy |
+| `traefik` | Standalone Traefik with DNS-01 certificates, a Docker socket proxy and optional error pages |
 | `portainer` | Portainer server or agent |
 | `pulsix_manager` | Pulsix manager, database and any number of local workers |
 | `pulsix_worker` | Any number of remote Pulsix workers, enrolled with one-time tokens |

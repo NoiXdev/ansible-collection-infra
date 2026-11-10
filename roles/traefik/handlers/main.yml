@@ -5,3 +5,11 @@
     project_name: "{{ traefik_project }}"
     services: [traefik]
     state: restarted
+
+# Runs after the restart (handlers run in this order), so the running Traefik
+# never references middlewares of a removed file.
+- name: Remove the error pages configuration
+  ansible.builtin.file:
+    path: "{{ traefik_dir }}/dynamic/error-pages.yml"
+    state: absent
+  when: not traefik_error_pages_enabled

@@ -12,6 +12,8 @@ accessLog: {}
 
 entryPoints:
 {% for ep in traefik_entrypoints %}
+{% set ep_error_pages = traefik_error_pages_enabled and ep.name in traefik_error_pages_entrypoints %}
+{% set ep_mw = ((['error-pages-compress@file'] if traefik_error_pages_compress else []) + ['error-pages-errors@file'] if ep_error_pages else []) + ep.middlewares | default([]) %}
   {{ ep.name }}:
     address: ":{{ ep.port }}{{ '/udp' if ep.protocol | default('tcp') == 'udp' else '' }}"
 {% if ep.as_default | default(false) %}
@@ -29,10 +31,10 @@ entryPoints:
 {% endif %}
           scheme: https
           permanent: true
-{% elif ep.tls | default(false) or ep.middlewares | default([]) | length > 0 %}
+{% elif ep.tls | default(false) or ep_mw | length > 0 %}
     http:
-{% if ep.middlewares | default([]) | length > 0 %}
-      middlewares: {{ ep.middlewares | to_json }}
+{% if ep_mw | length > 0 %}
+      middlewares: {{ ep_mw | to_json }}
 {% endif %}
 {% if ep.tls | default(false) %}
       tls:

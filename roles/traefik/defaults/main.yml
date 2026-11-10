@@ -47,5 +47,39 @@ traefik_cert_domains: []
 # instead of disappearing.
 traefik_docker_allow_empty_services: false
 
+# Error pages: a service that serves /<code>.html. The role runs
+# noixdev/error-pages in the Traefik compose project (service error-pages,
+# alias error-pages on the shared network) and writes dynamic/error-pages.yml
+# with the middlewares error-pages-errors and error-pages-compress, one router
+# per route and the service error-pages.
+traefik_error_pages_enabled: false
+# false: run the error pages service elsewhere and point the URL at it.
+traefik_error_pages_container: true
+traefik_error_pages_image: noixdev/error-pages:1
+# Container environment; replaces the whole dict when set (see the image's
+# documentation for THEME, LANGUAGES, LINKS and the rest).
+traefik_error_pages_env:
+  THEME: glass
+  LANGUAGES: en,de
+  DEFAULT_LANGUAGE: en
+  SHOW_DETAILS: "false"
+traefik_error_pages_cpus: "0.25"
+traefik_error_pages_memory: 64M
+traefik_error_pages_url: http://error-pages:8080
+# Backend statuses replaced by the matching page.
+traefik_error_pages_status: ["502-504"]
+# Entrypoints whose routers all get compress (if enabled) and the errors
+# middleware, before the entrypoint's own middlewares.
+traefik_error_pages_entrypoints: []
+traefik_error_pages_compress: true
+traefik_error_pages_compress_types: [text/html, text/plain, application/json]
+# Routers that answer with one fixed page (higher priority wins):
+#   - name: catchall          # [a-z0-9-]+, unique
+#     entrypoints: [web]
+#     rule: HostRegexp(`.+`)  # default
+#     priority: 1             # default
+#     page: "404"             # a status code or "internal"
+traefik_error_pages_routes: []
+
 # Extra files for the file provider: {file name: YAML content}.
 traefik_dynamic_files: {}
