@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-10
 
 - `traefik`: entrypoints take `host_port`, the port published on the host (default: `port`), so
   two entrypoints can share a host port on different bind addresses. A redirect to such an
