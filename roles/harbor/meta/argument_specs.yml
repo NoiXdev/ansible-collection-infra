@@ -1,0 +1,116 @@
+---
+argument_specs:
+  main:
+    short_description: Harbor registry behind Traefik
+    options:
+      harbor_version:
+        type: str
+        description: >-
+          Harbor release tag (vX.Y.Z). Newer than the installed version upgrades
+          (after a backup), older is refused.
+      harbor_installer_url:
+        type: str
+        description: >-
+          Full URL of the online installer archive; empty builds the GitHub release
+          URL from harbor_version and the host architecture.
+      harbor_installer_checksum:
+        type: str
+        description: >-
+          Checksum of the installer in get_url form (algorithm:hash or
+          algorithm:URL). Empty uses the release's md5sum file for the built URL
+          and no check for harbor_installer_url.
+      harbor_dir:
+        type: path
+        description: Directory with the installers, harbor.yml and the compose override.
+      harbor_data_dir:
+        type: path
+        description: Harbor's data_volume (database, secret, filesystem blobs).
+      harbor_backup_dir:
+        type: path
+        description: >-
+          Directory of the pre-upgrade backups (one timestamped directory each) and
+          of latest, which harbor-backup without an argument replaces.
+      harbor_backups_keep:
+        type: int
+        description: Number of pre-upgrade backups kept after a successful upgrade.
+      harbor_log_dir:
+        type: path
+        description: Directory Harbor's log container writes the component logs to.
+      harbor_log_level:
+        type: str
+        choices: [debug, info, warning, error, fatal]
+        description: Log level of the Harbor components.
+      harbor_hostname:
+        type: str
+        required: true
+        description: Host name Traefik routes to Harbor.
+      harbor_external_url:
+        type: str
+        description: URL clients reach Harbor at (external_url in harbor.yml).
+      harbor_admin_password:
+        type: str
+        required: true
+        no_log: true
+        description: >-
+          Initial password (at least 8 characters) of the user admin, used only on
+          the first start. Keep it in a vault.
+      harbor_db_password:
+        type: str
+        required: true
+        no_log: true
+        description: >-
+          Password of Harbor's PostgreSQL. Set it once; do not change it after the
+          first start (the database keeps the first one). Keep it in a vault.
+      harbor_storage:
+        type: str
+        choices: [filesystem, s3]
+        description: Where the registry stores image blobs.
+      harbor_s3:
+        type: dict
+        description: S3 settings for harbor_storage s3; keep the keys in a vault.
+        options:
+          endpoint:
+            type: str
+            description: Endpoint URL (regionendpoint); empty for AWS.
+          region:
+            type: str
+            description: Region of the bucket.
+          bucket:
+            type: str
+            description: Bucket name.
+          access_key:
+            type: str
+            no_log: true
+            description: Access key.
+          secret_key:
+            type: str
+            no_log: true
+            description: Secret key.
+          secure:
+            type: bool
+            description: Use HTTPS to reach the endpoint.
+          v4auth:
+            type: bool
+            description: Use AWS signature version 4.
+          chunksize:
+            type: int
+            description: Multipart upload chunk size in bytes (at least 5 MiB).
+          rootdirectory:
+            type: str
+            description: Prefix of all objects in the bucket.
+      harbor_trivy:
+        type: bool
+        description: Run the Trivy scanner.
+      harbor_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      harbor_traefik_entrypoints:
+        type: list
+        elements: str
+        description: Traefik entrypoints of the route; empty uses Traefik's default ones.
+      harbor_traefik_priority:
+        type: int
+        description: Priority of the Traefik router; keep it above catch-all routers.
+      harbor_wait_timeout:
+        type: int
+        description: Seconds to wait for all Harbor services to become healthy.

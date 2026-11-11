@@ -23,6 +23,7 @@ are on the documentation site.
 | `traefik` | Standalone Traefik with DNS-01 certificates, a Docker socket proxy and optional error pages |
 | `portainer` | Portainer server or agent |
 | `dns` | CoreDNS for internal names on private addresses, forwarding the rest |
+| `harbor` | Harbor registry behind Traefik, with safe upgrades and backup scripts |
 | `pulsix_manager` | Pulsix manager, database and any number of local workers |
 | `pulsix_worker` | Any number of remote Pulsix workers, enrolled with one-time tokens |
 | `fail2ban` | fail2ban on the systemd journal with nftables bans |

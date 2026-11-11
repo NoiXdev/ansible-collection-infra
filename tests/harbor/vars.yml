@@ -1,0 +1,19 @@
+---
+# Test-only values; nothing here is a real secret.
+traefik_dir: /opt/traefik
+# One plain-HTTP entrypoint: no TLS, so no ACME e-mail. The DinD daemon
+# treats harbor.test as an insecure registry.
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+    as_default: true
+    responding_timeouts: {read: 600s, write: "0s"}
+
+harbor_version: v2.14.6
+harbor_hostname: harbor.test
+harbor_external_url: http://harbor.test
+harbor_admin_password: Test-admin-password-0
+harbor_db_password: test-db-password-0000
+# Keeps the test fast; the role default is on.
+harbor_trivy: false

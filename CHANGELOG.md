@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- `harbor`: new role that installs Harbor (`harbor_version`, default `v2.15.4`) from its online
+  installer, kept per version under `harbor_dir/installer/` (`harbor_installer_url` and
+  `harbor_installer_checksum` override the GitHub release download and its md5 check). It renders
+  `harbor.yml` (mode `0600`) from `harbor_hostname`, `harbor_external_url`,
+  `harbor_admin_password`, `harbor_db_password`, `harbor_data_dir`, `harbor_storage`
+  (`filesystem` or `s3` with `harbor_s3`), `harbor_trivy`, `harbor_log_dir` and
+  `harbor_log_level`, runs `prepare` only when that file or the Trivy choice changed, and waits
+  up to `harbor_wait_timeout` seconds until every service is healthy. Harbor's nginx publishes no
+  host port: a compose override joins it to `harbor_traefik_network` with a router for
+  `harbor_hostname` on `harbor_traefik_entrypoints` at `harbor_traefik_priority` (default `100`,
+  above the error pages routes). The installed version is recorded in
+  `harbor_dir/installed-version`; an older `harbor_version` is refused, and so is a run without
+  that record over an existing database in `harbor_data_dir/database`. Before `v2.16.0`, whose
+  images exist for amd64 only, the role refuses a platform other than amd64 (the host
+  architecture, or `DOCKER_DEFAULT_PLATFORM` when it is set) before it changes anything, unless
+  `harbor_installer_url` is set.
+- `harbor`: a newer `harbor_version` upgrades Harbor. The role fetches the new installer first (a
+  failed download leaves Harbor running), writes the marker `harbor_dir/upgrade-failed` (`from`,
+  `to`, `backup`, `backup_complete`, `time`), stops every service except the database, takes a
+  verified backup into a timestamped directory under `harbor_backup_dir`, stops the database and
+  prepares and starts the new version. After success it removes the marker and keeps the newest
+  `harbor_backups_keep` backups. On a failure Harbor stays stopped, the marker stays and the run
+  fails with the `harbor-restore` command for the backup (or, when the backup did not complete, the
+  steps to retry); while the marker exists every run fails at once and changes nothing.
+- `harbor`: host scripts `/usr/local/sbin/harbor-backup [<dir>]` and `/usr/local/sbin/harbor-restore
+  <dir>` (root, mode `0750`). `harbor-backup` writes one `pg_dump -Fc` file per Harbor database
+  (`registry.dump`, read back in full to verify it), a copy of Harbor's `secret` directory (with its
+  modes in `secret.modes`), `harbor.yml` and `version` into a new `0700` directory (files `0600`,
+  directories `0700`); without an argument it replaces `harbor_backup_dir/latest` only once the
+  backup is complete. It fails when `harbor-db` is not running, and without an argument also while
+  `harbor_dir/upgrade-failed` exists (an upgrade is running or failed). `harbor-restore` refuses a
+  backup of another version than the installed one; it stops Harbor except the database, moves
+  clusters the database does not run on (left by a newer PostgreSQL) to
+  `harbor_data_dir/database-stale-*`, drops and reloads the databases, restores `secret`, moves the
+  Redis data (caches and job queue) aside, runs `prepare` with the role's `harbor.yml`, starts
+  Harbor, waits until it is healthy and removes the `upgrade-failed` marker that names this backup.
 - `traefik`: entrypoints accept `responding_timeouts` with the optional keys `read`, `write` and
   `idle` (Traefik durations such as `600s`, `0s` for no limit). They render as
   `transport.respondingTimeouts` of that entrypoint only; other entrypoints keep Traefik's

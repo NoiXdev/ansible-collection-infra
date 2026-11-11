@@ -1,0 +1,186 @@
+---
+- name: Check the Harbor settings
+  ansible.builtin.assert:
+    that:
+      - harbor_version is match('^v\d+\.\d+\.\d+$')
+      - harbor_hostname | length > 0
+      - harbor_external_url is match('^https?://')
+      - harbor_admin_password | length >= 8
+      - harbor_db_password | length > 0
+      - harbor_installer_url | length == 0 or harbor_installer_url is match('^https?://')
+      - harbor_backups_keep | int >= 1
+      - harbor_wait_timeout | int > 0
+    fail_msg: >-
+      harbor_version must look like vX.Y.Z; harbor_hostname, harbor_db_password
+      and a harbor_admin_password of at least 8 characters are required;
+      harbor_external_url and harbor_installer_url (if set) must be http(s) URLs;
+      harbor_backups_keep and harbor_wait_timeout must be positive.
+    quiet: true
+
+- name: Check the S3 storage settings
+  ansible.builtin.assert:
+    that:
+      - harbor_s3.region | default('') | length > 0
+      - harbor_s3.bucket | default('') | length > 0
+      - harbor_s3.access_key | default('') | length > 0
+      - harbor_s3.secret_key | default('') | length > 0
+      - harbor_s3.endpoint | default('') | length == 0 or harbor_s3.endpoint is match('^https?://')
+    fail_msg: >-
+      harbor_storage s3 needs harbor_s3 with region, bucket, access_key and
+      secret_key; endpoint, if set, must be an http(s) URL.
+    quiet: true
+  when: harbor_storage == 's3'
+
+- name: Read the Docker Compose version
+  ansible.builtin.command:
+    cmd: docker compose version --short
+  register: harbor_compose_version
+  changed_when: false
+
+# The compose override drops the proxy's host port with the !reset tag.
+- name: Check the Docker Compose version
+  ansible.builtin.assert:
+    that: harbor_compose_version.stdout | trim | regex_replace('^v', '') is version('2.24.0', '>=')
+    fail_msg: Harbor needs Docker Compose 2.24.0 or newer, found {{ harbor_compose_version.stdout | trim }}.
+    quiet: true
+
+- name: Read the host architecture
+  ansible.builtin.setup:
+    gather_subset: [platform]
+  when: ansible_facts.architecture is not defined or ansible_facts.env is not defined
+
+- name: Check the host architecture
+  ansible.builtin.assert:
+    that: ansible_facts.architecture in harbor_arch_map
+    fail_msg: >-
+      Harbor installers exist for x86_64 and aarch64 only, not for
+      {{ ansible_facts.architecture }}; set harbor_installer_url.
+    quiet: true
+  when: harbor_installer_url | length == 0 and harbor_version[1:] is version('2.16.0', '>=')
+
+# Before v2.16.0 Harbor publishes amd64 images only; on another platform they
+# fail late with exec format errors. DOCKER_DEFAULT_PLATFORM, if set in the
+# environment the role runs with, is the platform the containers run as.
+- name: Check the platform for Harbor before v2.16.0
+  ansible.builtin.assert:
+    that: harbor_container_arch == 'amd64'
+    fail_msg: >-
+      Harbor {{ harbor_version }} publishes amd64 images only, but its containers
+      would run as {{ harbor_container_arch }}. Use an amd64 host, Harbor v2.16.0
+      or newer, or set harbor_installer_url to an installer for this platform.
+    quiet: true
+  vars:
+    harbor_container_arch: >-
+      {{ ((ansible_facts.env.DOCKER_DEFAULT_PLATFORM | default('')) ~ '/').split('/')[1]
+         or harbor_arch_map.get(ansible_facts.architecture, ansible_facts.architecture) }}
+  when: harbor_installer_url | length == 0 and harbor_version[1:] is version('2.16.0', '<')
+
+- name: Read the installed Harbor version
+  ansible.builtin.slurp:
+    src: "{{ harbor_dir }}/installed-version"
+  register: harbor_installed_record
+  failed_when: false
+
+- name: Note the installed Harbor version
+  ansible.builtin.set_fact:
+    harbor_installed_version: "{{ (harbor_installed_record.content | default('') | b64decode).strip() }}"
+
+- name: Check the installed version record
+  ansible.builtin.assert:
+    that: harbor_installed_version is match('^v\d+\.\d+\.\d+$')
+    fail_msg: >-
+      {{ harbor_dir }}/installed-version does not hold a version like vX.Y.Z;
+      write the version that is installed into it.
+    quiet: true
+  when: harbor_installed_version | length > 0
+
+# Written when an upgrade starts and removed when it succeeded: a run while it
+# exists could back up a half-migrated database or start it again.
+- name: Read the upgrade marker
+  ansible.builtin.slurp:
+    src: "{{ harbor_dir }}/upgrade-failed"
+  register: harbor_upgrade_marker
+  failed_when: false
+
+- name: Refuse to run after a failed upgrade
+  ansible.builtin.fail:
+    msg: >-
+      {{ harbor_dir }}/upgrade-failed exists: an upgrade of Harbor failed, and
+      Harbor may be stopped ({{ harbor_marker_text.splitlines()
+      | reject('match', '^#') | reject('equalto', '') | join('; ') }}).
+      {% if harbor_marker_text is search('(?m)^backup_complete: *true *$') %}
+      Restore the backup it names with `harbor-restore <backup>`, which starts
+      the version of the backup and removes the marker; or repair Harbor by hand
+      and remove the marker.
+      {% else %}
+      Its backup was not completed, so there is nothing to restore, and the
+      database was not touched. Remove the marker first, then run the role again
+      (it backs up and upgrades again) or set harbor_version to the version in
+      `from` to start that version.
+      {% endif %}
+      The role changes nothing while the marker exists.
+  vars:
+    harbor_marker_text: "{{ harbor_upgrade_marker.content | b64decode }}"
+  when: harbor_upgrade_marker.content is defined
+
+- name: Decide what to do
+  ansible.builtin.set_fact:
+    harbor_action: >-
+      {{ 'install' if harbor_installed_version == ''
+         else 'noop' if harbor_installed_version == harbor_version
+         else 'upgrade' if harbor_version[1:] is version(harbor_installed_version[1:], '>')
+         else 'downgrade' }}
+
+- name: Refuse a downgrade
+  ansible.builtin.fail:
+    msg: >-
+      Harbor {{ harbor_installed_version }} is installed; the role refuses to
+      downgrade to {{ harbor_version }}. Set harbor_version to
+      {{ harbor_installed_version }} or newer.
+  when: harbor_action == 'downgrade'
+
+# Harbor would migrate a database of an unknown (maybe older) version on start,
+# without a backup.
+- name: Read the Harbor database directory
+  ansible.builtin.stat:
+    path: "{{ harbor_data_dir }}/database"
+  register: harbor_database_dir
+  when: harbor_action == 'install'
+
+- name: Look for an existing Harbor database
+  ansible.builtin.find:
+    paths: "{{ harbor_data_dir }}/database"
+    file_type: any
+    hidden: true
+  register: harbor_existing_database
+  when:
+    - harbor_action == 'install'
+    - harbor_database_dir.stat.isdir | default(false)
+
+- name: Refuse to install over an existing database
+  ansible.builtin.fail:
+    msg: >-
+      {{ harbor_data_dir }}/database holds a Harbor database, but
+      {{ harbor_dir }}/installed-version is missing. The role does not start
+      Harbor {{ harbor_version }} on a database of an unknown version. If you
+      know the Harbor version that wrote it, write that version into
+      {{ harbor_dir }}/installed-version and run the role again (a newer
+      harbor_version then upgrades with a backup). Otherwise move the database
+      directory away, install Harbor with the role and load a backup with
+      `harbor-restore <dir>`.
+  when:
+    - harbor_action == 'install'
+    - harbor_existing_database.matched | default(0) > 0
+
+- name: Install or reconfigure Harbor
+  when: harbor_action in ['install', 'noop']
+  block:
+    - name: Fetch the Harbor installer and render its configuration
+      ansible.builtin.include_tasks: fetch.yml
+
+    - name: Start Harbor
+      ansible.builtin.include_tasks: start.yml
+
+- name: Upgrade Harbor
+  ansible.builtin.include_tasks: upgrade.yml
+  when: harbor_action == 'upgrade'

@@ -48,3 +48,17 @@ jobs:
       - run: tests/host/run.sh
         env:
           UBUNTU: ${{ matrix.ubuntu }}
+
+  harbor:
+    # amd64: Harbor before v2.16 publishes amd64 images only.
+    runs-on: ubuntu-24.04
+    needs: lint
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install ansible-core
+      - run: ansible-galaxy collection install community.docker community.general ansible.posix
+      - run: tests/harbor/run.sh

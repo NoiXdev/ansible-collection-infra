@@ -1,0 +1,22 @@
+---
+# ansible_facts.architecture -> architecture in the installer name (v2.16.0+)
+harbor_arch_map:
+  x86_64: amd64
+  aarch64: arm64
+
+harbor_release_url: https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}
+harbor_installer_name: >-
+  harbor-online-installer-{{ harbor_version }}{{
+  '-' ~ harbor_arch_map[ansible_facts.architecture] if harbor_version[1:] is version('2.16.0', '>=') else '' }}.tgz
+harbor_installer_dir: "{{ harbor_dir }}/installer/{{ harbor_version }}"
+# What prepare last ran with: harbor.yml's checksum and the Trivy choice.
+harbor_prepared_state: "{{ harbor_config.checksum }} trivy={{ harbor_trivy | bool }}\n"
+# Content of harbor_dir/upgrade-failed during an upgrade (see upgrade.yml).
+harbor_upgrade_marker_content: |
+  # Written when an upgrade starts, removed when it succeeded. While this file
+  # exists the harbor role refuses to run. backup_complete: true means the
+  # backup exists and harbor-restore <backup> restores it (and removes this
+  # file); false means the database was not touched and there is no backup.
+  {{ {'from': harbor_installed_version, 'to': harbor_version, 'backup': harbor_upgrade_backup,
+      'backup_complete': harbor_upgrade_backup_complete | bool,
+      'time': harbor_upgrade_time} | to_nice_yaml(sort_keys=false) }}

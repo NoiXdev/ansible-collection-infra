@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# harbor-backup [<dir>]
+#
+# Writes a backup of Harbor into <dir>: one PostgreSQL dump (pg_dump -Fc) per
+# Harbor database (<name>.dump), a copy of Harbor's secret directory
+# (secret/, files 0600 and directories 0700; Harbor's own modes are kept in
+# secret.modes for harbor-restore), the rendered harbor.yml (for reference)
+# and the installed version (version). <dir> must not exist. Without <dir> the
+# backup replaces {{ harbor_backup_dir }}/latest, which a backup tool can pick up.
+#
+# Needs the container harbor-db running; the other Harbor services may run
+# (pg_dump is consistent by itself). Without <dir> it refuses while
+# {{ harbor_dir }}/upgrade-failed exists (an upgrade is running or failed).
+# The backup is written next to its target and moved into place only when it
+# is complete, so a failure leaves the target untouched. Exits non-zero on any
+# failure.
+#
+# Not atomic: replacing latest takes two renames (old latest aside, new one
+# in). Between them latest is absent for an instant, never partial. A failed
+# second rename puts the old latest back; if the script is killed in that
+# instant, the next run without <dir> puts it back from
+# {{ harbor_backup_dir }}/.harbor-backup-old.*.
+set -Eeuo pipefail
+
+harbor_dir={{ harbor_dir | quote }}
+data_dir={{ harbor_data_dir | quote }}
+backup_dir={{ harbor_backup_dir | quote }}
+
+die() {
+  echo "harbor-backup: $*" >&2
+  exit 1
+}
+
+[ "$(id -u)" = 0 ] || die "run it as root"
+case "$#" in
+  0) target="$backup_dir/latest" replace=1 ;;
+  1) target="${1%/}" replace=0 ;;
+  *) die "usage: harbor-backup [<dir>]" ;;
+esac
+case "$target" in
+  /*) ;;
+  *) target="$PWD/$target" ;;
+esac
+if [ "$replace" = 0 ] && [ -e "$target" ]; then
+  die "$target exists; give a new directory"
+fi
+parent="$(dirname "$target")"
+
+work=""
+old=""
+on_exit() {
+  [ -z "$work" ] || rm -rf "$work"
+  # Interrupted between the two renames: the old latest goes back.
+  if [ -n "$old" ] && [ -d "$old/$(basename "$target")" ]; then
+    if [ ! -e "$target" ]; then
+      mv "$old/$(basename "$target")" "$target" && rm -rf "$old"
+    else
+      rm -rf "$old"
+    fi
+  fi
+  [ "$1" = 0 ] || echo "harbor-backup: no backup written; $target is unchanged" >&2
+}
+trap 'on_exit $?' EXIT
+trap 'exit 130' INT TERM HUP
+
+# While an upgrade runs (or after it failed) installed-version still names the
+# old version, but the database may already be the new one: a backup would be
+# mislabelled. The upgrade's own call names a directory and is not refused.
+if [ "$replace" = 1 ] && [ -e "$harbor_dir/upgrade-failed" ]; then
+  die "$harbor_dir/upgrade-failed exists: an upgrade of Harbor is running or failed; no backup"
+fi
+
+if [ "$replace" = 1 ]; then
+  # A run killed between the two renames left the previous latest aside.
+  if [ ! -e "$target" ]; then
+    for leftover in "$parent"/.harbor-backup-old.*/"$(basename "$target")"; do
+      [ -d "$leftover" ] || continue
+      mv "$leftover" "$target"
+      echo "harbor-backup: put the previous $target back from $(dirname "$leftover")" >&2
+      break
+    done
+  fi
+  # Only here: a call with a directory could remove the aside copy of a
+  # concurrent call without one.
+  if [ -d "$parent" ]; then
+    find "$parent" -mindepth 1 -maxdepth 1 -name '.harbor-backup-old.*' -exec rm -rf {} +
+  fi
+fi
+
+version="$(cat "$harbor_dir/installed-version" 2>/dev/null)" \
+  || die "$harbor_dir/installed-version is missing; is Harbor installed?"
+[[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "$harbor_dir/installed-version does not hold a version"
+harbor_yml="$harbor_dir/installer/$version/harbor.yml"
+[ -f "$harbor_yml" ] || die "$harbor_yml is missing"
+[ -d "$data_dir/secret" ] || die "$data_dir/secret is missing"
+
+[ -n "$(docker ps --quiet --filter name='^harbor-db$' --filter status=running)" ] \
+  || die "harbor-db is not running; start Harbor's database first"
+for _ in $(seq 60); do
+  docker exec harbor-db pg_isready --quiet --username postgres && break
+  sleep 1
+done
+docker exec harbor-db pg_isready --quiet --username postgres || die "harbor-db does not accept connections"
+
+databases="$(docker exec harbor-db psql --username postgres --no-align --tuples-only --command \
+  "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate AND datname <> 'postgres' ORDER BY 1")" \
+  || die "cannot list the databases in harbor-db"
+grep -qx registry <<<"$databases" || die "harbor-db has no database registry"
+
+mkdir -p "$parent"
+umask 077
+work="$(mktemp -d "$parent/.harbor-backup.XXXXXX")"
+
+while read -r db; do
+  docker exec harbor-db pg_dump --username postgres --format custom "$db" >"$work/$db.dump" \
+    || die "pg_dump of database $db failed"
+  [ -s "$work/$db.dump" ] || die "the dump of database $db is empty"
+  # Reads the whole archive (as a restore would, into /dev/null): a truncated
+  # or corrupt dump fails here.
+  docker exec -i harbor-db pg_restore --file /dev/null <"$work/$db.dump" \
+    || die "the dump of database $db is not readable"
+done <<<"$databases"
+
+cp -a "$data_dir/secret" "$work/secret"
+# Harbor's modes (its containers need them), restored by harbor-restore; the
+# copy itself is readable by root only.
+(cd "$work/secret" && find . -exec stat -c '%a %n' {} +) >"$work/secret.modes"
+chmod -R go-rwx "$work/secret"
+cp "$harbor_yml" "$work/harbor.yml"
+printf '%s\n' "$version" >"$work/version"
+chmod 0600 "$work"/*.dump "$work/harbor.yml" "$work/version" "$work/secret.modes"
+chmod 0700 "$work"
+sync
+
+if [ "$replace" = 1 ] && [ -e "$target" ]; then
+  old="$(mktemp -d "$parent/.harbor-backup-old.XXXXXX")"
+  mv "$target" "$old/"
+  mv "$work" "$target" || die "cannot move the new backup to $target"
+  work=""
+  replaced="$old"
+  old=""
+  rm -rf "$replaced" || echo "harbor-backup: could not remove $replaced" >&2
+else
+  mv "$work" "$target"
+  work=""
+fi
+
+echo "harbor-backup: wrote $target (Harbor $version, databases: $(tr '\n' ' ' <<<"$databases" | sed 's/ $//'))"

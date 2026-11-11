@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Harbor registry behind Traefik
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+    - name: Debian
+      versions: [bookworm, trixie]
+dependencies: []

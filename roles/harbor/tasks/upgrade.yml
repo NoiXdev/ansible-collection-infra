@@ -1,0 +1,157 @@
+---
+# Upgrade from harbor_installed_version to harbor_version. main.yml has already
+# checked that no upgrade-failed marker exists and that harbor_version is newer.
+#
+# Order: fetch the new installer (a failure leaves the running Harbor alone)
+# -> write the marker -> stop all but the database -> back up -> stop the
+# database -> prepare and start the new version -> remove the marker. From the
+# marker on, a failure stops Harbor and keeps the marker; every later run
+# refuses until harbor-restore (or the owner) removes it.
+- name: Fetch the new Harbor installer and render its configuration
+  ansible.builtin.include_tasks: fetch.yml
+
+- name: Name the pre-upgrade backup
+  ansible.builtin.set_fact:
+    harbor_upgrade_backup: >-
+      {{ harbor_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ harbor_installed_version }}
+    harbor_upgrade_time: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+    harbor_upgrade_backup_done: false
+
+- name: Write the upgrade marker
+  ansible.builtin.copy:
+    dest: "{{ harbor_dir }}/upgrade-failed"
+    content: "{{ harbor_upgrade_marker_content }}"
+    owner: root
+    group: root
+    mode: "0600"
+  vars:
+    harbor_upgrade_backup_complete: false
+
+- name: Upgrade Harbor
+  block:
+    - name: List the Harbor services
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, harbor, ps, --all, --format, "{% raw %}{{.Service}}{% endraw %}"]
+      register: harbor_upgrade_services
+      changed_when: false
+
+    # No pushes or jobs can land between the dump and the stop. log stays up:
+    # every Harbor container, harbor-db too, logs through it.
+    - name: Stop Harbor except its database
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'compose', '--project-name', 'harbor', 'stop'] + harbor_upgrade_stop }}"
+      vars:
+        harbor_upgrade_stop: "{{ harbor_upgrade_services.stdout_lines | difference(['postgresql', 'log']) }}"
+      changed_when: true
+      when: harbor_upgrade_stop | length > 0
+
+    # A no-op on a running Harbor; a stopped one gets its database back.
+    - name: Start the database of Harbor {{ harbor_installed_version }}
+      ansible.builtin.command:
+        cmd: docker compose --project-name harbor start log postgresql
+      changed_when: true
+
+    - name: Back up Harbor {{ harbor_installed_version }}
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/harbor-backup, "{{ harbor_upgrade_backup }}"]
+      changed_when: true
+
+    - name: Read the pre-upgrade dump
+      ansible.builtin.stat:
+        path: "{{ harbor_upgrade_backup }}/registry.dump"
+      register: harbor_upgrade_dump
+
+    - name: Check the pre-upgrade backup
+      ansible.builtin.assert:
+        that:
+          - harbor_upgrade_dump.stat.exists
+          - harbor_upgrade_dump.stat.size > 0
+        fail_msg: "{{ harbor_upgrade_backup }}/registry.dump is missing or empty."
+        quiet: true
+
+    - name: Note the backup in the upgrade marker
+      ansible.builtin.copy:
+        dest: "{{ harbor_dir }}/upgrade-failed"
+        content: "{{ harbor_upgrade_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        harbor_upgrade_backup_complete: true
+
+    - name: Note the backup
+      ansible.builtin.set_fact:
+        harbor_upgrade_backup_done: true
+
+    - name: Stop Harbor {{ harbor_installed_version }}
+      ansible.builtin.command:
+        cmd: docker compose --project-name harbor stop
+      changed_when: true
+
+    - name: Start Harbor {{ harbor_version }}
+      ansible.builtin.include_tasks: start.yml
+
+    - name: Remove the upgrade marker
+      ansible.builtin.file:
+        path: "{{ harbor_dir }}/upgrade-failed"
+        state: absent
+
+  rescue:
+    - name: Stop Harbor after the failed upgrade
+      ansible.builtin.command:
+        cmd: docker compose --project-name harbor stop
+      register: harbor_upgrade_rescue_stop
+      changed_when: true
+      failed_when: false
+
+    # harbor-restore needs the version of the backup recorded as installed.
+    - name: Record the version to restore
+      ansible.builtin.copy:
+        dest: "{{ harbor_dir }}/installed-version"
+        content: "{{ harbor_installed_version }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when: harbor_upgrade_backup_done
+
+    - name: Fail with the restore instructions
+      ansible.builtin.fail:
+        msg: >-
+          The upgrade of Harbor from {{ harbor_installed_version }} to {{ harbor_version }}
+          failed at "{{ ansible_failed_task.name | default('?') }}":
+          {{ ansible_failed_result.msg | default('') }}
+          {{ (ansible_failed_result.stderr | default(''))[-600:] }}
+          {% if harbor_upgrade_rescue_stop.rc | default(1) == 0 %}
+          Harbor is stopped.
+          {% else %}
+          Stopping Harbor failed too ({{ harbor_upgrade_rescue_stop.stderr | default('') | trim }}),
+          so its state is unknown; check `docker compose --project-name harbor ps`.
+          {% endif %}
+          {{ harbor_dir }}/upgrade-failed blocks every run of the role.
+          {% if harbor_upgrade_backup_done %}
+          The database may be half-migrated. Restore the backup taken before the
+          upgrade with `harbor-restore {{ harbor_upgrade_backup }}` (it starts
+          Harbor {{ harbor_installed_version }} and removes the marker), then fix the
+          cause before you raise harbor_version again.
+          {% else %}
+          The backup was not completed (there is no usable backup of this attempt),
+          and the database was not touched. Fix the cause, remove
+          {{ harbor_dir }}/upgrade-failed, then either run the role again (it backs up
+          and upgrades again) or set harbor_version to {{ harbor_installed_version }}
+          to start the old version; both need the marker removed first.
+          {% endif %}
+
+# Only after a successful upgrade; the newest harbor_backups_keep stay.
+- name: Find the pre-upgrade backups
+  ansible.builtin.find:
+    paths: "{{ harbor_backup_dir }}"
+    file_type: directory
+    patterns: ['^\d{8}T\d{6}Z-v\d+\.\d+\.\d+$']
+    use_regex: true
+  register: harbor_upgrade_backups
+
+- name: Remove the oldest pre-upgrade backups
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (harbor_upgrade_backups.files | map(attribute='path') | sort)[: -(harbor_backups_keep | int)] }}"

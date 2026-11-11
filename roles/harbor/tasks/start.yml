@@ -1,0 +1,77 @@
+---
+# Prepare (if needed) and start the installer of harbor_version, wait until
+# healthy, then record what runs. Expects fetch.yml to have run.
+
+# prepare regenerates every component's configuration (with new internal
+# secrets), so it runs only when harbor.yml or the Trivy choice changed since
+# the last successful start of this installer.
+- name: Read the prepare record
+  ansible.builtin.slurp:
+    src: "{{ harbor_installer_dir }}/prepared"
+  register: harbor_prepared_record
+  failed_when: false
+
+- name: Decide whether to run prepare
+  ansible.builtin.set_fact:
+    harbor_prepare_needed: "{{ (harbor_prepared_record.content | default('') | b64decode) != harbor_prepared_state }}"
+
+# Before prepare overwrites the generated configuration: a run that fails
+# after this point must prepare again, even for a reverted harbor.yml.
+- name: Remove the prepare record
+  ansible.builtin.file:
+    path: "{{ harbor_installer_dir }}/prepared"
+    state: absent
+  when: harbor_prepare_needed
+
+- name: Run prepare
+  ansible.builtin.command:
+    cmd: "./prepare{{ ' --with-trivy' if harbor_trivy | bool else '' }}"
+    chdir: "{{ harbor_installer_dir }}"
+  changed_when: true
+  register: harbor_prepare
+  when: harbor_prepare_needed
+
+- name: Start Harbor
+  community.docker.docker_compose_v2:
+    project_src: "{{ harbor_installer_dir }}"
+    project_name: harbor
+    files:
+      - docker-compose.yml
+      - "{{ harbor_dir }}/compose.override.yml"
+    state: present
+    pull: missing
+    # prepare rewrote the mounted configuration files, which compose cannot see.
+    recreate: "{{ 'always' if harbor_prepare is changed else 'auto' }}"
+    remove_orphans: true
+
+# Not compose's --wait: on every start jobservice exits and restarts until core
+# answers, and --wait gives up on the first unhealthy container.
+- name: Wait until all Harbor services are healthy
+  ansible.builtin.command:
+    cmd: docker compose --project-name harbor ps --all --format json
+  register: harbor_services
+  changed_when: false
+  until: >-
+    harbor_services.stdout_lines | length > 0
+    and harbor_services.stdout_lines | map('from_json')
+        | rejectattr('State', 'equalto', 'running') | list | length == 0
+    and harbor_services.stdout_lines | map('from_json')
+        | rejectattr('Health', 'in', ['healthy', '']) | list | length == 0
+  retries: "{{ (harbor_wait_timeout | int / 5) | round(0, 'ceil') | int }}"
+  delay: 5
+
+- name: Record the prepare state
+  ansible.builtin.copy:
+    dest: "{{ harbor_installer_dir }}/prepared"
+    content: "{{ harbor_prepared_state }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Record the installed version
+  ansible.builtin.copy:
+    dest: "{{ harbor_dir }}/installed-version"
+    content: "{{ harbor_version }}\n"
+    owner: root
+    group: root
+    mode: "0644"

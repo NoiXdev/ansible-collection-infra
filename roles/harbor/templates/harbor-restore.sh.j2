@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# harbor-restore <dir>
+#
+# Restores a backup written by harbor-backup onto the installed Harbor of the
+# same version: stops every Harbor service except the database, drops and
+# reloads each database from its dump, restores the secret directory, empties
+# Redis (caches and job queue; the old data is moved aside), runs
+# prepare with the harbor.yml the role rendered (the copy in <dir> is for
+# reference only), starts Harbor and waits until it is healthy. Removes
+# {{ harbor_dir }}/upgrade-failed when that marker names <dir>.
+#
+# Refuses when <dir> holds another version than {{ harbor_dir }}/installed-version.
+# Every step can be repeated: after a failure, fix the cause and run it again.
+set -Eeuo pipefail
+
+harbor_dir={{ harbor_dir | quote }}
+data_dir={{ harbor_data_dir | quote }}
+trivy={{ harbor_trivy | bool }}
+wait_timeout={{ harbor_wait_timeout | int }}
+
+die() {
+  echo "harbor-restore: $*" >&2
+  exit 1
+}
+step() { echo "harbor-restore: $*"; }
+
+# Set once Harbor is touched: from then on any failure (die, set -e, also
+# inside functions, or a signal) ends with the hint below.
+touched=0
+on_exit() {
+  if [ "$1" != 0 ] && [ "$touched" = 1 ]; then
+    echo "harbor-restore: failed; Harbor may be stopped. Fix the cause and run harbor-restore $dir again." >&2
+  fi
+}
+trap 'on_exit $?' EXIT
+trap 'exit 130' INT TERM HUP
+
+[ "$(id -u)" = 0 ] || die "run it as root"
+[ "$#" = 1 ] || die "usage: harbor-restore <dir>"
+dir="$(cd "$1" 2>/dev/null && pwd -P)" || die "$1 is not a directory"
+
+# Everything is checked before Harbor is touched.
+backup_version="$(cat "$dir/version" 2>/dev/null)" || die "$dir/version is missing; is $dir a harbor-backup directory?"
+[[ "$backup_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "$dir/version does not hold a version"
+[ -s "$dir/registry.dump" ] || die "$dir/registry.dump is missing or empty"
+[ -d "$dir/secret" ] || die "$dir/secret is missing"
+installed="$(cat "$harbor_dir/installed-version" 2>/dev/null)" \
+  || die "$harbor_dir/installed-version is missing; install Harbor $backup_version with the role first"
+[ "$backup_version" = "$installed" ] \
+  || die "$dir holds Harbor $backup_version but $installed is installed; restore it onto Harbor $backup_version"
+installer="$harbor_dir/installer/$installed"
+for f in docker-compose.yml harbor.yml prepare; do
+  [ -e "$installer/$f" ] || die "$installer/$f is missing; run the role with harbor_version $installed first"
+done
+override="$harbor_dir/compose.override.yml"
+[ -f "$override" ] || die "$override is missing; run the role first"
+
+compose() {
+  docker compose --project-name harbor --project-directory "$installer" \
+    --file "$installer/docker-compose.yml" --file "$override" "$@"
+}
+# Over TCP, as harbor-db's own healthcheck: the temporary server that runs the
+# init scripts of a fresh cluster listens on the socket only, so this answers
+# only once the final server is up. The password stays inside the container.
+psql_db() {
+  docker exec harbor-db sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" exec psql --host 127.0.0.1 --username postgres \
+    --no-align --tuples-only --command "$1"' sh "$1"
+}
+
+all_services="$(compose config --services)" || die "docker compose config failed for $installer"
+grep -qx postgresql <<<"$all_services" || die "$installer/docker-compose.yml has no service postgresql"
+mapfile -t services < <(grep -vx -e postgresql -e log <<<"$all_services" || true)
+[ -n "${services[*]:-}" ] || die "$installer/docker-compose.yml has no services besides the database"
+
+# Also what runs of the project but is not in this version's file (a failed
+# upgrade may have started another version).
+running="$(docker compose --project-name harbor ps --format '{% raw %}{{.Service}}{% endraw %}')" \
+  || die "cannot list the running Harbor services"
+mapfile -t stray < <(grep -vx -e postgresql -e log <<<"$running" | grep -vxF -f <(printf '%s\n' "${services[@]}") || true)
+
+touched=1
+step "stopping Harbor except its database"
+# log stays up: every Harbor container, harbor-db too, logs through it.
+compose stop "${services[@]}"
+if [ -n "${stray[*]:-}" ]; then
+  docker compose --project-name harbor stop "${stray[@]}"
+fi
+# Recreates harbor-db (and log) when a failed upgrade left another version's.
+compose up --detach postgresql
+ready=0
+for _ in $(seq 180); do
+  if [ "$(psql_db 'SELECT 1' 2>/dev/null)" = 1 ]; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+[ "$ready" = 1 ] || die "harbor-db does not answer queries after 180s"
+
+# A failed upgrade can leave a cluster of the newer PostgreSQL next to the one
+# in use; the next upgrade would start on it instead of the restored data.
+# Nothing is moved without proof of which cluster the server runs on.
+current="$(psql_db 'SHOW data_directory')" || die "cannot read the data directory of harbor-db"
+current="$(basename "$current")"
+[[ "$current" =~ ^pg[0-9]+$ ]] && [ -d "$data_dir/database/$current" ] \
+  || die "harbor-db runs on '$current', which is not a cluster in $data_dir/database; restore stopped before any database change"
+stale="$data_dir/database-stale-$(date -u +%Y%m%dT%H%M%SZ)"
+for cluster in "$data_dir"/database/pg*; do
+  [ -d "$cluster" ] && [ "$(basename "$cluster")" != "$current" ] || continue
+  mkdir -p "$stale" && chmod 0700 "$stale"
+  mv "$cluster" "$stale/"
+  step "moved the unused cluster $(basename "$cluster") to $stale; delete it when Harbor works"
+done
+[ "$(basename "$(psql_db 'SHOW data_directory')")" = "$current" ] && [ -d "$data_dir/database/$current" ] \
+  || die "the cluster of harbor-db changed while unused clusters were moved; check $data_dir/database and $stale"
+
+for dump in "$dir"/*.dump; do
+  db="$(basename "$dump" .dump)"
+  step "restoring database $db"
+  docker exec harbor-db dropdb --username postgres --if-exists --force "$db"
+  docker exec -i harbor-db pg_restore --username postgres --create --exit-on-error --dbname postgres <"$dump"
+done
+
+step "restoring $data_dir/secret"
+rm -rf "$data_dir/secret.restore"
+cp -a "$dir/secret" "$data_dir/secret.restore"
+# harbor-backup stores secret/ as 0600/0700 and records Harbor's own modes.
+if [ -f "$dir/secret.modes" ]; then
+  while read -r mode path; do
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && [ -n "$path" ] || die "$dir/secret.modes is malformed"
+    chmod "$mode" "$data_dir/secret.restore/$path"
+  done <"$dir/secret.modes"
+fi
+rm -rf "$data_dir/secret"
+mv "$data_dir/secret.restore" "$data_dir/secret"
+
+# Redis holds only caches, sessions and the job queue, which belong to the
+# replaced database; a newer Harbor's Redis also writes a format the older one
+# cannot load. Harbor starts with an empty one; the old data is kept aside.
+if [ -d "$data_dir/redis" ]; then
+  redis_owner="$(stat -c '%u:%g' "$data_dir/redis")"
+  redis_mode="$(stat -c '%a' "$data_dir/redis")"
+  redis_stale="$data_dir/redis-stale-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$data_dir/redis" "$redis_stale"
+  chmod go-rwx "$redis_stale"
+  mkdir "$data_dir/redis"
+  chown "$redis_owner" "$data_dir/redis"
+  chmod "$redis_mode" "$data_dir/redis"
+  step "moved Harbor's Redis data to $redis_stale (caches and job queue); delete it when Harbor works"
+fi
+
+step "running prepare for Harbor $installed"
+rm -f "$installer/prepared"
+args=()
+[ "$trivy" = True ] && args+=(--with-trivy)
+(cd "$installer" && ./prepare "${args[@]}")
+
+step "starting Harbor $installed"
+compose up --detach --force-recreate --remove-orphans
+healthy=0
+for _ in $(seq $(((wait_timeout + 4) / 5))); do
+  # One line per container: "<state> <health>"; health is empty without a check.
+  states="$(compose ps --all --format '{% raw %}{{.State}} {{.Health}}{% endraw %}')"
+  if [ -n "$states" ] && ! grep -qvE '^running (healthy)?$' <<<"$states"; then
+    healthy=1
+    break
+  fi
+  sleep 5
+done
+[ "$healthy" = 1 ] || die "Harbor is not healthy after ${wait_timeout}s: $(compose ps --all --format '{% raw %}{{.Name}}={{.State}}/{{.Health}}{% endraw %}' | tr '\n' ' ')"
+
+# The same record the role writes, so its next run does not prepare again.
+printf '%s trivy=%s\n' "$(sha1sum "$installer/harbor.yml" | cut -d ' ' -f 1)" "$trivy" >"$installer/prepared"
+
+marker="$harbor_dir/upgrade-failed"
+if [ -e "$marker" ]; then
+  marked="$(sed -n "s/^backup: *//p" "$marker" | sed -e "s/^[\"']//" -e "s/[\"']$//")"
+  if [ -n "$marked" ] && [ "$(cd "$marked" 2>/dev/null && pwd -P)" = "$dir" ]; then
+    rm -f "$marker"
+    step "removed $marker"
+  else
+    step "kept $marker: it names another backup ($marked)"
+  fi
+fi
+
+step "restored $dir onto Harbor $installed"

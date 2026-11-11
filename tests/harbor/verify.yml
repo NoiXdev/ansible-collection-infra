@@ -1,0 +1,95 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  vars:
+    harbor_dir: /opt/harbor
+    test_image: traefik/whoami:v1.10.3
+    test_repo: "{{ harbor_hostname }}/library/whoami:v1"
+    # false checks an earlier push only (after an upgrade or a restore).
+    verify_push: true
+  tasks:
+    - name: Wait until Harbor reports healthy through Traefik
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/v2.0/health
+        headers:
+          Host: "{{ harbor_hostname }}"
+        return_content: true
+      register: health
+      until: health.json is defined and health.json.status == 'healthy'
+      retries: "{{ (harbor_wait_timeout | default(900) / 10) | int }}"
+      delay: 10
+
+    - name: Read the installed version
+      ansible.builtin.slurp:
+        src: "{{ harbor_dir }}/installed-version"
+      register: installed
+
+    - name: Stat the rendered harbor.yml
+      ansible.builtin.stat:
+        path: "{{ harbor_dir }}/installer/{{ harbor_version }}/harbor.yml"
+      register: harbor_yml
+
+    - name: Check the version record and the harbor.yml permissions
+      ansible.builtin.assert:
+        that:
+          - installed.content | b64decode == harbor_version + '\n'
+          - harbor_yml.stat.exists
+          - harbor_yml.stat.mode == '0600'
+          - harbor_yml.stat.pw_name == 'root'
+
+    - name: Log in to Harbor through Traefik
+      ansible.builtin.command:
+        cmd: docker login {{ harbor_hostname }} -u admin --password-stdin
+        stdin: "{{ harbor_admin_password }}"
+      changed_when: false
+
+    - name: Push an image to Harbor
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          docker pull -q {{ test_image }}
+          docker tag {{ test_image }} {{ test_repo }}
+          docker push {{ test_repo }}
+      changed_when: false
+      when: verify_push | bool
+
+    # After an upgrade or a restore: the image pushed before must still be there.
+    - name: Pull the image from Harbor
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          docker rmi -f {{ test_image }} {{ test_repo }} >/dev/null 2>&1 || true
+          docker pull {{ test_repo }}
+      changed_when: false
+
+    - name: Find the pushed image through the API
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/v2.0/projects/library/repositories/whoami/artifacts/v1
+        headers:
+          Host: "{{ harbor_hostname }}"
+        url_username: admin
+        url_password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+
+    - name: List the ports of the Harbor containers
+      ansible.builtin.command:
+        cmd: >-
+          docker ps --all --filter label=com.docker.compose.project=harbor
+          --format {% raw %}'{{.Names}} {{.Ports}}'{% endraw %}
+      register: harbor_ports
+      changed_when: false
+
+    - name: Check that no Harbor port is published beyond loopback
+      ansible.builtin.assert:
+        that:
+          - harbor_ports.stdout_lines | length >= 8
+          - harbor_ports.stdout is not search('0\.0\.0\.0:')
+          - harbor_ports.stdout is not search('\[?::\]?:')
+        fail_msg: "{{ harbor_ports.stdout_lines }}"
+
+    - name: Check that the proxy publishes nothing
+      ansible.builtin.assert:
+        that: harbor_ports.stdout_lines | select('match', '^nginx\\s*$') | list | length == 1
+        fail_msg: "{{ harbor_ports.stdout_lines }}"

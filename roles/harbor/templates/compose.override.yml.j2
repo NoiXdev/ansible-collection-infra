@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+# Merged over the docker-compose.yml that prepare generates: Harbor's nginx
+# (service proxy) publishes no host port and is reached through Traefik.
+services:
+  proxy:
+    ports: !reset []
+    networks:
+      - traefik
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network={{ harbor_traefik_network }}
+      - "traefik.http.routers.harbor.rule=Host(`{{ harbor_hostname }}`)"
+{% if harbor_traefik_entrypoints | length > 0 %}
+      - traefik.http.routers.harbor.entrypoints={{ harbor_traefik_entrypoints | join(',') }}
+{% endif %}
+      - traefik.http.routers.harbor.priority={{ harbor_traefik_priority }}
+      - traefik.http.routers.harbor.service=harbor
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - traefik.http.services.harbor.loadbalancer.server.port=8080
+
+networks:
+  traefik:
+    name: {{ harbor_traefik_network }}
+    external: true

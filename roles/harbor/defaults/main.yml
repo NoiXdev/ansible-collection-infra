@@ -1,0 +1,65 @@
+---
+# Harbor release (tag of github.com/goharbor/harbor). A newer version than
+# the installed one is an upgrade; an older one is refused.
+harbor_version: v2.15.4
+# Full URL of the online installer; empty builds the GitHub release URL from
+# harbor_version (and, from v2.16.0, the host architecture).
+harbor_installer_url: ""
+# get_url checksum of the installer, e.g. "sha256:<hex>" or "md5:<url>".
+# Empty: the release's md5sum file when the URL is built from the version,
+# no check with harbor_installer_url.
+harbor_installer_checksum: ""
+
+# Everything Harbor needs lives below harbor_dir: installers, harbor.yml,
+# the compose override and (by default) the data volume.
+harbor_dir: /opt/harbor
+harbor_data_dir: "{{ harbor_dir }}/data"
+# Backups (mode 0700): one timestamped directory per upgrade, taken by
+# harbor-backup before the new version starts, and latest, which
+# /usr/local/sbin/harbor-backup without an argument replaces (for a backup
+# tool). After a successful upgrade the newest harbor_backups_keep
+# timestamped directories are kept; latest is never pruned.
+harbor_backup_dir: "{{ harbor_dir }}/backups"
+harbor_backups_keep: 3
+# Component logs written by Harbor's log container.
+harbor_log_dir: /var/log/harbor
+harbor_log_level: info
+
+# Host name Traefik routes to Harbor (required).
+harbor_hostname: ""
+# URL clients use; Traefik terminates TLS, Harbor itself speaks plain HTTP.
+harbor_external_url: "https://{{ harbor_hostname }}"
+# Initial password of the user admin (at least 8 characters); Harbor uses it
+# only on the first start. Keep it in a vault.
+harbor_admin_password: ""
+# Password of Harbor's PostgreSQL. Set it once: do not change it after the
+# first start (the database keeps the first one). Keep it in a vault.
+harbor_db_password: ""
+
+# filesystem: blobs under harbor_data_dir/registry. s3: blobs in a bucket.
+harbor_storage: filesystem
+# Used with harbor_storage: s3. endpoint may be empty for AWS.
+harbor_s3:
+  endpoint: ""
+  region: ""
+  bucket: ""
+  access_key: ""
+  secret_key: ""
+  secure: true
+  v4auth: true
+  chunksize: 5242880
+  rootdirectory: /
+
+# Vulnerability scanning with Trivy.
+harbor_trivy: true
+
+# Traefik: external network and entrypoints of the route; empty entrypoints
+# use Traefik's default ones. The priority keeps the route above catch-all
+# routers such as the traefik role's error pages routes (priority 1 and 2).
+harbor_traefik_network: proxy
+harbor_traefik_entrypoints: []
+harbor_traefik_priority: 100
+
+# Seconds to wait for all Harbor services to become healthy. A first start
+# migrates the database (and downloads the Trivy DB), which takes minutes.
+harbor_wait_timeout: 900
