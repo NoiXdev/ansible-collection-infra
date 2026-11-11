@@ -96,6 +96,51 @@ done
 [ "$answer" = "192.0.2.10" ] \
   || { echo "restored record not served, got: $answer" >&2; exit 1; }
 
+echo "== invalid dashy config must fail"
+if play "$here/dashy_invalid.yml" >"$out/dashy-invalid.log" 2>&1; then
+  echo "dashy accepted a config without sections" >&2
+  exit 1
+fi
+grep -q "dashy_config needs a non-empty sections list" "$out/dashy-invalid.log" \
+  || { cat "$out/dashy-invalid.log" >&2; exit 1; }
+docker exec "$host" test ! -e /opt/dashy-invalid \
+  || { echo "dashy touched the host before checking its config" >&2; exit 1; }
+
+dashy_title() {
+  docker exec "$host" wget -qO- --header 'Host: dashy.test' http://127.0.0.1/conf.yml 2>/dev/null \
+    | sed -n 's/^ *title: //p' | head -1
+}
+dashy_started() { docker exec "$host" docker inspect -f '{{.State.StartedAt}}' dashy-dashy-1; }
+
+echo "== changed dashy config is served without a manual restart"
+before="$(dashy_started)"
+play "$here/converge.yml" >"$out/dashy-unchanged.log"
+[ "$(dashy_started)" = "$before" ] \
+  || { echo "dashy restarted without a config change" >&2; exit 1; }
+play "$here/converge.yml" -e '{"dashy_config": {"pageInfo": {"title": "Changed"}, "sections": [{"name": "Tools", "items": [{"title": "Portainer", "url": "http://portainer.test"}]}]}}' >"$out/dashy-changed.log"
+for _ in $(seq 30); do
+  [ "$(dashy_title)" = "Changed" ] && break
+  sleep 1
+done
+[ "$(dashy_title)" = "Changed" ] \
+  || { echo "changed dashy config not served, got: $(dashy_title)" >&2; exit 1; }
+[ "$(dashy_started)" != "$before" ] \
+  || { echo "dashy was not recreated after a config change" >&2; exit 1; }
+play "$here/converge.yml" >"$out/dashy-restored.log"
+for _ in $(seq 30); do
+  [ "$(dashy_title)" = "Test" ] && break
+  sleep 1
+done
+[ "$(dashy_title)" = "Test" ] \
+  || { echo "restored dashy config not served, got: $(dashy_title)" >&2; exit 1; }
+# The earlier verify step leaves other roles (Pulsix) with a recreate on the
+# next converge, so only the dashy tasks are held to "nothing changed" here.
+play "$here/converge.yml" >"$out/dashy-idempotence.log"
+awk '/^TASK \[/ { task = $0 } /^changed:/ && task ~ /noixdev\.infra\.dashy/ { print task }' "$out/dashy-idempotence.log" >"$out/dashy-changed-tasks.log"
+[ ! -s "$out/dashy-changed-tasks.log" ] \
+  || { echo "dashy changed on a converge without a config change:" >&2; cat "$out/dashy-changed-tasks.log" >&2; exit 1; }
+[ "$(dashy_title)" = "Test" ] || { echo "dashy lost its config" >&2; exit 1; }
+
 echo "== turning error pages off cleans up"
 play "$here/converge.yml" -e '{"traefik_error_pages_enabled": false}' >"$out/error-pages-off.log"
 play "$here/error_pages_disabled.yml"

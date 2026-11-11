@@ -1,0 +1,21 @@
+---
+dashy_version: 4.9.0
+dashy_image: lissy93/dashy
+dashy_dir: /opt/dashy
+dashy_project: dashy
+dashy_mtu: 1500
+
+# Host name Traefik routes to the page; required
+dashy_host: ""
+dashy_traefik_network: proxy
+dashy_traefik_entrypoint: ""
+
+# The whole Dashy config (pageInfo, appConfig, sections); required. The role
+# adds the keys that lock the in-UI editor, whatever this holds.
+dashy_config: {}
+
+# DNS servers of the container, so status checks resolve internal names
+dashy_dns: []
+
+dashy_cpus: "0.5"
+dashy_memory: 256M

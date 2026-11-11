@@ -421,3 +421,44 @@
       delay: 3
       until: verify_remote_seen.stdout == '1'
       changed_when: false
+
+    - name: Traefik routes Dashy
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers: { Host: dashy.test }
+      register: verify_dashy
+      retries: 30
+      delay: 2
+      until: verify_dashy.status == 200
+
+    - name: Dashy serves the rendered config with the lock-down keys
+      ansible.builtin.uri:
+        url: http://127.0.0.1/conf.yml
+        headers: { Host: dashy.test }
+        return_content: true
+      register: verify_dashy_conf
+      failed_when: >-
+        'title: Test' not in verify_dashy_conf.content
+        or 'preventWriteToDisk: true' not in verify_dashy_conf.content
+        or 'preventLocalSave: true' not in verify_dashy_conf.content
+        or 'disableConfiguration: true' not in verify_dashy_conf.content
+
+    - name: Inspect the Dashy container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - -f
+          - >-
+            {{ '{{' }}json .HostConfig.PortBindings{{ '}}' }}
+            {{ '{{' }}range .Mounts{{ '}}' }}{{ '{{' }}.Destination{{ '}}' }}={{ '{{' }}.RW{{ '}}' }};{{ '{{' }}end{{ '}}' }}
+          - dashy-dashy-1
+      register: verify_dashy_inspect
+      changed_when: false
+
+    - name: Dashy publishes no port and mounts the config read-only
+      ansible.builtin.assert:
+        that:
+          - verify_dashy_inspect.stdout.split()[0] in ['{}', 'null']
+          - "'/app/user-data/conf.yml=false;' in verify_dashy_inspect.stdout"
+        quiet: true

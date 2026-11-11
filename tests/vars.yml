@@ -66,3 +66,12 @@ pulsix_manager_workers:
   - name: ctl-2
     zone: default
     max_concurrent: 2
+
+dashy_host: dashy.test
+dashy_config:
+  pageInfo:
+    title: Test
+  sections:
+    - name: Tools
+      items:
+        - { title: Portainer, url: "http://portainer.test", statusCheck: true }

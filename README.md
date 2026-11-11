@@ -22,6 +22,7 @@ are on the documentation site.
 | `tailscale` | Tailscale node, optionally a subnet router |
 | `traefik` | Standalone Traefik with DNS-01 certificates, a Docker socket proxy and optional error pages |
 | `portainer` | Portainer server or agent |
+| `dashy` | Dashy start page from configuration, behind Traefik |
 | `dns` | CoreDNS for internal names on private addresses, forwarding the rest |
 | `harbor` | Harbor registry behind Traefik, with safe upgrades and backup scripts |
 | `pulsix_manager` | Pulsix manager, database and any number of local workers |

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `dashy`: new role that runs the Dashy start page (`dashy_image` and `dashy_version`, default
+  `4.9.0`) behind Traefik on `dashy_host` (`dashy_traefik_network`, `dashy_traefik_entrypoint`),
+  publishing no host port. `dashy_config` holds the whole config (`pageInfo`, `appConfig`,
+  `sections`); the role renders it to `dashy_dir/conf.yml`, mounted read-only, and sets
+  `appConfig.preventWriteToDisk`, `preventLocalSave` and `disableConfiguration` to `true` so the page
+  cannot be edited in the browser. A changed config recreates only Dashy; an empty `sections` list
+  is refused before the host is touched. `dashy_dns` sets the container's DNS servers so status
+  checks resolve internal names; `dashy_cpus` and `dashy_memory` limit the container.
 - `harbor`: new role that installs Harbor (`harbor_version`, default `v2.15.4`) from its online
   installer, kept per version under `harbor_dir/installer/` (`harbor_installer_url` and
   `harbor_installer_checksum` override the GitHub release download and its md5 check). It renders

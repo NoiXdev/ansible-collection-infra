@@ -1,0 +1,32 @@
+# {{ ansible_managed }}
+services:
+  dashy:
+    image: {{ dashy_image }}:{{ dashy_version }}
+    volumes:
+      - ./conf.yml:/app/user-data/conf.yml:ro
+{% if dashy_dns | length > 0 %}
+    dns:
+{% for server in dashy_dns %}
+      - "{{ server }}"
+{% endfor %}
+{% endif %}
+    networks: [default, proxy]
+    labels:
+      - traefik.enable=true
+      - "traefik.http.routers.dashy.rule=Host(`{{ dashy_host }}`)"
+{% if dashy_traefik_entrypoint %}
+      - traefik.http.routers.dashy.entrypoints={{ dashy_traefik_entrypoint }}
+{% endif %}
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - traefik.http.services.dashy.loadbalancer.server.port=8080
+    cpus: "{{ dashy_cpus }}"
+    mem_limit: {{ dashy_memory }}
+    restart: unless-stopped
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ dashy_mtu }}"
+  proxy:
+    name: {{ dashy_traefik_network }}
+    external: true

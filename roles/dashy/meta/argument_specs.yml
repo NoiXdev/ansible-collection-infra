@@ -1,0 +1,49 @@
+---
+argument_specs:
+  main:
+    short_description: Dashy start page from configuration, behind Traefik
+    options:
+      dashy_version:
+        type: str
+        description: Dashy image tag, such as 4.9.0.
+      dashy_image:
+        type: str
+        description: Dashy image without a tag.
+      dashy_dir:
+        type: path
+        description: Directory of the compose project.
+      dashy_project:
+        type: str
+        description: Compose project name.
+      dashy_mtu:
+        type: int
+        description: MTU of the compose network.
+      dashy_host:
+        type: str
+        required: true
+        description: Host name Traefik routes to the page.
+      dashy_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      dashy_traefik_entrypoint:
+        type: str
+        description: Traefik entrypoint for the route; empty uses Traefik's default.
+      dashy_config:
+        type: dict
+        required: true
+        description: >-
+          The whole Dashy config (pageInfo, appConfig, sections) with a non-empty
+          sections list. It is written to conf.yml and mounted read-only. The role
+          sets appConfig.preventWriteToDisk, preventLocalSave and disableConfiguration
+          to true, so the page cannot be edited in the browser. Dashy serves it as
+          /conf.yml to every visitor, so it must hold no secrets.
+      dashy_dns:
+        type: list
+        elements: str
+        description: DNS servers of the container, so status checks resolve internal names.
+      dashy_cpus:
+        type: str
+        description: CPU limit of the container.
+      dashy_memory:
+        type: str
+        description: Memory limit of the container.

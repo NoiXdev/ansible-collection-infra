@@ -5,6 +5,7 @@
   roles:
     - noixdev.infra.traefik
     - noixdev.infra.portainer
+    - noixdev.infra.dashy
     - noixdev.infra.pulsix_manager
     - noixdev.infra.dns
 

@@ -1,0 +1,12 @@
+---
+# The dashy role must reject an empty or invalid config before it touches the host.
+- name: Dashy without sections
+  hosts: all
+  roles:
+    - role: noixdev.infra.dashy
+      vars:
+        dashy_dir: /opt/dashy-invalid
+        dashy_host: dashy.test
+        dashy_config:
+          pageInfo: {title: Invalid}
+          sections: []

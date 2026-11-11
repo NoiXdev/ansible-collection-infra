@@ -1,0 +1,59 @@
+---
+- name: Check the Dashy settings
+  ansible.builtin.assert:
+    that:
+      - dashy_version is match('^\d+\.\d+\.\d+$')
+      - dashy_host | length > 0
+      - dashy_config is mapping
+      - dashy_config.sections | default([]) is sequence
+      - dashy_config.sections | default([]) is not string
+      - dashy_config.sections | default([]) is not mapping
+      - dashy_config.sections | default([]) | length > 0
+      - dashy_config.appConfig | default({}) is mapping
+    fail_msg: >-
+      dashy_version must look like X.Y.Z, dashy_host must be set and dashy_config
+      needs a non-empty sections list.
+    quiet: true
+
+- name: Create the Dashy directory
+  ansible.builtin.file:
+    path: "{{ dashy_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the Dashy config
+  ansible.builtin.copy:
+    dest: "{{ dashy_dir }}/conf.yml"
+    content: "{{ dashy_effective_config | to_nice_yaml(indent=2) }}"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    dashy_lockdown:
+      preventWriteToDisk: true
+      preventLocalSave: true
+      disableConfiguration: true
+    dashy_effective_config: >-
+      {{ dashy_config | combine({'appConfig': (dashy_config.appConfig | default({})) | combine(dashy_lockdown)}) }}
+  register: dashy_conf
+
+- name: Write the compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ dashy_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start Dashy
+  community.docker.docker_compose_v2:
+    project_src: "{{ dashy_dir }}"
+    project_name: "{{ dashy_project }}"
+    state: present
+    pull: missing
+    # conf.yml is a single-file bind mount: a rewrite replaces the file and the
+    # running container keeps the old one, and Dashy reads it at start.
+    recreate: "{{ 'always' if dashy_conf is changed else 'auto' }}"
+    remove_orphans: true
