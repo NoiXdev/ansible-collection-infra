@@ -35,7 +35,7 @@ are on the documentation site.
 collections:
   - name: https://github.com/NoiXdev/ansible-collection-infra.git
     type: git
-    version: v0.2.0
+    version: v0.4.0
 ```
 
 ```bash
