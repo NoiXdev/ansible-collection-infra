@@ -8,6 +8,13 @@
     quiet: true
   when: portainer_mode == 'agent'
 
+- name: Check the admin password
+  ansible.builtin.assert:
+    that: portainer_admin_password | length >= 12
+    fail_msg: portainer_admin_password needs at least 12 characters.
+    quiet: true
+  when: portainer_mode == 'server' and portainer_admin_password | length > 0
+
 - name: Create the Portainer directory
   ansible.builtin.file:
     path: "{{ portainer_dir }}"
@@ -30,6 +37,23 @@
   no_log: true
   register: portainer_env
 
+- name: Write the admin password file
+  ansible.builtin.copy:
+    dest: "{{ portainer_dir }}/admin_password"
+    content: "{{ portainer_admin_password }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  register: portainer_admin_password_file
+  when: portainer_mode == 'server' and portainer_admin_password | length > 0
+
+- name: Remove the admin password file
+  ansible.builtin.file:
+    path: "{{ portainer_dir }}/admin_password"
+    state: absent
+  when: portainer_mode != 'server' or portainer_admin_password | length == 0
+
 - name: Write the compose file
   ansible.builtin.template:
     src: "compose.{{ portainer_mode }}.yaml.j2"
@@ -44,5 +68,5 @@
     project_name: "{{ portainer_project }}"
     state: present
     pull: missing
-    recreate: "{{ 'always' if portainer_env is changed else 'auto' }}"
+    recreate: "{{ 'always' if portainer_env is changed or portainer_admin_password_file is changed else 'auto' }}"
     remove_orphans: true

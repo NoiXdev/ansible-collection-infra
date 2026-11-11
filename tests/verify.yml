@@ -30,6 +30,19 @@
       delay: 2
       until: verify_portainer.status in [200, 307]
 
+    - name: Portainer created the admin from the password file
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/auth
+        method: POST
+        headers: { Host: portainer.test }
+        body_format: json
+        body: { username: admin, password: "{{ portainer_admin_password }}" }
+      register: verify_portainer_login
+      retries: 15
+      delay: 2
+      until: verify_portainer_login.status == 200
+      failed_when: verify_portainer_login.json.jwt | default('') | length == 0
+
     - name: Traefik answers on a separate host port
       ansible.builtin.uri:
         url: http://127.0.0.1:18081/

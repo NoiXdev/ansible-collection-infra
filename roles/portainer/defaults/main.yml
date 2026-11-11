@@ -9,6 +9,11 @@ portainer_mtu: 1500
 # accepts the first server that connects to it.
 portainer_agent_secret: ""
 
+# server: password of the user "admin", set when Portainer starts without an
+# admin (first start). Empty: create the admin in the UI within 5 minutes of
+# the first start. Changing it later does not change the existing password.
+portainer_admin_password: ""
+
 # server: reachable through Traefik on this host name
 portainer_host: ""
 portainer_traefik_network: proxy

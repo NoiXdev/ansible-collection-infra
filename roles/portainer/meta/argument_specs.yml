@@ -22,6 +22,13 @@ argument_specs:
       portainer_agent_secret:
         type: str
         description: Shared secret of server and agents (AGENT_SECRET). Keep it in a vault.
+      portainer_admin_password:
+        type: str
+        description: >-
+          Server only. Password (at least 12 characters) of the user admin, which
+          Portainer creates on a start without an admin. Keep it in a vault. Empty
+          leaves the admin to the setup page. Changing it later does not change an
+          existing admin's password.
       portainer_host:
         type: str
         description: Server only. Host name Traefik routes to the UI; empty adds no route.

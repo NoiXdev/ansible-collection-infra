@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `portainer`: `portainer_admin_password` (server only, at least 12 characters) makes Portainer
+  create the user `admin` with that password on a start without an admin, through
+  `--admin-password-file`, so the five-minute setup window no longer applies. The role keeps the
+  password in a file with mode `0600` and recreates the container when it changes. Portainer
+  ignores it once an admin exists, so changing it later does not change the password.
+
 ## 0.4.0 — 2026-11-11
 
 - `dns`: new role that runs CoreDNS on the host network. It answers `dns_records` (names with

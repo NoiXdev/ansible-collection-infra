@@ -50,6 +50,7 @@ dns_records:
 
 portainer_host: portainer.test
 portainer_agent_secret: test-agent-secret-0000000000000000
+portainer_admin_password: test-admin-password-0000
 
 pulsix_manager_db_password: "0000000000000000000000000000000000000000000000000000000000000001"
 pulsix_manager_master_key: "0000000000000000000000000000000000000000000000000000000000000002"
