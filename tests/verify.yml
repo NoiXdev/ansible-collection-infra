@@ -70,7 +70,7 @@
         src: /opt/traefik/traefik.yml
       register: verify_static
 
-    - name: Static configuration has entrypoint middlewares and allowEmptyServices
+    - name: Static configuration has entrypoint middlewares, responding timeouts and allowEmptyServices
       ansible.builtin.assert:
         that:
           - verify_static_cfg.providers.docker.allowEmptyServices is sameas true
@@ -78,6 +78,10 @@
           - verify_static_cfg.entryPoints.web.http.middlewares
             == ['error-pages-compress@file', 'error-pages-errors@file']
           - verify_static_cfg.entryPoints['alt-redirect'].http.middlewares is not defined
+          - verify_static_cfg.entryPoints.alt.transport.respondingTimeouts.readTimeout == '600s'
+          - verify_static_cfg.entryPoints.alt.transport.respondingTimeouts.writeTimeout == '0s'
+          - verify_static_cfg.entryPoints.alt.transport.respondingTimeouts.idleTimeout is not defined
+          - verify_static_cfg.entryPoints.web.transport is not defined
         quiet: true
       vars:
         verify_static_cfg: "{{ verify_static.content | b64decode | from_yaml }}"

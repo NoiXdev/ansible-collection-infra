@@ -19,6 +19,19 @@ entryPoints:
 {% if ep.as_default | default(false) %}
     asDefault: true
 {% endif %}
+{% if ep.responding_timeouts | default({}) | length > 0 %}
+    transport:
+      respondingTimeouts:
+{% if ep.responding_timeouts.read is defined %}
+        readTimeout: {{ ep.responding_timeouts.read | string | to_json }}
+{% endif %}
+{% if ep.responding_timeouts.write is defined %}
+        writeTimeout: {{ ep.responding_timeouts.write | string | to_json }}
+{% endif %}
+{% if ep.responding_timeouts.idle is defined %}
+        idleTimeout: {{ ep.responding_timeouts.idle | string | to_json }}
+{% endif %}
+{% endif %}
 {% if ep.redirect_to | default('') %}
 {% set target = traefik_entrypoints | selectattr('name', 'equalto', ep.redirect_to) | first | default({}) %}
     http:

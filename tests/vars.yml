@@ -12,6 +12,7 @@ traefik_entrypoints:
     host_port: 18081
     bind: [127.0.0.1]
     middlewares: [test-header@file]
+    responding_timeouts: {read: 600s, write: "0s"}
   # Redirects to alt's host port, not its container port.
   - name: alt-redirect
     port: 8082

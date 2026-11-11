@@ -25,6 +25,10 @@ traefik_address: 172.31.255.254
 #   redirect_to: redirect HTTP to this entrypoint (to its host_port when set)
 #   middlewares: middlewares every router on this entrypoint gets, e.g.
 #                [name@file]; not allowed together with redirect_to
+#   responding_timeouts: Traefik transport timeouts of the entrypoint, each
+#                optional: {read: 600s, write: 0s, idle: 180s}; "0s" means no
+#                limit. read limits reading requests (large uploads), write
+#                limits writing responses (large downloads).
 traefik_entrypoints:
   - name: web
     port: 80

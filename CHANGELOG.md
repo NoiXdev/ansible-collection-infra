@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `traefik`: entrypoints accept `responding_timeouts` with the optional keys `read`, `write` and
+  `idle` (Traefik durations such as `600s`, `0s` for no limit). They render as
+  `transport.respondingTimeouts` of that entrypoint only; other entrypoints keep Traefik's
+  defaults. `read` limits reading a request, so large uploads (pushes) need a long one; `write`
+  limits writing a response, so large downloads (pulls) need a long one or `0s`.
 - `portainer`: `portainer_admin_password` (server only, at least 12 characters) makes Portainer
   create the user `admin` with that password on a start without an admin, through
   `--admin-password-file`, so the five-minute setup window no longer applies. The role keeps the

@@ -45,13 +45,16 @@ argument_specs:
         elements: dict
         description:
           - Entrypoints; see defaults/main.yml for the keys.
-          - Keys are name, port, host_port, bind, protocol, tls, as_default, redirect_to and
-            middlewares.
+          - Keys are name, port, host_port, bind, protocol, tls, as_default, redirect_to,
+            middlewares and responding_timeouts.
           - host_port publishes the container port on another host port, so two entrypoints
             can share a host port on different bind addresses. A redirect to such an
             entrypoint goes to its host_port.
           - middlewares lists middlewares (for example name@file) that every router on the
             entrypoint gets; an entrypoint with redirect_to cannot have them.
+          - responding_timeouts is a dict with the optional keys read, write and idle (Traefik
+            durations such as 600s; 0s means no limit). They set readTimeout, writeTimeout and
+            idleTimeout of the entrypoint transport.
       traefik_acme_email:
         type: str
         description: ACME account e-mail; required when an entrypoint terminates TLS.
