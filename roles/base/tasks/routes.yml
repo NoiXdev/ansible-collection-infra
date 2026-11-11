@@ -33,4 +33,7 @@
   ansible.builtin.systemd_service:
     name: base-routes.service
     enabled: true
+    # Also started here, not only by the handler: a run that fails after
+    # writing the script would otherwise leave the routes unapplied.
+    state: started
     daemon_reload: true
