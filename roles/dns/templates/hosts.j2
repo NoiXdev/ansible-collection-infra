@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+{% for record in dns_records %}
+{% for address in record.addresses %}
+{{ address }} {{ record.name }}
+{% endfor %}
+{% endfor %}

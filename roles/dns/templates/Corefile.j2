@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+.:53 {
+    bind {{ dns_bind_effective | join(' ') }}
+    acl {
+        allow net {{ dns_allow | join(' ') }}
+        block
+    }
+    hosts /etc/coredns/hosts {
+        ttl {{ dns_ttl }}
+        fallthrough
+    }
+    forward . {{ dns_upstreams | join(' ') }}
+{% if dns_cache | int > 0 %}
+    cache {{ dns_cache }}
+{% endif %}
+{% if dns_log_queries %}
+    log
+{% endif %}
+    errors
+    loop
+}

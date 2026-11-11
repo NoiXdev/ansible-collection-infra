@@ -1,0 +1,59 @@
+---
+argument_specs:
+  main:
+    short_description: CoreDNS for internal names, forwarding everything else
+    options:
+      dns_image:
+        type: str
+        description: CoreDNS image.
+      dns_dir:
+        type: path
+        description: Directory of the compose project.
+      dns_project:
+        type: str
+        description: Compose project name.
+      dns_bind:
+        type: list
+        elements: str
+        description: Addresses CoreDNS binds on UDP and TCP port 53. Wildcard addresses are refused.
+      dns_bind_tailscale:
+        type: bool
+        description: Also bind the addresses of `tailscale ip -4` and `tailscale ip -6`.
+      dns_allow:
+        type: list
+        elements: str
+        required: true
+        description: Client networks (CIDR) that get answers. Every other client is refused. 0.0.0.0/0 and ::/0 are refused.
+      dns_upstreams:
+        type: list
+        elements: str
+        description: Resolvers that names without a local record are forwarded to.
+      dns_records:
+        type: list
+        elements: dict
+        description: Names answered locally, served from a managed hosts file.
+        options:
+          name:
+            type: str
+            required: true
+            description: Lower-case host name.
+          addresses:
+            type: list
+            elements: str
+            required: true
+            description: IPv4 and IPv6 addresses of the name.
+      dns_ttl:
+        type: int
+        description: TTL of the local records in seconds.
+      dns_cache:
+        type: int
+        description: Seconds forwarded answers are cached; 0 turns the cache off.
+      dns_log_queries:
+        type: bool
+        description: Log every query.
+      dns_cpus:
+        type: str
+        description: CPU limit of the container.
+      dns_memory:
+        type: str
+        description: Memory limit of the container.

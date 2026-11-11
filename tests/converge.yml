@@ -6,6 +6,7 @@
     - noixdev.infra.traefik
     - noixdev.infra.portainer
     - noixdev.infra.pulsix_manager
+    - noixdev.infra.dns
 
 # Error pages fixtures: a backend that refuses connections (502) and one that
 # never gets healthy (503). The error pages container comes with the role.

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `dns`: new role that runs CoreDNS on the host network. It answers `dns_records` (names with
+  IPv4 and IPv6 addresses, `dns_ttl`) for the clients in `dns_allow` (all others are REFUSED) and
+  forwards everything else to `dns_upstreams`, cached for `dns_cache` seconds. Records are served
+  from a managed hosts file (not the host's `/etc/hosts`), and changes to them apply without a
+  restart. It binds only `dns_bind` (wildcard addresses are refused), plus the node's Tailscale
+  addresses with `dns_bind_tailscale`. Further variables: `dns_image`, `dns_dir`, `dns_project`,
+  `dns_log_queries`, `dns_cpus`, `dns_memory`. The container is read-only without capabilities
+  except `NET_BIND_SERVICE` and cannot gain privileges, and is recreated when the Corefile or
+  the compose file changes.
+  `dns_allow` must not contain `0.0.0.0/0` or `::/0`.
 - `base`: `base_nonlocal_bind` (and `base_sshd_listen_addresses`) now also sets
   `net.ipv6.ip_nonlocal_bind`, so services can bind IPv6 addresses that are not up yet. It is
   skipped on a kernel without IPv6 (`ipv6.disable=1`).

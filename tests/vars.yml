@@ -42,6 +42,12 @@ traefik_dynamic_files:
             customResponseHeaders:
               X-Test-Entrypoint: alt
 
+dns_bind: [127.0.0.1, 192.0.2.53]
+dns_allow: [127.0.0.0/8]
+dns_records:
+  - { name: app.internal.test, addresses: [192.0.2.10] }
+  - { name: dual.internal.test, addresses: [192.0.2.11, "2001:db8::11"] }
+
 portainer_host: portainer.test
 portainer_agent_secret: test-agent-secret-0000000000000000
 

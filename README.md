@@ -22,6 +22,7 @@ are on the documentation site.
 | `tailscale` | Tailscale node, optionally a subnet router |
 | `traefik` | Standalone Traefik with DNS-01 certificates, a Docker socket proxy and optional error pages |
 | `portainer` | Portainer server or agent |
+| `dns` | CoreDNS for internal names on private addresses, forwarding the rest |
 | `pulsix_manager` | Pulsix manager, database and any number of local workers |
 | `pulsix_worker` | Any number of remote Pulsix workers, enrolled with one-time tokens |
 | `fail2ban` | fail2ban on the systemd journal with nftables bans |

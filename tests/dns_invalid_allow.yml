@@ -1,0 +1,10 @@
+---
+# The dns role must not answer every client.
+- name: DNS allowed for everybody
+  hosts: all
+  roles:
+    - role: noixdev.infra.dns
+      vars:
+        dns_dir: /opt/dns-invalid-allow
+        dns_bind: [127.0.0.1]
+        dns_allow: [0.0.0.0/0]

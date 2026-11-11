@@ -1,0 +1,10 @@
+---
+# The dns role must reject unsafe settings before it touches the host.
+- name: DNS on a wildcard address
+  hosts: all
+  roles:
+    - role: noixdev.infra.dns
+      vars:
+        dns_dir: /opt/dns-invalid
+        dns_bind: [0.0.0.0]
+        dns_allow: [127.0.0.0/8]

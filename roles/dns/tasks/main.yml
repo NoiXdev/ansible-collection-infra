@@ -1,0 +1,95 @@
+---
+- name: Check the settings
+  ansible.builtin.assert:
+    that:
+      - dns_bind | length > 0 or dns_bind_tailscale
+      - dns_bind | intersect(['0.0.0.0', '::', '::0', '[::]']) | length == 0
+    fail_msg: >-
+      dns_bind needs specific addresses (or dns_bind_tailscale): the list must not
+      be empty and must not contain 0.0.0.0, :: , ::0 or [::].
+    quiet: true
+
+- name: Check the clients, records and upstreams
+  ansible.builtin.assert:
+    that:
+      - dns_allow | length > 0
+      - dns_allow | intersect(['0.0.0.0/0', '::/0']) | length == 0
+      - dns_upstreams | length > 0
+      - dns_records | selectattr('name', 'defined') | list | length == dns_records | length
+      - >-
+        dns_records | selectattr('name', 'defined') | map(attribute='name')
+        | select('match', '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$') | list | length == dns_records | length
+      - dns_records | selectattr('addresses', 'defined') | rejectattr('addresses', 'equalto', []) | list | length == dns_records | length
+    fail_msg: >-
+      dns needs a non-empty dns_allow without 0.0.0.0/0 or ::/0 (that would answer
+      every client), dns_upstreams, and records that each have a lower-case name
+      and at least one address.
+    quiet: true
+
+- name: Read the Tailscale IPv4 address
+  ansible.builtin.command:
+    cmd: tailscale ip -4
+  register: dns_tailscale_v4
+  changed_when: false
+  when: dns_bind_tailscale
+
+- name: Read the Tailscale IPv6 address
+  ansible.builtin.command:
+    cmd: tailscale ip -6
+  register: dns_tailscale_v6
+  changed_when: false
+  when: dns_bind_tailscale
+
+- name: Work out the addresses to bind
+  ansible.builtin.set_fact:
+    dns_bind_effective: >-
+      {{ (dns_bind
+          + (dns_tailscale_v4.stdout_lines | default([]))
+          + (dns_tailscale_v6.stdout_lines | default([]))) | unique }}
+
+- name: Create the DNS directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ dns_dir }}"
+    - "{{ dns_dir }}/config"
+
+- name: Write the Corefile
+  ansible.builtin.template:
+    src: Corefile.j2
+    dest: "{{ dns_dir }}/config/Corefile"
+    owner: root
+    group: root
+    mode: "0644"
+  register: dns_corefile
+
+- name: Write the records file
+  ansible.builtin.template:
+    src: hosts.j2
+    dest: "{{ dns_dir }}/config/hosts"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write the compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ dns_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+  register: dns_compose
+
+- name: Start CoreDNS
+  community.docker.docker_compose_v2:
+    project_src: "{{ dns_dir }}"
+    project_name: "{{ dns_project }}"
+    state: present
+    pull: missing
+    # The records file is re-read by CoreDNS, so only the Corefile needs a recreate.
+    recreate: "{{ 'always' if dns_corefile is changed or dns_compose is changed else 'auto' }}"
+    remove_orphans: true

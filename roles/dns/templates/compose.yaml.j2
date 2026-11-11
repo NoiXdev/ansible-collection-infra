@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+services:
+  coredns:
+    image: {{ dns_image }}
+    command: [-conf, /etc/coredns/Corefile]
+    # The host network keeps real client addresses, which the acl needs.
+    network_mode: host
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    volumes:
+      - {{ dns_dir }}/config:/etc/coredns:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "{{ dns_cpus }}"
+          memory: {{ dns_memory }}
+          pids: 64
+    restart: unless-stopped

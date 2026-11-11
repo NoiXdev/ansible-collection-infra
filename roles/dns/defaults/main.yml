@@ -1,0 +1,29 @@
+---
+dns_image: coredns/coredns:1.13.1
+dns_dir: /opt/dns
+dns_project: dns
+
+# Addresses CoreDNS binds (UDP and TCP 53). Never a wildcard: the server
+# answers private names and must not listen where it was not meant to.
+dns_bind: []
+# Also bind the addresses printed by `tailscale ip -4` and `tailscale ip -6`.
+dns_bind_tailscale: false
+
+# Client networks (CIDR) that get answers; everything else is REFUSED. Required.
+dns_allow: []
+
+dns_upstreams:
+  - 1.1.1.1
+  - 8.8.8.8
+
+# Names answered locally, e.g.
+#   - { name: host.example.test, addresses: [192.0.2.10, "2001:db8::10"] }
+dns_records: []
+# TTL of those records in seconds.
+dns_ttl: 60
+# Cache for forwarded answers in seconds; 0 turns the cache off.
+dns_cache: 300
+dns_log_queries: false
+
+dns_cpus: "0.25"
+dns_memory: 64M

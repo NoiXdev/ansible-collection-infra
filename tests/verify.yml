@@ -251,6 +251,87 @@
       loop_control:
         label: "{{ item.name }}"
 
+    - name: DNS answers a record with its address
+      ansible.builtin.command:
+        cmd: dig +short @127.0.0.1 app.internal.test A
+      register: verify_dns_a
+      retries: 10
+      delay: 1
+      until: verify_dns_a.stdout | trim == '192.0.2.10'
+      changed_when: false
+
+    - name: DNS answers a known name without that type as empty NOERROR
+      ansible.builtin.command:
+        cmd: dig @127.0.0.1 app.internal.test AAAA
+      register: verify_dns_nodata
+      changed_when: false
+
+    - name: Check the empty answer
+      ansible.builtin.assert:
+        that:
+          - "'status: NOERROR' in verify_dns_nodata.stdout"
+          - "'ANSWER: 0' in verify_dns_nodata.stdout"
+        quiet: true
+
+    - name: DNS answers an IPv6 record
+      ansible.builtin.command:
+        cmd: dig +short @127.0.0.1 dual.internal.test AAAA
+      register: verify_dns_aaaa
+      changed_when: false
+
+    - name: Check the IPv6 record
+      ansible.builtin.assert:
+        that: verify_dns_aaaa.stdout | trim == '2001:db8::11'
+        quiet: true
+
+    - name: DNS forwards other names
+      ansible.builtin.command:
+        cmd: dig @127.0.0.1 example.com A
+      register: verify_dns_forward
+      changed_when: false
+
+    - name: Check the forwarded answer
+      ansible.builtin.assert:
+        that:
+          - "'status: NOERROR' in verify_dns_forward.stdout"
+          - "verify_dns_forward.stdout is not search('ANSWER: 0')"
+        quiet: true
+
+    - name: DNS does not serve the host's /etc/hosts
+      ansible.builtin.command:
+        cmd: dig +short @127.0.0.1 leak.internal.test A
+      register: verify_dns_leak
+      changed_when: false
+
+    - name: Check that the /etc/hosts entry is not answered
+      ansible.builtin.assert:
+        that: "'203.0.113.7' not in verify_dns_leak.stdout"
+        quiet: true
+
+    - name: DNS refuses clients outside dns_allow
+      ansible.builtin.command:
+        cmd: dig @192.0.2.53 app.internal.test A
+      register: verify_dns_refused
+      changed_when: false
+
+    - name: Check the refusal
+      ansible.builtin.assert:
+        that: "'status: REFUSED' in verify_dns_refused.stdout"
+        quiet: true
+
+    - name: Inspect the DNS container
+      ansible.builtin.command:
+        cmd: >-
+          docker inspect dns-coredns-1
+          --format '{{ '{{' }}.HostConfig.ReadonlyRootfs{{ '}}' }} {{ '{{' }}.HostConfig.NetworkMode{{ '}}' }} {{ '{{' }}.HostConfig.SecurityOpt{{ '}}' }}'
+      register: verify_dns_inspect
+      changed_when: false
+
+    - name: Check the DNS container
+      ansible.builtin.assert:
+        that: verify_dns_inspect.stdout | trim == 'true host [no-new-privileges:true]'
+        quiet: true
+
 # A remote worker over the published endpoint. Its identity is seeded from
 # the manager CLI's bundle, standing in for a redeemed token (minting a
 # token needs an interactive browser session): the role must treat it as
