@@ -38,7 +38,7 @@ entryPoints:
 {% endif %}
 {% if ep.tls | default(false) %}
       tls:
-        certResolver: dns
+        certResolver: {{ traefik_acme_challenge }}
 {% if traefik_cert_domains | length > 0 %}
         domains:
 {% for d in traefik_cert_domains %}
@@ -69,15 +69,20 @@ providers:
 {% if traefik_acme_email %}
 
 certificatesResolvers:
-  dns:
+  {{ traefik_acme_challenge }}:
     acme:
       email: "{{ traefik_acme_email }}"
       caServer: "{{ traefik_acme_ca_server }}"
       storage: /acme/acme.json
+{% if traefik_acme_challenge == 'http' %}
+      httpChallenge:
+        entryPoint: {{ traefik_acme_http_entrypoint }}
+{% else %}
       dnsChallenge:
         provider: {{ traefik_dns_provider }}
         resolvers:
 {% for r in traefik_dns_resolvers %}
           - "{{ r }}"
 {% endfor %}
+{% endif %}
 {% endif %}

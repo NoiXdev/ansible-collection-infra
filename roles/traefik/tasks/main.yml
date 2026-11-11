@@ -6,6 +6,21 @@
     quiet: true
   when: traefik_entrypoints | selectattr('tls', 'defined') | selectattr('tls') | list | length > 0
 
+- name: Check the HTTP-01 settings
+  ansible.builtin.assert:
+    that:
+      - traefik_entrypoints | selectattr('name', 'equalto', traefik_acme_http_entrypoint) | list | length == 1
+      - (traefik_entrypoints | selectattr('name', 'equalto', traefik_acme_http_entrypoint) | first).host_port
+        | default((traefik_entrypoints | selectattr('name', 'equalto', traefik_acme_http_entrypoint) | first).port)
+        | int == 80
+      - traefik_cert_domains | map(attribute='main') | select('match', '^\\*') | list | length == 0
+      - traefik_cert_domains | map(attribute='sans', default=[]) | flatten | select('match', '^\\*') | list | length == 0
+    fail_msg: >-
+      HTTP-01 needs traefik_acme_http_entrypoint to name an entrypoint on host
+      port 80, and traefik_cert_domains cannot contain wildcards.
+    quiet: true
+  when: traefik_acme_challenge == 'http'
+
 - name: Check the entrypoints
   ansible.builtin.assert:
     that:

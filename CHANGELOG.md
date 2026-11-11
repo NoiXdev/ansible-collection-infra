@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `traefik`: `traefik_acme_challenge: http` issues certificates with HTTP-01 on
+  `traefik_acme_http_entrypoint` (an entrypoint on host port 80), one per router host, without a
+  DNS API. The cert resolver is named after the challenge (`dns` or `http`); `dns` stays the
+  default.
+- `base`: the static route unit is started by the role itself, not only by a handler, so a run
+  that failed after writing the script no longer leaves the routes unapplied.
+
 ## 0.3.0 — 2026-11-10
 
 - `traefik`: entrypoints take `host_port`, the port published on the host (default: `port`), so

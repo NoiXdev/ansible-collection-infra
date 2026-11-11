@@ -36,6 +36,12 @@ traefik_entrypoints:
 
 traefik_acme_email: ""
 traefik_acme_ca_server: https://acme-v02.api.letsencrypt.org/directory
+# dns: DNS-01 through traefik_dns_provider (wildcards possible).
+# http: HTTP-01 on traefik_acme_http_entrypoint; Traefik requests one
+#       certificate per router host, which must resolve publicly to this host
+#       and reach that entrypoint on port 80.
+traefik_acme_challenge: dns
+traefik_acme_http_entrypoint: web
 traefik_dns_provider: hetzner
 traefik_dns_resolvers: [1.1.1.1:53, 9.9.9.9:53]
 traefik_dns_env: {}

@@ -58,6 +58,18 @@ argument_specs:
       traefik_acme_ca_server:
         type: str
         description: ACME directory (use the staging directory for tests).
+      traefik_acme_challenge:
+        type: str
+        choices: [dns, http]
+        description:
+          - ACME challenge, also the name of the cert resolver.
+          - dns uses DNS-01 through traefik_dns_provider and can issue wildcards.
+          - http uses HTTP-01 on traefik_acme_http_entrypoint. Traefik requests a certificate per
+            router host; each host must resolve publicly to this server and reach that entrypoint
+            on host port 80. traefik_cert_domains cannot contain wildcards then.
+      traefik_acme_http_entrypoint:
+        type: str
+        description: Entrypoint that answers the HTTP-01 challenge; it must exist and listen on host port 80.
       traefik_dns_provider:
         type: str
         description: lego DNS provider for the DNS-01 challenge.
