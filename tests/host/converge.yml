@@ -3,6 +3,7 @@
   hosts: testhost
   vars:
     base_timezone: Europe/Berlin
+    base_nonlocal_bind: true
     base_sshd_listen_addresses: ["{{ ansible_facts['default_ipv4']['address'] }}"]
     base_sshd_allow_users: [root]
     base_static_routes:

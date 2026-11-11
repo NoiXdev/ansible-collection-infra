@@ -45,11 +45,22 @@
     group: root
     mode: "0644"
 
+# A kernel booted with ipv6.disable=1 has no net.ipv6 keys; setting one there
+# would fail the sysctl reload on every run.
+- name: Check whether the kernel has IPv6
+  ansible.builtin.stat:
+    path: /proc/sys/net/ipv6
+  register: base_ipv6_proc
+  when: base_nonlocal_bind or base_sshd_listen_addresses | length > 0
+
 - name: Allow binding to addresses that are not up yet
   ansible.posix.sysctl:
-    name: net.ipv4.ip_nonlocal_bind
+    name: "{{ item }}"
     value: "1"
     sysctl_file: /etc/sysctl.d/60-nonlocal-bind.conf
+  loop: >-
+    {{ ['net.ipv4.ip_nonlocal_bind']
+       + (['net.ipv6.ip_nonlocal_bind'] if base_ipv6_proc.stat.exists else []) }}
   when: base_nonlocal_bind or base_sshd_listen_addresses | length > 0
 
 - name: Manage static routes

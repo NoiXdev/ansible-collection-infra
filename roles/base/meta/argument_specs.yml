@@ -44,8 +44,8 @@ argument_specs:
         elements: str
         description: >-
           Addresses sshd binds to. Empty keeps the distribution default. When
-          set, socket activation is turned off and net.ipv4.ip_nonlocal_bind
-          is enabled, so sshd starts even before an address is up.
+          set, socket activation is turned off and the nonlocal bind
+          sysctls are enabled, so sshd starts even before an address is up.
       base_sshd_port:
         type: int
         description: sshd port.
@@ -105,9 +105,10 @@ argument_specs:
         type: bool
         default: false
         description: >-
-          Enable net.ipv4.ip_nonlocal_bind, so services (sshd, published
-          container ports) can bind an address before it is up at boot.
-          Always on when base_sshd_listen_addresses is set.
+          Enable net.ipv4.ip_nonlocal_bind and net.ipv6.ip_nonlocal_bind, so
+          services (sshd, published container ports) can bind an address before it is up at boot.
+          The IPv6 key is skipped on a kernel without IPv6. Always on when
+          base_sshd_listen_addresses is set.
       base_static_routes:
         type: list
         elements: dict

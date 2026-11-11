@@ -46,8 +46,8 @@ base_sshd_macs:
   - hmac-sha2-512-etm@openssh.com
   - hmac-sha2-256-etm@openssh.com
 
-# Lets services bind addresses that are not up yet (e.g. a private IP at
-# boot). Always on when base_sshd_listen_addresses is set.
+# Lets services bind IPv4 and IPv6 addresses that are not up yet (e.g. a
+# private IP at boot). Always on when base_sshd_listen_addresses is set.
 base_nonlocal_bind: false
 
 # Static routes added at boot: [{to: CIDR, via: gateway}]. The interface is

@@ -15,6 +15,7 @@
         - ss -Htln sport = :22
         - docker info --format {{ '{{' }}.LoggingDriver{{ '}}' }}
         - timedatectl show -p Timezone --value
+        - sysctl -n net.ipv4.ip_nonlocal_bind net.ipv6.ip_nonlocal_bind
       register: host_state
       changed_when: false
       failed_when: false
@@ -29,6 +30,7 @@
           - (host_ip ~ ':22') in host_state.results[3].stdout
           - host_state.results[4].stdout == 'local'
           - host_state.results[5].stdout == 'Europe/Berlin'
+          - host_state.results[6].stdout_lines == ['1', '1']
         fail_msg: "{{ host_state.results | map(attribute='stdout') | list }}"
 
 - name: Verify the sshd hardening

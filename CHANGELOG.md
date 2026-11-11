@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `base`: `base_nonlocal_bind` (and `base_sshd_listen_addresses`) now also sets
+  `net.ipv6.ip_nonlocal_bind`, so services can bind IPv6 addresses that are not up yet. It is
+  skipped on a kernel without IPv6 (`ipv6.disable=1`).
 - `traefik`: `traefik_acme_challenge: http` issues certificates with HTTP-01 on
   `traefik_acme_http_entrypoint` (an entrypoint on host port 80), one per router host, without a
   DNS API. The cert resolver is named after the challenge (`dns` or `http`); `dns` stays the
