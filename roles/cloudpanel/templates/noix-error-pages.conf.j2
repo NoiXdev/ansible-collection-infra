@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+#
+# noix error pages: serves the pages that the error_page lines of
+# {{ cloudpanel_error_pages_http_conf }} point at. Include it in every server block:
+#   include {{ cloudpanel_error_pages_include }};
+# The Ansible role adds that line to CloudPanel's vhost templates and once to
+# every site's vhost; remove it in the vhost editor to opt a site out.
+location ^~ /noix-error-pages/ {
+    internal;
+    auth_basic off;
+    allow all;
+    # The redirect to the page keeps the request's headers: without this a
+    # 413 (body too large) fails again here and nginx shows its own page.
+    client_max_body_size 0;
+    alias {{ cloudpanel_error_pages_dir }}/active/;
+}

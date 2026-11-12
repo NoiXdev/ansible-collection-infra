@@ -1,0 +1,84 @@
+---
+# DB_ENGINE values that CloudPanel's v2 installer accepts on Ubuntu 24.04.
+cloudpanel_db_engines:
+  - MYSQL_8.4
+  - MYSQL_8.0
+  - MARIADB_10.11
+  - MARIADB_11.4
+  - MARIADB_11.8
+  - MARIADB_12.3
+
+# Where the installer is kept between its verified download and its run; it
+# is removed after a successful install.
+cloudpanel_installer_path: /root/cloudpanel-install.sh
+# What the installer and clp-update call that a minimal image may lack.
+# CloudPanel's package writes to /etc/apparmor.d/tunables on Ubuntu.
+cloudpanel_installer_packages: [apparmor, ca-certificates, curl, sudo, wget]
+
+# CloudPanel's CLI; its presence means CloudPanel is installed. Without it,
+# CloudPanel's home directory or a known cloudpanel package still means the
+# installer must not run.
+cloudpanel_clpctl: /usr/bin/clpctl
+cloudpanel_home: /home/clp
+
+# The nginx that serves the sites (CloudPanel's own UI runs in clp-nginx).
+# Read by the error pages tasks.
+cloudpanel_nginx_dir: /etc/nginx
+cloudpanel_nginx_conf_d: "{{ cloudpanel_nginx_dir }}/conf.d"
+cloudpanel_nginx_sites_dir: "{{ cloudpanel_nginx_dir }}/sites-enabled"
+
+# Services that must be active again after a reboot, besides the database
+# (mysql, also MariaDB's alias) and every enabled php*-fpm unit. clp-nginx and
+# clp-php-fpm serve the CloudPanel UI.
+cloudpanel_services: [nginx, clp-nginx, clp-php-fpm, clp-agent]
+
+# Packages whose upgrade restarts Docker and with it the compose projects.
+cloudpanel_docker_packages: [containerd.io, docker-ce, docker-ce-cli, docker-compose-plugin]
+
+# The running compose projects taken at the start of the run (Name, Status,
+# ConfigFiles), from `docker compose ls --format json`.
+cloudpanel_compose_projects: "{{ (cloudpanel_compose_ls.stdout | default('', true) or '[]') | from_json }}"
+
+# What the health check requests: the CloudPanel UI (self-signed by default)
+# and every cloudpanel_health_urls entry.
+cloudpanel_ui_url: >-
+  https://{{ ('[' ~ cloudpanel_ui_host ~ ']') if ':' in cloudpanel_ui_host else cloudpanel_ui_host }}:8443/
+cloudpanel_health_targets: >-
+  {{ ([{'url': cloudpanel_ui_url, 'validate_certs': false}] if cloudpanel_ui_check | bool else [])
+     + cloudpanel_health_urls | map('community.general.dict_kv', 'url') | list }}
+
+# Each health check URL: requests of at most 10 seconds (less with a smaller
+# cloudpanel_health_timeout), 5 seconds apart, as many as fit into
+# cloudpanel_health_timeout (at least one).
+cloudpanel_health_request_timeout: "{{ [cloudpanel_health_timeout | int, 10] | min }}"
+cloudpanel_health_retries: >-
+  {{ [(cloudpanel_health_timeout | int + 5) // (cloudpanel_health_request_timeout | int + 5) - 1, 0] | max }}
+
+# CloudPanel's database: the sites with their vhosts (what the vhost editor
+# shows and saves) and the vhost templates new sites copy.
+cloudpanel_db: /home/clp/htdocs/app/data/db.sq3
+
+# Every 4xx and 5xx status code in the IANA registry: the pages of the export
+# and the codes of the full-set include. The export adds the default codes.
+cloudpanel_error_pages_all_codes: >-
+  {{ range(400, 419) | list + [421, 422, 423, 424, 425, 426, 428, 429, 431, 451]
+     + range(500, 509) | list + [510, 511] }}
+cloudpanel_error_pages_export_codes: >-
+  {{ (cloudpanel_error_pages_all_codes + cloudpanel_error_pages_default_codes | map('int') | list) | unique | sort }}
+# The export's environment: cloudpanel_error_pages_env without the keys that
+# make no sense for static files, plus the theme.
+cloudpanel_error_pages_ignored_env: [THEME, SHOW_DETAILS, MAINTENANCE, MAINTENANCE_UNTIL, LISTEN, CONFIG_FILE]
+cloudpanel_error_pages_export_env: >-
+  {{ cloudpanel_error_pages_env | dict2items | rejectattr('key', 'in', cloudpanel_error_pages_ignored_env)
+     | items2dict | combine({'THEME': cloudpanel_error_pages_theme, 'SHOW_DETAILS': 'false'}) }}
+# The script that exports the pages, and the record of the sites whose vhost
+# had the include (error_pages_vhosts.py).
+cloudpanel_error_pages_export: /usr/local/lib/noix-error-pages/export
+cloudpanel_error_pages_state: /var/lib/noix-error-pages/vhosts.json
+# nginx: the default codes at http level (CloudPanel's nginx.conf includes
+# sites-enabled/*.conf and not conf.d; without .conf the name has no dot, so it is no
+# site's), the include in every vhost and the full-set include.
+cloudpanel_error_pages_http_conf: "{{ cloudpanel_nginx_sites_dir }}/noix-error-pages-http.conf"
+cloudpanel_error_pages_include: "{{ cloudpanel_nginx_dir }}/noix-error-pages.conf"
+cloudpanel_error_pages_include_all: "{{ cloudpanel_nginx_dir }}/noix-error-pages-all.conf"
+cloudpanel_maintenance_script: /usr/local/sbin/noix-maintenance

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# Exports the noix error pages ({{ cloudpanel_error_pages_image }}, theme
+# {{ cloudpanel_error_pages_theme }}) to static files: it runs the image once on a loopback
+# port, saves every page in every language it offers and removes the
+# container again. nginx serves the files; nothing runs afterwards.
+#
+#   releases/<id>/pages/<lang>/<code>.html        one page per status code, and maintenance.html
+#   releases/<id>/maintenance/<lang>/<code>.html  the same codes, 5xx linked to maintenance.html
+#   releases/<id>/export.json                     default language, languages, sha1 of this script
+#   current                                       link to the release nginx serves
+#   active                                        current/pages or current/maintenance
+#                                                 (noix-maintenance), not touched here
+#
+# A new export is written into a release of its own and goes live with one
+# rename of the link current, when it is complete; the old release is removed
+# afterwards. A failure leaves the served pages as they were. Exits non-zero
+# on any failure.
+set -Eeuo pipefail
+
+dir={{ cloudpanel_error_pages_dir | quote }}
+image={{ cloudpanel_error_pages_image | quote }}
+theme={{ cloudpanel_error_pages_theme | quote }}
+codes=({{ cloudpanel_error_pages_export_codes | join(' ') }})
+env=(
+{% for key, value in cloudpanel_error_pages_export_env | dictsort %}
+  --env '{{ (key ~ '=' ~ value) | replace("'", "'\\''") }}'
+{% endfor %}
+)
+
+cid=""
+tmp=""
+cleanup() {
+  [ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true
+  [ -z "$tmp" ] || rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+mkdir -p "$dir/releases"
+tmp="$(mktemp -d "$dir/releases/XXXXXXXX")"
+cid="$(docker run --detach --rm --quiet --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true --publish 127.0.0.1::8080 "${env[@]}" "$image")"
+port="$(docker port "$cid" 8080/tcp | head -n 1)"
+base="http://127.0.0.1:${port##*:}"
+for _ in $(seq 50); do
+  curl -fs "$base/healthz" >/dev/null && break
+  sleep 0.2
+done
+if ! curl -fs "$base/healthz" >/dev/null; then
+  echo "The error pages container did not answer:" >&2
+  docker logs "$cid" >&2 || true
+  exit 1
+fi
+
+# The language a request without Accept-Language gets, and the languages the
+# page's language switch offers (none when only one is configured).
+probe="$(curl -s "$base/404.html")"
+default="$(sed -n 's/.*<html lang="\([A-Za-z-]*\)".*/\1/p' <<<"$probe" | head -n 1)"
+mapfile -t langs < <(grep -o 'data-lang="[A-Za-z-]*"' <<<"$probe" | cut -d'"' -f2 | sort -u)
+[ -n "$default" ] || { echo "The error pages image rendered no language." >&2; exit 1; }
+[ -n "${langs[*]:-}" ] || langs=("$default")
+
+for lang in "${langs[@]}"; do
+  mkdir -p "$tmp/pages/$lang" "$tmp/maintenance/$lang"
+  for page in "${codes[@]}" maintenance; do
+    file="$tmp/pages/$lang/$page.html"
+    curl -s -o "$file" -H 'Accept: text/html' "$base/$page.html?lang=$lang"
+    want="data-code=\"$page\""
+    [ "$page" != maintenance ] || want='data-page="maintenance"'
+    grep -qF "$want" "$file" || { echo "The error pages image rendered no page $page ($lang)." >&2; exit 1; }
+    grep -qF "ep-theme-$theme" "$file" \
+      || { echo "The error pages image rendered page $page ($lang) without the theme $theme; check the theme's name." >&2; exit 1; }
+  done
+  for code in "${codes[@]}"; do
+    target="$code"
+    [ "$code" -lt 500 ] || target=maintenance
+    ln -s "../../pages/$lang/$target.html" "$tmp/maintenance/$lang/$code.html"
+  done
+done
+
+sha1="$(sha1sum "$0" | cut -d' ' -f1)"
+printf '{"default": "%s", "languages": [%s], "script": "%s"}\n' "$default" \
+  "$(printf '"%s", ' "${langs[@]}" | sed 's/, $//')" "$sha1" >"$tmp/export.json"
+chmod -R u=rwX,go=rX "$tmp"
+
+release="${tmp##*/}"
+ln -sfn "releases/$release" "$dir/current.new"
+mv -T "$dir/current.new" "$dir/current"
+tmp=""
+for old in "$dir"/releases/*; do
+  [ "${old##*/}" = "$release" ] || rm -rf "$old"
+done
+cat "$dir/current/export.json"

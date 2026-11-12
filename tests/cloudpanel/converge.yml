@@ -1,0 +1,27 @@
+---
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  roles:
+    - noixdev.infra.base
+    - noixdev.infra.docker
+    # As on a CloudPanel server: fail2ban and CrowdSec before the cloudpanel
+    # role, CrowdSec's Local API off CloudPanel's port 8080 (vars.yml).
+    # cloudpanel_test_security=false leaves them out of the first converge,
+    # so CrowdSec is installed where nginx already holds 8080.
+    - role: noixdev.infra.fail2ban
+      when: cloudpanel_test_security | default(true) | bool
+    - role: noixdev.infra.crowdsec
+      when: cloudpanel_test_security | default(true) | bool
+    - noixdev.infra.cloudpanel
+  post_tasks:
+    - name: Check that the vhost templates with error pages of their own are listed
+      ansible.builtin.assert:
+        that: cloudpanel_error_pages_template_overrides is defined
+        quiet: true
+      when: cloudpanel_error_pages_enabled | default(true) | bool
+
+    - name: Show the vhost templates with error pages of their own
+      ansible.builtin.debug:
+        var: cloudpanel_error_pages_template_overrides
+      when: cloudpanel_error_pages_enabled | default(true) | bool

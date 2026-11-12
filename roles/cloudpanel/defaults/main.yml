@@ -1,0 +1,97 @@
+---
+# Database engine of a fresh install, passed to CloudPanel's installer as
+# DB_ENGINE. The role never changes the engine of an installed server.
+cloudpanel_db_engine: MARIADB_11.4
+
+# CloudPanel CE v2 installer and the sha256 that CloudPanel publishes for it
+# (https://www.cloudpanel.io/docs/v2/getting-started/other/). The download is
+# verified before it runs; when CloudPanel publishes a new installer, update
+# both. Used only where CloudPanel is not installed yet.
+cloudpanel_installer_url: https://installer.cloudpanel.io/ce/v2/install.sh
+cloudpanel_installer_sha256: 8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476
+# Passed to the installer as SWAP: true lets it set up a 2 GB swap file
+# (/home/.swap, dphys-swapfile). Set false where swap is managed otherwise,
+# e.g. with the base role's base_swap_size_mb.
+cloudpanel_swap: true
+
+# First admin user. When all three are set, the role creates it with
+# `clpctl user:add` right after a fresh install (never on an installed
+# server). When they are empty, finish CloudPanel's first-visit setup at
+# https://<host>:8443 right after the install: until then anyone who reaches
+# the port can create the admin. Keep the password in a vault; clpctl takes it
+# on its command line, so it shows in the process list while user:add runs.
+cloudpanel_admin_user: ""
+cloudpanel_admin_email: ""
+cloudpanel_admin_password: ""
+
+# Every run: CloudPanel's own update (clp-update), then an upgrade of all
+# packages from the server's apt sources (apt-get dist-upgrade, keeping
+# changed config files). An upgrade that would remove or downgrade a package
+# fails the run before anything is upgraded and names the packages.
+cloudpanel_update: true
+
+# Reboot when an update of this run requires it (/var/run/reboot-required),
+# then wait up to cloudpanel_reboot_timeout seconds for the server and for
+# nginx, PHP-FPM, the database and CloudPanel. A required reboot that is not
+# taken (false, or cloudpanel_update false) is a warning, not a failure.
+cloudpanel_reboot: true
+cloudpanel_reboot_timeout: 900
+# Command whose output changes with every boot; the reboot is complete when
+# it does. Change it only where the boot id stays the same across a reboot
+# (for example a container).
+cloudpanel_reboot_boot_time_command: cat /proc/sys/kernel/random/boot_id
+
+# After a reboot, an upgrade of a Docker package or a restart of Docker, run
+# `docker compose up -d --no-recreate` for every compose project that was
+# running when the run started (projects whose files are missing: a warning).
+cloudpanel_compose_reconcile: true
+
+# URLs requested from the Ansible controller after the updates (and a
+# reboot), e.g. a few representative sites. Each must answer with a status
+# below 500 within cloudpanel_health_timeout seconds, or the run fails.
+# Certificates are validated. Redirects are not followed, so a redirect
+# passes: use the final URL (https://www.example.test/, not the bare domain
+# that redirects there).
+cloudpanel_health_urls: []
+# Also request the CloudPanel UI at https://<cloudpanel_ui_host>:8443 (its
+# certificate is not validated: CloudPanel starts with a self-signed one).
+cloudpanel_ui_check: true
+cloudpanel_ui_host: "{{ inventory_hostname }}"
+# Seconds each URL may take in all: requests of at most 10 seconds, 5 seconds
+# apart, as many as fit in.
+cloudpanel_health_timeout: 60
+
+# noix error pages in CloudPanel's nginx. The pages are exported once from
+# cloudpanel_error_pages_image (with Docker, so run the docker role first) to
+# static files in cloudpanel_error_pages_dir and served by nginx; no
+# container keeps running. A new image, theme or environment exports them
+# again. With false the role leaves the error pages alone (it does not remove
+# what an earlier run installed).
+cloudpanel_error_pages_enabled: true
+cloudpanel_error_pages_image: noixdev/error-pages:1.0.0
+# One theme (glass, terminal, classic, status or clean; not random).
+cloudpanel_error_pages_theme: classic
+# Environment of the export, as for the error pages container on the Traefik
+# hosts (LANGUAGES, DEFAULT_LANGUAGE, SHOW_FOOTER, COPYRIGHT_NAME, LINKS, ...;
+# see the image's documentation). Each page carries every language with its
+# switch; nginx starts it in the first language of the browser that the pages
+# offer. THEME is cloudpanel_error_pages_theme; SHOW_DETAILS is always false
+# (the time and request ID of the export would be wrong); MAINTENANCE,
+# MAINTENANCE_UNTIL, LISTEN and CONFIG_FILE are ignored.
+cloudpanel_error_pages_env: {}
+# The codes every site gets, for the errors nginx itself generates: an
+# unreachable PHP-FPM or backend (502, 504), a request body or URI that is too
+# large (413, 414). A vhost's own error_page replaces them. Avoid codes that
+# applications answer themselves (404, 419, 422, 429, 503, ...): CloudPanel's
+# PHP vhosts intercept them, so the page would replace the application's.
+# Sites opt in to every 4xx and 5xx with the full-set include instead.
+cloudpanel_error_pages_default_codes: [502, 504, 413, 414]
+# Where the exported pages live (not under /home, where CloudPanel's nginx
+# does not follow the maintenance switch's links).
+cloudpanel_error_pages_dir: /var/www/noix-error-pages
+
+# Show the maintenance page instead of the 5xx pages nginx generates, on
+# every site of the server (noix-maintenance on|off on the host). Working
+# sites are not affected. Every run sets the switch to this value, so a
+# `noix-maintenance on` by hand lasts until the next run.
+cloudpanel_maintenance: false

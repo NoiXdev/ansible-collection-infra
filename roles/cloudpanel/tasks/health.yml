@@ -1,0 +1,51 @@
+---
+# From the Ansible controller, as a visitor reaches the sites. Each URL gets
+# at most cloudpanel_health_timeout seconds: requests of at most
+# cloudpanel_health_request_timeout seconds, repeated every 5 seconds while
+# the answer is a 5xx or missing, as long as another one fits in. The URLs are
+# requested one after another.
+- name: Note that the health check runs
+  ansible.builtin.set_fact:
+    cloudpanel_health_started: true
+
+- name: Request the health check URLs
+  ansible.builtin.uri:
+    url: "{{ item.url }}"
+    validate_certs: "{{ item.validate_certs | default(true) }}"
+    follow_redirects: none
+    status_code: "{{ range(100, 500) | list }}"
+    timeout: "{{ cloudpanel_health_request_timeout }}"
+  register: cloudpanel_health
+  until: cloudpanel_health.status | default(-1) | int in range(100, 500)
+  retries: "{{ cloudpanel_health_retries }}"
+  delay: 5
+  failed_when: false
+  loop: "{{ cloudpanel_health_targets }}"
+  loop_control:
+    label: "{{ item.url }}"
+  delegate_to: localhost
+  become: false
+
+- name: Note the health check results
+  ansible.builtin.set_fact:
+    cloudpanel_health_failures: >-
+      {%- set failures = [] -%}
+      {%- for r in cloudpanel_health.results -%}
+      {%-   set status = r.status | default(-1) | int -%}
+      {%-   if status >= 500 -%}
+      {%-     set _ = failures.append('Health check failed: ' ~ r.item.url ~ ' answered ' ~ status) -%}
+      {%-   elif status < 100 -%}
+      {%-     set _ = failures.append('Health check failed: ' ~ r.item.url ~ ' gave no answer within '
+                ~ cloudpanel_health_timeout ~ ' seconds ('
+                ~ (r.msg | default('') | regex_replace('^Status code was -1 and not \\[[^]]*\\]: ', '')) ~ ')') -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ failures }}
+
+# Skipped after another step failed: the rescue reports both.
+- name: Check the health check results
+  ansible.builtin.assert:
+    that: cloudpanel_health_failures | length == 0
+    fail_msg: "{{ cloudpanel_health_failures | join('; ') }}"
+    quiet: true
+  when: not (cloudpanel_health_report_only | default(false) | bool)

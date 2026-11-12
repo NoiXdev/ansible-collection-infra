@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+#
+# noix error pages, the full set: a page for every 4xx and 5xx status of the
+# server block that includes it, also for the application's own error
+# answers where nginx intercepts them (fastcgi_intercept_errors on in
+# CloudPanel's PHP vhosts). Opt in per site in the vhost editor:
+#   include {{ cloudpanel_error_pages_include_all }};
+# in the server block that answers the requests: for PHP sites the one on
+# port 8080, for static sites the main one. Where that server block has an
+# error_page of its own for a code, the line that comes first wins: put the
+# include below it.
+{% for code in cloudpanel_error_pages_export_codes %}
+error_page {{ code }} /noix-error-pages-all/$noix_error_pages_lang/{{ code }}.html;
+{% endfor %}
+
+location ^~ /noix-error-pages-all/ {
+    internal;
+    auth_basic off;
+    allow all;
+    # The redirect to the page keeps the request's headers: without this a
+    # 413 (body too large) fails again here and nginx shows its own page.
+    client_max_body_size 0;
+    alias {{ cloudpanel_error_pages_dir }}/active/;
+}

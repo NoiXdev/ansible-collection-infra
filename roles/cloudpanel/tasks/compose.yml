@@ -1,0 +1,71 @@
+---
+# The compose projects that were running when the run started (main.yml),
+# started again after anything that stopped Docker: a reboot, a Docker
+# package upgrade, or a restart of Docker (a handler of the docker role, a
+# restart during the package upgrade).
+- name: Read when Docker started after the updates
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveEnterTimestampMonotonic, --value, docker.service]
+  register: cloudpanel_docker_started_after
+  changed_when: false
+  failed_when: false
+
+- name: Note whether Docker was stopped
+  ansible.builtin.set_fact:
+    cloudpanel_docker_upgraded: >-
+      {{ cloudpanel_docker_after.stdout is defined
+         and cloudpanel_docker_after.stdout != cloudpanel_docker_before.stdout | default('') }}
+    cloudpanel_docker_restarted: >-
+      {{ cloudpanel_docker_started_after.stdout | default('')
+         != cloudpanel_docker_started_before.stdout | default('') }}
+
+- name: Look for the files of the compose projects
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    get_checksum: false
+  loop: "{{ cloudpanel_compose_projects | map(attribute='ConfigFiles') | map('split', ',') | flatten | unique }}"
+  register: cloudpanel_compose_files
+  when: cloudpanel_rebooted or cloudpanel_docker_upgraded or cloudpanel_docker_restarted
+
+# A project whose files are gone (deleted, or inside another container, as
+# with stacks deployed by Portainer) cannot be started from here.
+- name: Note the compose projects that can be started
+  ansible.builtin.set_fact:
+    cloudpanel_compose_startable: >-
+      {{ cloudpanel_compose_projects | rejectattr('Name', 'in', cloudpanel_compose_skipped_names) | list }}
+    cloudpanel_compose_skipped: "{{ cloudpanel_compose_skipped_names }}"
+  vars:
+    cloudpanel_compose_missing: >-
+      {{ cloudpanel_compose_files.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+    cloudpanel_compose_skipped_names: >-
+      {%- set skipped = [] -%}
+      {%- for p in cloudpanel_compose_projects -%}
+      {%-   if p.ConfigFiles.split(',') | select('in', cloudpanel_compose_missing) | list | length > 0 -%}
+      {%-     set _ = skipped.append(p.Name) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ skipped }}
+  when: cloudpanel_compose_files is not skipped
+
+- name: Report the compose projects whose files are missing
+  noixdev.infra.warn:
+    msg: >-
+      Not started again, their compose files are missing on the host:
+      {{ cloudpanel_compose_skipped | join(', ') }}. Start them where they are managed.
+  when:
+    - cloudpanel_compose_files is not skipped
+    - cloudpanel_compose_skipped | length > 0
+
+# --no-recreate: only what is stopped is started; nothing is recreated.
+- name: Start the compose projects that were running
+  ansible.builtin.command:
+    argv: >-
+      {{ ['docker', 'compose', '--project-name', item.Name]
+         + (item.ConfigFiles.split(',') | map('regex_replace', '^', '--file=') | list)
+         + ['up', '--detach', '--no-recreate'] }}
+  register: cloudpanel_compose_up
+  changed_when: cloudpanel_compose_up.stderr is search('Started|Created|Recreated')
+  loop: "{{ cloudpanel_compose_startable | default([]) }}"
+  loop_control:
+    label: "{{ item.Name }}"
+  when: cloudpanel_compose_files is not skipped

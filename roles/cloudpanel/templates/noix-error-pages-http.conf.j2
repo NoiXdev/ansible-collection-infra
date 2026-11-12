@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+#
+# noix error pages, http level (CloudPanel's nginx.conf includes
+# sites-enabled/*.conf, not conf.d). The error_page lines below are the
+# default of every server. A server or location with an error_page of its own
+# replaces all of them there (nginx inherits error_page only where a level has
+# none). They point at the location in {{ cloudpanel_error_pages_include }},
+# which every CloudPanel vhost includes in its server blocks.
+
+# The page's language: the first language of the browser's Accept-Language,
+# when the pages offer it.
+map $http_accept_language $noix_error_pages_lang {
+    default {{ cloudpanel_error_pages_languages.default }};
+{% for lang in cloudpanel_error_pages_languages.languages if lang != cloudpanel_error_pages_languages.default %}
+    "~*^{{ lang }}(-|;|,|$)" {{ lang }};
+{% endfor %}
+}
+
+{% for code in cloudpanel_error_pages_default_codes | map('int') | unique | sort %}
+error_page {{ code }} /noix-error-pages/$noix_error_pages_lang/{{ code }}.html;
+{% endfor %}

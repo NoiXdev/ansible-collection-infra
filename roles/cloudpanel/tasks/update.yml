@@ -1,0 +1,119 @@
+---
+- name: Read the CloudPanel version
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f=${Version} cloudpanel
+  register: cloudpanel_version_before
+  changed_when: false
+
+- name: Check the CloudPanel version
+  ansible.builtin.assert:
+    that: cloudpanel_version_before.stdout is match('^\d+\.\d+\.\d+')
+    fail_msg: >-
+      The package cloudpanel has version '{{ cloudpanel_version_before.stdout }}',
+      not one like X.Y.Z.
+    quiet: true
+
+# clp-update compares CloudPanel's version with the latest release and, when
+# they differ, runs `apt upgrade` (which never removes packages). It prints
+# "Nothing to do; you are up to date" otherwise. Its check of $USER needs it.
+- name: Update CloudPanel with clp-update
+  ansible.builtin.command:
+    cmd: clp-update
+  environment:
+    USER: root
+    TERM: dumb
+  register: cloudpanel_clp_update
+  changed_when: false
+
+# clp-update exits 0 even when its apt upgrade failed; only its two messages
+# say that it worked.
+- name: Check the result of clp-update
+  ansible.builtin.assert:
+    that: cloudpanel_clp_update.stdout is search('you are up to date|CloudPanel has been updated')
+    fail_msg: >-
+      clp-update reported neither "up to date" nor an update. Last output:
+      {{ ((cloudpanel_clp_update.stdout_lines + cloudpanel_clp_update.stderr_lines) | select | list)[-10:]
+         | join(' | ') }}
+    quiet: true
+
+- name: Read the CloudPanel version after clp-update
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f=${Version} cloudpanel
+  register: cloudpanel_version_after
+  changed_when: false
+
+- name: Report the CloudPanel version
+  ansible.builtin.debug:
+    msg: >-
+      CloudPanel {{ cloudpanel_version_before.stdout }}
+      {{ ('updated to ' ~ cloudpanel_version_after.stdout) if cloudpanel_version_changed else 'is up to date' }}
+  changed_when: cloudpanel_version_changed
+  vars:
+    cloudpanel_version_changed: "{{ cloudpanel_version_after.stdout != cloudpanel_version_before.stdout }}"
+
+- name: Update the package lists
+  ansible.builtin.apt:
+    update_cache: true
+  changed_when: false
+
+- name: Simulate the upgrade of all packages
+  ansible.builtin.command:
+    argv: [apt-get, --simulate, dist-upgrade]
+  environment:
+    LC_ALL: C
+  register: cloudpanel_apt_simulation
+  changed_when: false
+
+# A dist-upgrade may remove packages to resolve conflicts. On a customer
+# server that is the owner's decision, not the nightly run's.
+- name: Refuse an upgrade that would remove packages
+  ansible.builtin.fail:
+    msg: >-
+      The upgrade of all packages would remove packages: {{ cloudpanel_apt_removals | join(', ') }}.
+      The upgrade did not run. Check `apt-get --simulate dist-upgrade` on the host, then
+      resolve it by hand (or hold a package) and run again.
+  vars:
+    cloudpanel_apt_removals: >-
+      {{ cloudpanel_apt_simulation.stdout_lines | select('match', '^Remv ')
+         | map('regex_replace', '^Remv (\S+).*$', '\1') | list }}
+  when: cloudpanel_apt_removals | length > 0
+
+# CloudPanel pins its apt source at priority 1000, which can make apt prefer
+# an older version; dist-upgrade then stops halfway without
+# --allow-downgrades. A downgrade is the owner's decision too.
+- name: Refuse an upgrade that would downgrade packages
+  ansible.builtin.fail:
+    msg: >-
+      The upgrade of all packages would downgrade packages: {{ cloudpanel_apt_downgrades | join(', ') }}.
+      The upgrade did not run. Check `apt-get --simulate dist-upgrade` and `apt-cache policy` for
+      them on the host (an apt pin with priority 1000 prefers the older version), then resolve it by
+      hand (or hold a package) and run again.
+  vars:
+    cloudpanel_apt_downgrades: >-
+      {%- set ns = namespace(listing=false, packages=[]) -%}
+      {%- for line in cloudpanel_apt_simulation.stdout_lines -%}
+      {%-   if line == 'The following packages will be DOWNGRADED:' -%}
+      {%-     set ns.listing = true -%}
+      {%-   elif ns.listing and line is match('^ ') -%}
+      {%-     set ns.packages = ns.packages + line.split() -%}
+      {%-   else -%}
+      {%-     set ns.listing = false -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ ns.packages }}
+  when: cloudpanel_apt_downgrades | length > 0
+
+- name: Upgrade all packages
+  ansible.builtin.apt:
+    upgrade: dist
+    autoremove: false
+    force_apt_get: true
+    dpkg_options: force-confdef,force-confold
+
+- name: Read the Docker package versions after the upgrade
+  ansible.builtin.command:
+    argv: "{{ ['dpkg-query', '-W', '-f=${Package} ${Version}\\n'] + cloudpanel_docker_packages }}"
+  register: cloudpanel_docker_after
+  changed_when: false
+  failed_when: false
+  when: cloudpanel_compose_reconcile | bool

@@ -1,0 +1,189 @@
+---
+argument_specs:
+  main:
+    short_description: CloudPanel CE v2, installed and kept updated
+    description:
+      - >-
+        Installs CloudPanel CE v2 with its official installer where it is not installed
+        yet (no clpctl), and never runs the installer where it is. Supports Ubuntu 24.04
+        only; any other release is refused before the host is changed.
+      - >-
+        Every run updates CloudPanel (clp-update) and all packages (apt-get
+        dist-upgrade, keeping changed config files), reboots when an update requires
+        it, starts the compose projects again that a reboot, a Docker upgrade or a
+        restart of Docker stopped, adds the noix error pages to nginx
+        (cloudpanel_error_pages_enabled) and requests the health check URLs from the
+        Ansible controller. A run on an up-to-date server changes nothing, as long as
+        nothing else upgrades packages there (set base_unattended_upgrades false).
+      - >-
+        The handlers of the roles before it (a Docker restart, for example) run right
+        after the role has listed the running compose projects, so the reconcile
+        covers them.
+      - >-
+        Every failure names its step ("CloudPanel step failed: <step>"). Nothing is
+        rolled back. When a step from the updates on fails, the health check still
+        runs and its result is added to the message; the run fails all the same.
+      - >-
+        Sets the facts cloudpanel_installed, cloudpanel_reboot_pending,
+        cloudpanel_error_pages_without, cloudpanel_error_pages_template_overrides and
+        cloudpanel_error_pages_record_lost. Run it as root.
+    options:
+      cloudpanel_db_engine:
+        type: str
+        choices: [MYSQL_8.4, MYSQL_8.0, MARIADB_10.11, MARIADB_11.4, MARIADB_11.8, MARIADB_12.3]
+        description: >-
+          Database engine of a fresh install (the installer's DB_ENGINE; the values it
+          accepts on Ubuntu 24.04). Ignored where CloudPanel is installed.
+      cloudpanel_installer_url:
+        type: str
+        description: URL of CloudPanel's v2 installer (https).
+      cloudpanel_installer_sha256:
+        type: str
+        description: >-
+          sha256 of the installer (64 lowercase hex digits), as CloudPanel publishes it.
+          The download is verified before it runs.
+      cloudpanel_swap:
+        type: bool
+        description: >-
+          Let the installer set up a 2 GB swap file (its SWAP). Set false where swap is
+          managed otherwise.
+      cloudpanel_admin_user:
+        type: str
+        description: >-
+          User name of the first admin. With cloudpanel_admin_email and
+          cloudpanel_admin_password set too, the role creates the admin (clpctl
+          user:add, name "Admin Admin", time zone UTC) right after a fresh install, and
+          never on an installed server. With all three empty, finish CloudPanel's
+          first-visit setup at https://<host>:8443 right after the install; until then
+          anyone who reaches the port can create the admin. Set all three or none. The
+          installer runs only with SSH on port 22 (ansible_port and base_sshd_port),
+          because it enables a firewall that opens 22 only.
+      cloudpanel_admin_email:
+        type: str
+        description: E-mail address of the first admin; see cloudpanel_admin_user.
+      cloudpanel_admin_password:
+        type: str
+        no_log: true
+        description: >-
+          Password of the first admin; see cloudpanel_admin_user. Keep it in a vault.
+          clpctl takes it on its command line, so it is visible in the host's process
+          list for the second user:add runs (once, on a fresh install); the role's
+          output never shows it.
+      cloudpanel_update:
+        type: bool
+        description: >-
+          Update CloudPanel and all packages on every run. An upgrade that would remove or
+          downgrade a package fails the run before anything is upgraded and names the
+          packages.
+      cloudpanel_reboot:
+        type: bool
+        description: >-
+          Reboot when an update requires it (/var/run/reboot-required) and wait for
+          nginx, PHP-FPM, the database and CloudPanel. Only after this run's updates
+          (cloudpanel_update). A required reboot that is not taken (false here, or
+          cloudpanel_update false) is an Ansible warning and the fact
+          cloudpanel_reboot_pending; the run does not fail.
+      cloudpanel_reboot_timeout:
+        type: int
+        description: Seconds to wait for the host, and then for its services, after a reboot.
+      cloudpanel_reboot_boot_time_command:
+        type: str
+        description: >-
+          Command whose output changes with every boot (the reboot module's
+          boot_time_command). Change it only where the boot id stays the same across a
+          reboot, such as a container.
+      cloudpanel_compose_reconcile:
+        type: bool
+        description: >-
+          After a reboot, an upgrade of a Docker package or a restart of Docker (its start
+          time changed during the run), run `docker compose up -d --no-recreate` for every
+          compose project that was running when the run started. A project whose compose
+          files are missing on the host is skipped with a warning; without the compose
+          plugin the reconcile is skipped with a warning.
+      cloudpanel_health_urls:
+        type: list
+        elements: str
+        description: >-
+          http(s) URLs requested from the Ansible controller after the updates (and a
+          reboot). Each must answer with a status below 500 within
+          cloudpanel_health_timeout seconds, or the run fails. Certificates are
+          validated; redirects are not followed, so a redirect passes whatever its
+          target answers: use the final URL (for example https://www.example.test/
+          when the bare domain redirects there).
+      cloudpanel_ui_check:
+        type: bool
+        description: >-
+          Also request the CloudPanel UI at https://<cloudpanel_ui_host>:8443 (without
+          validating its certificate).
+      cloudpanel_ui_host:
+        type: str
+        description: Host name or address of the CloudPanel UI check; defaults to inventory_hostname.
+      cloudpanel_health_timeout:
+        type: int
+        description: >-
+          Seconds each health check URL may take in all. Each request waits at most 10
+          seconds (at most this value when it is smaller); a 5xx or no answer is asked
+          again 5 seconds later, as long as another request fits in. The URLs are
+          requested one after another.
+      cloudpanel_error_pages_enabled:
+        type: bool
+        description:
+          - >-
+            Add the noix error pages to CloudPanel's nginx: the pages of
+            cloudpanel_error_pages_image are exported once (with Docker; run the docker role
+            first) to static files in cloudpanel_error_pages_dir, served by nginx through an
+            internal location; no container keeps running.
+          - >-
+            The default codes are error_page lines at http level
+            (sites-enabled/noix-error-pages-http.conf); a server or location with an
+            error_page of its own replaces them. Each server block needs
+            `include /etc/nginx/noix-error-pages.conf;`. The role adds it to CloudPanel's
+            vhost templates (new sites) and once to each site's vhost, in CloudPanel's
+            database (what the vhost editor shows and saves) and in the vhost file, and runs
+            nginx -t before the database is committed: a vhost nginx rejects with the line
+            fails the run and is restored. A site whose include was removed in the vhost
+            editor is reported and left alone (fact cloudpanel_error_pages_without), and so
+            is every site without it when the role's record of the sites was lost. System
+            templates with an error_page of their own are reported (fact
+            cloudpanel_error_pages_template_overrides).
+          - >-
+            `include /etc/nginx/noix-error-pages-all.conf;` in a server block gives that
+            site a page for every 4xx and 5xx, also for the application's own error answers.
+          - >-
+            false leaves the error pages alone; it does not remove what an earlier run
+            installed.
+      cloudpanel_error_pages_image:
+        type: str
+        description: Error pages image (noixdev/error-pages or compatible); a new one exports the pages again.
+      cloudpanel_error_pages_theme:
+        type: str
+        description: Theme of the pages, one of the image's themes (classic, glass, terminal, status, clean; not random).
+      cloudpanel_error_pages_env:
+        type: dict
+        description:
+          - >-
+            Environment of the export, as for the error pages container on the Traefik
+            hosts (LANGUAGES, DEFAULT_LANGUAGE, COPYRIGHT_NAME, LINKS and the rest).
+          - >-
+            Each page carries every language; nginx starts it in the first language of the
+            browser's Accept-Language that the pages offer, else in the default language.
+          - >-
+            THEME is cloudpanel_error_pages_theme and SHOW_DETAILS is always false;
+            MAINTENANCE, MAINTENANCE_UNTIL, LISTEN and CONFIG_FILE are ignored.
+      cloudpanel_error_pages_default_codes:
+        type: list
+        elements: int
+        description: >-
+          Status codes (400-599) every site gets a page for, at http level. Keep to codes
+          nginx generates itself: CloudPanel's PHP vhosts intercept the application's
+          error answers, so a page for 404, 422 or 503 would replace the application's.
+      cloudpanel_error_pages_dir:
+        type: path
+        description: Directory of the exported pages (absolute, not under /home).
+      cloudpanel_maintenance:
+        type: bool
+        description: >-
+          Show the maintenance page instead of the 5xx pages nginx generates, on every site
+          of the server; working sites are not affected. The host script
+          `noix-maintenance on|off|status` switches the same thing; every run sets it to
+          this value.

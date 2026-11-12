@@ -1,0 +1,26 @@
+---
+# Test-only values; nothing here is a real secret.
+# CloudPanel's package turns unattended upgrades off on install (it writes
+# 20auto-upgrades); with true, base would turn them on again.
+base_unattended_upgrades: false
+# CloudPanel's PHP vhosts listen on 8080 (the backend behind Varnish), on all
+# addresses; CrowdSec's Local API cannot bind 127.0.0.1:8080 next to them.
+crowdsec_lapi_port: 8081
+cloudpanel_db_engine: MARIADB_11.4
+# run.sh publishes the container's 8443 on the controller's loopback.
+cloudpanel_ui_host: 127.0.0.1
+# The first admin, created by the role on the fresh install.
+cloudpanel_admin_user: admin
+cloudpanel_admin_email: admin@cloudpanel.test
+cloudpanel_admin_password: Test-admin-password-0
+# In a container the kernel's boot id stays the same across a reboot (the
+# container restarts, the kernel does not); the start time of PID 1 changes.
+cloudpanel_reboot_boot_time_command: awk '{print $22}' /proc/1/stat
+# Short, so the failing health checks fail fast.
+cloudpanel_health_timeout: 10
+# swapoff fails in a container, which fails CloudPanel's package setup.
+cloudpanel_swap: false
+# The error pages in two languages; the page follows the browser's language.
+cloudpanel_error_pages_env:
+  LANGUAGES: en,de
+  DEFAULT_LANGUAGE: en

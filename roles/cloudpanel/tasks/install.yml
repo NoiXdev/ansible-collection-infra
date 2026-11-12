@@ -1,0 +1,111 @@
+---
+# Runs only where CloudPanel is not installed (no clpctl).
+
+# The installer turns on ufw with port 22 as the only SSH port: an SSH server
+# on another port is cut off in the middle of the install.
+- name: Check the SSH port
+  ansible.builtin.assert:
+    that:
+      - ansible_port | default(22) | int == 22
+      - base_sshd_port | default(22) | int == 22
+    fail_msg: >-
+      CloudPanel's installer enables its firewall with port 22 as the only SSH port, but this
+      host is reached on port {{ ansible_port | default(22) }} and base_sshd_port is
+      {{ base_sshd_port | default(22) }}. Use port 22 for SSH on CloudPanel hosts. Nothing was
+      installed.
+    quiet: true
+
+- name: Install what the CloudPanel installer needs
+  ansible.builtin.apt:
+    name: "{{ cloudpanel_installer_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Download the CloudPanel installer
+  ansible.builtin.get_url:
+    url: "{{ cloudpanel_installer_url }}"
+    dest: "{{ cloudpanel_installer_path }}"
+    checksum: "sha256:{{ cloudpanel_installer_sha256 }}"
+    owner: root
+    group: root
+    mode: "0700"
+
+# The installer checks the OS, that ports 80, 443 and 3306 are free, that the
+# host name resolves and that 6 GB are free; it fails on its own if not.
+- name: Run the CloudPanel installer
+  ansible.builtin.command:
+    argv: [bash, "{{ cloudpanel_installer_path }}"]
+    creates: "{{ cloudpanel_clpctl }}"
+  environment:
+    DB_ENGINE: "{{ cloudpanel_db_engine }}"
+    SWAP: "{{ cloudpanel_swap | bool | string | lower }}"
+    TERM: dumb
+  register: cloudpanel_installer_run
+  failed_when: false
+  # The installer restarts sshd and runs for several minutes.
+  async: 3600
+  poll: 10
+
+# Right after its run, whatever the outcome: a later run downloads it again.
+- name: Remove the CloudPanel installer
+  ansible.builtin.file:
+    path: "{{ cloudpanel_installer_path }}"
+    state: absent
+
+# The installer reports success even when CloudPanel's package failed to
+# configure; the package state is the reliable answer.
+- name: Read the state of the installed CloudPanel package
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f=${db:Status-Status} cloudpanel
+  register: cloudpanel_installed_state
+  changed_when: false
+  failed_when: false
+
+- name: Check the CloudPanel install
+  ansible.builtin.assert:
+    that:
+      - cloudpanel_installer_run.rc | default(1) == 0
+      - cloudpanel_installed_state.stdout == 'installed'
+    fail_msg: >-
+      The CloudPanel installer failed (exit {{ cloudpanel_installer_run.rc | default('unknown') }},
+      package cloudpanel '{{ cloudpanel_installed_state.stdout | default('') or 'missing' }}').
+      Last output:
+      {{ ((cloudpanel_installer_run.stdout_lines | default([])) + (cloudpanel_installer_run.stderr_lines | default([])))[-15:]
+         | join(' | ') }}
+    quiet: true
+
+- name: Create the first CloudPanel admin
+  ansible.builtin.command:
+    argv:
+      - "{{ cloudpanel_clpctl }}"
+      - user:add
+      - --userName={{ cloudpanel_admin_user }}
+      - --email={{ cloudpanel_admin_email }}
+      - --firstName=Admin
+      - --lastName=Admin
+      - --password={{ cloudpanel_admin_password }}
+      - --role=admin
+      - --timezone=UTC
+      - --status=1
+  register: cloudpanel_admin_add
+  changed_when: cloudpanel_admin_add.rc == 0
+  failed_when: false
+  no_log: true
+  when: cloudpanel_admin_user | length > 0
+
+# clpctl prints its errors, never the password; replaced all the same.
+- name: Check the first CloudPanel admin
+  ansible.builtin.assert:
+    that: cloudpanel_admin_add.rc == 0
+    fail_msg: >-
+      clpctl user:add failed (exit {{ cloudpanel_admin_add.rc }}):
+      {{ ((cloudpanel_admin_add.stdout_lines + cloudpanel_admin_add.stderr_lines)
+          | select | list)[-5:] | join(' | ') | replace(cloudpanel_admin_password, '********') }}.
+      CloudPanel is installed; create the admin in the UI or with clpctl user:add.
+    quiet: true
+  when: cloudpanel_admin_user | length > 0
+
+- name: Note that CloudPanel is installed
+  ansible.builtin.set_fact:
+    cloudpanel_installed: true

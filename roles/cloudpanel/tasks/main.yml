@@ -1,0 +1,238 @@
+---
+# Every step fails the run with its own name (see the rescue); nothing is
+# rolled back. A failure from the updates on still runs the health check, so
+# the report says whether the sites answer.
+- name: Install, update and check CloudPanel
+  block:
+    - name: Note that nothing has run yet
+      ansible.builtin.set_fact:
+        cloudpanel_changes_started: false
+        cloudpanel_health_started: false
+        cloudpanel_health_failures: []
+
+    - name: Check the CloudPanel settings
+      ansible.builtin.assert:
+        that:
+          - cloudpanel_db_engine in cloudpanel_db_engines
+          - cloudpanel_installer_url is match('^https://')
+          - cloudpanel_installer_sha256 is match('^[0-9a-f]{64}$')
+          - cloudpanel_reboot_timeout | int > 0
+          - cloudpanel_health_timeout | int > 0
+          - cloudpanel_health_urls | select('string') | select('match', '^https?://') | list | length
+            == cloudpanel_health_urls | length
+          - not (cloudpanel_ui_check | bool) or cloudpanel_ui_host | length > 0
+          - cloudpanel_admin_fields | select | list | length in [0, 3]
+          - cloudpanel_admin_user is match('^[A-Za-z0-9._-]*$')
+          - cloudpanel_error_pages_theme is match('^[a-z]+$')
+          - cloudpanel_error_pages_theme != 'random'
+          - cloudpanel_error_pages_default_codes | map('int') | select('ge', 400) | select('le', 599) | list | length
+            == cloudpanel_error_pages_default_codes | length
+          - cloudpanel_error_pages_dir is match('^/[^/]')
+          - cloudpanel_error_pages_dir is not match('^/home(/|$)')
+        fail_msg: >-
+          cloudpanel_db_engine must be one of {{ cloudpanel_db_engines | join(', ') }};
+          cloudpanel_installer_url must be an https URL and cloudpanel_installer_sha256
+          64 lowercase hex digits; cloudpanel_reboot_timeout and cloudpanel_health_timeout
+          must be positive; cloudpanel_health_urls must be http(s) URLs;
+          cloudpanel_ui_check needs cloudpanel_ui_host; cloudpanel_admin_user,
+          cloudpanel_admin_email and cloudpanel_admin_password are set together or not
+          at all, and the user name has letters, digits, dots, dashes and underscores only;
+          cloudpanel_error_pages_theme must be one theme (not random),
+          cloudpanel_error_pages_default_codes codes from 400 to 599, and
+          cloudpanel_error_pages_dir an absolute directory outside /home.
+        quiet: true
+      vars:
+        cloudpanel_admin_fields:
+          - "{{ cloudpanel_admin_user | length > 0 }}"
+          - "{{ cloudpanel_admin_email | length > 0 }}"
+          - "{{ cloudpanel_admin_password | length > 0 }}"
+
+    - name: Read the operating system
+      ansible.builtin.setup:
+        gather_subset: [distribution]
+      when: ansible_facts['distribution_version'] is not defined
+
+    - name: Check the operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] == '24.04'
+        fail_msg: >-
+          The cloudpanel role supports Ubuntu 24.04 only; {{ inventory_hostname }} runs
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+          Nothing was changed.
+        quiet: true
+
+    - name: Look for CloudPanel
+      ansible.builtin.stat:
+        path: "{{ cloudpanel_clpctl }}"
+      register: cloudpanel_clpctl_stat
+
+    - name: Note whether CloudPanel is installed
+      ansible.builtin.set_fact:
+        cloudpanel_installed: "{{ cloudpanel_clpctl_stat.stat.exists }}"
+
+    - name: Read the state of the CloudPanel package
+      ansible.builtin.command:
+        cmd: dpkg-query -W -f=${db:Status-Status} cloudpanel
+      register: cloudpanel_package_state
+      changed_when: false
+      failed_when: false
+
+    # A failed install or update leaves clpctl behind with a package that is
+    # not configured. The installer must not run over it, and updating it
+    # would build on a broken state.
+    - name: Refuse a CloudPanel package that is not fully installed
+      ansible.builtin.fail:
+        msg: >-
+          {{ cloudpanel_clpctl }} exists, but the package cloudpanel is
+          '{{ cloudpanel_package_state.stdout | default('') or 'unknown' }}', not 'installed':
+          an install or update of CloudPanel did not finish. The role does not run the
+          installer where CloudPanel exists. Repair it on the host (`dpkg --configure -a`,
+          then `clp-update`) and run the role again.
+      when:
+        - cloudpanel_installed
+        - cloudpanel_package_state.stdout | default('') != 'installed'
+
+    - name: Look for CloudPanel's home directory
+      ansible.builtin.stat:
+        path: "{{ cloudpanel_home }}"
+      register: cloudpanel_home_stat
+      when: not cloudpanel_installed
+
+    # A second signal besides clpctl: the installer must never run on a
+    # server where CloudPanel is or was installed.
+    - name: Refuse to install where CloudPanel has left traces
+      ansible.builtin.fail:
+        msg: >-
+          {{ cloudpanel_clpctl }} is missing, but CloudPanel seems to be (or have been) installed:
+          {{ cloudpanel_traces | join('; ') }}. The role runs CloudPanel's installer only on a
+          server without CloudPanel. Check the server by hand.
+      vars:
+        cloudpanel_traces: >-
+          {{ ([cloudpanel_home ~ ' exists'] if cloudpanel_home_stat.stat.exists else [])
+             + (['the package cloudpanel is ' ~ cloudpanel_package_state.stdout]
+                if cloudpanel_package_state.rc == 0
+                   and cloudpanel_package_state.stdout not in ['', 'not-installed'] else []) }}
+      when:
+        - not cloudpanel_installed
+        - cloudpanel_traces | length > 0
+
+    # Taken before anything changes: after a reboot, a restart of Docker or a
+    # Docker upgrade these projects are started again.
+    - name: Look for Docker Compose
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: command -v docker >/dev/null || exit 3; docker compose version
+      register: cloudpanel_compose_version
+      changed_when: false
+      failed_when: false
+      when: cloudpanel_compose_reconcile | bool
+
+    - name: Report that Docker Compose is missing
+      noixdev.infra.warn:
+        msg: >-
+          docker exists, but `docker compose version` failed, so the compose projects are not
+          started again after a reboot or a restart of Docker in this run:
+          {{ cloudpanel_compose_version.stderr | default('') }}
+      when:
+        - cloudpanel_compose_reconcile | bool
+        - cloudpanel_compose_version.rc not in [0, 3]
+
+    - name: List the running compose projects
+      ansible.builtin.command:
+        argv: [docker, compose, ls, --format, json]
+      register: cloudpanel_compose_ls
+      changed_when: false
+      when:
+        - cloudpanel_compose_reconcile | bool
+        - cloudpanel_compose_version.rc == 0
+
+    # Missing packages make dpkg-query fail; it still lists the others.
+    - name: Read the Docker package versions
+      ansible.builtin.command:
+        argv: "{{ ['dpkg-query', '-W', '-f=${Package} ${Version}\\n'] + cloudpanel_docker_packages }}"
+      register: cloudpanel_docker_before
+      changed_when: false
+      failed_when: false
+      when: cloudpanel_compose_reconcile | bool
+
+    - name: Read when Docker started
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=ActiveEnterTimestampMonotonic, --value, docker.service]
+      register: cloudpanel_docker_started_before
+      changed_when: false
+      failed_when: false
+      when: cloudpanel_compose_reconcile | bool
+
+    # The handlers of the roles before this one run now, after the list of
+    # compose projects: a Docker restart from the docker role (a changed
+    # daemon.json) stops containers, and the reconcile below starts them again.
+    - name: Run the handlers of the roles before
+      ansible.builtin.meta: flush_handlers
+
+    - name: Install CloudPanel
+      ansible.builtin.include_tasks: install.yml
+      when: not cloudpanel_installed
+
+    - name: Note that the updates begin
+      ansible.builtin.set_fact:
+        cloudpanel_changes_started: true
+
+    - name: Update CloudPanel and the system packages
+      ansible.builtin.include_tasks: update.yml
+      when: cloudpanel_update | bool
+
+    - name: Reboot if required
+      ansible.builtin.include_tasks: reboot.yml
+
+    - name: Start the compose projects again
+      ansible.builtin.include_tasks: compose.yml
+      when:
+        - cloudpanel_compose_reconcile | bool
+        - cloudpanel_compose_projects | length > 0
+
+    # After the updates, before the health check that also covers them.
+    - name: Add the error pages to nginx
+      ansible.builtin.include_tasks: error_pages.yml
+      when: cloudpanel_error_pages_enabled | bool
+
+    - name: Check the sites and the CloudPanel UI
+      ansible.builtin.include_tasks: health.yml
+      when: cloudpanel_health_targets | length > 0
+
+  rescue:
+    - name: Note the step that failed
+      ansible.builtin.set_fact:
+        cloudpanel_failed_step: "{{ ansible_failed_task.name }}"
+        cloudpanel_failed_msg: "{{ ansible_failed_result.msg | default('') }}"
+        cloudpanel_health_after_failure: >-
+          {{ cloudpanel_changes_started | default(false) | bool
+             and not (cloudpanel_health_started | default(false) | bool)
+             and cloudpanel_health_targets | length > 0 }}
+
+    # A failed update, reboot or error pages step can leave sites down; the
+    # report says so instead of leaving it to the next run.
+    - name: Check the sites after the failure
+      when: cloudpanel_health_after_failure | bool
+      block:
+        - name: Run the health check after the failure
+          ansible.builtin.include_tasks: health.yml
+          vars:
+            cloudpanel_health_report_only: true
+      rescue:
+        - name: Note that the health check could not run
+          ansible.builtin.set_fact:
+            cloudpanel_health_failures:
+              - "the health check itself failed: {{ ansible_failed_result.msg | default('') }}"
+
+    - name: Fail with the step that failed
+      ansible.builtin.fail:
+        msg: >-
+          CloudPanel step failed: {{ cloudpanel_failed_step }}: {{ cloudpanel_failed_msg
+          }}{{ (' | Health check after the failure: ' ~ cloudpanel_health_summary)
+               if cloudpanel_health_after_failure | bool else '' }}
+      vars:
+        cloudpanel_health_summary: >-
+          {{ cloudpanel_health_failures | join('; ') if cloudpanel_health_failures | length > 0
+             else 'every URL answered below 500' }}

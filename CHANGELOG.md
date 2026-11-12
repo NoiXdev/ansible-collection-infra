@@ -56,6 +56,67 @@
   `--admin-password-file`, so the five-minute setup window no longer applies. The role keeps the
   password in a file with mode `0600` and recreates the container when it changes. Portainer
   ignores it once an admin exists, so changing it later does not change the password.
+- `cloudpanel`: new role for CloudPanel CE v2 on Ubuntu 24.04 (any other release is refused
+  before the host is changed). Where CloudPanel is not installed (no `clpctl`), it checks that
+  SSH runs on port 22 (the installer's firewall opens only 22), downloads the official installer
+  (`cloudpanel_installer_url`), verifies it against `cloudpanel_installer_sha256`, runs it with
+  `cloudpanel_db_engine` (default `MARIADB_11.4`) and `cloudpanel_swap`, and removes it right
+  after the run. It never runs the installer where CloudPanel exists or has left traces
+  (`/home/clp`, or any dpkg state of `cloudpanel`), and refuses a `cloudpanel` package that is
+  not fully installed. With `cloudpanel_admin_user`,
+  `cloudpanel_admin_email` and `cloudpanel_admin_password` it creates the first admin with
+  `clpctl user:add` on the fresh install; without them the owner finishes CloudPanel's first-visit
+  setup. Sets the fact `cloudpanel_installed`.
+- `cloudpanel`: every run (`cloudpanel_update`) runs `clp-update` (changed when the CloudPanel
+  version changed) and then upgrades all packages with `apt-get dist-upgrade`, keeping changed
+  config files and without autoremove. A simulated upgrade runs first: if it would remove or
+  downgrade packages, the run fails and names them before anything is upgraded. When
+  `/var/run/reboot-required` exists after the updates it reboots (`cloudpanel_reboot`,
+  `cloudpanel_reboot_timeout`, `cloudpanel_reboot_boot_time_command`) and waits until nginx,
+  PHP-FPM, the database and CloudPanel are all active; a required reboot that is not taken is a
+  warning and the fact `cloudpanel_reboot_pending`. The handlers of the roles before it run right
+  after it has listed the running compose projects; after a reboot, a Docker package upgrade or
+  a restart of Docker it runs `docker compose up -d --no-recreate` for each of them
+  (`cloudpanel_compose_reconcile`), skipping with a warning projects whose compose files are
+  missing and hosts without the compose plugin. Then it requests `cloudpanel_health_urls` and the
+  UI at `https://<cloudpanel_ui_host>:8443` (`cloudpanel_ui_check`) from the Ansible controller;
+  a 5xx or no answer within `cloudpanel_health_timeout` seconds per URL (requests of at most 10
+  seconds, 5 seconds apart) fails the run. Every failure names its step; nothing is rolled back.
+  A failure from the updates on still runs the health check and adds its result to the message.
+  A run on an up-to-date server changes nothing.
+- `cloudpanel`: noix error pages in CloudPanel's nginx (`cloudpanel_error_pages_enabled`, default
+  `true`). The role exports the pages of `cloudpanel_error_pages_image` (default
+  `noixdev/error-pages:1.0.0`) once with Docker to static files in `cloudpanel_error_pages_dir`
+  (default `/var/www/noix-error-pages`), in theme `cloudpanel_error_pages_theme` (default `classic`)
+  and with `cloudpanel_error_pages_env` (languages and the rest, as on the Traefik hosts); no
+  container keeps running, and a new image, theme or environment exports them again. nginx starts
+  each page in the first language of the browser that the pages offer. The default codes
+  (`cloudpanel_error_pages_default_codes`, default `502, 504, 413, 414`) are `error_page` lines at
+  http level (`sites-enabled/noix-error-pages-http.conf`), which a vhost's own `error_page`
+  replaces; `include /etc/nginx/noix-error-pages.conf;` in each server block serves the files.
+  The role adds that line to CloudPanel's system vhost templates (new sites; CloudPanel imports
+  them again every day and on updates, so every run checks them) and once to each existing
+  site's vhost, in CloudPanel's database (what the vhost editor shows and saves) and in the vhost
+  file (LF or CRLF, as the vhost editor stored it). A site whose include was removed in the
+  vhost editor is reported, never changed again (fact `cloudpanel_error_pages_without`; the
+  record keeps the site's id and creation time, so a site recreated under the same domain counts
+  as new, and a lost record, or an include added by hand before the first run, reports instead
+  of patching, fact `cloudpanel_error_pages_record_lost`). Nothing nginx rejects is left in place: an nginx
+  configuration that fails `nginx -t` before the run is reported as such and nothing is changed;
+  the vhosts are written, `nginx -t` runs before CloudPanel's database is committed, and when it
+  or the commit fails, each file is restored on its own (a file that cannot be restored is
+  named), the transaction is rolled back and the run fails; the three nginx files are kept with
+  a backup until `nginx -t` passed. System templates with an `error_page` of their
+  own are reported (fact `cloudpanel_error_pages_template_overrides`). A new export goes live
+  with one rename and checks that every page has the theme.
+  `include /etc/nginx/noix-error-pages-all.conf;` opts a site in to a page for every 4xx and 5xx.
+- `cloudpanel`: maintenance switch. `/usr/local/sbin/noix-maintenance on|off|status` shows the
+  maintenance page instead of the 5xx pages nginx generates, on every site of the server, and
+  reloads nginx; sites that answer are not affected. It runs `nginx -t` first and switches
+  nothing when it fails, and switches back when the reload fails. Every run sets it to
+  `cloudpanel_maintenance` (default `false`).
+- `noixdev.infra.warn`: action that shows a message as an Ansible warning without failing the
+  run (used by `cloudpanel`).
 
 ## 0.4.0 — 2026-11-11
 

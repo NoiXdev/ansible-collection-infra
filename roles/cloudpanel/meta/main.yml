@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: CloudPanel CE v2, installed and kept updated with reboots and health checks
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

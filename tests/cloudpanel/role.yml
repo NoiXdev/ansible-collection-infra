@@ -1,0 +1,7 @@
+---
+# The cloudpanel role alone, for checks that must fail before any host change.
+- name: Converge the cloudpanel role only
+  hosts: all
+  vars_files: [vars.yml]
+  roles:
+    - noixdev.infra.cloudpanel

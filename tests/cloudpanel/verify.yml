@@ -1,0 +1,43 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Request the CloudPanel UI from the controller
+      ansible.builtin.uri:
+        url: "https://{{ cloudpanel_ui_host }}:8443/"
+        validate_certs: false
+        follow_redirects: none
+        status_code: [200, 301, 302]
+      delegate_to: localhost
+
+    - name: Read the CloudPanel state
+      ansible.builtin.command:
+        cmd: "{{ item }}"
+      loop:
+        - clpctl user:list
+        - dpkg-query -W -f=${Version} cloudpanel
+        - systemctl is-active nginx mariadb
+        - test -e /root/cloudpanel-install.sh
+        # CloudPanel appends PasswordAuthentication yes to sshd_config; base's
+        # drop-in, read first, must still win. With socket activation no sshd
+        # has created /run/sshd after a reboot yet, and sshd -T needs it.
+        - bash -c 'install -d -m 0755 /run/sshd && sshd -T'
+      register: verify_cp
+      changed_when: false
+      failed_when: false
+
+    - name: Check it
+      ansible.builtin.assert:
+        that:
+          - verify_cp.results[0].rc == 0
+          - "'admin@cloudpanel.test' in verify_cp.results[0].stdout"
+          - verify_cp.results[1].stdout is match('^\d+\.\d+\.\d+')
+          - verify_cp.results[2].stdout_lines == ['active', 'active']
+          # The installer is removed after a successful install.
+          - verify_cp.results[3].rc != 0
+          - "'passwordauthentication no' in verify_cp.results[4].stdout_lines"
+          - "'permitrootlogin without-password' in verify_cp.results[4].stdout_lines
+             or 'permitrootlogin prohibit-password' in verify_cp.results[4].stdout_lines"
+        fail_msg: "{{ verify_cp.results | map(attribute='stdout') | list }}"

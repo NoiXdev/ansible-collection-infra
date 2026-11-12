@@ -1,0 +1,263 @@
+---
+# The noix error pages in CloudPanel's nginx: static files exported once from
+# the error pages image, the default codes as error_page lines at http level,
+# and one include per server block that serves the files, added through
+# CloudPanel's own storage of the vhosts (files/error_pages_vhosts.py).
+
+# Before anything changes: a configuration that is already broken is not the
+# error pages' doing, and every nginx -t below would fail on it.
+- name: Test the nginx configuration before the error pages
+  ansible.builtin.command:
+    argv: [nginx, -t, -q]
+  register: cloudpanel_nginx_pretest
+  changed_when: false
+  failed_when: false
+
+- name: Check the nginx configuration before the error pages
+  ansible.builtin.assert:
+    that: cloudpanel_nginx_pretest.rc == 0
+    fail_msg: >-
+      nginx config already invalid before error pages: nginx -t fails before the role changed
+      anything for the error pages, so the cause is elsewhere (a vhost or a file in
+      {{ cloudpanel_nginx_dir }}). Fix it, then run again: {{ cloudpanel_nginx_pretest.stderr }}
+    quiet: true
+
+- name: Create the error pages directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ cloudpanel_error_pages_dir }}", mode: "0755"}
+    - {path: "{{ cloudpanel_error_pages_export | dirname }}", mode: "0755"}
+    - {path: "{{ cloudpanel_error_pages_state | dirname }}", mode: "0700"}
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Install the error pages export
+  ansible.builtin.template:
+    src: noix-error-pages-export.sh.j2
+    dest: "{{ cloudpanel_error_pages_export }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: cloudpanel_error_pages_export_script
+
+- name: Read the last export of the error pages
+  ansible.builtin.slurp:
+    src: "{{ cloudpanel_error_pages_dir }}/current/export.json"
+  register: cloudpanel_error_pages_exported
+  failed_when: false
+
+# Again whenever the export changed (image, theme, environment, codes) or did
+# not finish. Only then is Docker needed.
+- name: Note whether the error pages need an export
+  ansible.builtin.set_fact:
+    cloudpanel_error_pages_export_needed: >-
+      {{ cloudpanel_error_pages_exported.content is not defined
+         or (cloudpanel_error_pages_exported.content | b64decode | from_json).script | default('')
+            != cloudpanel_error_pages_export_script.checksum }}
+
+- name: Look for Docker
+  ansible.builtin.command:
+    argv: [docker, version, --format, "{{ '{{' }}.Server.Version{{ '}}' }}"]
+  register: cloudpanel_docker_version
+  changed_when: false
+  failed_when: false
+  when: cloudpanel_error_pages_export_needed | bool
+
+- name: Check that Docker runs
+  ansible.builtin.assert:
+    that: cloudpanel_docker_version.rc == 0
+    fail_msg: >-
+      The error pages are exported from {{ cloudpanel_error_pages_image }} with Docker
+      (run the docker role first), but `docker version` failed:
+      {{ cloudpanel_docker_version.stderr | default(cloudpanel_docker_version.msg | default('')) }}
+    quiet: true
+  when: cloudpanel_error_pages_export_needed | bool
+
+- name: Export the error pages
+  ansible.builtin.command:
+    argv: ["{{ cloudpanel_error_pages_export }}"]
+  register: cloudpanel_error_pages_export_run
+  changed_when: true
+  failed_when: false
+  when: cloudpanel_error_pages_export_needed | bool
+
+- name: Check the export of the error pages
+  ansible.builtin.assert:
+    that: cloudpanel_error_pages_export_run.rc == 0
+    fail_msg: "{{ cloudpanel_error_pages_export }} failed: {{ cloudpanel_error_pages_export_run.stderr }}"
+    quiet: true
+  when: cloudpanel_error_pages_export_run is not skipped
+
+- name: Note the languages of the error pages
+  ansible.builtin.set_fact:
+    cloudpanel_error_pages_languages: >-
+      {{ (cloudpanel_error_pages_export_run.stdout if cloudpanel_error_pages_export_run is not skipped
+          else cloudpanel_error_pages_exported.content | b64decode) | from_json }}
+
+# Kept with a backup until nginx -t passed: a configuration nginx rejects is
+# never left in place.
+- name: Install the nginx configuration of the error pages
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  loop:
+    - {src: noix-error-pages-http.conf.j2, dest: "{{ cloudpanel_error_pages_http_conf }}"}
+    - {src: noix-error-pages.conf.j2, dest: "{{ cloudpanel_error_pages_include }}"}
+    - {src: noix-error-pages-all.conf.j2, dest: "{{ cloudpanel_error_pages_include_all }}"}
+  loop_control:
+    label: "{{ item.dest }}"
+  register: cloudpanel_error_pages_nginx
+
+- name: Test the nginx configuration of the error pages
+  ansible.builtin.command:
+    argv: [nginx, -t, -q]
+  register: cloudpanel_nginx_test
+  changed_when: false
+  failed_when: false
+  when: cloudpanel_error_pages_nginx.results | selectattr('changed') | list | length > 0
+
+- name: Put back the nginx configuration nginx rejected
+  ansible.builtin.copy:
+    src: "{{ item.backup_file }}"
+    dest: "{{ item.dest }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ cloudpanel_error_pages_nginx.results | selectattr('changed') | selectattr('backup_file', 'defined') }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  when: cloudpanel_nginx_test.rc | default(0) != 0
+
+- name: Remove the new nginx configuration nginx rejected
+  ansible.builtin.file:
+    path: "{{ item.dest }}"
+    state: absent
+  loop: "{{ cloudpanel_error_pages_nginx.results | selectattr('changed') | rejectattr('backup_file', 'defined') }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  when: cloudpanel_nginx_test.rc | default(0) != 0
+
+- name: Remove the backups of the nginx configuration
+  ansible.builtin.file:
+    path: "{{ item.backup_file }}"
+    state: absent
+  loop: "{{ cloudpanel_error_pages_nginx.results | selectattr('changed') | selectattr('backup_file', 'defined') }}"
+  loop_control:
+    label: "{{ item.backup_file }}"
+
+- name: Check the nginx test
+  ansible.builtin.assert:
+    that: cloudpanel_nginx_test.rc | default(0) == 0
+    fail_msg: >-
+      nginx -t failed with the new error pages configuration; the previous files are back
+      in place: {{ cloudpanel_nginx_test.stderr | default('') }}
+    quiet: true
+
+- name: Install noix-maintenance
+  ansible.builtin.template:
+    src: noix-maintenance.sh.j2
+    dest: "{{ cloudpanel_maintenance_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Look for the maintenance switch
+  ansible.builtin.stat:
+    path: "{{ cloudpanel_error_pages_dir }}/active"
+  register: cloudpanel_error_pages_active
+
+# Only where it is missing: noix-maintenance switches it.
+- name: Serve the error pages
+  ansible.builtin.file:
+    src: current/pages
+    dest: "{{ cloudpanel_error_pages_dir }}/active"
+    state: link
+    owner: root
+    group: root
+  when: not cloudpanel_error_pages_active.stat.exists
+
+# The script runs nginx -t before it commits anything: a vhost nginx rejects
+# with the include is restored, in the file and in CloudPanel's database.
+- name: Add the include to CloudPanel's vhost templates and vhosts
+  ansible.builtin.script:
+    cmd: >-
+      error_pages_vhosts.py {{ cloudpanel_db | quote }} {{ cloudpanel_nginx_sites_dir | quote }}
+      {{ cloudpanel_error_pages_include | quote }} {{ cloudpanel_error_pages_state | quote }}
+    executable: python3
+  register: cloudpanel_error_pages_vhosts
+  changed_when: cloudpanel_error_pages_vhosts.rc == 0 and (cloudpanel_error_pages_vhosts.stdout | from_json).changed
+  failed_when: false
+
+- name: Check the vhost changes
+  ansible.builtin.assert:
+    that: cloudpanel_error_pages_vhosts.rc == 0
+    fail_msg: "{{ cloudpanel_error_pages_vhosts.stderr | default(cloudpanel_error_pages_vhosts.msg) }}"
+    quiet: true
+
+- name: Reload nginx
+  ansible.builtin.systemd_service:
+    name: nginx
+    state: reloaded
+  when: cloudpanel_error_pages_nginx is changed or cloudpanel_error_pages_vhosts is changed
+
+- name: Read the maintenance switch
+  ansible.builtin.command:
+    argv: ["{{ cloudpanel_maintenance_script }}", status]
+  register: cloudpanel_maintenance_state
+  changed_when: false
+
+- name: Switch maintenance {{ 'on' if cloudpanel_maintenance | bool else 'off' }}
+  ansible.builtin.command:
+    argv: ["{{ cloudpanel_maintenance_script }}", "{{ 'on' if cloudpanel_maintenance | bool else 'off' }}"]
+  changed_when: true
+  when: cloudpanel_maintenance_state.stdout != ('on' if cloudpanel_maintenance | bool else 'off')
+
+- name: Note the vhosts without the error pages include
+  ansible.builtin.set_fact:
+    cloudpanel_error_pages_without: "{{ (cloudpanel_error_pages_vhosts.stdout | from_json).without }}"
+    cloudpanel_error_pages_template_overrides: "{{ (cloudpanel_error_pages_vhosts.stdout | from_json).overrides }}"
+    cloudpanel_error_pages_record_lost: "{{ (cloudpanel_error_pages_vhosts.stdout | from_json).record_lost }}"
+
+- name: Report that the record of the sites is missing
+  ansible.builtin.debug:
+    msg: >-
+      {{ cloudpanel_error_pages_state }} was missing although some sites already have the error
+      pages include, so no site was patched in this run. Either the role's record of the sites
+      was lost (host rebuilt or moved, file removed), or someone added the include by hand
+      before the role's first run. The record now lists every site; add the include in the
+      vhost editor to the sites below that should have the error pages.
+  when: cloudpanel_error_pages_record_lost | bool
+
+# Not added again: the include was removed in the vhost editor, the vhost has
+# no server block, or the role's record of the sites was missing (see above).
+- name: Report the vhosts without the error pages include
+  ansible.builtin.debug:
+    msg: >-
+      Sites without the error pages include: {{ cloudpanel_error_pages_without | join(', ') }}.
+      nginx still sends the default codes to /noix-error-pages/ there, which these sites do
+      not serve. Mostly nginx's own page then shows (tested for 413 and 502); where the
+      redirect gets through `location /` of a PHP or reverse-proxy site, the application or
+      the backend answers it instead (for a 504 that is a second slow request). Add
+      `include {{ cloudpanel_error_pages_include }};` to their server blocks in the vhost editor
+      to give them the error pages again.
+  when: cloudpanel_error_pages_without | length > 0
+
+# A server block with an error_page of its own replaces all the default codes
+# for its sites.
+- name: Report the vhost templates with error pages of their own
+  ansible.builtin.debug:
+    msg: >-
+      CloudPanel's vhost templates with an error_page of their own:
+      {{ cloudpanel_error_pages_template_overrides | join(', ') }}. Where it is set at server
+      level, sites made from them do not get the default error pages.
+  when: cloudpanel_error_pages_template_overrides | length > 0

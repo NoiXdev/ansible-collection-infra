@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# noix-maintenance on|off|status
+#
+# Switches the pages nginx shows for the 5xx errors it generates itself (502,
+# 504, and every 5xx of the full set) between the error pages and the
+# maintenance page, for every site on this server, and reloads nginx. It
+# changes nothing else: a site that answers keeps answering as before.
+# The Ansible role sets it to cloudpanel_maintenance on every run.
+set -Eeuo pipefail
+
+dir={{ cloudpanel_error_pages_dir | quote }}
+active="$dir/active"
+
+state() {
+  if [ "$(readlink "$active" || true)" = current/maintenance ]; then echo on; else echo off; fi
+}
+
+case "${1:-}" in
+  status)
+    state
+    exit 0
+    ;;
+  on) target=current/maintenance ;;
+  off) target=current/pages ;;
+  *)
+    echo "usage: noix-maintenance on|off|status" >&2
+    exit 2
+    ;;
+esac
+
+[ -d "$dir/$target" ] || { echo "$dir/$target is missing; run the Ansible role first." >&2; exit 1; }
+if [ "$(state)" = "$1" ] && [ -L "$active" ]; then
+  echo "Maintenance is already $1."
+  exit 0
+fi
+# Tested first: when nginx rejects its configuration, nothing is switched.
+if ! out="$(nginx -t 2>&1)"; then
+  echo "nginx -t failed; maintenance is still $(state): $out" >&2
+  exit 1
+fi
+previous="$(readlink "$active" || true)"
+ln -sfn "$target" "$active.new"
+mv -T "$active.new" "$active"
+# nginx reads the pages through the link on every request, so the switch is
+# live before the reload. A failed reload switches it back.
+if ! out="$(systemctl reload nginx 2>&1)"; then
+  if [ -n "$previous" ]; then
+    ln -sfn "$previous" "$active.new"
+    mv -T "$active.new" "$active"
+  fi
+  echo "Reloading nginx failed, so the switch was undone; maintenance is $(state): $out" >&2
+  exit 1
+fi
+echo "Maintenance is $1."

@@ -62,3 +62,17 @@ jobs:
       - run: pip install ansible-core
       - run: ansible-galaxy collection install community.docker community.general ansible.posix
       - run: tests/harbor/run.sh
+
+  cloudpanel:
+    # CloudPanel's real installer on the systemd Ubuntu 24.04 test host.
+    runs-on: ubuntu-24.04
+    needs: lint
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install ansible-core
+      - run: ansible-galaxy collection install community.docker community.general ansible.posix
+      - run: tests/cloudpanel/run.sh

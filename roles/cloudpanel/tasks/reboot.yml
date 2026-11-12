@@ -1,0 +1,71 @@
+---
+# A reboot only after this run's updates (cloudpanel_update); one that is
+# required otherwise is reported as a warning.
+- name: Check whether a reboot is required
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: cloudpanel_reboot_required
+
+- name: Note whether a reboot is pending
+  ansible.builtin.set_fact:
+    cloudpanel_reboot_pending: >-
+      {{ cloudpanel_reboot_required.stat.exists
+         and not (cloudpanel_update | bool and cloudpanel_reboot | bool) }}
+
+- name: Report that a reboot is required but not taken
+  noixdev.infra.warn:
+    msg: >-
+      A reboot is required (/var/run/reboot-required), but the host was not rebooted because
+      {{ 'cloudpanel_update' if not cloudpanel_update | bool else 'cloudpanel_reboot' }} is false.
+      Reboot it in a quiet hour.
+  when: cloudpanel_reboot_pending | bool
+
+- name: Reboot the host
+  ansible.builtin.reboot:
+    msg: Reboot after updates (Ansible role cloudpanel)
+    reboot_timeout: "{{ cloudpanel_reboot_timeout }}"
+    boot_time_command: "{{ cloudpanel_reboot_boot_time_command }}"
+  register: cloudpanel_reboot_result
+  when:
+    - cloudpanel_reboot_required.stat.exists
+    - cloudpanel_update | bool
+    - cloudpanel_reboot | bool
+
+- name: Note whether the host was rebooted
+  ansible.builtin.set_fact:
+    cloudpanel_rebooted: "{{ cloudpanel_reboot_result.rebooted | default(false) }}"
+
+- name: Find the enabled PHP-FPM services
+  ansible.builtin.service_facts:
+  when: cloudpanel_rebooted
+
+# mysql is the database's unit for MySQL and an alias of mariadb for MariaDB.
+- name: Wait for nginx, PHP-FPM, the database and CloudPanel
+  ansible.builtin.command:
+    argv: "{{ ['systemctl', 'is-active'] + cloudpanel_wait_units }}"
+  register: cloudpanel_units_active
+  changed_when: false
+  failed_when: false
+  # is-active exits 0 when any one unit is active: every line must say so.
+  until: cloudpanel_units_active.stdout_lines | select('equalto', 'active') | list | length == cloudpanel_wait_units | length
+  retries: "{{ (cloudpanel_reboot_timeout | int / 5) | int }}"
+  delay: 5
+  vars:
+    cloudpanel_wait_units: >-
+      {{ cloudpanel_services + ['mysql']
+         + ansible_facts.services.values() | selectattr('name', 'match', '^php[0-9.]+-fpm\\.service$')
+           | selectattr('status', 'equalto', 'enabled') | map(attribute='name') | sort
+         + (['docker'] if cloudpanel_compose_projects | length > 0 else []) }}
+  when: cloudpanel_rebooted
+
+- name: Check that the services are active after the reboot
+  ansible.builtin.assert:
+    that: cloudpanel_units_active.stdout_lines | select('equalto', 'active') | list | length == cloudpanel_wait_units | length
+    fail_msg: >-
+      Not active {{ cloudpanel_reboot_timeout }} seconds after the reboot:
+      {{ cloudpanel_wait_units | zip(cloudpanel_units_active.stdout_lines)
+         | rejectattr(1, 'equalto', 'active') | map('join', ' is ') | join(', ') }}.
+    quiet: true
+  vars:
+    cloudpanel_wait_units: "{{ cloudpanel_units_active.cmd[2:] }}"
+  when: cloudpanel_rebooted
