@@ -34,6 +34,8 @@ if [ "$arch" != x86_64 ]; then
   echo "Docker Desktop on Apple silicon: install Rosetta 2 (softwareupdate --install-rosetta)," >&2
   echo "turn on its Rosetta emulation in Settings > General and restart Docker Desktop." >&2
   echo "Linux: register QEMU for amd64 (docker run --privileged --rm tonistiigi/binfmt --install amd64)." >&2
+  echo "If it worked before, a privileged container that runs systemd-binfmt flushed the handlers" >&2
+  echo "(tests/host/Dockerfile masks it); restart Docker Desktop or register them again." >&2
   exit 1
 fi
 
