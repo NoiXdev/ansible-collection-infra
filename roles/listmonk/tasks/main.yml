@@ -1,0 +1,141 @@
+---
+- name: Check that listmonk_db_password is set
+  ansible.builtin.assert:
+    that: listmonk_db_password | default('') | string | length > 0
+    fail_msg: listmonk_db_password is required.
+    quiet: true
+
+# The names end up in SQL, compose and docker filters unquoted.
+- name: Check the listmonk settings
+  ansible.builtin.assert:
+    that:
+      - listmonk_version is match('^v\d+\.\d+\.\d+$')
+      - listmonk_dir is match('^/')
+      - listmonk_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - listmonk_name is match('^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+      - listmonk_bind | length > 0
+      - listmonk_port | int >= 1 and listmonk_port | int <= 65535
+      - listmonk_postgres_image | length > 0
+      - listmonk_db_user is match('^[a-z_][a-z0-9_]*$')
+      - listmonk_db_name is match('^[a-z_][a-z0-9_]*$')
+      - listmonk_dumps_keep | int >= 1
+      - listmonk_health_timeout | int > 0
+      - listmonk_postpone_limit | int >= 1
+    fail_msg: >-
+      listmonk_version must look like vX.Y.Z; listmonk_dir must be an absolute
+      path whose basename (the compose project) has only lowercase letters,
+      digits, - and _; listmonk_name only letters, digits, - and _;
+      listmonk_db_user and listmonk_db_name only lowercase letters, digits and
+      _; listmonk_bind and listmonk_postgres_image must be set, listmonk_port
+      a port; listmonk_dumps_keep, listmonk_health_timeout and
+      listmonk_postpone_limit must be positive.
+    quiet: true
+
+- name: Read the installation
+  ansible.builtin.include_tasks: state.yml
+
+# Written by update.yml after a failed update; it names the failed version.
+- name: Read the marker of a failed update
+  ansible.builtin.slurp:
+    src: "{{ listmonk_marker_file }}"
+  register: listmonk_marker_read
+  failed_when: false
+
+# A marker that is not YAML cannot say which version failed.
+- name: Check the marker of a failed update
+  when: listmonk_marker_read.content is defined
+  block:
+    - name: Parse the marker
+      ansible.builtin.set_fact:
+        listmonk_marker_yaml: "{{ listmonk_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Fail on a marker that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ listmonk_marker_file }} exists, but it is not YAML, so the role
+          cannot tell which listmonk update failed and changes nothing. Check
+          listmonk, then remove the file (rm {{ listmonk_marker_file }}).
+
+# A marker that names no version blocks every version.
+- name: Refuse the version of a failed update
+  ansible.builtin.fail:
+    msg: >-
+      {{ listmonk_marker_file }} exists: the listmonk update to
+      {{ listmonk_version }} failed on {{ listmonk_marker.time | default('?') }}
+      ({{ listmonk_marker_outcome }}; dump {{ listmonk_marker.dump | default('?') }}).
+      The role does not try {{ listmonk_version }} again and changes nothing
+      while the marker names it. To try again, remove it (rm
+      {{ listmonk_marker_file }}); or set listmonk_version to another version,
+      and the marker is removed once a run with it succeeds.
+  vars:
+    listmonk_marker: "{{ listmonk_marker_yaml if listmonk_marker_yaml is mapping else {} }}"
+    listmonk_marker_outcome: >-
+      {{ ('rolled back to ' ~ listmonk_marker.rolled_back_to) if listmonk_marker.rolled_back_to | default(none)
+         else 'the rollback failed too' }}
+  when:
+    - listmonk_marker_read.content is defined
+    - listmonk_marker.failed_version | default(listmonk_version) == listmonk_version
+
+- name: Check the first admin for the install
+  ansible.builtin.assert:
+    that:
+      - listmonk_admin_user | length > 0
+      - listmonk_admin_password | length > 0
+    fail_msg: >-
+      listmonk is not installed in {{ listmonk_dir }}; a fresh install needs
+      listmonk_admin_user and listmonk_admin_password.
+    quiet: true
+  when: listmonk_state == 'install'
+
+- name: Install listmonk
+  ansible.builtin.include_tasks: install.yml
+  when: listmonk_state == 'install'
+
+- name: Reconfigure listmonk
+  ansible.builtin.include_tasks: reconfigure.yml
+  when: listmonk_state == 'reconfigure'
+
+# Read-only: a run without changes starts and restarts nothing, but stays red
+# while listmonk is down.
+- name: Check that listmonk runs
+  when: listmonk_state == 'noop'
+  block:
+    - name: Fail when listmonk is not running
+      ansible.builtin.fail:
+        msg: >-
+          listmonk in {{ listmonk_dir }} is down: {{ listmonk_app_container }}
+          is not running. The role starts nothing on a run without changes;
+          start it with docker compose up -d in {{ listmonk_dir }}.
+      when: not listmonk_app_running
+
+    - name: Check that listmonk answers
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when listmonk does not answer
+      ansible.builtin.fail:
+        msg: >-
+          listmonk in {{ listmonk_dir }} is unhealthy: it does not answer on
+          {{ listmonk_health_url }} within {{ listmonk_health_timeout }} seconds.
+          The role restarts nothing on a run without changes; see docker logs
+          {{ listmonk_app_container }}.
+      when: not listmonk_healthy
+
+- name: Update listmonk
+  ansible.builtin.include_tasks: update.yml
+  when: listmonk_state == 'update'
+
+# Reached only by a run that succeeded. A postponed update keeps both; an
+# update that goes ahead has removed the count already (update.yml).
+- name: Remove the marker of a failed update of another version
+  ansible.builtin.file:
+    path: "{{ listmonk_marker_file }}"
+    state: absent
+  when:
+    - listmonk_marker_read.content is defined
+    - not listmonk_update_postponed | default(false)
+
+- name: Remove the count of postponed updates
+  ansible.builtin.file:
+    path: "{{ listmonk_postpone_file }}"
+    state: absent
+  when: not listmonk_update_postponed | default(false)

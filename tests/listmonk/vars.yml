@@ -1,0 +1,6 @@
+---
+# Test-only values; nothing here is a real secret. The database password
+# holds characters that need quoting in SQL, YAML and compose ($, ', ").
+listmonk_db_password: test-db-pa$s'w"ord-0
+listmonk_admin_user: test-admin
+listmonk_admin_password: Test-admin-password-0

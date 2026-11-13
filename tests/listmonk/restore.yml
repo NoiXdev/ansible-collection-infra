@@ -1,0 +1,63 @@
+---
+# The role's restore path onto a schema a newer listmonk migrated: a dump,
+# then a new table with a foreign key to subscribers and changed data, then
+# restore.yml. The new table must be gone and the data as in the dump.
+- name: Restore a dump onto a migrated schema
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  vars:
+    # Set by run.sh: the role's default listmonk_version.
+    verify_version: ""
+  tasks:
+    - name: Read the compose file
+      ansible.builtin.slurp:
+        src: /opt/listmonk/listmonk-app/docker-compose.yaml
+      register: compose_file
+      no_log: true
+
+    - name: Note what restore.yml puts back
+      ansible.builtin.set_fact:
+        listmonk_compose_before: "{{ compose_file.content | b64decode }}"
+        listmonk_running_version: "{{ verify_version }}"
+        listmonk_db_password_is_old: false
+      no_log: true
+
+    - name: Dump the database
+      ansible.builtin.include_role:
+        name: noixdev.infra.listmonk
+        tasks_from: dump
+
+    - name: Change the schema and the data as a migration would
+      ansible.builtin.command:
+        cmd: docker exec -i listmonk_app_db psql -U listmonk -d listmonk --no-psqlrc --set=ON_ERROR_STOP=1
+        stdin: |
+          CREATE TABLE extra (id serial PRIMARY KEY, subscriber_id int NOT NULL REFERENCES subscribers (id));
+          INSERT INTO extra (subscriber_id) SELECT id FROM subscribers WHERE email = 'old@example.test';
+          INSERT INTO subscribers (uuid, email, name, status) VALUES (gen_random_uuid(), 'new@example.test', 'New', 'enabled');
+          UPDATE subscribers SET name = 'Changed' WHERE email = 'old@example.test';
+      changed_when: true
+
+    - name: Restore the dump
+      ansible.builtin.include_role:
+        name: noixdev.infra.listmonk
+        tasks_from: restore
+
+    - name: Read the restored data
+      ansible.builtin.command:
+        cmd: >-
+          docker exec listmonk_app_db psql -U listmonk -d listmonk -tA -F ' ' -c
+          "SELECT to_regclass('public.extra') IS NULL,
+                  (SELECT count(*) FROM subscribers WHERE email = 'new@example.test'),
+                  (SELECT name FROM subscribers WHERE email = 'old@example.test')"
+      register: restored
+      changed_when: false
+
+    - name: Check the restore
+      ansible.builtin.assert:
+        that:
+          - listmonk_healthy
+          - listmonk_restore_error == ''
+          - restored.stdout == 't 0 Old'
+        fail_msg: "healthy: {{ listmonk_healthy }}; error: {{ listmonk_restore_error }}; data: {{ restored.stdout }}"
+        quiet: true

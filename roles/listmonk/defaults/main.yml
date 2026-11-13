@@ -1,0 +1,38 @@
+---
+# listmonk release (tag of listmonk/listmonk, vX.Y.Z). Newer than the running
+# version is an update; older is refused, listmonk cannot migrate down.
+listmonk_version: v6.2.0
+
+# Directory of the compose project (docker-compose.yaml, data, backups). Its
+# basename is the compose project name (compose's default), so an existing
+# installation in this layout is taken over in place.
+listmonk_dir: /opt/listmonk/listmonk-app
+# Containers <name>_db and <name>_app.
+listmonk_name: listmonk_app
+
+# Address and host port of listmonk's HTTP server; a reverse proxy in front
+# of it terminates TLS.
+listmonk_bind: 127.0.0.1
+listmonk_port: 9000
+
+listmonk_postgres_image: postgres:17
+listmonk_db_user: listmonk
+listmonk_db_name: listmonk
+# listmonk_db_password is required and has no default; keep it in a vault.
+# The password an existing installation's database uses, if it is not
+# listmonk_db_password yet (the old role used listmonk); the role then sets
+# listmonk_db_password.
+listmonk_db_password_old: listmonk
+
+# The first admin, created on a fresh install only (required there).
+listmonk_admin_user: ""
+listmonk_admin_password: ""
+
+# Dumps of the database taken before every change of a running installation
+# (backups/ in listmonk_dir); the newest listmonk_dumps_keep are kept.
+listmonk_dumps_keep: 3
+# Seconds to wait for listmonk to answer /health after a start.
+listmonk_health_timeout: 120
+# Runs in a row an update may be postponed (a campaign is sending) before
+# the run fails.
+listmonk_postpone_limit: 3

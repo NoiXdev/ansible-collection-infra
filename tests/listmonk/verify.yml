@@ -1,0 +1,71 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  vars:
+    listmonk_dir: /opt/listmonk/listmonk-app
+    # Set by run.sh: the role's default listmonk_version.
+    verify_version: ""
+    verify_port: 9000
+    # true after a rollback to an installation of the old role: the database
+    # takes the old password, not listmonk_db_password.
+    verify_old_password: false
+  tasks:
+    - name: Check that listmonk answers its health check
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ verify_port }}/health
+        return_content: true
+      register: health
+      until: health.status == 200 and (health.json | default({})).data | default(false) is true
+      retries: 12
+      delay: 5
+
+    - name: Inspect the listmonk containers
+      ansible.builtin.command:
+        cmd: docker inspect listmonk_app_db listmonk_app_app
+      register: containers
+      changed_when: false
+
+    - name: Stat the compose file
+      ansible.builtin.stat:
+        path: "{{ listmonk_dir }}/docker-compose.yaml"
+      register: compose_file
+
+    - name: Check the containers, their project and the compose file
+      ansible.builtin.assert:
+        that:
+          - db.Config.Labels['com.docker.compose.project'] == 'listmonk-app'
+          - app.Config.Labels['com.docker.compose.project'] == 'listmonk-app'
+          - db.State.Running and app.State.Running
+          - app.Config.Image == 'listmonk/listmonk:' ~ verify_version
+          - "app.HostConfig.PortBindings['9000/tcp'] == [{'HostIp': '127.0.0.1', 'HostPort': verify_port | string}]"
+          - db.HostConfig.PortBindings | default({}, true) | length == 0
+          - compose_file.stat.mode == '0600'
+        fail_msg: "{{ containers.stdout }}"
+        quiet: true
+      vars:
+        db: "{{ (containers.stdout | from_json)[0] }}"
+        app: "{{ (containers.stdout | from_json)[1] }}"
+
+    # 127.0.0.1 inside the database container is trusted without a password;
+    # the compose network address is not, as for listmonk itself.
+    - name: Connect to the database with listmonk_db_password
+      ansible.builtin.command:
+        cmd: docker exec -e PGPASSWORD listmonk_app_db psql -h db -U listmonk -d listmonk -tAc 'select 1'
+      environment:
+        PGPASSWORD: "{{ listmonk_db_password }}"
+      register: new_password
+      changed_when: false
+      failed_when: >-
+        (new_password.rc != 0) != verify_old_password | bool
+        or verify_old_password | bool and new_password.stderr is not search('password authentication failed')
+
+    - name: Connect to the database with the old password
+      ansible.builtin.command:
+        cmd: docker exec -e PGPASSWORD=listmonk listmonk_app_db psql -h db -U listmonk -d listmonk -tAc 'select 1'
+      register: old_password
+      changed_when: false
+      failed_when: >-
+        (old_password.rc == 0) != verify_old_password | bool
+        or not verify_old_password | bool and old_password.stderr is not search('password authentication failed')

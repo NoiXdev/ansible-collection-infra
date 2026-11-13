@@ -1,0 +1,51 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+# Managed by the noixdev.infra.listmonk role; changes are overwritten.
+services:
+  db:
+    image: {{ q(listmonk_postgres_image) }}
+    container_name: {{ q(listmonk_db_container) }}
+    environment:
+      POSTGRES_USER: {{ q(listmonk_db_user) }}
+      POSTGRES_PASSWORD: {{ q(listmonk_db_password) }}
+      POSTGRES_DB: {{ q(listmonk_db_name) }}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", {{ q(listmonk_db_user) }}, "-d", {{ q(listmonk_db_name) }}]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    volumes:
+      - ./data/postgresql/data:{{ listmonk_db_mount }}
+    networks: [listmonk]
+    restart: unless-stopped
+
+  app:
+    image: {{ q(listmonk_image ~ ':' ~ listmonk_version) }}
+    container_name: {{ q(listmonk_app_container) }}
+    # The schema is created if missing; updates run --upgrade as their own step.
+    command: [sh, -c, "./listmonk --install --idempotent --yes --config '' && exec ./listmonk --config ''"]
+    environment:
+      TZ: Etc/UTC
+      LISTMONK_app__address: 0.0.0.0:9000
+      LISTMONK_db__host: db
+      LISTMONK_db__port: 5432
+      LISTMONK_db__user: {{ q(listmonk_db_user) }}
+      LISTMONK_db__password: {{ q(listmonk_db_password) }}
+      LISTMONK_db__database: {{ q(listmonk_db_name) }}
+      LISTMONK_db__ssl_mode: disable
+      LISTMONK_db__max_open: 25
+      LISTMONK_db__max_idle: 25
+      LISTMONK_db__max_lifetime: 300s
+    ports:
+      - {{ q(('[' ~ listmonk_bind ~ ']' if ':' in listmonk_bind else listmonk_bind) ~ ':' ~ listmonk_port ~ ':9000') }}
+    volumes:
+      - ./data/listmonk/uploads:{{ listmonk_uploads_mount }}
+    networks: [listmonk]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  listmonk:

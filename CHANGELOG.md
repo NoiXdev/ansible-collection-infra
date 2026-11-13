@@ -13,6 +13,59 @@
   not on the tailnet yet gives a warning and no record, so the run stays green (also on a tailnet
   without peers, `"Peer": null`, and for a node without addresses, `"TailscaleIPs": null`); a host
   name shared by two nodes fails the run instead of picking one.
+- `listmonk`: new role that runs listmonk (`listmonk_version`, default `v6.2.0`) and PostgreSQL
+  (`listmonk_postgres_image`, default `postgres:17`) as one compose project in `listmonk_dir`
+  (default `/opt/listmonk/listmonk-app`; its basename is the project name), with the containers
+  `<listmonk_name>_db` and `<listmonk_name>_app` (default `listmonk_app`), the data in
+  `data/postgresql/data` and `data/listmonk/uploads`, and listmonk on `listmonk_bind:listmonk_port`
+  (default `127.0.0.1:9000`). The compose file `docker-compose.yaml` (mode `0600`) holds
+  `listmonk_db_password`, which is required; the first admin (`listmonk_admin_user`,
+  `listmonk_admin_password`) is needed for a fresh install only and is passed to listmonk's
+  `--install` without being written to the host. Each run reads the host and picks one state:
+  *install* (no compose file and no containers; refused over an existing database),
+  *reconfigure* (the running version equals the pin but the compose file or the database password
+  differs), *noop* (nothing differs) or *update* (a newer pin). The running version comes from
+  the app image's tag when it is `vX.Y.Z` and from the listmonk binary otherwise (such as
+  `latest`); a pin lower than the running version is refused before anything changes. A *noop*
+  run pulls, starts and restarts nothing, but fails when the app container is not running or
+  listmonk does not answer `/health` within `listmonk_health_timeout` seconds. Before it checks
+  the database password the role waits up to `listmonk_health_timeout` seconds for a database
+  that is still starting (after a reboot); only an authentication failure counts as a wrong
+  password.
+- `listmonk`: takes over an existing installation in this layout in place (such as one with the
+  image tag `latest` and the database password `listmonk`). Before it changes anything it checks
+  the compose file, the project, the container names and the data directories, and refuses with
+  the expected and the found layout when they differ; it also refuses a database that takes
+  neither `listmonk_db_password` nor `listmonk_db_password_old` (default `listmonk`). A
+  reconfigure dumps the database first (`pg_dump -Fc`, read back in full, to
+  `backups/<UTC time>-<version>.dump`, never overwriting one, the newest `listmonk_dumps_keep`
+  kept), sets `listmonk_db_password` when the database still uses the old one, writes the compose
+  file, recreates what changed and waits up to `listmonk_health_timeout` seconds for `/health`.
+  When any of that fails it puts the previous compose file (mode `0600`) and password back,
+  recreates the database empty and loads the dump into it (so tables a newer listmonk added do not
+  survive or block the restore), starts listmonk again and fails the run saying that it restored
+  the installation, or naming the dump to restore by hand.
+- `listmonk`: updates to a newer `listmonk_version`. A failed pull of the new image changes
+  nothing. Then the role dumps the database (as above, the dump named after the running
+  version), stops listmonk, sets `listmonk_db_password` when the database still uses
+  `listmonk_db_password_old` (an old installation updated on its first run), runs the new
+  release's `listmonk --upgrade --yes` against the database, writes the compose file with the new
+  version, starts listmonk and waits up to `listmonk_health_timeout` seconds for `/health`. Any
+  failure after the dump rolls back: the previous compose file, database password and the dump
+  (as for a reconfigure), and the run fails with "update to X failed, rolled back to Y", or
+  naming the dump to restore by hand when the rollback fails too. The compose file names the new
+  version only from the upgrade until a rollback, so a later `docker compose up -d` starts the
+  version that works.
+- `listmonk`: a failed update writes `update-failed` in `listmonk_dir` (`failed_version`,
+  `rolled_back_to`, `dump`, `time`). While it names the pinned version, every run fails before
+  changing anything and says how to clear it (remove the file, or pin another version); the
+  first successful run with another version removes it.
+- `listmonk`: an update waits while a campaign is sending (status `running`): the run stays
+  green with a warning and counts the postponed runs per version in `update-postponed` in
+  `listmonk_dir`; the run that reaches `listmonk_postpone_limit` (default 3) in a row fails. Like
+  a *noop* run, a postponed run starts and restarts nothing, but fails when the app container is
+  not running or listmonk does not answer `/health`. A run that goes ahead with the update
+  removes the count, and so does any other successful run.
 - `crowdsec`: reports what the role did not install or write, with a warning that never counts as
   a change; nothing is deleted. Reported are collections that `crowdsec_collections` does not list
   (the dependencies of listed collections, and of the reported ones, are not), sources in

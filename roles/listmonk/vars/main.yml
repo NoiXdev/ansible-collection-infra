@@ -1,0 +1,54 @@
+---
+# The compose project name: compose's default for the directory, which the
+# old role relied on.
+listmonk_project: "{{ listmonk_dir | basename }}"
+# The old role's file name, so the takeover replaces it instead of adding a
+# second compose file next to it.
+listmonk_compose_file: "{{ listmonk_dir }}/docker-compose.yaml"
+listmonk_backup_dir: "{{ listmonk_dir }}/backups"
+# Written after a failed update (failed_version, rolled_back_to, dump, time);
+# that version is not tried again while it exists.
+listmonk_marker_file: "{{ listmonk_dir }}/update-failed"
+# Updates postponed because a campaign was sending (version, count).
+listmonk_postpone_file: "{{ listmonk_dir }}/update-postponed"
+listmonk_db_container: "{{ listmonk_name }}_db"
+listmonk_app_container: "{{ listmonk_name }}_app"
+listmonk_image: listmonk/listmonk
+
+# Bind mounts the containers must have: host directory and container path.
+listmonk_db_data: "{{ listmonk_dir }}/data/postgresql/data"
+listmonk_db_mount: /var/lib/postgresql/data
+listmonk_uploads: "{{ listmonk_dir }}/data/listmonk/uploads"
+listmonk_uploads_mount: /listmonk_uploads
+
+# The compose file as the role writes it; compared with the one on disk.
+listmonk_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
+
+# Address the health check reaches listmonk at. /health needs no session
+# (/api/health does); listmonk serves it once it has connected to the
+# database and checked the schema at start.
+listmonk_health_host: >-
+  {{ '127.0.0.1' if listmonk_bind == '0.0.0.0'
+     else '[::1]' if listmonk_bind == '::'
+     else '[' ~ listmonk_bind ~ ']' if ':' in listmonk_bind
+     else listmonk_bind }}
+listmonk_health_url: http://{{ listmonk_health_host }}:{{ listmonk_port }}/health
+
+# In a rescue: the failed task and the first line of its error (the last line
+# of stderr for a command that only says it failed).
+listmonk_failure: >-
+  {{ ansible_failed_task.name }}:
+  {{ ((ansible_failed_result.stderr | default('') | trim).splitlines() or ['']) | last
+     if ansible_failed_result.msg | default('') is search('non-zero return code')
+     else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
+
+# After a failed restore: how to restore listmonk_dump by hand.
+listmonk_restore_hint: >-
+  Restore by hand in {{ listmonk_dir }}: put the previous compose file back,
+  run docker compose stop app, recreate the database (psql -U
+  {{ listmonk_db_user }} -d postgres in {{ listmonk_db_container }}:
+  DROP DATABASE "{{ listmonk_db_name }}" WITH (FORCE); CREATE DATABASE
+  "{{ listmonk_db_name }}" OWNER "{{ listmonk_db_user }}"), load the dump
+  with docker exec -i {{ listmonk_db_container }} pg_restore
+  --single-transaction -U {{ listmonk_db_user }} -d {{ listmonk_db_name }}
+  < {{ listmonk_dump }}, then docker compose up -d.

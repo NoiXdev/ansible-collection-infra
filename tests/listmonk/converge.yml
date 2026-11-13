@@ -1,0 +1,6 @@
+---
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  roles:
+    - noixdev.infra.listmonk

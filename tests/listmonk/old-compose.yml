@@ -1,0 +1,53 @@
+# yamllint disable-file
+# Ansible managed
+
+services:
+  db:
+    image: postgres:17
+    networks:
+      - listmonk
+    environment:
+      - POSTGRES_PASSWORD=listmonk
+      - POSTGRES_USER=listmonk
+      - POSTGRES_DB=listmonk
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U listmonk" ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    container_name: "listmonk_app_db"
+    volumes:
+      - ./data/postgresql/data:/var/lib/postgresql/data
+
+  app:
+    restart: unless-stopped
+    image:
+      listmonk/listmonk:__TAG__
+    ports:
+      - "127.0.0.1:9000:9000"
+    networks:
+      - listmonk
+    environment:
+      TZ: Etc/UTC
+      LISTMONK_app__address: 0.0.0.0:9000
+      LISTMONK_db__user: listmonk
+      LISTMONK_db__password: listmonk
+      LISTMONK_db__database: listmonk
+      LISTMONK_db__host: "db"
+      LISTMONK_db__port: 5432
+      LISTMONK_db__ssl_mode: disable
+      LISTMONK_db__max_open: 25
+      LISTMONK_db__max_idle: 25
+      LISTMONK_db__max_lifetime: 300s
+      LISTMONK_ADMIN_USER: admin           # If these (optional) are set during the first `docker compose up`, then the Super Admin user is automatically created.
+      LISTMONK_ADMIN_PASSWORD: Old-admin-password-0
+    container_name: "listmonk_app_app"
+    command: [sh, -c, "./listmonk --install --idempotent --yes --config '' && ./listmonk --upgrade --yes --config '' && ./listmonk --config ''"]
+    depends_on:
+      - db
+    volumes:
+      - ./data/listmonk/uploads:/listmonk_uploads
+
+networks:
+  listmonk:

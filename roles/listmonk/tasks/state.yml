@@ -1,0 +1,275 @@
+---
+# Reads the host and sets listmonk_state: install (no listmonk), update (the
+# pin is newer than the running version), reconfigure (same version, but the
+# compose file or the database password differs: a takeover or a changed
+# setting) or noop. Also sets listmonk_running_version, listmonk_compose_before
+# (the compose file on disk), listmonk_app_running and
+# listmonk_db_password_is_old (true when the database takes
+# listmonk_db_password_old and not listmonk_db_password, so the password is
+# still to be set). Changes nothing; waits for a starting database; refuses an
+# installation laid out otherwise than the role expects, a downgrade and a
+# database that takes neither password.
+
+- name: Read the compose file
+  ansible.builtin.slurp:
+    src: "{{ listmonk_compose_file }}"
+  register: listmonk_compose_read
+  failed_when: false
+  # It holds the database password.
+  no_log: true
+
+- name: Look for the containers of the compose project
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - --all
+      - --quiet
+      - --no-trunc
+      - --filter
+      - label=com.docker.compose.project={{ listmonk_project }}
+  register: listmonk_project_ids
+  changed_when: false
+
+- name: Look for the listmonk containers by name
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - --all
+      - --quiet
+      - --no-trunc
+      - --filter
+      - name=^{{ listmonk_db_container }}$
+      - --filter
+      - name=^{{ listmonk_app_container }}$
+  register: listmonk_named_ids
+  changed_when: false
+
+- name: Inspect the containers
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'inspect'] + listmonk_ids }}"
+  vars:
+    listmonk_ids: "{{ (listmonk_project_ids.stdout_lines + listmonk_named_ids.stdout_lines) | unique }}"
+  register: listmonk_inspect
+  changed_when: false
+  # The environment of the containers holds the database password.
+  no_log: true
+  when: listmonk_ids | length > 0
+
+# Each container as one line, compared with the expected ones.
+- name: Note what is on the host
+  ansible.builtin.set_fact:
+    listmonk_compose_before: "{{ listmonk_compose_read.content | default('') | b64decode }}"
+    listmonk_containers: "{{ listmonk_inspect.stdout | default('[]', true) | from_json }}"
+    listmonk_found: >-
+      {%- set found = [] -%}
+      {%- for c in listmonk_inspect.stdout | default('[]', true) | from_json -%}
+      {%-   set labels = c.Config.Labels | default({}, true) -%}
+      {%-   set binds = c.Mounts | default([], true) | selectattr('Type', 'equalto', 'bind') | list -%}
+      {%-   set _ = found.append(
+              (c.Name | regex_replace('^/', '')) ~ ' (project '
+              ~ (labels['com.docker.compose.project'] | default('none')) ~ ', service '
+              ~ (labels['com.docker.compose.service'] | default('none')) ~ ', directory '
+              ~ (labels['com.docker.compose.project.working_dir'] | default('none')) ~ ', mounts '
+              ~ ((binds | map(attribute='Source') | zip(binds | map(attribute='Destination'))
+                  | map('join', ':') | sort | join(' ')) or 'none') ~ ')') -%}
+      {%- endfor -%}
+      {{ found | sort }}
+    listmonk_expected: >-
+      {{ [listmonk_db_container ~ ' (project ' ~ listmonk_project ~ ', service db, directory '
+          ~ listmonk_dir ~ ', mounts ' ~ listmonk_db_data ~ ':' ~ listmonk_db_mount ~ ')',
+          listmonk_app_container ~ ' (project ' ~ listmonk_project ~ ', service app, directory '
+          ~ listmonk_dir ~ ', mounts ' ~ listmonk_uploads ~ ':' ~ listmonk_uploads_mount ~ ')']
+         | sort }}
+  no_log: true
+
+- name: Note whether listmonk is installed
+  ansible.builtin.set_fact:
+    listmonk_installed: "{{ listmonk_compose_read.content is defined or listmonk_containers | length > 0 }}"
+    listmonk_running_version: ""
+
+# A database without containers would get listmonk_db_password only on
+# initdb, which skips an existing database.
+- name: Look for a database without listmonk
+  ansible.builtin.stat:
+    path: "{{ listmonk_db_data }}/PG_VERSION"
+    get_checksum: false
+  register: listmonk_orphan_db
+  when: not listmonk_installed
+
+- name: Refuse to install over an existing database
+  ansible.builtin.fail:
+    msg: >-
+      {{ listmonk_db_data }} holds a PostgreSQL database, but there is no
+      compose file and no listmonk container. The role does not install over
+      it; move it away, or put back the compose file and containers that use
+      it so the role can take them over.
+  when:
+    - not listmonk_installed
+    - listmonk_orphan_db.stat.exists
+
+- name: Check the layout of the installation
+  ansible.builtin.assert:
+    that:
+      - listmonk_compose_read.content is defined
+      - listmonk_found == listmonk_expected
+    fail_msg: >-
+      The listmonk installation in {{ listmonk_dir }} is not laid out as the
+      role expects, so the role changes nothing. Expected: the compose file
+      {{ listmonk_compose_file }} and exactly these containers:
+      {{ listmonk_expected | join('; ') }}. Found: the compose file
+      {{ 'present' if listmonk_compose_read.content is defined else 'missing' }}
+      and {{ (listmonk_found | join('; ')) if listmonk_found else 'no containers' }}.
+      Read the directory and container names from the host (docker inspect)
+      and set listmonk_dir and listmonk_name to them.
+    quiet: true
+  when: listmonk_installed
+
+- name: Read the installed listmonk
+  when: listmonk_installed
+  vars:
+    listmonk_app_info: >-
+      {{ listmonk_containers | selectattr('Name', 'equalto', '/' ~ listmonk_app_container) | first }}
+    listmonk_db_info: >-
+      {{ listmonk_containers | selectattr('Name', 'equalto', '/' ~ listmonk_db_container) | first }}
+  block:
+    # A tag such as latest is not a version: then the binary of the app
+    # container's image says what runs.
+    - name: Read the version of the listmonk binary
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network=none
+          - --entrypoint=/listmonk/listmonk
+          - "{{ listmonk_app_info.Image }}"
+          - --version
+      register: listmonk_binary_version
+      changed_when: false
+      when: listmonk_app_info.Config.Image is not match('^[^@]*:v\d+\.\d+\.\d+$')
+
+    - name: Note the running version
+      ansible.builtin.set_fact:
+        listmonk_app_running: "{{ listmonk_app_info.State.Running }}"
+        listmonk_running_version: >-
+          {{ listmonk_app_info.Config.Image.split(':')[-1] if listmonk_binary_version is skipped
+             else listmonk_binary_version.stdout | regex_search('^v\d+\.\d+\.\d+') | default('', true) }}
+
+    - name: Check the running version
+      ansible.builtin.assert:
+        that: listmonk_running_version | length > 0
+        fail_msg: >-
+          Cannot read the version of listmonk in {{ listmonk_app_container }}
+          (image {{ listmonk_app_info.Config.Image }}):
+          {{ listmonk_binary_version.stdout | default('') }} {{ listmonk_binary_version.stderr | default('') }}
+        quiet: true
+
+    - name: Refuse a downgrade
+      ansible.builtin.fail:
+        msg: >-
+          listmonk_version {{ listmonk_version }} is lower than the running
+          version {{ listmonk_running_version }} in {{ listmonk_dir }}; the role
+          refuses to downgrade, listmonk cannot migrate its database down. Set
+          listmonk_version to {{ listmonk_running_version }} or newer.
+      when: listmonk_version[1:] is version(listmonk_running_version[1:], '<')
+
+    # The run may follow a reboot or a compose reconcile, so the database can
+    # still be starting. Over the compose network, as listmonk connects.
+    - name: Note when the wait for the database starts
+      ansible.builtin.set_fact:
+        listmonk_wait_start: "{{ now().timestamp() }}"
+
+    # retries is an upper bound; the deadline ends the wait after
+    # listmonk_health_timeout seconds.
+    - name: Wait for the database
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ listmonk_db_container }}"
+          - pg_isready
+          - --host=db
+          - --username={{ listmonk_db_user }}
+          - --dbname={{ listmonk_db_name }}
+          - --timeout=2
+      register: listmonk_db_ready
+      until: >-
+        listmonk_db_ready.rc == 0
+        or now().timestamp() - listmonk_wait_start | float >= listmonk_health_timeout | int
+      retries: "{{ (listmonk_health_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
+      delay: 2
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when the database is not ready
+      ansible.builtin.fail:
+        msg: >-
+          {{ listmonk_db_container }} does not accept connections after
+          {{ listmonk_health_timeout }} seconds
+          ({{ (listmonk_db_ready.stderr | default('') or listmonk_db_ready.stdout | default('')) | trim }}),
+          so the role cannot check its password and changes nothing. Start it
+          (docker compose up -d in {{ listmonk_dir }}) and run the role again.
+      when: listmonk_db_ready.rc != 0
+
+    # 127.0.0.1 inside the database container is trusted without a password,
+    # the compose network is not. Only an authentication failure means a wrong
+    # password; any other error fails with its message.
+    - name: Try listmonk_db_password on the database
+      ansible.builtin.command:
+        argv: &listmonk_psql_check
+          - docker
+          - exec
+          - --env=PGPASSWORD
+          - "{{ listmonk_db_container }}"
+          - psql
+          - --host=db
+          - --username={{ listmonk_db_user }}
+          - --dbname={{ listmonk_db_name }}
+          - --no-psqlrc
+          - --tuples-only
+          - --command=SELECT 1
+      environment:
+        PGPASSWORD: "{{ listmonk_db_password }}"
+      register: listmonk_password_new
+      changed_when: false
+      failed_when: >-
+        listmonk_password_new.rc != 0
+        and listmonk_password_new.stderr is not search('password authentication failed')
+
+    - name: Try listmonk_db_password_old on the database
+      ansible.builtin.command:
+        argv: *listmonk_psql_check
+      environment:
+        PGPASSWORD: "{{ listmonk_db_password_old }}"
+      register: listmonk_password_old
+      changed_when: false
+      failed_when: >-
+        listmonk_password_old.rc != 0
+        and listmonk_password_old.stderr is not search('password authentication failed')
+      when: listmonk_password_new.rc != 0
+
+    - name: Refuse an unknown database password
+      ansible.builtin.fail:
+        msg: >-
+          The database of listmonk in {{ listmonk_dir }} takes neither
+          listmonk_db_password nor listmonk_db_password_old for the user
+          {{ listmonk_db_user }} ({{ listmonk_password_old.stderr | default('') | trim }}).
+          Set listmonk_db_password_old to the password it uses (the old compose
+          file's LISTMONK_db__password); the role changes nothing until then.
+      when:
+        - listmonk_password_new.rc != 0
+        - listmonk_password_old.rc | default(1) != 0
+
+    - name: Note whether the database password changes
+      ansible.builtin.set_fact:
+        listmonk_db_password_is_old: "{{ listmonk_password_new.rc != 0 }}"
+
+- name: Decide what to do
+  ansible.builtin.set_fact:
+    listmonk_state: >-
+      {{ 'install' if not listmonk_installed
+         else 'update' if listmonk_version[1:] is version(listmonk_running_version[1:], '>')
+         else 'reconfigure' if listmonk_compose_before != listmonk_compose or listmonk_db_password_is_old
+         else 'noop' }}

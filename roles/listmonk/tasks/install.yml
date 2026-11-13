@@ -1,0 +1,72 @@
+---
+# A fresh install: the compose file, the database, the schema with the first
+# admin, then listmonk; fails when listmonk does not answer.
+
+- name: Create the listmonk directory
+  ansible.builtin.file:
+    path: "{{ listmonk_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the compose file
+  ansible.builtin.copy:
+    dest: "{{ listmonk_compose_file }}"
+    content: "{{ listmonk_compose }}"
+    owner: root
+    group: root
+    mode: "0600"
+  # It holds the database password.
+  diff: false
+
+- name: Start the database
+  community.docker.docker_compose_v2:
+    project_src: "{{ listmonk_dir }}"
+    services: [db]
+    state: present
+    pull: missing
+    wait: true
+    wait_timeout: "{{ listmonk_health_timeout }}"
+
+# The admin's credentials come from the environment, so they stay out of the
+# compose file; listmonk reads them on --install only.
+- name: Create the schema and the first admin
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - run
+      - --rm
+      - --no-deps
+      - --env=LISTMONK_ADMIN_USER
+      - --env=LISTMONK_ADMIN_PASSWORD
+      - app
+      - ./listmonk
+      - --install
+      - --idempotent
+      - --yes
+      - --config
+      - ""
+    chdir: "{{ listmonk_dir }}"
+  environment:
+    LISTMONK_ADMIN_USER: "{{ listmonk_admin_user }}"
+    LISTMONK_ADMIN_PASSWORD: "{{ listmonk_admin_password }}"
+  changed_when: true
+
+- name: Start listmonk
+  community.docker.docker_compose_v2:
+    project_src: "{{ listmonk_dir }}"
+    state: present
+    pull: missing
+
+- name: Check that listmonk answers
+  ansible.builtin.include_tasks: health.yml
+
+- name: Fail when listmonk does not answer
+  ansible.builtin.fail:
+    msg: >-
+      listmonk {{ listmonk_version }} does not answer on {{ listmonk_health_url }}
+      within {{ listmonk_health_timeout }} seconds; see docker logs
+      {{ listmonk_app_container }}.
+  when: not listmonk_healthy

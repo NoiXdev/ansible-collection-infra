@@ -1,0 +1,290 @@
+---
+# The pin is newer than the running version. Postponed while a campaign is
+# sending (counted in listmonk_postpone_file; the run fails once
+# listmonk_postpone_limit runs in a row were postponed for this version, and
+# at once when listmonk is down, as a run without changes does). Otherwise:
+# the count is removed, then the new image (a failed pull changes nothing), a dump, listmonk
+# stopped, listmonk_db_password set if the database still uses the old one,
+# the schema upgraded by the new release, then the compose file with the new
+# version and listmonk started and checked. Any failure after the dump
+# restores it with the previous compose file and password (restore.yml),
+# writes listmonk_marker_file and fails the run.
+
+# Over the local socket, which needs no password.
+- name: Count the campaigns that are sending
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ listmonk_db_container }}"
+      - psql
+      - --username={{ listmonk_db_user }}
+      - --dbname={{ listmonk_db_name }}
+      - --no-psqlrc
+      - --tuples-only
+      - --no-align
+      - --set=ON_ERROR_STOP=1
+      - --command=SELECT count(*) FROM campaigns WHERE status = 'running'
+  register: listmonk_sending
+  changed_when: false
+
+- name: Read the postponed updates
+  ansible.builtin.slurp:
+    src: "{{ listmonk_postpone_file }}"
+  register: listmonk_postponed_read
+  failed_when: false
+  when: listmonk_sending.stdout | int > 0
+
+- name: Note whether the update is postponed
+  ansible.builtin.set_fact:
+    listmonk_update_postponed: "{{ listmonk_sending.stdout | int > 0 }}"
+    listmonk_postponed_count: >-
+      {{ (listmonk_postponed.count | default(0) | int + 1)
+         if listmonk_postponed.version | default('') == listmonk_version else 1 }}
+  vars:
+    listmonk_postponed_yaml: >-
+      {{ listmonk_postponed_read.content | default('') | b64decode | from_yaml }}
+    listmonk_postponed: "{{ listmonk_postponed_yaml if listmonk_postponed_yaml is mapping else {} }}"
+
+# Read-only, as a run without changes: a postponed update starts and restarts
+# nothing, but stays red while listmonk is down.
+- name: Postpone the update
+  when: listmonk_update_postponed
+  vars:
+    listmonk_postponed_why: >-
+      The update to {{ listmonk_version }} is postponed because
+      {{ listmonk_sending.stdout | int }} campaign(s) are sending (status
+      running), and the role starts and restarts nothing while it postpones
+  block:
+    - name: Fail when listmonk is not running
+      ansible.builtin.fail:
+        msg: >-
+          listmonk in {{ listmonk_dir }} is down: {{ listmonk_app_container }}
+          is not running. {{ listmonk_postponed_why }}; start it with docker
+          compose up -d in {{ listmonk_dir }}.
+      when: not listmonk_app_running
+
+    # The compose file on disk may publish another address than the settings.
+    - name: Read the address of the running listmonk
+      ansible.builtin.command:
+        argv: [docker, port, "{{ listmonk_app_container }}", 9000/tcp]
+      register: listmonk_running_address
+      changed_when: false
+
+    - name: Check that listmonk answers
+      ansible.builtin.include_tasks: health.yml
+      vars:
+        listmonk_health_url: >-
+          http://{{ listmonk_running_address.stdout_lines | first
+                    | regex_replace('^0\.0\.0\.0:', '127.0.0.1:') | regex_replace('^\[::\]:', '[::1]:') }}/health
+
+    - name: Fail when listmonk does not answer
+      ansible.builtin.fail:
+        msg: >-
+          listmonk in {{ listmonk_dir }} is unhealthy: it does not answer on
+          its /health within {{ listmonk_health_timeout }} seconds.
+          {{ listmonk_postponed_why }}; see docker logs {{ listmonk_app_container }}.
+      when: not listmonk_healthy
+
+    - name: Count the postponed update
+      ansible.builtin.copy:
+        dest: "{{ listmonk_postpone_file }}"
+        content: |
+          # Written by the noixdev.infra.listmonk role: runs in a row that
+          # postponed the update to version because a campaign was sending.
+          {{ {'version': listmonk_version, 'count': listmonk_postponed_count | int} | to_nice_yaml }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Fail when the update was postponed too often
+      ansible.builtin.fail:
+        msg: >-
+          The listmonk update from {{ listmonk_running_version }} to
+          {{ listmonk_version }} in {{ listmonk_dir }} has been postponed
+          {{ listmonk_postponed_count }} runs in a row, because
+          {{ listmonk_sending.stdout | int }} campaign(s) are sending (status
+          running). The role updates once no campaign is sending; pause the
+          campaign or let it finish, or keep listmonk_version at
+          {{ listmonk_running_version }} for now. The count is in
+          {{ listmonk_postpone_file }}.
+      when: listmonk_postponed_count | int >= listmonk_postpone_limit | int
+
+    - name: Report the postponed update
+      noixdev.infra.warn:
+        msg: >-
+          The listmonk update to {{ listmonk_version }} is postponed:
+          {{ listmonk_sending.stdout | int }} campaign(s) are sending, and the
+          role does not restart listmonk while it sends. It stays at
+          {{ listmonk_running_version }}; this is postponed run
+          {{ listmonk_postponed_count }} in a row, and run
+          {{ listmonk_postpone_limit }} fails.
+
+- name: Update listmonk
+  when: not listmonk_update_postponed
+  vars:
+    listmonk_new_image: "{{ listmonk_image }}:{{ listmonk_version }}"
+  block:
+    # Runs in a row: this one is not postponed.
+    - name: Remove the count of postponed updates
+      ansible.builtin.file:
+        path: "{{ listmonk_postpone_file }}"
+        state: absent
+
+    - name: Look for the image of listmonk {{ listmonk_version }}
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ listmonk_new_image }}"]
+      register: listmonk_new_image_local
+      changed_when: false
+      failed_when: false
+
+    - name: Pull listmonk {{ listmonk_version }}
+      ansible.builtin.command:
+        argv: [docker, pull, --quiet, "{{ listmonk_new_image }}"]
+      changed_when: true
+      when: listmonk_new_image_local.rc != 0
+
+    - name: Dump the database
+      ansible.builtin.include_tasks: dump.yml
+
+    - name: Stop listmonk for the update
+      ansible.builtin.command:
+        argv: [docker, compose, stop, app]
+        chdir: "{{ listmonk_dir }}"
+      changed_when: true
+
+    # Over the local socket, which needs no password; through \getenv, so the
+    # password is in neither the command line nor the SQL text.
+    - name: Set listmonk_db_password on the database
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - --interactive
+          - --env=LISTMONK_DB_PASSWORD
+          - "{{ listmonk_db_container }}"
+          - psql
+          - --username={{ listmonk_db_user }}
+          - --dbname={{ listmonk_db_name }}
+          - --no-psqlrc
+          - --set=ON_ERROR_STOP=1
+        stdin: |
+          \getenv password LISTMONK_DB_PASSWORD
+          ALTER USER "{{ listmonk_db_user }}" PASSWORD :'password';
+      environment:
+        LISTMONK_DB_PASSWORD: "{{ listmonk_db_password }}"
+      changed_when: true
+      when: listmonk_db_password_is_old
+
+    # The new release's binary (its image's entrypoint left aside) on the
+    # compose network, as listmonk connects; the password from the
+    # environment.
+    - name: Upgrade the database to listmonk {{ listmonk_version }}
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network={{ listmonk_db_network }}
+          - --entrypoint=/listmonk/listmonk
+          - --env=LISTMONK_db__host=db
+          - --env=LISTMONK_db__port=5432
+          - --env=LISTMONK_db__user={{ listmonk_db_user }}
+          - --env=LISTMONK_db__password
+          - --env=LISTMONK_db__database={{ listmonk_db_name }}
+          - --env=LISTMONK_db__ssl_mode=disable
+          - "{{ listmonk_new_image }}"
+          - --upgrade
+          - --yes
+          - --config
+          - ""
+      environment:
+        LISTMONK_db__password: "{{ listmonk_db_password }}"
+      vars:
+        listmonk_db_network: >-
+          {{ (listmonk_containers | selectattr('Name', 'equalto', '/' ~ listmonk_db_container)
+              | first).NetworkSettings.Networks | list | first }}
+      changed_when: true
+
+    - name: Write the compose file with listmonk {{ listmonk_version }}
+      ansible.builtin.copy:
+        dest: "{{ listmonk_compose_file }}"
+        content: "{{ listmonk_compose }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the database password.
+      diff: false
+
+    - name: Start listmonk {{ listmonk_version }}
+      community.docker.docker_compose_v2:
+        project_src: "{{ listmonk_dir }}"
+        state: present
+        pull: missing
+
+    - name: Check that listmonk answers
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when listmonk does not answer
+      ansible.builtin.fail:
+        msg: >-
+          listmonk {{ listmonk_version }} does not answer on {{ listmonk_health_url }}
+          within {{ listmonk_health_timeout }} seconds
+      when: not listmonk_healthy
+
+  rescue:
+    - name: Note what failed
+      ansible.builtin.set_fact:
+        listmonk_error: "{{ listmonk_failure }}"
+
+    - name: Fail when the update failed before the dump
+      ansible.builtin.fail:
+        msg: >-
+          The listmonk update from {{ listmonk_running_version }} to
+          {{ listmonk_version }} in {{ listmonk_dir }} failed before anything
+          changed ({{ listmonk_error | trim }}).
+      when: listmonk_dump is not defined
+
+    - name: Roll back to the previous version
+      ansible.builtin.include_tasks: restore.yml
+
+    # Written whether or not the rollback worked: the failed version is not
+    # tried again on the next run.
+    - name: Write the marker of the failed update
+      ansible.builtin.copy:
+        dest: "{{ listmonk_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.listmonk role: the update to
+          # failed_version failed. The role does not try that version again
+          # while this file exists; remove it to retry.
+          {{ {'failed_version': listmonk_version,
+              'rolled_back_to': listmonk_running_version if listmonk_healthy else none,
+              'dump': listmonk_dump,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')}
+             | combine({} if listmonk_healthy else {'restore_error': listmonk_restore_error | trim})
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Fail with the rollback
+      ansible.builtin.fail:
+        msg: >-
+          listmonk update to {{ listmonk_version }} failed, rolled back to
+          {{ listmonk_running_version }} ({{ listmonk_error | trim }}). The role
+          restored the dump {{ listmonk_dump }} with the previous compose file
+          and database password; listmonk {{ listmonk_running_version }}
+          answers again. It does not try {{ listmonk_version }} again while
+          {{ listmonk_marker_file }} exists: remove it to retry, or set
+          listmonk_version to another version.
+      when: listmonk_healthy
+
+    - name: Fail with the failed rollback
+      ansible.builtin.fail:
+        msg: >-
+          listmonk update to {{ listmonk_version }} failed
+          ({{ listmonk_error | trim }}), and rolling back to
+          {{ listmonk_running_version }} failed too
+          ({{ listmonk_restore_error | trim }}), so listmonk may be down.
+          {{ listmonk_restore_hint }} {{ listmonk_marker_file }} stops further
+          updates to {{ listmonk_version }}; remove it once listmonk runs again.

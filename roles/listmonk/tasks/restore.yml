@@ -1,0 +1,137 @@
+---
+# Puts back what a failed change replaced: the compose file from
+# listmonk_compose_before, the database password the installation used
+# (listmonk_db_password_old when listmonk_db_password_is_old) and the database
+# from listmonk_dump, loaded into a recreated empty database; then starts
+# listmonk and runs health.yml. Never fails by itself: listmonk_healthy says
+# whether listmonk answers again, listmonk_restore_error what failed.
+
+- name: Restore listmonk
+  vars:
+    listmonk_previous_url: >-
+      http://{{ listmonk_previous_address.stdout_lines | first
+                | regex_replace('^0\.0\.0\.0:', '127.0.0.1:') | regex_replace('^\[::\]:', '[::1]:') }}/health
+  block:
+    - name: Put the previous compose file back
+      ansible.builtin.copy:
+        dest: "{{ listmonk_compose_file }}"
+        content: "{{ listmonk_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the database password.
+      diff: false
+
+    - name: Stop listmonk for the restore
+      ansible.builtin.command:
+        argv: [docker, compose, stop, app]
+        chdir: "{{ listmonk_dir }}"
+      changed_when: true
+
+    - name: Start the previous database container
+      community.docker.docker_compose_v2:
+        project_src: "{{ listmonk_dir }}"
+        services: [db]
+        state: present
+        pull: missing
+
+    - name: Note when the wait for the database starts
+      ansible.builtin.set_fact:
+        listmonk_wait_start: "{{ now().timestamp() }}"
+
+    # Fails after listmonk_health_timeout seconds.
+    - name: Wait for the database
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ listmonk_db_container }}"
+          - pg_isready
+          - --username={{ listmonk_db_user }}
+          - --dbname={{ listmonk_db_name }}
+          - --timeout=2
+      register: listmonk_db_ready
+      until: >-
+        listmonk_db_ready.rc == 0
+        or now().timestamp() - listmonk_wait_start | float >= listmonk_health_timeout | int
+      retries: "{{ (listmonk_health_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
+      delay: 2
+      changed_when: false
+
+    # Over the local socket, which needs no password; through \getenv, so the
+    # password is in neither the command line nor the SQL text.
+    - name: Set the previous database password back
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - --interactive
+          - --env=LISTMONK_DB_PASSWORD
+          - "{{ listmonk_db_container }}"
+          - psql
+          - --username={{ listmonk_db_user }}
+          - --dbname={{ listmonk_db_name }}
+          - --no-psqlrc
+          - --set=ON_ERROR_STOP=1
+        stdin: |
+          \getenv password LISTMONK_DB_PASSWORD
+          ALTER USER "{{ listmonk_db_user }}" PASSWORD :'password';
+      environment:
+        LISTMONK_DB_PASSWORD: "{{ listmonk_db_password_old }}"
+      changed_when: true
+      when: listmonk_db_password_is_old | default(false)
+
+    # An empty database, not pg_restore --clean: --clean drops only what is
+    # in the dump, so tables a newer listmonk added (with foreign keys to the
+    # old ones) would block the drops.
+    - name: Recreate the database
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - --interactive
+          - "{{ listmonk_db_container }}"
+          - psql
+          - --username={{ listmonk_db_user }}
+          - --dbname=postgres
+          - --no-psqlrc
+          - --set=ON_ERROR_STOP=1
+        stdin: |
+          DROP DATABASE IF EXISTS "{{ listmonk_db_name }}" WITH (FORCE);
+          CREATE DATABASE "{{ listmonk_db_name }}" OWNER "{{ listmonk_db_user }}";
+      changed_when: true
+
+    - name: Restore the database dump
+      ansible.builtin.shell:
+        cmd: >-
+          docker exec -i {{ listmonk_db_container | quote }} pg_restore --single-transaction
+          --exit-on-error --username={{ listmonk_db_user | quote }}
+          --dbname={{ listmonk_db_name | quote }} <{{ listmonk_dump | quote }}
+      changed_when: true
+
+    - name: Start the previous listmonk
+      community.docker.docker_compose_v2:
+        project_src: "{{ listmonk_dir }}"
+        state: present
+        pull: missing
+
+    # The previous compose file may publish another address than the settings.
+    - name: Read the address of the previous listmonk
+      ansible.builtin.command:
+        argv: [docker, port, "{{ listmonk_app_container }}", 9000/tcp]
+      register: listmonk_previous_address
+      changed_when: false
+
+    - name: Check that the previous listmonk answers
+      ansible.builtin.include_tasks: health.yml
+      vars:
+        listmonk_health_url: "{{ listmonk_previous_url }}"
+
+    - name: Note the restore
+      ansible.builtin.set_fact:
+        listmonk_restore_error: "{{ '' if listmonk_healthy else 'listmonk does not answer on ' ~ listmonk_previous_url }}"
+  rescue:
+    - name: Note the failed restore
+      ansible.builtin.set_fact:
+        listmonk_healthy: false
+        listmonk_restore_error: "{{ listmonk_failure }}"

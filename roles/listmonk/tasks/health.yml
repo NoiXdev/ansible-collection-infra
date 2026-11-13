@@ -1,0 +1,28 @@
+---
+# Waits up to listmonk_health_timeout seconds for a 200 with {"data": true}
+# from listmonk's /health and sets listmonk_healthy. Never fails by itself.
+
+- name: Note when the health check starts
+  ansible.builtin.set_fact:
+    listmonk_health_start: "{{ now().timestamp() }}"
+
+# retries is an upper bound (every attempt takes at least the delay); the
+# deadline ends the wait after listmonk_health_timeout seconds.
+- name: Wait until listmonk answers its health check
+  ansible.builtin.uri:
+    url: "{{ listmonk_health_url }}"
+    timeout: 2
+  register: listmonk_health
+  until: >-
+    listmonk_health.status | default(-1) == 200
+    and (listmonk_health.json | default({})).data | default(false) is true
+    or now().timestamp() - listmonk_health_start | float >= listmonk_health_timeout | int
+  retries: "{{ (listmonk_health_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
+  delay: 2
+  failed_when: false
+
+- name: Note whether listmonk is healthy
+  ansible.builtin.set_fact:
+    listmonk_healthy: >-
+      {{ listmonk_health.status | default(-1) == 200
+         and (listmonk_health.json | default({})).data | default(false) is true }}

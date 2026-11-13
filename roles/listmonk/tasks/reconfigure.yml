@@ -1,0 +1,89 @@
+---
+# Same version, other compose file or database password: the takeover of an
+# installation of the old role, or a changed setting. A dump first, then the
+# password and the compose file, then listmonk is recreated and checked. Any
+# failure after the dump restores it (restore.yml) and fails the run.
+
+- name: Reconfigure listmonk
+  block:
+    - name: Dump the database
+      ansible.builtin.include_tasks: dump.yml
+
+    # Over the local socket, which needs no password; through \getenv, so the
+    # password is in neither the command line nor the SQL text.
+    - name: Set listmonk_db_password on the database
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - --interactive
+          - --env=LISTMONK_DB_PASSWORD
+          - "{{ listmonk_db_container }}"
+          - psql
+          - --username={{ listmonk_db_user }}
+          - --dbname={{ listmonk_db_name }}
+          - --no-psqlrc
+          - --set=ON_ERROR_STOP=1
+        stdin: |
+          \getenv password LISTMONK_DB_PASSWORD
+          ALTER USER "{{ listmonk_db_user }}" PASSWORD :'password';
+      environment:
+        LISTMONK_DB_PASSWORD: "{{ listmonk_db_password }}"
+      changed_when: true
+      when: listmonk_db_password_is_old
+
+    - name: Write the compose file
+      ansible.builtin.copy:
+        dest: "{{ listmonk_compose_file }}"
+        content: "{{ listmonk_compose }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the database password.
+      diff: false
+
+    - name: Start listmonk with the new configuration
+      community.docker.docker_compose_v2:
+        project_src: "{{ listmonk_dir }}"
+        state: present
+        pull: missing
+
+    - name: Check that listmonk answers
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when listmonk does not answer
+      ansible.builtin.fail:
+        msg: >-
+          listmonk does not answer on {{ listmonk_health_url }} within
+          {{ listmonk_health_timeout }} seconds
+      when: not listmonk_healthy
+
+  rescue:
+    - name: Note what failed
+      ansible.builtin.set_fact:
+        listmonk_error: "{{ listmonk_failure }}"
+
+    - name: Fail when the dump failed
+      ansible.builtin.fail:
+        msg: >-
+          The reconfigure of listmonk in {{ listmonk_dir }} failed before
+          anything changed ({{ listmonk_error | trim }}).
+      when: listmonk_dump is not defined
+
+    - name: Restore the previous installation
+      ansible.builtin.include_tasks: restore.yml
+
+    - name: Fail with the restore
+      ansible.builtin.fail:
+        msg: >-
+          The reconfigure of listmonk in {{ listmonk_dir }} failed
+          ({{ listmonk_error | trim }}).
+          {% if listmonk_healthy %}
+          The role restored the previous compose file, database password and
+          the dump {{ listmonk_dump }}; listmonk {{ listmonk_running_version }}
+          answers again.
+          {% else %}
+          Restoring the previous installation failed too
+          ({{ listmonk_restore_error | trim }}), so listmonk may be down.
+          {{ listmonk_restore_hint }}
+          {% endif %}

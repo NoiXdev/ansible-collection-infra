@@ -1,0 +1,67 @@
+---
+argument_specs:
+  main:
+    short_description: listmonk with PostgreSQL in Docker Compose, with a dump before every change
+    options:
+      listmonk_version:
+        type: str
+        description: >-
+          listmonk image tag (vX.Y.Z). Newer than the running version is an
+          update; older is refused before anything changes.
+      listmonk_dir:
+        type: path
+        description: >-
+          Directory of the compose project (docker-compose.yaml, data, backups).
+          Its basename is the compose project name.
+      listmonk_name:
+        type: str
+        description: Prefix of the container names <name>_db and <name>_app.
+      listmonk_bind:
+        type: str
+        description: Address listmonk's HTTP port is published on.
+      listmonk_port:
+        type: int
+        description: Host port listmonk's HTTP port is published on.
+      listmonk_postgres_image:
+        type: str
+        description: PostgreSQL image with its tag; the role does no major upgrades.
+      listmonk_db_user:
+        type: str
+        description: PostgreSQL user of listmonk.
+      listmonk_db_name:
+        type: str
+        description: PostgreSQL database of listmonk.
+      # Not required here: the role's own check names it when it is missing.
+      listmonk_db_password:
+        type: str
+        no_log: true
+        description: >-
+          Password of the PostgreSQL user (required). An existing installation
+          whose database uses listmonk_db_password_old gets this one set. Keep
+          it in a vault.
+      listmonk_db_password_old:
+        type: str
+        no_log: true
+        description: >-
+          The password an existing installation's database uses when it is not
+          listmonk_db_password yet (the old role used listmonk).
+      listmonk_admin_user:
+        type: str
+        description: Name of the first admin; required for a fresh install, unused otherwise.
+      listmonk_admin_password:
+        type: str
+        no_log: true
+        description: >-
+          Password of the first admin; required for a fresh install, unused
+          otherwise. Keep it in a vault.
+      listmonk_dumps_keep:
+        type: int
+        description: Number of database dumps kept in backups/ of listmonk_dir.
+      listmonk_health_timeout:
+        type: int
+        description: Seconds to wait for listmonk to answer /health after a start.
+      listmonk_postpone_limit:
+        type: int
+        description: >-
+          Runs in a row an update may be postponed because a campaign is sending
+          before the run fails.

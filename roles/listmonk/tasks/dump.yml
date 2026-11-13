@@ -1,0 +1,51 @@
+---
+# Dumps the database (pg_dump -Fc, read back in full with pg_restore) to
+# backups/<UTC time>-<running version>.dump (mode 0600, directory 0700) and
+# keeps the newest listmonk_dumps_keep dumps. Sets listmonk_dump; fails when
+# the dump fails or a dump of that name exists, leaving no partial file behind.
+
+- name: Create the backup directory
+  ansible.builtin.file:
+    path: "{{ listmonk_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Name the dump
+  ansible.builtin.set_fact:
+    listmonk_dump_next: >-
+      {{ listmonk_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ listmonk_running_version }}.dump
+
+- name: Dump the database
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 077
+      partial={{ (listmonk_dump_next ~ '.partial') | quote }}
+      trap 'rm -f "$partial"' EXIT
+      docker exec {{ listmonk_db_container | quote }} pg_dump --format=custom \
+        --username={{ listmonk_db_user | quote }} --dbname={{ listmonk_db_name | quote }} >"$partial"
+      docker exec -i {{ listmonk_db_container | quote }} pg_restore --file=/dev/null <"$partial"
+      # ln fails if a dump of the same name (the same second) exists.
+      ln "$partial" {{ listmonk_dump_next | quote }}
+  changed_when: true
+
+- name: List the dumps
+  ansible.builtin.find:
+    paths: "{{ listmonk_backup_dir }}"
+    patterns: ["*.dump"]
+  register: listmonk_dumps
+
+# The names start with the time, so they sort by age.
+- name: Remove the oldest dumps
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (listmonk_dumps.files | map(attribute='path') | sort | reverse | list)[listmonk_dumps_keep | int :] }}"
+
+# Last: a rescue restores only once listmonk_dump is set, and nothing of the
+# installation has changed up to here.
+- name: Note the dump
+  ansible.builtin.set_fact:
+    listmonk_dump: "{{ listmonk_dump_next }}"
