@@ -19,12 +19,101 @@
       - >-
         dns_records | selectattr('name', 'defined') | map(attribute='name')
         | select('match', '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$') | list | length == dns_records | length
-      - dns_records | selectattr('addresses', 'defined') | rejectattr('addresses', 'equalto', []) | list | length == dns_records | length
+      - dns_records | selectattr('addresses', 'defined') | rejectattr('addresses', 'equalto', []) | list | length
+        == dns_records | selectattr('addresses', 'defined') | list | length
+      - dns_records | selectattr('tailscale_peer', 'defined') | map(attribute='tailscale_peer') | select('match', '^\\S+$') | list | length
+        == dns_records | selectattr('tailscale_peer', 'defined') | list | length
     fail_msg: >-
       dns needs a non-empty dns_allow without 0.0.0.0/0 or ::/0 (that would answer
       every client), dns_upstreams, and records that each have a lower-case name
-      and at least one address.
+      and at least one address (or a tailscale_peer host name).
     quiet: true
+
+- name: Check that each record has addresses or a tailscale_peer
+  ansible.builtin.assert:
+    that: >-
+      (item.addresses is defined) != (item.tailscale_peer is defined)
+    fail_msg: "dns record {{ item.name }} needs exactly one of addresses or tailscale_peer."
+    quiet: true
+  loop: "{{ dns_records }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# The tailnet is read once, and only when a record follows a peer.
+- name: Work out the records that follow a tailnet peer
+  ansible.builtin.set_fact:
+    dns_peer_records: "{{ dns_records | selectattr('tailscale_peer', 'defined') | list }}"
+
+- name: Read the tailnet
+  ansible.builtin.command:
+    cmd: tailscale status --json
+  register: dns_tailscale_status
+  changed_when: false
+  failed_when: false
+  when: dns_peer_records | length > 0
+
+- name: Check that the tailnet could be read
+  ansible.builtin.assert:
+    that: dns_tailscale_status.rc == 0
+    fail_msg: >-
+      tailscale status --json failed on the DNS host, which the records
+      {{ dns_peer_records | map(attribute='name') | join(', ') }} need
+      (is the tailscale CLI installed and the host on the tailnet?).
+    quiet: true
+  when: dns_peer_records | length > 0
+
+# Peers are matched on HostName, ignoring case; the DNS host (Self) counts as a
+# node too. Each record gets the addresses of its match, and the matching nodes.
+# A tailnet without peers reports "Peer": null, a node without addresses
+# "TailscaleIPs": null.
+- name: Resolve the peer records
+  ansible.builtin.set_fact:
+    dns_peer_json: >-
+      {% set status = dns_tailscale_status.stdout | from_json %}
+      {% set nodes = (status.Peer | default({}, true)).values() | list + ([status.Self] if status.Self is defined else []) %}
+      {% set out = [] %}
+      {% for record in dns_peer_records %}
+      {% set pattern = '^' ~ (record.tailscale_peer | regex_escape) ~ '$' %}
+      {% set found = nodes | selectattr('HostName', 'defined')
+         | selectattr('HostName', 'search', pattern, ignorecase=true) | list %}
+      {% set ips = (found[0].TailscaleIPs | default([], true)) if found | length == 1 else [] %}
+      {% set _ = out.append({'name': record.name, 'peer': record.tailscale_peer,
+                             'matches': found | length, 'addresses': ips}) %}
+      {% endfor %}
+      {{ out | to_json }}
+  when: dns_peer_records | length > 0
+
+- name: Read the resolved peer records
+  ansible.builtin.set_fact:
+    dns_peer_resolved: "{{ dns_peer_json | from_json }}"
+  when: dns_peer_records | length > 0
+
+- name: Check that no peer name is ambiguous
+  ansible.builtin.assert:
+    that: item.matches <= 1
+    fail_msg: >-
+      dns record {{ item.name }}: more than one tailnet peer is named {{ item.peer }};
+      rename a node so that the host name is unique.
+    quiet: true
+  loop: "{{ dns_peer_resolved | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Warn about peers that are not on the tailnet
+  noixdev.infra.warn:
+    msg: >-
+      dns record {{ item.name }} has no addresses yet: no tailnet peer named
+      {{ item.peer }} with a Tailscale address; the record is left out.
+  when: item.matches == 0 or item.addresses | length == 0
+  loop: "{{ dns_peer_resolved | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Work out the records to serve
+  ansible.builtin.set_fact:
+    dns_records_effective: >-
+      {{ dns_records | selectattr('addresses', 'defined') | list
+         + (dns_peer_resolved | default([]) | selectattr('addresses', 'truthy') | list) }}
 
 - name: Read the Tailscale IPv4 address
   ansible.builtin.command:

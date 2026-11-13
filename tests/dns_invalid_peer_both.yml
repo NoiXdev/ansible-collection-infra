@@ -1,0 +1,12 @@
+---
+# A record is either static (addresses) or follows a tailnet peer, never both.
+- name: DNS record with addresses and tailscale_peer
+  hosts: all
+  roles:
+    - role: noixdev.infra.dns
+      vars:
+        dns_dir: /opt/dns-invalid-both
+        dns_bind: [127.0.0.1]
+        dns_allow: [127.0.0.0/8]
+        dns_records:
+          - { name: both.internal.test, addresses: [192.0.2.30], tailscale_peer: peer-a }

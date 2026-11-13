@@ -48,6 +48,12 @@ dns_allow: [127.0.0.0/8]
 dns_records:
   - { name: app.internal.test, addresses: [192.0.2.10] }
   - { name: dual.internal.test, addresses: [192.0.2.11, "2001:db8::11"] }
+  # Addresses come from the tailscale stub (see run.sh); the host name is matched
+  # case-insensitively, and the DNS host itself (Self) can be named too.
+  - { name: peer-a.example.test, tailscale_peer: Peer-A }
+  - { name: self.example.test, tailscale_peer: dns-host }
+  # No such peer: the run stays green with a warning and no record.
+  - { name: peer-missing.example.test, tailscale_peer: peer-missing }
 
 portainer_host: portainer.test
 portainer_agent_secret: test-agent-secret-0000000000000000

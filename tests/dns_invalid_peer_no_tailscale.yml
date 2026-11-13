@@ -1,0 +1,14 @@
+---
+# A record that follows a tailnet peer needs the tailscale CLI on the DNS host.
+- name: DNS record for a peer without the tailscale CLI
+  hosts: all
+  environment:
+    PATH: /nonexistent
+  roles:
+    - role: noixdev.infra.dns
+      vars:
+        dns_dir: /opt/dns-invalid-no-tailscale
+        dns_bind: [127.0.0.1]
+        dns_allow: [127.0.0.0/8]
+        dns_records:
+          - { name: peer-a.internal.test, tailscale_peer: peer-a }

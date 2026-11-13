@@ -31,7 +31,7 @@ argument_specs:
       dns_records:
         type: list
         elements: dict
-        description: Names answered locally, served from a managed hosts file.
+        description: Names answered locally, served from a managed hosts file. Each has `addresses` or `tailscale_peer`.
         options:
           name:
             type: str
@@ -40,8 +40,18 @@ argument_specs:
           addresses:
             type: list
             elements: str
-            required: true
-            description: IPv4 and IPv6 addresses of the name.
+            description: >-
+              IPv4 and IPv6 addresses of the name. Exactly one of `addresses` and
+              `tailscale_peer` is required.
+          tailscale_peer:
+            type: str
+            description: >-
+              Host name of a tailnet peer (`Peer[*].HostName` of `tailscale status --json`,
+              matched case-insensitively; the DNS host itself, `Self`, can be named too).
+              The name answers that peer's Tailscale addresses (IPv4 and IPv6), read on
+              the DNS host. A peer that is not on the tailnet yet gives a warning and no
+              record; a host name shared by two nodes fails the run. Needs the `tailscale`
+              CLI on the DNS host.
       dns_ttl:
         type: int
         description: TTL of the local records in seconds.

@@ -18,6 +18,9 @@ dns_upstreams:
 
 # Names answered locally, e.g.
 #   - { name: host.example.test, addresses: [192.0.2.10, "2001:db8::10"] }
+#   - { name: peer.example.test, tailscale_peer: peer-host }
+# A record has either `addresses` or `tailscale_peer` (the peer's host name in
+# `tailscale status --json`; resolved to its Tailscale IPs on the DNS host).
 dns_records: []
 # TTL of those records in seconds.
 dns_ttl: 60

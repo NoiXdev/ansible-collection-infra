@@ -1,0 +1,12 @@
+---
+# Two tailnet peers with the same host name: the role must not pick one.
+- name: DNS record for an ambiguous peer name
+  hosts: all
+  roles:
+    - role: noixdev.infra.dns
+      vars:
+        dns_dir: /opt/dns-invalid-ambiguous
+        dns_bind: [127.0.0.1]
+        dns_allow: [127.0.0.0/8]
+        dns_records:
+          - { name: dup.internal.test, tailscale_peer: peer-dup }

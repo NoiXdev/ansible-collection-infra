@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `dns`: a `dns_records` entry has either `addresses` or the new `tailscale_peer` (exactly one;
+  both or neither fails before anything changes). `tailscale_peer` is a node's host name as in
+  `tailscale status --json` (`Peer[*].HostName`, matched case-insensitively; the DNS host itself,
+  `Self`, can be named too); the name then answers that node's Tailscale IPv4 and IPv6 addresses.
+  The tailnet is read once per run, and only when an entry uses `tailscale_peer` (needs the
+  `tailscale` CLI on the DNS host; without it the run fails naming the entries). A peer that is
+  not on the tailnet yet gives a warning and no record, so the run stays green (also on a tailnet
+  without peers, `"Peer": null`, and for a node without addresses, `"TailscaleIPs": null`); a host
+  name shared by two nodes fails the run instead of picking one.
 - `dashy`: new role that runs the Dashy start page (`dashy_image` and `dashy_version`, default
   `4.9.0`) behind Traefik on `dashy_host` (`dashy_traefik_network`, `dashy_traefik_entrypoint`),
   publishing no host port. `dashy_config` holds the whole config (`pageInfo`, `appConfig`,

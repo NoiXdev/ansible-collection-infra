@@ -301,6 +301,32 @@
         that: verify_dns_aaaa.stdout | trim == '2001:db8::11'
         quiet: true
 
+    - name: DNS answers a record that follows a tailnet peer
+      ansible.builtin.command:
+        cmd: "dig +short @127.0.0.1 {{ item.name }} {{ item.type }}"
+      register: verify_dns_peer
+      retries: 10
+      delay: 1
+      until: verify_dns_peer.stdout | trim == item.address
+      changed_when: false
+      loop:
+        - { name: peer-a.example.test, type: A, address: 100.64.0.10 }
+        - { name: peer-a.example.test, type: AAAA, address: "fd7a:115c:a1e0::a" }
+        - { name: self.example.test, type: A, address: 100.64.0.1 }
+      loop_control:
+        label: "{{ item.name }} {{ item.type }}"
+
+    - name: DNS has no record for a peer that is not on the tailnet
+      ansible.builtin.command:
+        cmd: dig @127.0.0.1 peer-missing.example.test A
+      register: verify_dns_missing
+      changed_when: false
+
+    - name: Check the missing peer has no record
+      ansible.builtin.assert:
+        that: "'ANSWER: 0' in verify_dns_missing.stdout"
+        quiet: true
+
     - name: DNS forwards other names
       ansible.builtin.command:
         cmd: dig @127.0.0.1 example.com A
