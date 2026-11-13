@@ -12,7 +12,7 @@
 ## Checklist
 
 - [ ] `ansible-lint` passes
-- [ ] `tests/run.sh` and `tests/host/run.sh` pass where the change touches those roles
+- [ ] `tests/all.sh` (or the suites of the roles the change touches) passes locally; CI runs lint and shellcheck only (a release needs `tests/attest.sh`, the signed full run)
 - [ ] New variables have an argument spec and a default
 - [ ] The second converge changes nothing (idempotent)
 - [ ] No private values (hosts, addresses, domains, tokens) in the change

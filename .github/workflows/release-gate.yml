@@ -1,0 +1,27 @@
+name: release-gate
+
+# A release (a v* tag) needs a signed, green attestation of the full local
+# test run for the tagged code: tests/attest.sh publishes it as a git note,
+# .github/scripts/verify-tests-attestation.sh checks it. This workflow flags
+# a tag without one (its check fails); it cannot stop the tag, so run the
+# check before tagging. See CONTRIBUTING.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  attestation:
+    name: tests attestation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Fetch the attestations
+        run: git fetch --quiet origin '+refs/notes/tests:refs/notes/tests' || true
+      - name: Verify the signed local test run
+        run: .github/scripts/verify-tests-attestation.sh "${{ github.sha }}"

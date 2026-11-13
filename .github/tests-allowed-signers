@@ -1,0 +1,5 @@
+# Keys allowed to sign the attestations of the local test run (tests/attest.sh),
+# checked by .github/scripts/verify-tests-attestation.sh against this file as of
+# the release commit. Format: ssh-keygen ALLOWED SIGNERS (principal, options,
+# public key); the namespace must be noixdev-infra-tests.
+hello@noidee.dev namespaces="noixdev-infra-tests" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID+GYaQTJmqDy+WMZpz1/m97pJAXATzQ9coY3tLjMipR

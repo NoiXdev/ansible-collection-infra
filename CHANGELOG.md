@@ -405,6 +405,15 @@
   `cloudpanel_maintenance` (default `false`).
 - `noixdev.infra.warn`: action that shows a message as an Ansible warning without failing the
   run (used by `cloudpanel`).
+- Tests: the Docker test suites run locally only, with `tests/all.sh` (all suites or the named
+  ones, a summary with each suite's result and runtime). CI runs `ansible-lint` and `shellcheck`.
+- Tests: a release needs a signed attestation of the full local run: `tests/attest.sh` runs every
+  suite and publishes the SSH-signed result as a git note (`refs/notes/tests`) and the commit
+  status `tests/local`; the tag workflow `release-gate.yml` verifies it
+  (`.github/scripts/verify-tests-attestation.sh`) and flags a tag without a green one.
+  `tests/attest.sh` refuses to start while a variable that narrows the suites is set (such as
+  `HOST_UBUNTU` or `STUB_ONLY`). `tests/all.sh --summary FILE` writes a machine-readable
+  summary.
 
 ## 0.4.0 — 2026-11-11
 
