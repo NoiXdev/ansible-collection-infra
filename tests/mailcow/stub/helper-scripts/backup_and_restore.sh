@@ -4,7 +4,8 @@
 # real one (1 KiB of random data each) and mailcow.conf, and prints what
 # mariabackup prints when it succeeds. Records its calls in
 # /var/log/mailcow-stub/backup.calls. Flags in /etc/mailcow-stub:
-# backup-seconds (how long a backup takes, default 1), backup-fails (exit 1
+# backup-seconds (how long a backup takes, default 1), backup-hold (the
+# backup waits while it exists, after backup-seconds), backup-fails (exit 1
 # after half the archives).
 set -euo pipefail
 flags=/etc/mailcow-stub
@@ -17,6 +18,7 @@ folder="$MAILCOW_BACKUP_LOCATION/mailcow-$(date +%Y-%m-%d-%H-%M-%S)"
 mkdir -p "$folder"
 cp "$here/../mailcow.conf" "$folder/"
 sleep "$(cat "$flags/backup-seconds" 2>/dev/null || echo 1)"
+while [ -e "$flags/backup-hold" ]; do sleep 1; done
 n=0
 for component in vmail crypt redis rspamd postfix mariadb; do
   head -c 1024 /dev/urandom >"$folder/backup_$component.tar.zst"

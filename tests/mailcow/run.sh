@@ -1559,13 +1559,38 @@ echo 1 | hxi sh -c "cat >$flags/backup-seconds"
 echo "== the daily backup running while the run backs up before its update"
 stub_install
 play_ok concurrent-setup "$here/converge.yml" >/dev/null
-echo 20 | hxi sh -c "cat >$flags/backup-seconds"
 # Due for the daily backup, too young for the age check.
 set_last_backup_age 13
 folders_before="$(backup_folders)"
 release 2
+# The daily backup holds the lock until the run is waiting for it (no
+# timing: on a slow machine the run reached its backup after a 20-second
+# daily backup had already finished).
+calls_before="$(hx sh -c 'cat /var/log/mailcow-stub/backup.calls 2>/dev/null | wc -l')"
+hx touch "$flags/backup-hold"
 hx systemctl start --no-block mailcow-backup.service
-play_ok concurrent "$here/converge.yml" -v
+for _ in $(seq 60); do
+  [ "$(hx sh -c 'cat /var/log/mailcow-stub/backup.calls 2>/dev/null | wc -l')" -gt "$calls_before" ] && break
+  sleep 1
+done
+[ "$(hx sh -c 'cat /var/log/mailcow-stub/backup.calls 2>/dev/null | wc -l')" -gt "$calls_before" ] \
+  || fail "the daily backup did not start"
+play_ok concurrent "$here/converge.yml" -v &
+converge=$!
+# The run's backup waits in `flock 9` (mailcow-backup's lock); the daily
+# backup took the lock with flock --nonblock, which does not linger. The
+# role's log shows the message only when the async task ends.
+waiting() {
+  hx sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " <"$f" 2>/dev/null; echo; done | grep -qx "flock 9 "'
+}
+for _ in $(seq 600); do
+  waiting && break
+  kill -0 "$converge" 2>/dev/null || break
+  sleep 1
+done
+waiting || { hx rm -f "$flags/backup-hold"; wait "$converge" || true; fail "the run's backup never waited for the daily backup"; }
+hx rm -f "$flags/backup-hold"
+wait "$converge" || fail "converge concurrent failed"
 for _ in $(seq 60); do
   [ "$(hx systemctl show -p ActiveState --value mailcow-backup.service)" = inactive ] && break
   sleep 1
