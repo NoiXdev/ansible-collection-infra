@@ -371,7 +371,8 @@ check "12. the runner never ran" test ! -e "$tmp/runner-ran"
 # Fake docker and gh on PATH; origin's path contains github.com/<owner>/<repo>
 # so attest.sh reads the repository from it.
 mkdir -p "$tmp/bin" "$tmp/github.com/example"
-printf '#!/usr/bin/env bash\necho 29.0.0-fake\n' >"$tmp/bin/docker"
+# version answers the Docker version, run the amd64 check (uname -m).
+printf '#!/usr/bin/env bash\ncase "$1" in run) echo x86_64 ;; *) echo 29.0.0-fake ;; esac\n' >"$tmp/bin/docker"
 printf '#!/usr/bin/env bash\ncase "$1" in auth) exit 0 ;; api) printf "%%s\\n" "$@" >"%s/gh-call"; exit 0 ;; esac\nexit 1\n' "$tmp" >"$tmp/bin/gh"
 chmod +x "$tmp/bin/docker" "$tmp/bin/gh"
 origin="$tmp/github.com/example/selftest.git"
@@ -391,6 +392,12 @@ g push -q origin main
 c13="$(head_sha)"
 # A leftover note in the local ref that origin never had.
 g notes --ref="$REAL" add -f -m "payload: stale" "$c1" 2>/dev/null
+mkdir -p "$tmp/bin-noamd64"
+cp "$tmp/bin/gh" "$tmp/bin-noamd64/gh"
+printf '#!/usr/bin/env bash\ncase "$1" in run) echo "exec /bin/uname: exec format error" ;; *) echo 29.0.0-fake ;; esac\n' >"$tmp/bin-noamd64/docker"
+chmod +x "$tmp/bin-noamd64/docker"
+expect "13. real: Docker without amd64 emulation refuses to start" 2 "cannot run linux/amd64 images" -- \
+  env -u ATTEST_DRY_RUN -u ATTEST_RUNNER PATH="$tmp/bin-noamd64:$PATH" "$A"
 expect "13. real: a first run (no notes on origin yet) is green" 0 "pushed, status tests/local set" -- real "$A"
 check "13. real: origin has the note of the run" git --git-dir="$origin" notes --ref="$REAL" show "$c13"
 check "13. real: the stale local note was not pushed" sh -c '! git --git-dir="$1" notes --ref=refs/notes/tests show "$2" >/dev/null 2>&1' _ "$origin" "$c1"

@@ -29,7 +29,8 @@
 # (Docker-in-Docker) runs natively; the suite's inventory runs the Harbor
 # images inside it as linux/amd64, so on a machine that is not amd64 (an
 # arm64 Mac, for example) they run under emulation (Docker Desktop's Rosetta
-# or QEMU). Expect it to be slow there.
+# or QEMU). Expect it to be slow there. The suite checks first that the test
+# host runs linux/amd64 images and says how to turn the emulation on.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

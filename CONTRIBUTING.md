@@ -31,7 +31,9 @@ suite's result and runtime; the output of each suite is also in
 `tests/output/all/<suite>.log`. `--summary FILE` writes a machine-readable summary, one line
 per run (`<label> <pass|fail|skipped> <seconds>`). The `harbor` suite needs amd64 images: its test host
 runs natively, and on another architecture (an arm64 Mac) the Harbor images inside it
-run as `linux/amd64` under emulation, which is slow. The `mailcow` suite needs network
+run as `linux/amd64` under emulation, which is slow. Docker Desktop on Apple silicon needs
+Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tests/attest.sh`
+check this first. The `mailcow` suite needs network
 access and about 5 GB of images, `cloudpanel` runs CloudPanel's real installer.
 
 Each test converges the roles, converges again (the second run must change nothing),

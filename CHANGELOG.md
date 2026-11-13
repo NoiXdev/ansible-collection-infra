@@ -412,8 +412,9 @@
   status `tests/local`; the tag workflow `release-gate.yml` verifies it
   (`.github/scripts/verify-tests-attestation.sh`) and flags a tag without a green one.
   `tests/attest.sh` refuses to start while a variable that narrows the suites is set (such as
-  `HOST_UBUNTU` or `STUB_ONLY`). `tests/all.sh --summary FILE` writes a machine-readable
-  summary.
+  `HOST_UBUNTU` or `STUB_ONLY`), or when Docker cannot run `linux/amd64` images (the harbor
+  suite needs them; on Apple silicon Docker Desktop needs Rosetta 2). `tests/all.sh --summary
+  FILE` writes a machine-readable summary.
 
 ## 0.4.0 — 2026-11-11
 

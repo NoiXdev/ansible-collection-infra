@@ -31,7 +31,8 @@
 # Preconditions, checked before any suite runs: no coverage knob set, a clean
 # working tree (untracked files included), HEAD on a branch of origin (after
 # git fetch --prune origin), a signing key, a signer identity, ssh-keygen,
-# python3, Docker and an authenticated gh. After the run it refuses to
+# python3, Docker that runs linux/amd64 images (the harbor suite) and an
+# authenticated gh. After the run it refuses to
 # publish when HEAD moved or the working tree is not clean; that compares
 # the end state only (a file changed and restored during the run goes
 # unnoticed).
@@ -152,6 +153,11 @@ docker=unknown
 if [ -z "${ATTEST_RUNNER:-}" ]; then
   docker="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" || fail "the Docker daemon is not reachable"
   [ -n "$docker" ] || fail "the Docker daemon is not reachable"
+  # The harbor suite runs amd64-only images; without emulation it fails and
+  # the whole run would be published red for a reason outside the code.
+  amd64="$(docker run --rm --platform linux/amd64 alpine:3 uname -m 2>/dev/null | tail -n 1)" || true
+  [ "$amd64" = x86_64 ] ||
+    fail "Docker cannot run linux/amd64 images, which the harbor suite needs. Docker Desktop on Apple silicon: install Rosetta 2 (softwareupdate --install-rosetta), turn on its Rosetta emulation and restart Docker Desktop; Linux: register QEMU for amd64 (tonistiigi/binfmt)."
 fi
 [ -x "$runner" ] || fail "test runner $runner is not executable"
 

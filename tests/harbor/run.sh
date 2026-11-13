@@ -25,6 +25,18 @@ until docker exec "$host" docker info >/dev/null 2>&1; do sleep 1; done
 # GNU tar for the unarchive module, bash for the installer's prepare script.
 docker exec "$host" apk add --no-cache python3 tar bash >/dev/null
 
+echo "== the test host runs linux/amd64 images"
+# Harbor v2.14.6 has amd64 images only. Without emulation they fail later in
+# prepare with "exec format error"; say so now and how to fix it.
+arch="$(docker exec "$host" docker run --rm --platform linux/amd64 alpine:3 uname -m 2>&1 | tail -n 1)" || true
+if [ "$arch" != x86_64 ]; then
+  echo "the test host cannot run linux/amd64 images (got: $arch)." >&2
+  echo "Docker Desktop on Apple silicon: install Rosetta 2 (softwareupdate --install-rosetta)," >&2
+  echo "turn on its Rosetta emulation in Settings > General and restart Docker Desktop." >&2
+  echo "Linux: register QEMU for amd64 (docker run --privileged --rm tonistiigi/binfmt --install amd64)." >&2
+  exit 1
+fi
+
 play() { ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$@"; }
 
 echo "== converge"
