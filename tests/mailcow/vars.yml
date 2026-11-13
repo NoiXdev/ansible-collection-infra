@@ -1,0 +1,25 @@
+---
+# Test-only values. run.sh gives the host a tmpfs at /mnt/mailcow-backups,
+# so the backups are on a file system of their own.
+mailcow_backup_dir: /mnt/mailcow-backups
+mailcow_hostname: mail.example.test
+mailcow_timezone: Etc/UTC
+# Small enough for a test machine: no ClamAV, no full-text search; no ACME in a
+# container without a public name.
+mailcow_install_settings:
+  SKIP_CLAMD: "y"
+  SKIP_FTS: "y"
+  SKIP_LETS_ENCRYPT: "y"
+  SKIP_UNBOUND_HEALTHCHECK: "y"
+  # The test host has no IPv6 route to the internet, which
+  # generate_config.sh reads as a host without IPv6; its test clients
+  # (run.sh) reach mailcow over IPv6 all the same.
+  ENABLE_IPV6: "true"
+# The networks of run.sh's "allowed" test client (a network namespace on the
+# host, as a tailnet client would be).
+mailcow_admin_allow: [10.99.0.0/16, "fd00:99::/64"]
+# Roundcube's release list: run.sh serves a fake one (fake-github.py) here,
+# only for the scenarios with an integrated Roundcube.
+mailcow_roundcube_api_url: http://127.0.0.1:8099
+# Plain http to the fake server.
+mailcow_roundcube_allow_insecure_mirror: true

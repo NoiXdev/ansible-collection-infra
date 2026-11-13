@@ -1,0 +1,4 @@
+# Tracked file of the stub; a release and a local edit change it in the
+# merge conflict test.
+myhostname = mail.example.test
+smtpd_banner = $myhostname ESMTP

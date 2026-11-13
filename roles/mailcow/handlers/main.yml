@@ -1,0 +1,8 @@
+---
+# Also when only the service changed: the timer starts it by name, and a
+# restart makes systemd read both units again.
+- name: Restart the mailcow backup timer
+  ansible.builtin.systemd_service:
+    name: "{{ mailcow_backup_unit }}.timer"
+    state: restarted
+    daemon_reload: true

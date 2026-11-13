@@ -1,0 +1,67 @@
+---
+# After a successful converge: the backup script and its timer, the last
+# backup complete with the extra files, and mailcow answering over HTTPS.
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Read the timer
+      ansible.builtin.systemd_service:
+        name: mailcow-backup.timer
+      register: timer
+
+    - name: Stat the backup script
+      ansible.builtin.stat:
+        path: /usr/local/sbin/mailcow-backup
+      register: script
+
+    - name: Read the last backup
+      ansible.builtin.slurp:
+        src: /var/lib/noix-mailcow/last-backup
+      register: last_backup
+
+    - name: List the last backup
+      ansible.builtin.find:
+        paths: "{{ (last_backup.content | b64decode | from_yaml).folder }}"
+        hidden: true
+      register: backup_files
+
+    - name: Stat the files mailcow-backup writes itself
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ (last_backup.content | b64decode | from_yaml).folder }}/extra-files.tar.gz"
+        - /var/lib/noix-mailcow/backup.log
+        - /var/lib/noix-mailcow/last-backup
+      register: own_files
+
+    - name: Check the timer, the script and the last backup
+      ansible.builtin.assert:
+        that:
+          - timer.status.UnitFileState == 'enabled'
+          - timer.status.ActiveState == 'active'
+          - script.stat.exists and script.stat.mode == '0755'
+          - (last_backup.content | b64decode | from_yaml).folder is match('^/mnt/mailcow-backups/mailcow-')
+          - names | select('match', '^backup_(vmail|crypt|redis|rspamd|postfix|mariadb)\.tar\.zst$') | list | length == 6
+          - "'extra-files.tar.gz' in names"
+          - "'mailcow.conf' in names"
+          - own_files.results | map(attribute='stat.mode') | unique | list == ['0600']
+        fail_msg: >-
+          timer: {{ timer.status.UnitFileState }} {{ timer.status.ActiveState }};
+          last backup: {{ last_backup.content | b64decode }}; files: {{ names }};
+          modes: {{ own_files.results | map(attribute='stat.mode') | list }}
+        quiet: true
+      vars:
+        names: "{{ backup_files.files | map(attribute='path') | map('basename') | list }}"
+
+    - name: Check that mailcow answers over HTTPS
+      ansible.builtin.uri:
+        url: https://127.0.0.1/
+        headers:
+          Host: mail.example.test
+        validate_certs: false
+      register: ui
+      until: ui.status == 200
+      retries: 12
+      delay: 5

@@ -1,0 +1,17 @@
+---
+# anubis-vars.yml without the ActiveSync and DAV rule (mailcow-sync): the
+# negative control that DAV and ActiveSync are then challenged, so the suite's
+# checks for them can fail.
+anubis_policy_allow:
+  - name: mailcow-autoconfig
+    action: ALLOW
+    path_regex: (?i)^/autodiscover/autodiscover\.(xml|json)
+  - name: mailcow-thunderbird
+    action: ALLOW
+    path_regex: ^/(\.well-known/autoconfig/)?[mM]ail/[cC]onfig-v1\.1\.xml$
+  - name: mailcow-api-acme
+    action: ALLOW
+    path_regex: ^/(api/v1/|\.well-known/acme-challenge/|\.well-known/mta-sts\.txt$)
+  - name: test-admins
+    action: ALLOW
+    remote_addresses: [10.99.0.0/16, "fd00:99::/64"]

@@ -1,0 +1,28 @@
+---
+# Anubis in front of mailcow (anubis.yml, and -e @anubis-vars.yml with
+# converge.yml): the anubis role in nginx mode on its own network, which
+# nginx-mailcow joins, with the mail client rules of the mailcow role's
+# defaults.
+anubis_mode: nginx
+anubis_redirect_domains: [mail.example.test]
+# run.sh adds rules for one converge with -e anubis_test_extra_rules.
+anubis_policy_allow: "{{ anubis_test_mail_rules + anubis_test_extra_rules | default([]) }}"
+anubis_test_mail_rules:
+  - name: mailcow-sync
+    action: ALLOW
+    path_regex: ^/(Microsoft-Server-ActiveSync|SOGo/dav(/|$)|SOGo/Microsoft-Server-ActiveSync|\.well-known/(caldav|carddav)$)
+  - name: mailcow-autoconfig
+    action: ALLOW
+    path_regex: (?i)^/autodiscover/autodiscover\.(xml|json)
+  - name: mailcow-thunderbird
+    action: ALLOW
+    path_regex: ^/(\.well-known/autoconfig/)?[mM]ail/[cC]onfig-v1\.1\.xml$
+  - name: mailcow-api-acme
+    action: ALLOW
+    path_regex: ^/(api/v1/|\.well-known/acme-challenge/|\.well-known/mta-sts\.txt$)
+  # The admins' networks (as a tailnet's): matched against the address that
+  # connected to nginx, never one taken from X-Forwarded-For.
+  - name: test-admins
+    action: ALLOW
+    remote_addresses: [10.99.0.0/16, "fd00:99::/64"]
+mailcow_anubis_url: http://noixdev-anubis:8923

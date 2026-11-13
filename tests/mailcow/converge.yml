@@ -1,0 +1,13 @@
+---
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  roles:
+    - noixdev.infra.mailcow
+  post_tasks:
+    # run.sh reads this line.
+    - name: Show the facts of the role
+      ansible.builtin.debug:
+        msg: >-
+          mailcow facts: updated={{ mailcow_updated }} last_backup={{ mailcow_last_backup }}
+          roundcube_new={{ mailcow_roundcube_updated }}

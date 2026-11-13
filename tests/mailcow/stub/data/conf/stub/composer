@@ -1,0 +1,13 @@
+#!/bin/sh
+# Test stub of composer in php-fpm-mailcow. Calls go to /flags/rc.calls.
+# Flags in /flags: rc-composer-fails, rc-breaks (Roundcube answers 500
+# afterwards).
+echo "composer $*" >>/flags/rc.calls
+if [ -e /flags/rc-composer-fails ]; then
+  echo "Your requirements could not be resolved to an installable set of packages. (stub)" >&2
+  exit 2
+fi
+if [ -e /flags/rc-breaks ]; then
+  touch /web/rc/BROKEN
+fi
+echo "Nothing to install, update or remove"

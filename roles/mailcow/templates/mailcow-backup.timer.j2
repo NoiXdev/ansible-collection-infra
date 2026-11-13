@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Daily mailcow backup at {{ mailcow_backup_time }}
+
+[Timer]
+OnCalendar=*-*-* {{ mailcow_backup_time }}:00
+# A backup missed while the host was down runs at boot; mailcow-backup skips
+# it when a recent one succeeded.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test stub of apk in php-fpm-mailcow (the role adds rsync for installto.sh).
+# Calls go to /flags/rc.calls.
+echo "apk $*" >>/flags/rc.calls

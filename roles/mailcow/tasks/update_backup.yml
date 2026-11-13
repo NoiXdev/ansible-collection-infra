@@ -1,0 +1,41 @@
+---
+# The full backup before an update (mailcow-backup --reason update), at most
+# once per run: it is skipped when mailcow_update_backup is set already.
+# Include it before any update the role makes (mailcow, Roundcube), so one
+# backup covers all of them. Sets mailcow_update_backup (and
+# mailcow_last_backup) to the backup folder. Fails when the backup fails
+# (also when the space check fails); nothing has been updated then.
+
+- name: Back up mailcow before the update
+  when: mailcow_update_backup is not defined
+  block:
+    # Waits while the daily backup runs (the lock); long for a large mailbox.
+    - name: Run mailcow-backup --reason update
+      ansible.builtin.command:
+        argv: ["{{ mailcow_backup_script }}", --reason, update]
+      register: mailcow_update_backup_run
+      changed_when: true
+      failed_when: false
+      async: 21600
+      poll: 10
+
+    - name: Fail when the backup before the update failed
+      ansible.builtin.fail:
+        msg: >-
+          No update: the backup before the update failed, so mailcow in
+          {{ mailcow_dir }} was not updated and is unchanged
+          ({{ mailcow_update_backup_error }}). See {{ mailcow_state_dir }}/backup.log.
+      vars:
+        mailcow_update_backup_error: >-
+          {{ ((mailcow_update_backup_run.stderr | default('') | trim).splitlines() or ['no error output'])[-mailcow_tail_lines:]
+             | join(' / ') }}
+      when: >-
+        mailcow_update_backup_run.rc | default(1) != 0
+        or mailcow_update_backup_run.stdout | default('') is not search('(?m)^mailcow-backup: done: /')
+
+    - name: Note the backup before the update
+      ansible.builtin.set_fact:
+        mailcow_update_backup: >-
+          {{ mailcow_update_backup_run.stdout | regex_search('(?m)^mailcow-backup: done: (/.*)$', '\1') | first }}
+        mailcow_last_backup: >-
+          {{ mailcow_update_backup_run.stdout | regex_search('(?m)^mailcow-backup: done: (/.*)$', '\1') | first }}

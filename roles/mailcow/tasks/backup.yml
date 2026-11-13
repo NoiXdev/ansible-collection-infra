@@ -1,0 +1,166 @@
+---
+# The backup script (mailcow-backup), its daily systemd timer, and the end of
+# the backup script from mailcow's documentation (/etc/cron.daily), which the
+# timer replaces. A cron script with other content is reported and kept.
+
+- name: Create the backup directory
+  ansible.builtin.file:
+    path: "{{ mailcow_backup_dir }}"
+    state: directory
+    # backup_and_restore.sh refuses a directory others cannot read and enter.
+    mode: u+rwx,go+rx
+
+- name: Create the state directory of the backups
+  ansible.builtin.file:
+    path: "{{ mailcow_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the backup script
+  ansible.builtin.template:
+    src: mailcow-backup.sh.j2
+    dest: "{{ mailcow_backup_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the backup service
+  ansible.builtin.template:
+    src: mailcow-backup.service.j2
+    dest: /etc/systemd/system/{{ mailcow_backup_unit }}.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the mailcow backup timer
+
+- name: Write the backup timer
+  ansible.builtin.template:
+    src: mailcow-backup.timer.j2
+    dest: /etc/systemd/system/{{ mailcow_backup_unit }}.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the mailcow backup timer
+
+# Now, not at the end of the play: the timer runs even when a later step fails.
+- name: Apply changed backup units
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the backup timer
+  ansible.builtin.systemd_service:
+    name: "{{ mailcow_backup_unit }}.timer"
+    enabled: true
+    state: started
+
+- name: Look for the old backup cron script
+  ansible.builtin.stat:
+    path: "{{ mailcow_old_cron_script }}"
+    get_checksum: false
+  register: mailcow_old_cron_stat
+
+- name: Read the old backup cron script
+  ansible.builtin.slurp:
+    src: "{{ mailcow_old_cron_script }}"
+  register: mailcow_old_cron_read
+  when: mailcow_old_cron_stat.stat.exists
+
+# The script from mailcow's documentation ("Backup" page, the cron.daily
+# example) for this clone: the same lines apart from comments, blank lines,
+# indentation and the values of the backup location, parameters and options.
+- name: Recognise the old backup cron script
+  ansible.builtin.set_fact:
+    mailcow_old_cron_is_docs: >-
+      {%- set lines = (mailcow_old_cron_read.content | b64decode).splitlines() | map('trim')
+                      | reject('match', '^(#.*)?$') | list -%}
+      {%- set ns = namespace(ok=lines | length == mailcow_old_cron_patterns | length) -%}
+      {%- for pattern in mailcow_old_cron_patterns -%}
+      {%-   if ns.ok and lines[loop.index0] is not match(pattern) -%}{%- set ns.ok = false -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.ok }}
+    mailcow_old_cron_location: >-
+      {{ (mailcow_old_cron_read.content | b64decode)
+         | regex_search('(?m)^\s*export MAILCOW_BACKUP_LOCATION="?([^"\n]*)"?\s*$', '\1') | default([''], true) | first }}
+  vars:
+    mailcow_old_cron_patterns:
+      - '^set -e$'
+      - '^OUT="\$\(mktemp\)"$'
+      - '^export MAILCOW_BACKUP_LOCATION="?[^"]*"?$'
+      - '^SCRIPT="?{{ mailcow_dir | regex_escape }}/?/helper-scripts/backup_and_restore\.sh"?$'
+      - '^PARAMETERS="?backup( [a-z]+)+"?$'
+      - '^OPTIONS="?(--delete-days [0-9]+)?"?$'
+      - '^set \+e$'
+      - '^"\$\{SCRIPT\}" \$\{PARAMETERS\} \$\{OPTIONS\} 2>&1 > "\$OUT"$'
+      - '^RESULT=\$\?$'
+      - '^if \[ \$RESULT -ne 0 \]$'
+      - '^then$'
+      - '^echo "\$\{SCRIPT\} \$\{PARAMETERS\} \$\{OPTIONS\} encounters an error:"$'
+      - '^echo "RESULT=\$RESULT"$'
+      - '^echo "STDOUT / STDERR:"$'
+      - '^cat "\$OUT"$'
+      - '^fi$'
+  when: mailcow_old_cron_stat.stat.exists
+
+- name: Remove the old backup cron script
+  ansible.builtin.file:
+    path: "{{ mailcow_old_cron_script }}"
+    state: absent
+  when:
+    - mailcow_old_cron_stat.stat.exists
+    - mailcow_old_cron_is_docs
+
+- name: Report backups the old cron script left elsewhere
+  noixdev.infra.warn:
+    msg: >-
+      The old backup cron script {{ mailcow_old_cron_script }} wrote its
+      backups to {{ mailcow_old_cron_location }}, not to mailcow_backup_dir
+      ({{ mailcow_backup_dir }}). The role removed the script; the backups in
+      {{ mailcow_old_cron_location }} stay and are not pruned any more.
+  when:
+    - mailcow_old_cron_stat.stat.exists
+    - mailcow_old_cron_is_docs
+    - mailcow_old_cron_location | regex_replace('/+$', '') != mailcow_backup_dir | regex_replace('/+$', '')
+
+- name: Report a foreign backup cron script
+  noixdev.infra.warn:
+    msg: >-
+      {{ mailcow_old_cron_script }} is not the backup script from mailcow's
+      documentation, so the role keeps it. If it backs up mailcow, it runs
+      next to the role's daily backup ({{ mailcow_backup_unit }}.timer);
+      remove it by hand.
+  when:
+    - mailcow_old_cron_stat.stat.exists
+    - not mailcow_old_cron_is_docs
+
+- name: Look for other cron jobs that back up mailcow
+  ansible.builtin.command:
+    argv:
+      - grep
+      - --recursive
+      - --files-with-matches
+      - --no-messages
+      - --fixed-strings
+      - backup_and_restore.sh
+      - /etc/crontab
+      - /etc/cron.d
+      - /etc/cron.hourly
+      - /etc/cron.daily
+      - /etc/cron.weekly
+      - /etc/cron.monthly
+      - /var/spool/cron/crontabs
+  register: mailcow_other_cron
+  changed_when: false
+  failed_when: false
+
+- name: Report other cron jobs that back up mailcow
+  noixdev.infra.warn:
+    msg: >-
+      These cron files run mailcow's backup_and_restore.sh next to the role's
+      daily backup ({{ mailcow_backup_unit }}.timer), so mailcow may be backed
+      up twice: {{ mailcow_other_cron_files | join(', ') }}. The role keeps
+      them; remove the backup jobs by hand.
+  vars:
+    mailcow_other_cron_files: >-
+      {{ mailcow_other_cron.stdout_lines | reject('equalto', mailcow_old_cron_script) | list }}
+  when: mailcow_other_cron_files | length > 0

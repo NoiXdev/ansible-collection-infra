@@ -1,0 +1,6 @@
+---
+# The stub's nginx-mailcow is a plain nginx that does not read
+# data/conf/nginx: the role still writes its (then empty) nginx files and
+# runs nginx -t there, but exports no error pages.
+mailcow_admin_allow: []
+mailcow_error_pages_enabled: false

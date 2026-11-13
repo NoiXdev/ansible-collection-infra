@@ -1,0 +1,147 @@
+# {{ ansible_managed }}
+#
+# noix additions to mailcow's nginx, server level: mailcow's
+# sites-default.conf includes {{ mailcow_nginx_container_dir }}/site.*.custom in
+# each of its server blocks, before its own error_page 502. The http-level
+# part is noix.conf next to this file.
+{% if mailcow_admin_allow | length > 0 %}
+
+# Admin restriction: /admin (mailcow's admin UI) and /rspamd/ (the rspamd UI)
+# only for clients that connected from mailcow_admin_allow (noix.conf); 403
+# for everyone else, before any location runs. $uri is decoded and
+# normalised, so encoded or doubled slashes and dot segments do not get past
+# it. The match ignores case (/Admin, /RSPAMD/) and takes any first path
+# segment that starts with admin or rspamd and goes on with something other
+# than a letter, digit, - or _ (/admin;x, /admin.php), so nothing that
+# mailcow or a case-insensitive file system could map to them slips through.
+# A set and an if rather than a map: nginx keeps a map's value for the whole
+# request, so after the redirect to the 403 page the map would still say
+# "block" and nginx would answer with its own page instead of the noix one.
+set $noix_admin "$noix_admin_allowed:$uri";
+if ($noix_admin ~* "^0:/(admin|rspamd)([^a-z0-9_-]|$)") {
+    return 403;
+}
+{% endif %}
+{% if mailcow_error_pages_enabled %}
+
+# Error pages for the errors nginx generates itself; the first error_page for
+# a code wins, so these replace mailcow's own 502 page. Locations with an
+# error_page of their own (rspamd's /rspamd/auth) keep theirs. Answers of
+# mailcow's PHP, SOGo and rspamd pass unchanged (nginx does not intercept
+# them).
+{% for code in mailcow_error_pages_export_codes %}
+error_page {{ code }} /{{ mailcow_error_pages_name }}/$noix_error_pages_lang/{{ code }}.html;
+{% endfor %}
+
+location ^~ /{{ mailcow_error_pages_name }}/ {
+    internal;
+{% if mailcow_anubis_url | length > 0 %}
+    # The page of a 403 (the admin restriction, Anubis's DENY) or a 502 is
+    # never checked again.
+    auth_request off;
+{% endif %}
+    # The redirect to the page keeps the request's headers: without this a
+    # 413 (body too large) fails again here and nginx shows its own page.
+    client_max_body_size 0;
+    alias {{ mailcow_nginx_container_dir }}/{{ mailcow_error_pages_name }}/current/pages/;
+}
+{% endif %}
+{% if mailcow_anubis_url | length > 0 %}
+
+# Anubis (mailcow_anubis_url): every request of this server is checked
+# (auth_request) before its location runs; a browser without Anubis's cookie
+# gets Anubis's challenge page (401) at the URL it asked for, which goes on to
+# that URL, query and all, once solved. The locations with an auth_request of
+# their own (/SOGo, its /SOGo/so/ pages, /Microsoft-Server-ActiveSync) ask
+# mailcow's SOGo auth check, which runs on this server's port {{ mailcow_sogo_auth_port }} and is
+# checked there with the original URI. What nginx answers before the check
+# (the 403 of the admin restriction, mailcow's own redirects) is never
+# checked. The paths Anubis's policy ALLOWs (mail clients, the API, ACME) are
+# decided by Anubis too: while it is down every checked request answers 500
+# (fails closed), those included.
+auth_request /noix-anubis-check;
+auth_request_set $noix_anubis_status $upstream_status;
+error_page 401 @noix_anubis_401;
+
+# mailcow's SOGo auth check passes on $remote_addr only, which a client that
+# connects from a private network sets with X-Forwarded-For: such requests
+# (also every request of a reverse proxy in front of mailcow) get 403 on
+# /SOGo and /Microsoft-Server-ActiveSync instead of a check with a forged
+# address. A set and an if, as for the admin restriction.
+set $noix_anubis_sogo "$noix_anubis_forwarded:$uri";
+if ($noix_anubis_sogo ~ "^1:/(SOGo|Microsoft-Server-ActiveSync)") {
+    return 403;
+}
+
+# The check. A client-sent X-Original-Uri, X-Forwarded-Uri or X-Real-IP never
+# reaches Anubis: all three are set here (noix.conf). The name resolves when
+# a request comes (Docker's DNS), so nginx starts and nginx -t passes without
+# Anubis.
+location = /noix-anubis-check {
+    internal;
+    resolver 127.0.0.11 valid=5s ipv6=off;
+    set $noix_anubis_check "{{ mailcow_anubis_url }}/.within.website/x/cmd/anubis/api/check";
+    proxy_pass $noix_anubis_check;
+    # The check carries no body; without this nginx would hold the client's
+    # Content-Length against this location's limit (413, so 500).
+    client_max_body_size 0;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Original-Uri $noix_anubis_uri;
+    proxy_set_header X-Forwarded-Uri $noix_anubis_uri;
+    proxy_set_header X-Real-IP $noix_anubis_client;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 10s;
+}
+
+# Anubis's own paths (assets, pass-challenge), never checked and not
+# restricted. No X-Original-Uri or X-Forwarded-Uri: Anubis then judges the
+# path it is asked for (pass-challenge checks the rule of the redir URL,
+# which a forwarded URI would replace).
+location ^~ /.within.website/ {
+    auth_request off;
+    resolver 127.0.0.11 valid=5s ipv6=off;
+    set $noix_anubis "{{ mailcow_anubis_url }}";
+    proxy_pass $noix_anubis;
+    proxy_set_header Host $host;
+    proxy_set_header X-Original-Uri "";
+    proxy_set_header X-Forwarded-Uri "";
+    proxy_set_header X-Real-IP $realip_remote_addr;
+    proxy_connect_timeout 5s;
+}
+
+# A 401 (its status stays). Anubis's challenge: Anubis renders its page for
+# the request as sent (a GET, without the body), so the page's own URL is
+# where it leads once solved. On port {{ mailcow_sogo_auth_port }} the challenge goes back to SOGo's
+# auth check with the mark (noix.conf). Any other 401 (a wrong SOGo or
+# ActiveSync password) stays nginx's 401.
+location @noix_anubis_401 {
+    auth_request off;
+    add_header WWW-Authenticate $noix_anubis_mark always;
+    # An add_header here ends the inheritance of mailcow's (sites-default.conf),
+    # so its security headers are repeated, on every answer of this location.
+    add_header Strict-Transport-Security "max-age=15768000;" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Robots-Tag none always;
+    add_header X-Download-Options noopen always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Permitted-Cross-Domain-Policies none always;
+    add_header Referrer-Policy strict-origin always;
+    resolver 127.0.0.11 valid=5s ipv6=off;
+    set $noix_anubis "{{ mailcow_anubis_url }}";
+    proxy_method GET;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Original-Uri "";
+    proxy_set_header X-Forwarded-Uri "";
+    proxy_set_header X-Real-IP $noix_anubis_client;
+    proxy_connect_timeout 5s;
+    if ($noix_anubis_challenge) {
+        proxy_pass $noix_anubis;
+        break;
+    }
+    return 401;
+}
+{% endif %}

@@ -1,0 +1,663 @@
+---
+# Order: the checks (nothing changes before they pass), a fresh install when
+# there is no mailcow.conf, the backup script and timer, the role's nginx
+# files (admin restriction, error pages), the update (backup first), the
+# health check, the Roundcube update (the same backup), then the age of the
+# last backup (a first backup when none is recorded). Sets mailcow_updated,
+# mailcow_roundcube_updated and mailcow_last_backup.
+
+# Facts of an earlier run of the role in the same play must not carry over.
+- name: Reset the state of the run
+  ansible.builtin.set_fact:
+    mailcow_update_marker_written: false
+    mailcow_rc_installing: false
+    mailcow_rc_deferred_error: ""
+    mailcow_check_error: ""
+
+- name: Check the mailcow settings
+  ansible.builtin.assert:
+    that:
+      - mailcow_dir is match('^/.')
+      - mailcow_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - mailcow_git_repo | length > 0
+      - mailcow_backup_dir is match('^/.')
+      - mailcow_backup_keep_days | int >= 1
+      - mailcow_backup_time is match('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+      - mailcow_backup_skip_hours | int >= 1
+      - mailcow_backup_max_age_hours | int > mailcow_backup_skip_hours | int
+      - mailcow_health_timeout | int > 0
+      - mailcow_install_settings is mapping
+      - mailcow_install_settings | dict2items | map(attribute='key') | reject('match', '^[A-Z][A-Z0-9_]*$') | list | length == 0
+      - mailcow_install_settings | dict2items | map(attribute='value') | map('string') | select('search', '\n') | list | length == 0
+      - mailcow_admin_allow is sequence and mailcow_admin_allow is not string
+      - mailcow_admin_allow | map('string') | reject('match', mailcow_network_regex) | list | length == 0
+      - mailcow_roundcube_update is boolean
+      - mailcow_roundcube_allow_insecure_mirror is boolean
+      - mailcow_roundcube_api_url is match('^https://[^/]') or (mailcow_roundcube_allow_insecure_mirror and mailcow_roundcube_api_url is match('^http://[^/]'))
+      - mailcow_error_pages_image | length > 0
+      - mailcow_error_pages_theme is match('^[a-z0-9_-]+$')
+      - mailcow_error_pages_env is mapping
+      - mailcow_error_pages_codes is sequence and mailcow_error_pages_codes is not string
+      - mailcow_error_pages_codes | length > 0
+      - mailcow_error_pages_codes | map('string') | reject('match', '^[45][0-9][0-9]$') | list | length == 0
+    fail_msg: >-
+      mailcow_dir and mailcow_backup_dir must be absolute paths other than /;
+      mailcow_project only lowercase letters, digits, - and _;
+      mailcow_git_repo must be set; mailcow_backup_keep_days and
+      mailcow_health_timeout must be positive; mailcow_backup_skip_hours at
+      least 1; mailcow_backup_time HH:MM;
+      mailcow_backup_max_age_hours greater than mailcow_backup_skip_hours (or
+      a skipped daily backup could leave the last one too old);
+      mailcow_install_settings keys like SKIP_CLAMD (uppercase letters,
+      digits, _) with one-line values; mailcow_admin_allow a list of IPv4 or
+      IPv6 networks (such as 100.64.0.0/10 or fd7a:115c:a1e0::/48);
+      mailcow_roundcube_update true or false and mailcow_roundcube_api_url
+      an https URL (http only with mailcow_roundcube_allow_insecure_mirror,
+      for tests); mailcow_error_pages_image set, mailcow_error_pages_theme one theme
+      name, mailcow_error_pages_env a mapping and mailcow_error_pages_codes
+      a non-empty list of status codes from 400 to 599.
+    quiet: true
+  vars:
+    # An IPv4 or IPv6 address with an optional prefix length; nginx -t checks
+    # the rest.
+    mailcow_network_regex: '^([0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9a-fA-F:]*:[0-9a-fA-F:.]*)(/[0-9]{1,3})?$'
+
+# Pruning and backups must never reach into the installation, nor the
+# installation into the backups. Compared as real paths (symbolic links
+# resolved; either may not exist yet).
+- name: Read the real paths of the clone and the backups
+  ansible.builtin.command:
+    argv: [realpath, -m, --, "{{ mailcow_dir }}", "{{ mailcow_backup_dir }}"]
+  register: mailcow_realpaths
+  changed_when: false
+
+- name: Check that the clone and the backups are apart
+  ansible.builtin.assert:
+    that:
+      - not (mailcow_dir_n ~ '/').startswith(mailcow_backup_dir_n ~ '/')
+      - not (mailcow_backup_dir_n ~ '/').startswith(mailcow_dir_n ~ '/')
+    fail_msg: >-
+      mailcow_dir ({{ mailcow_dir }}, {{ mailcow_dir_n }}) and mailcow_backup_dir
+      ({{ mailcow_backup_dir }}, {{ mailcow_backup_dir_n }}) must not be the same
+      directory or one inside the other. Nothing was changed.
+    quiet: true
+  vars:
+    mailcow_dir_n: "{{ mailcow_realpaths.stdout_lines[0] | regex_replace('/+$', '') }}"
+    mailcow_backup_dir_n: "{{ mailcow_realpaths.stdout_lines[1] | regex_replace('/+$', '') }}"
+
+# Written by update_failed.yml before update.sh --force and before a Roundcube
+# install, rewritten with the step when they fail, removed once the health
+# check after them passed: a run that stopped in between (a lost connection,
+# a killed worker, a time limit) leaves it too.
+- name: Read the marker of a failed update
+  ansible.builtin.slurp:
+    src: "{{ mailcow_update_failed_file }}"
+  register: mailcow_update_failed_read
+  failed_when: false
+
+- name: Refuse to run after a failed update
+  ansible.builtin.fail:
+    msg: >-
+      {{ mailcow_update_failed_file }} exists: an update of mailcow in
+      {{ mailcow_dir }} did not complete ({{ mailcow_marker_step }}; at
+      {{ mailcow_marker_time }}). The backup taken before it is
+      {{ mailcow_marker_backup }}; mailcow-backup keeps it while the marker
+      exists. The role does not update or change mailcow while the marker
+      exists. Fix mailcow (restore from that backup by hand if needed), then
+      remove the marker (rm {{ mailcow_update_failed_file }}) and run the role
+      again.
+  vars:
+    mailcow_marker_text: "{{ mailcow_update_failed_read.content | b64decode }}"
+    mailcow_marker_time: "{{ mailcow_marker_text | regex_search('(?m)^time: (.*)$', '\\1') | default(['?'], true) | first }}"
+    mailcow_marker_backup: "{{ mailcow_marker_text | regex_search('(?m)^backup: (.*)$', '\\1') | default(['?'], true) | first }}"
+    mailcow_marker_step: >-
+      {{ mailcow_marker_text | regex_search('(?m)^failed_step: (.*)$', '\1') | default(['"?"'], true) | first | from_yaml }}
+  when: mailcow_update_failed_read.content is defined
+
+- name: Read the Docker version
+  ansible.builtin.command:
+    argv: [docker, version, --format, "{{ '{{.Server.Version}}' }}"]
+  register: mailcow_docker_version
+  changed_when: false
+  failed_when: false
+
+- name: Read the Docker Compose version
+  ansible.builtin.command:
+    argv: [docker, compose, version, --short]
+  register: mailcow_compose_version
+  changed_when: false
+  failed_when: false
+
+- name: Check Docker and Compose v2
+  ansible.builtin.assert:
+    that:
+      - mailcow_docker_version.rc == 0
+      - mailcow_docker_version.stdout | trim is match('^[0-9]+\.')
+      - mailcow_docker_version.stdout | trim is version('24', '>=')
+      - mailcow_compose_version.rc == 0
+      - mailcow_compose_version.stdout | trim | regex_replace('^v', '') is match('^[2-9]\.|^[1-9][0-9]+\.')
+    fail_msg: >-
+      mailcow needs Docker 24 or newer with the Compose v2 plugin (docker
+      compose); found Docker
+      "{{ (mailcow_docker_version.stdout | default('') or mailcow_docker_version.stderr | default('')) | trim }}"
+      and Compose
+      "{{ (mailcow_compose_version.stdout | default('') or mailcow_compose_version.stderr | default('')) | trim }}".
+      Install Docker first; the role does not install or change it.
+    quiet: true
+
+- name: Look for mailcow.conf
+  ansible.builtin.stat:
+    path: "{{ mailcow_conf }}"
+    get_checksum: false
+  register: mailcow_conf_stat
+
+- name: Look for the mailcow clone
+  ansible.builtin.stat:
+    path: "{{ mailcow_dir }}/.git"
+    get_checksum: false
+  register: mailcow_git_stat
+
+- name: Note whether mailcow is installed
+  ansible.builtin.set_fact:
+    mailcow_installed: "{{ mailcow_conf_stat.stat.exists }}"
+
+- name: Check the clone
+  when: mailcow_git_stat.stat.exists
+  block:
+    - name: Read the branch of the clone
+      ansible.builtin.command:
+        argv: "{{ mailcow_git + ['rev-parse', '--abbrev-ref', 'HEAD'] }}"
+      register: mailcow_branch
+      changed_when: false
+      failed_when: false
+
+    # update.sh follows the checked-out branch; the role keeps mailcow on the
+    # stable one and never switches.
+    - name: Check that the clone is on master
+      ansible.builtin.assert:
+        that:
+          - mailcow_branch.rc == 0
+          - mailcow_branch.stdout | trim == 'master'
+        fail_msg: >-
+          {{ mailcow_dir }} is not on mailcow's stable branch master (found
+          {{ (mailcow_branch.stdout | trim or mailcow_branch.stderr | trim)
+             | regex_replace('^HEAD$', 'a detached HEAD') }}). The role updates
+          the stable branch only and does not switch branches; switch by hand
+          (./update.sh --stable in {{ mailcow_dir }}, after a backup) or point
+          mailcow_dir at another clone. Nothing was changed.
+        quiet: true
+
+    - name: Look for an unfinished merge
+      ansible.builtin.command:
+        argv: "{{ mailcow_git + ['ls-files', '--unmerged'] }}"
+      register: mailcow_unmerged_before
+      changed_when: false
+
+    - name: Refuse a clone with an unfinished merge
+      ansible.builtin.fail:
+        msg: >-
+          {{ mailcow_dir }} has files with an unresolved merge conflict
+          (probably from an earlier update.sh): {{ mailcow_unmerged_files | join(', ') }}.
+          Resolve them by hand (git status in {{ mailcow_dir }}), then run the
+          role again. Nothing was changed.
+      vars:
+        mailcow_unmerged_files: >-
+          {{ mailcow_unmerged_before.stdout_lines | map('regex_replace', '^[^\t]*\t', '') | unique | list }}
+      when: mailcow_unmerged_before.stdout_lines | length > 0
+
+- name: Check the existing installation
+  when: mailcow_installed
+  block:
+    - name: Read mailcow.conf
+      ansible.builtin.slurp:
+        src: "{{ mailcow_conf }}"
+      register: mailcow_conf_read
+      # It holds the database passwords.
+      no_log: true
+
+    - name: Note the compose project of the installation
+      ansible.builtin.set_fact:
+        mailcow_conf_project: >-
+          {{ (mailcow_conf_read.content | b64decode)
+             | regex_search('(?m)^COMPOSE_PROJECT_NAME=(.*)$', '\1') | default([''], true) | first | trim }}
+
+    - name: Check the compose project of the installation
+      ansible.builtin.assert:
+        that: mailcow_conf_project == mailcow_project
+        fail_msg: >-
+          {{ mailcow_conf }} names the compose project
+          "{{ mailcow_conf_project }}", but mailcow_project is
+          "{{ mailcow_project }}". Set mailcow_project to the installation's
+          project; the role does not change mailcow.conf. Nothing was changed.
+        quiet: true
+
+    - name: Check that the installation is a clone
+      ansible.builtin.assert:
+        that: mailcow_git_stat.stat.exists
+        fail_msg: >-
+          {{ mailcow_dir }} has mailcow.conf but is not a Git clone, so
+          update.sh cannot update it. Nothing was changed.
+        quiet: true
+
+# Clients that Docker's userland proxy carries appear as an address of
+# mailcow's own network: listing it (or a range that contains it) would let
+# them all through. mailcow.conf names it (IPV4_NETWORK: the first three
+# octets of a /24; IPV6_NETWORK); a fresh install takes
+# mailcow_install_settings or mailcow's defaults (also for an empty value, as
+# mailcow's compose file does). Fails closed: an allowed entry that does not
+# parse as a network (such as leading zeros, 000.0.0.0/0, which nginx's geo
+# would read as 0.0.0.0/0) is refused, and so is a mailcow network that does
+# not parse.
+- name: Check that mailcow_admin_allow leaves out mailcow's own network
+  when: mailcow_admin_allow | length > 0
+  block:
+    - name: Look for allowed networks that cover mailcow's own network
+      ansible.builtin.command:
+        argv: "{{ ['python3', '-c', mailcow_overlap_script, mailcow_own_ipv4, mailcow_own_ipv6] + (mailcow_admin_allow | map('string') | list) }}"
+      register: mailcow_admin_allow_bad
+      changed_when: false
+      failed_when: false
+      vars:
+        # argv: IPv4 /24 prefix, IPv6 network, allowed networks. Prints each
+        # allowed entry the role refuses, with the reason; exits 3 naming a
+        # mailcow network that does not parse.
+        mailcow_overlap_script: |
+          import ipaddress, sys
+          own = []
+          for network in (sys.argv[1] + ".0/24", sys.argv[2]):
+              try:
+                  own.append(ipaddress.ip_network(network, strict=False))
+              except ValueError:
+                  print(network, file=sys.stderr)
+                  sys.exit(3)
+          for entry in sys.argv[3:]:
+              try:
+                  network = ipaddress.ip_network(entry, strict=False)
+              except ValueError:
+                  print(entry + " (does not parse as a network; write it without leading zeros, with a prefix length the address allows)")
+                  continue
+              if network.prefixlen == 0:
+                  print(entry + " (every address)")
+                  continue
+              for other in own:
+                  if network.version == other.version and network.overlaps(other):
+                      print(entry + " (overlaps mailcow's network " + str(other) + ")")
+        mailcow_conf_text: "{{ (mailcow_conf_read.content | b64decode) if mailcow_installed else '' }}"
+        mailcow_own_ipv4: >-
+          {{ mailcow_conf_text | regex_search('(?m)^IPV4_NETWORK=(.*)$', '\1')
+             | default([mailcow_install_settings.IPV4_NETWORK | default('')], true)
+             | first | trim | trim('"') | regex_replace('\.0/24$', '') | default('172.22.1', true) }}
+        mailcow_own_ipv6: >-
+          {{ mailcow_conf_text | regex_search('(?m)^IPV6_NETWORK=(.*)$', '\1')
+             | default([mailcow_install_settings.IPV6_NETWORK | default('')], true)
+             | first | trim | trim('"') | default('fd4d:6169:6c63:6f77::/64', true) }}
+
+    - name: Check that mailcow's own network could be read
+      ansible.builtin.assert:
+        that: mailcow_admin_allow_bad.rc == 0
+        fail_msg: >-
+          The role cannot read mailcow's own network
+          "{{ (mailcow_admin_allow_bad.stderr | trim) or ('exit ' ~ mailcow_admin_allow_bad.rc) }}" (IPV4_NETWORK,
+          the first three octets of a /24, and IPV6_NETWORK in {{ mailcow_conf }} or
+          mailcow_install_settings), so it cannot check mailcow_admin_allow against
+          it. Fix the value; nothing was changed.
+        quiet: true
+
+    - name: Check the networks of mailcow_admin_allow
+      ansible.builtin.assert:
+        that: mailcow_admin_allow_bad.stdout_lines | length == 0
+        fail_msg: >-
+          mailcow_admin_allow has entries the role refuses:
+          {{ mailcow_admin_allow_bad.stdout_lines | join(', ') }}. Every address
+          and mailcow's own network are refused because clients that Docker's
+          userland proxy carries (IPv6 without mailcow's IPv6, the loopback)
+          appear with an address of that network; an entry that does not parse
+          is refused because nginx may read it differently. List only the
+          networks of your admins (such as your tailnet's 100.64.0.0/10 and
+          fd7a:115c:a1e0::/48). Nothing was changed.
+        quiet: true
+
+# Anubis (mailcow_anubis_url): before anything changes, the settings, the
+# network nginx-mailcow joins (the anubis role makes it; mailcow does not
+# start while the compose override names a missing one) and a compose
+# override that is not the role's.
+- name: Check the Anubis settings
+  ansible.builtin.assert:
+    that:
+      - mailcow_anubis_url is string
+      - >-
+        mailcow_anubis_url | length == 0
+        or mailcow_anubis_url is match('^http://[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?(:[0-9]{1,5})?$')
+      - mailcow_anubis_network is string
+      - mailcow_anubis_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    fail_msg: >-
+      mailcow_anubis_url is empty or Anubis's address on its network, http://
+      with a host name and an optional port, without a path (such as
+      http://noixdev-anubis:8923); mailcow_anubis_network is the name of a
+      Docker network (letters, digits, _, . and -). Nothing was changed.
+    quiet: true
+
+- name: Check that the error pages leave 401 to Anubis
+  ansible.builtin.assert:
+    that: 401 not in mailcow_error_pages_codes | map('int') | list
+    fail_msg: >-
+      mailcow_error_pages_codes contains 401, which Anubis needs
+      (mailcow_anubis_url): its challenge is a 401 that nginx answers with
+      Anubis's challenge page, and a wrong SOGo or ActiveSync password must
+      stay mailcow's own 401. Take 401 out of mailcow_error_pages_codes.
+      Nothing was changed.
+    quiet: true
+  when: mailcow_anubis_url | length > 0
+
+# Behind a reverse proxy the address that connected is the proxy's: every
+# client would share one address in Anubis, and /SOGo and ActiveSync would
+# answer 403 (site.noix.custom). The settings that say so are refused; a
+# proxy that mailcow.conf does not name cannot be told apart.
+- name: Refuse Anubis behind a reverse proxy
+  ansible.builtin.assert:
+    that:
+      - mailcow_anubis_proxy_protocol is not match('(?i)^(y|yes|true|1)$')
+      - mailcow_anubis_trusted_proxies | length == 0
+    fail_msg: >-
+      mailcow_anubis_url does not work behind a reverse proxy, and
+      {{ 'mailcow.conf' if mailcow_installed else 'mailcow_install_settings' }} sets
+      {{ ((['NGINX_USE_PROXY_PROTOCOL=' ~ mailcow_anubis_proxy_protocol] if mailcow_anubis_proxy_protocol is match('(?i)^(y|yes|true|1)$') else [])
+          + (['TRUSTED_PROXIES=' ~ mailcow_anubis_trusted_proxies] if mailcow_anubis_trusted_proxies | length > 0 else [])) | join(' and ') }}:
+      nginx would see the proxy's address instead of the client's, so every
+      client would share one address in Anubis and /SOGo and ActiveSync
+      would answer 403. Leave mailcow_anubis_url empty there. Nothing was
+      changed.
+    quiet: true
+  vars:
+    # An installed mailcow: mailcow.conf alone (a key it lacks is unset,
+    # whatever mailcow_install_settings says); else mailcow_install_settings.
+    mailcow_anubis_conf_text: "{{ (mailcow_conf_read.content | b64decode) if mailcow_installed else '' }}"
+    mailcow_anubis_proxy_protocol: >-
+      {{ ((mailcow_anubis_conf_text | regex_search('(?m)^NGINX_USE_PROXY_PROTOCOL=(.*)$', '\1') | default([''], true) | first)
+          if mailcow_installed else mailcow_install_settings.NGINX_USE_PROXY_PROTOCOL | default(''))
+         | string | trim | trim('"') }}
+    mailcow_anubis_trusted_proxies: >-
+      {{ ((mailcow_anubis_conf_text | regex_search('(?m)^TRUSTED_PROXIES=(.*)$', '\1') | default([''], true) | first)
+          if mailcow_installed else mailcow_install_settings.TRUSTED_PROXIES | default(''))
+         | string | trim | trim('"') }}
+  when: mailcow_anubis_url | length > 0
+
+- name: Look for Anubis's network
+  ansible.builtin.command:
+    argv: [docker, network, inspect, --format, "{{ '{{.Name}}' }}", "{{ mailcow_anubis_network }}"]
+  register: mailcow_anubis_network_inspect
+  changed_when: false
+  failed_when: false
+  when: mailcow_anubis_url | length > 0
+
+- name: Check that Anubis's network exists
+  ansible.builtin.assert:
+    that: mailcow_anubis_network_inspect.rc == 0
+    fail_msg: >-
+      The Docker network {{ mailcow_anubis_network }} (mailcow_anubis_network)
+      does not exist, so nginx-mailcow cannot join it to reach Anubis
+      ({{ mailcow_anubis_url }}). Run the anubis role in nginx mode first
+      (anubis_mode: nginx; it creates anubis_nginx_network, default
+      noixdev-anubis), then this role. Nothing was changed.
+    quiet: true
+  when: mailcow_anubis_url | length > 0
+
+- name: Look for a compose override
+  ansible.builtin.command:
+    argv: [grep, -qxF, -e, "{{ mailcow_compose_override_marker }}", --, "{{ mailcow_compose_override }}"]
+  register: mailcow_override_grep
+  changed_when: false
+  failed_when: false
+
+# grep: 0 the role's file, 1 another one, 2 none.
+- name: Refuse a compose override that is not the role's
+  ansible.builtin.assert:
+    that: mailcow_override_grep.rc != 1
+    fail_msg: >-
+      {{ mailcow_compose_override }} exists and was not written by this role,
+      which needs it to put nginx-mailcow on Anubis's network
+      (mailcow_anubis_url); the role does not merge into a file of yours.
+      Move its contents out of the way, or leave mailcow_anubis_url empty.
+      Nothing was changed.
+    quiet: true
+  when: mailcow_anubis_url | length > 0
+
+- name: Check the settings for a fresh install
+  ansible.builtin.assert:
+    that:
+      - mailcow_hostname is match('^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+){2,}$')
+      - mailcow_timezone | length > 0
+    fail_msg: >-
+      mailcow is not installed in {{ mailcow_dir }} (no mailcow.conf); a fresh
+      install needs mailcow_hostname (the mail server's FQDN with a subdomain,
+      such as mail.example.org) and mailcow_timezone. Nothing was changed.
+    quiet: true
+  when: not mailcow_installed
+
+- name: Look for the backup directory
+  ansible.builtin.stat:
+    path: "{{ mailcow_backup_dir }}"
+    get_checksum: false
+    # A symbolic link to the backup disk counts as the directory it points at.
+    follow: true
+  register: mailcow_backup_dir_stat
+
+- name: Check the backup directory
+  when: mailcow_backup_require_mount
+  block:
+    - name: Check that the backup directory exists
+      ansible.builtin.assert:
+        that: mailcow_backup_dir_stat.stat.isdir | default(false)
+        fail_msg: >-
+          mailcow_backup_dir {{ mailcow_backup_dir }} does not exist. It must be
+          on a file system of its own (mailcow_backup_require_mount); mount the
+          backup disk there first. Nothing was changed.
+        quiet: true
+
+    # One line per path: its device, then the path. mailcow_dir may not exist
+    # yet (a fresh install): its nearest existing parent stands in.
+    - name: Read the file systems of the backup directory and what it must not share
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          clone={{ mailcow_dir | quote }}
+          while [ ! -e "$clone" ]; do clone="$(dirname "$clone")"; done
+          docker_root="$(docker info --format '{{ '{{.DockerRootDir}}' }}')"
+          for path in {{ mailcow_backup_dir | quote }} / "$clone" "$docker_root"; do
+            echo "$(stat -L -c %d -- "$path") $path"
+          done
+      register: mailcow_backup_devices
+      changed_when: false
+
+    - name: Check that the backups are on a file system of their own
+      ansible.builtin.assert:
+        that: mailcow_backup_shared | length == 0
+        fail_msg: >-
+          mailcow_backup_dir {{ mailcow_backup_dir }} is on the same file system
+          as {{ mailcow_backup_shared | join(', ') }}, where backups would fill
+          the system disk, the mailcow installation or Docker's data. Mount a
+          disk of its own there (mailcow_backup_require_mount), or set
+          mailcow_backup_require_mount: false. Nothing was changed.
+        quiet: true
+      vars:
+        mailcow_backup_device: "{{ mailcow_backup_devices.stdout_lines[0].split(' ')[0] }}"
+        mailcow_backup_shared: >-
+          {{ mailcow_backup_devices.stdout_lines[1:] | select('match', mailcow_backup_device ~ ' ')
+             | map('regex_replace', '^[0-9]+ ', '') | unique | list }}
+
+# mailcow's scripts (generate_config.sh, update.sh, backup_and_restore.sh)
+# need these; present on a running mailcow already.
+- name: Install the tools mailcow's scripts need
+  ansible.builtin.apt:
+    name: [git, jq, curl, openssl, gawk, util-linux]
+    state: present
+  when: ansible_facts['os_family'] | default('') == 'Debian'
+
+- name: Install mailcow
+  ansible.builtin.include_tasks: install.yml
+  when: not mailcow_installed
+
+- name: Set up the backups
+  ansible.builtin.include_tasks: backup.yml
+
+- name: Set up mailcow's nginx (admin restriction, error pages)
+  ansible.builtin.include_tasks: nginx.yml
+
+- name: Note that nothing was updated yet
+  ansible.builtin.set_fact:
+    mailcow_updated: false
+    mailcow_roundcube_updated: false
+
+- name: Update mailcow
+  ansible.builtin.include_tasks: update.yml
+  when: mailcow_update
+
+- name: Check that mailcow is healthy
+  ansible.builtin.include_tasks: health.yml
+
+- name: Note the marker of an update that left mailcow unhealthy
+  ansible.builtin.include_tasks: update_failed.yml
+  vars:
+    mailcow_failed_step: "health check after the update: {{ mailcow_health_error | trim }}"
+  when:
+    - mailcow_health_error | length > 0
+    - mailcow_updated
+
+# A failing health check, and a Roundcube install that fails, end the run
+# before the errors kept for its end (a failing update check, a last backup
+# that is too old): their messages name those too.
+- name: Read the last successful backup for the failure message
+  ansible.builtin.slurp:
+    src: "{{ mailcow_last_backup_file }}"
+  register: mailcow_held_backup_read
+  failed_when: false
+  when: mailcow_health_error | length > 0
+
+- name: Note the errors kept for the end of the run
+  ansible.builtin.set_fact:
+    mailcow_held_errors: >-
+      {{ [mailcow_check_error | trim, (mailcow_stale_message | trim) if mailcow_stale_age_hours | float > mailcow_backup_max_age_hours | float else '']
+         | select | list }}
+  vars:
+    mailcow_held_text: "{{ mailcow_held_backup_read.content | default('') | b64decode }}"
+    mailcow_stale_folder: "{{ mailcow_held_text | regex_search('(?m)^folder: (.*)$', '\\1') | default([''], true) | first }}"
+    # No backup on record yet: not stale (the first one is made later).
+    mailcow_stale_age_hours: >-
+      {{ (((now(utc=true) - (mailcow_held_text | regex_search('(?m)^time: (.*)$', '\1') | first | trim
+                             | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).total_seconds() / 3600) | round(1))
+         if mailcow_held_text is search('(?m)^time: ') else 0 }}
+  when: mailcow_health_error | length > 0
+
+- name: Fail when mailcow is unhealthy
+  ansible.builtin.fail:
+    msg: >-
+      mailcow in {{ mailcow_dir }} is unhealthy{{ ' after the update' if mailcow_updated else '' }}.
+      Health step failed: {{ mailcow_health_error | trim }}.{{ mailcow_restore_hint }}{{ mailcow_held_note }}
+  vars:
+    mailcow_restore_hint: >-
+      {{ (' The backup taken before the update is ' ~ mailcow_update_backup ~ '; restore from it by hand'
+          ~ ' (helper-scripts/backup_and_restore.sh restore with MAILCOW_BACKUP_LOCATION=' ~ mailcow_backup_dir
+          ~ ') or from a server snapshot. The role does not roll back and does not run again until '
+      ~ mailcow_update_failed_file ~ ' is removed.') if mailcow_updated else '' }}
+  when: mailcow_health_error | length > 0
+
+- name: Remove the marker of the update now that mailcow is healthy
+  ansible.builtin.include_tasks: update_done.yml
+  when: mailcow_update_marker_written
+
+# After the health check: a Roundcube update restarts php-fpm-mailcow and
+# checks everything again. Same backup as mailcow's update, same marker. A
+# failure before the install began (GitHub's rate limit or an outage, a
+# download that fails its checksum, a missing asset) changed nothing: it is
+# kept until the first-backup and backup-age checks below have run, then fails
+# the run. From the install on it fails at once (the marker is written).
+- name: Update Roundcube
+  when: mailcow_roundcube_update
+  block:
+    - name: Run the Roundcube update
+      ansible.builtin.include_tasks: roundcube.yml
+  rescue:
+    # A backup was made just before the install, so only the check error
+    # can be kept.
+    - name: Fail at once when the Roundcube install failed
+      ansible.builtin.fail:
+        msg: >-
+          {{ ansible_failed_result.msg | default('The Roundcube update failed.') }}{{
+             (' Also: ' ~ (mailcow_check_error | trim)) if mailcow_check_error | trim | length > 0 else '' }}
+      when: mailcow_rc_installing
+
+    - name: Keep the Roundcube error for the end of the run
+      ansible.builtin.set_fact:
+        mailcow_rc_deferred_error: "{{ ansible_failed_result.msg | default('The Roundcube update failed.') }}"
+
+# Without a recorded backup (a fresh install, a takeover without an update)
+# the first one is made now; otherwise the last one must be recent.
+- name: Read the last successful backup
+  ansible.builtin.slurp:
+    src: "{{ mailcow_last_backup_file }}"
+  register: mailcow_last_backup_read
+  failed_when: false
+
+- name: Make the first backup
+  ansible.builtin.command:
+    argv: ["{{ mailcow_backup_script }}", --reason, daily]
+  register: mailcow_first_backup
+  changed_when: "mailcow_first_backup.stdout is search('mailcow-backup: done: ')"
+  failed_when: false
+  async: 21600
+  poll: 10
+  when: mailcow_last_backup_read.content is not defined
+
+- name: Fail when the first backup failed
+  ansible.builtin.fail:
+    msg: >-
+      The first mailcow backup into {{ mailcow_backup_dir }} failed
+      ({{ mailcow_first_backup_error }}). See {{ mailcow_state_dir }}/backup.log.
+  vars:
+    # No exit code: Ansible stopped it at its time limit (async).
+    mailcow_first_backup_error: >-
+      {{ ('it did not finish within 21600 seconds and was stopped: ' ~ (mailcow_first_backup.msg | default('') | trim))
+         if mailcow_first_backup.rc is not defined
+         else ((mailcow_first_backup.stderr | default('') | trim).splitlines() or ['no error output'])[-mailcow_tail_lines:]
+              | join(' / ') }}
+  when:
+    - mailcow_first_backup is not skipped
+    - >-
+      mailcow_first_backup.rc | default(1) != 0
+      or mailcow_first_backup.stdout | default('') is not search('(?m)^mailcow-backup: (done|skipped): ')
+
+- name: Read the last successful backup again
+  ansible.builtin.slurp:
+    src: "{{ mailcow_last_backup_file }}"
+  register: mailcow_last_backup_reread
+  when: mailcow_first_backup is not skipped
+
+- name: Note the last successful backup
+  ansible.builtin.set_fact:
+    mailcow_last_backup: "{{ mailcow_last_backup_text | regex_search('(?m)^folder: (.*)$', '\\1') | default([''], true) | first }}"
+    mailcow_last_backup_age_hours: >-
+      {{ ((now(utc=true) - (mailcow_last_backup_text | regex_search('(?m)^time: (.*)$', '\1')
+                             | default(['1970-01-01T00:00:00Z'], true) | first | trim
+                             | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).total_seconds() / 3600) | round(1) }}
+  vars:
+    mailcow_last_backup_text: >-
+      {{ (mailcow_last_backup_read if mailcow_last_backup_reread is skipped else mailcow_last_backup_reread).content
+         | b64decode }}
+
+# The errors kept for the end of the run, in one failure: a failing update
+# check (update.yml), a last backup that is too old and Roundcube's error from
+# before its install (see above). An update makes its own backup first, so
+# only a run without one can find the last backup too old: the daily timer
+# failed or did not run.
+- name: Fail with the errors kept for the end of the run
+  ansible.builtin.fail:
+    msg: "{{ mailcow_end_errors | join(' Also: ') }}"
+  vars:
+    mailcow_stale_folder: "{{ mailcow_last_backup }}"
+    mailcow_stale_age_hours: "{{ mailcow_last_backup_age_hours }}"
+    mailcow_stale_error: >-
+      {{ mailcow_stale_message if mailcow_last_backup_age_hours | float > mailcow_backup_max_age_hours | float else '' }}
+    mailcow_end_errors: >-
+      {{ [mailcow_check_error | trim, mailcow_stale_error | trim, mailcow_rc_deferred_error | trim] | select | list }}
+  when: mailcow_end_errors | length > 0

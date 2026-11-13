@@ -1,0 +1,13 @@
+---
+# Docker on the systemd test host, as on a server before the mailcow role.
+- name: Prepare
+  hosts: all
+  pre_tasks:
+    # The base role installs it on the servers; the test image has none.
+    - name: Install the CA certificates
+      ansible.builtin.apt:
+        name: ca-certificates
+        state: present
+        update_cache: true
+  roles:
+    - noixdev.infra.docker

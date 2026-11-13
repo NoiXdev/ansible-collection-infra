@@ -1,0 +1,107 @@
+---
+mailcow_conf: "{{ mailcow_dir }}/mailcow.conf"
+# The daily and pre-update backup: mailcow-backup [--reason daily|update].
+mailcow_backup_script: /usr/local/sbin/mailcow-backup
+mailcow_backup_unit: mailcow-backup
+mailcow_backup_lock: /run/lock/mailcow-backup.lock
+# mailcow-backup's state: last-backup (folder, time, reason of the last
+# successful backup) and the output of the last backup_and_restore.sh run.
+mailcow_state_dir: /var/lib/noix-mailcow
+mailcow_last_backup_file: "{{ mailcow_state_dir }}/last-backup"
+# Written when an update failed after update.sh started (backup, time,
+# failed_step): the role refuses to run and mailcow-backup keeps that backup
+# until it is removed.
+mailcow_update_failed_file: "{{ mailcow_state_dir }}/update-failed"
+# The backup script from mailcow's documentation; the role's timer replaces it.
+mailcow_old_cron_script: /etc/cron.daily/mailcow-backup
+
+# git on the clone, also when it belongs to another user than root.
+mailcow_git: [git, -c, "safe.directory={{ mailcow_dir }}", -C, "{{ mailcow_dir }}"]
+
+# What update.sh prints when it updated itself (or its _modules) and wants to
+# be started again: current and older releases.
+mailcow_rerun_regex: (?i)(restart the update script|run this script again)
+
+# Seconds update.sh --force may run (Ansible stops it then; the run fails and
+# the marker stays).
+mailcow_update_timeout: 7200
+
+# The message of a last backup that is too old; the task sets
+# mailcow_stale_folder and mailcow_stale_age_hours.
+mailcow_stale_message: >-
+  The last successful mailcow backup ({{ mailcow_stale_folder or 'unknown folder' }}) is
+  {{ mailcow_stale_age_hours }} hours old, more than mailcow_backup_max_age_hours
+  ({{ mailcow_backup_max_age_hours }}). The daily backup ({{ mailcow_backup_unit }}.timer at
+  {{ mailcow_backup_time }}) failed or did not run; see journalctl -u {{ mailcow_backup_unit }},
+  fix it and run systemctl start {{ mailcow_backup_unit }}.
+# The errors kept for the end of the run, for a failing health check that
+# ends it sooner (mailcow_held_errors, set by main.yml): " Also: <error>" each.
+mailcow_held_note: >-
+  {{ mailcow_held_errors | default([]) | map('regex_replace', '^', ' Also: ') | join('') }}
+
+# The last lines of a command's output, for failure messages.
+mailcow_tail_lines: 15
+
+# The role's nginx files, in the directory nginx-mailcow mounts at
+# /etc/nginx/conf.d. mailcow's .gitignore ignores data/conf/nginx/*.conf and
+# *.custom, so update.sh keeps them; nginx.conf includes conf.d/*.conf at http
+# level and sites-default.conf includes conf.d/site.*.custom in every server.
+mailcow_nginx_dir: "{{ mailcow_dir }}/data/conf/nginx"
+mailcow_nginx_container_dir: /etc/nginx/conf.d
+mailcow_nginx_http_conf: "{{ mailcow_nginx_dir }}/noix.conf"
+mailcow_nginx_site_custom: "{{ mailcow_nginx_dir }}/site.noix.custom"
+mailcow_nginx_service: nginx-mailcow
+# Outside the clone: the role's nginx files as nginx-mailcow runs them (a copy,
+# or <name>.absent), kept while new ones are tested, and the flag of a
+# restart that is due (written before the files change, removed after nginx
+# -t passed and nginx-mailcow restarted), so a run that stops in between
+# does not lose the restart.
+mailcow_nginx_templates:
+  - {src: noix.conf.j2, dest: "{{ mailcow_nginx_http_conf }}"}
+  - {src: site.noix.custom.j2, dest: "{{ mailcow_nginx_site_custom }}"}
+mailcow_nginx_previous_dir: "{{ mailcow_state_dir }}/nginx-previous"
+mailcow_nginx_restart_flag: "{{ mailcow_state_dir }}/nginx-restart-pending"
+# Puts back the role's nginx files as nginx-mailcow runs them: the copies in
+# mailcow_nginx_previous_dir, or removes a file that did not exist.
+mailcow_nginx_restore_cmd: |
+  set -euo pipefail
+  previous={{ mailcow_nginx_previous_dir | quote }}
+  for file in {{ mailcow_nginx_templates | map(attribute='dest') | map('quote') | join(' ') }}; do
+    name="$(basename "$file")"
+    if [ -f "$previous/$name" ]; then
+      cp -p -- "$previous/$name" "$file"
+    elif [ -e "$previous/$name.absent" ]; then
+      rm -f -- "$file"
+    fi
+  done
+# The exported error pages: a directory of nginx's conf.d (no .conf or
+# .custom name, so nginx includes nothing from it), listed in
+# .git/info/exclude.
+mailcow_error_pages_name: noix-error-pages
+mailcow_error_pages_dir: "{{ mailcow_nginx_dir }}/{{ mailcow_error_pages_name }}"
+mailcow_git_exclude: "{{ mailcow_dir }}/.git/info/exclude"
+# The export script, in a directory of its own (error_pages_export makes its
+# directory 0755 root:root).
+mailcow_error_pages_export: /usr/local/lib/noix-mailcow/error-pages-export
+# The export's environment: mailcow_error_pages_env without the keys that
+# make no sense for static files, plus the theme.
+mailcow_error_pages_ignored_env: [THEME, SHOW_DETAILS, MAINTENANCE, MAINTENANCE_UNTIL, LISTEN, CONFIG_FILE]
+mailcow_error_pages_export_env: >-
+  {{ mailcow_error_pages_env | dict2items | rejectattr('key', 'in', mailcow_error_pages_ignored_env)
+     | items2dict | combine({'THEME': mailcow_error_pages_theme, 'SHOW_DETAILS': 'false'}) }}
+mailcow_error_pages_export_codes: "{{ mailcow_error_pages_codes | map('int') | unique | sort }}"
+
+# docker-compose.override.yml, mailcow's own place for changes to its compose
+# file (git-ignored, in mailcow's backups): with mailcow_anubis_url it puts
+# nginx-mailcow on mailcow_anubis_network. The role writes or removes it only
+# when it is absent or carries the marker line.
+mailcow_compose_override: "{{ mailcow_dir }}/docker-compose.override.yml"
+mailcow_compose_override_marker: "# Written by the noixdev.infra.mailcow role (mailcow_anubis_url)."
+# Port of mailcow's internal listener for SOGo's auth check (/sogo-auth-verify
+# proxies to 127.0.0.1:65510/sogo-auth).
+mailcow_sogo_auth_port: 65510
+
+# An integrated Roundcube (mailcow's guide): its files, run by
+# php-fpm-mailcow, which sees data/web as /web.
+mailcow_rc_dir: "{{ mailcow_dir }}/data/web/rc"
+mailcow_rc_iniset: "{{ mailcow_rc_dir }}/program/include/iniset.php"

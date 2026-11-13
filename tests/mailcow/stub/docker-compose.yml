@@ -1,0 +1,39 @@
+# Test stub of mailcow's compose file: nginx answers HTTPS, the SMTP banner
+# and IMAP over TLS, on the ports mailcow publishes; php-fpm-mailcow stands for
+# the container that runs Roundcube's installto.sh and composer (stub php and
+# composer).
+services:
+  nginx-mailcow:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTPS_BIND:-}:${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./data/conf/stub/https.conf:/etc/nginx/nginx.conf:ro
+      - ./data/assets/ssl:/ssl:ro
+      - ./data/web:/web:ro
+  php-fpm-mailcow:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    entrypoint: [sleep, infinity]
+    volumes:
+      - ./data/web:/web
+      - ./data/conf/stub/php:/usr/local/bin/php:ro
+      - ./data/conf/stub/composer:/usr/local/bin/composer:ro
+      - ./data/conf/stub/apk:/usr/local/bin/apk:ro
+      - /etc/mailcow-stub:/flags
+  postfix-mailcow:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "${SMTP_PORT:-25}:25"
+    volumes:
+      - ./data/conf/stub/smtp.conf:/etc/nginx/nginx.conf:ro
+  dovecot-mailcow:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "${IMAPS_PORT:-993}:993"
+    volumes:
+      - ./data/conf/stub/imaps.conf:/etc/nginx/nginx.conf:ro
+      - ./data/assets/ssl:/ssl:ro

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Test stub of php in php-fpm-mailcow: bin/installto.sh -y <target> run in
+# the new release's directory copies the release's version file over the
+# target's. Calls go to /flags/rc.calls. Flags in /flags (the host's
+# /etc/mailcow-stub): rc-install-fails.
+# The PHP version check of the role.
+if [ "$1" = -r ]; then
+  printf %s 8.2.35
+  exit 0
+fi
+echo "php $*" >>/flags/rc.calls
+if [ "$1" != bin/installto.sh ] || [ "$2" != -y ]; then
+  echo "stub php: unexpected arguments: $*" >&2
+  exit 2
+fi
+if [ -e /flags/rc-install-fails ]; then
+  echo "Failed to execute command: rsync -aC program/ $3/program/ (stub)" >&2
+  exit 1
+fi
+cp program/include/iniset.php "$3/program/include/iniset.php"
+cp index.php "$3/index.php"
+echo "Upgrading ... All done."

@@ -1,0 +1,187 @@
+---
+# The mailcow: dockerized clone. An existing one (with mailcow.conf) is taken
+# over in place; without mailcow.conf the role clones and installs mailcow.
+mailcow_dir: /opt/mailcow-dockerized
+# The compose project of the installation (COMPOSE_PROJECT_NAME in
+# mailcow.conf); a fresh install gets this one.
+mailcow_project: mailcowdockerized
+mailcow_git_repo: https://github.com/mailcow/mailcow-dockerized.git
+
+# A fresh install only (required there, unused otherwise): the mail server's
+# host name (an FQDN, not the mail domain) and its time zone, for
+# generate_config.sh.
+mailcow_hostname: ""
+mailcow_timezone: ""
+# A fresh install only: mailcow.conf settings written after generate_config.sh
+# and before mailcow starts, such as {SKIP_CLAMD: "y"}. An existing
+# mailcow.conf is never changed.
+mailcow_install_settings: {}
+
+# Every run checks for a new release on the stable branch (master) with
+# update.sh --check and, when there is one, backs up and runs update.sh
+# --force. false: the role neither checks nor updates. A failing
+# update.sh --check (GitHub out of reach) updates nothing and fails the run
+# after the health and backup checks.
+# The marker /var/lib/noix-mailcow/update-failed (backup, time, failed_step)
+# is written before update.sh --force runs, rewritten with the step when the
+# update fails (update.sh failing or leaving a merge conflict, or mailcow
+# unhealthy afterwards) and removed once the health check after the update
+# passed: a run that stopped during the update (a lost connection, a time
+# limit) leaves it too. While it exists the role fails at once and changes
+# nothing, and mailcow-backup never prunes the backup it names; remove it
+# after fixing mailcow.
+mailcow_update: true
+# Seconds the health check waits for mailcow (containers, HTTPS, SMTP, IMAP).
+mailcow_health_timeout: 300
+
+# Keeps an integrated Roundcube (files in data/web/rc, installed as mailcow's
+# guide describes; nothing happens without data/web/rc/index.php or
+# data/web/rc/public_html/index.php) on the newest release of the series it is
+# in (1.7.x stays on 1.7.x). The release's -complete.tar.gz must match the
+# SHA-256 digest GitHub publishes for that release asset, or nothing is
+# installed. The update (bin/installto.sh and composer update --no-dev -o in
+# php-fpm-mailcow, then a restart of it, then the health check with /rc/)
+# runs after mailcow's own, covered by the same backup, with the marker of a
+# failed update in place until the health check passed, as for mailcow's
+# update. A release that needs a newer PHP than php-fpm-mailcow runs is only
+# reported (the PHP requirement in its composer.json). A newer
+# series (1.8 for 1.7) is only reported: it needs config and nginx changes.
+# Roundcube's config and nginx snippet are never changed.
+mailcow_roundcube_update: true
+# Roundcube's release list (GET <url>/releases?per_page=100 in the format of
+# GitHub's API, whose asset entries carry browser_download_url and digest;
+# every call is unauthenticated, 60 per hour per address). For tests and
+# mirrors only: the downloads are taken from the list it returns. Both the
+# list URL and the download URLs must be https; plain http (a test server)
+# only with mailcow_roundcube_allow_insecure_mirror: true, which gives up
+# the integrity of the download entirely.
+mailcow_roundcube_api_url: https://api.github.com/repos/roundcube/roundcubemail
+mailcow_roundcube_allow_insecure_mirror: false
+
+# Backups (mailcow's backup_and_restore.sh backup all), daily from a systemd
+# timer and before every update, into mailcow_backup_dir (required). It must be
+# on a file system other than / (a mount point) unless
+# mailcow_backup_require_mount is false: on another file system than /,
+# mailcow_dir and Docker's root directory, and neither inside mailcow_dir nor
+# containing it (with symbolic links resolved; the directory may be a link to
+# the backup disk).
+mailcow_backup_require_mount: true
+# Backup folders (mailcow-YYYY-MM-DD-HH-MM-SS) older than this many days are
+# removed; never the last successful backup, the newest complete folder or
+# the backup of a failed update. With no successful backup on record nothing
+# is removed until this run's backup succeeded.
+mailcow_backup_keep_days: 3
+# The daily backup (host time, HH:MM).
+mailcow_backup_time: "06:25"
+# A run without an update fails when the last successful backup is older.
+mailcow_backup_max_age_hours: 26
+# The daily backup is skipped when a backup succeeded less than this many
+# hours ago (such as the backup before an update that night). At least 1, so
+# a daily backup never runs while update.sh works right after its backup.
+mailcow_backup_skip_hours: 12
+
+# /admin (mailcow's admin UI) and /rspamd/ (the rspamd UI) only from these
+# networks (CIDRs or addresses, IPv4 and IPv6); everyone else gets 403 there.
+# [] (the default) switches the restriction off: /admin and /rspamd/ are open
+# to every client, as in mailcow itself. Domain admins (/domainadmin),
+# mailbox users (/), webmail (/SOGo), the API (/api/v1, which has mailcow's
+# own IP allowlist for its keys), DAV, ActiveSync, Autodiscover and ACME stay
+# open.
+# The decision uses the address that connected to nginx, not X-Forwarded-For
+# (which mailcow's nginx trusts from private networks), so it needs Docker to
+# show nginx the real client address: published ports reached through
+# iptables/ip6tables (DNAT). Clients that come through Docker's userland
+# proxy appear as the address of mailcow's bridge and are refused: IPv6
+# clients when mailcow runs without IPv6 (ENABLE_IPV6=false in mailcow.conf,
+# or Docker without ip6tables), and connections over the loopback. Not for a
+# mailcow behind a reverse proxy or with NGINX_USE_PROXY_PROTOCOL: the
+# connecting address is then the proxy's.
+# List only your admins' networks (a tailnet's 100.64.0.0/10 and
+# fd7a:115c:a1e0::/48), never mailcow's Docker network or a broad private
+# range that contains it (172.16.0.0/12, 10.0.0.0/8): proxied clients appear
+# with an address of that network. The role refuses 0.0.0.0/0, ::/0 and
+# entries that overlap mailcow's network (IPV4_NETWORK and IPV6_NETWORK of
+# mailcow.conf), and entries that do not parse as a network (no leading
+# zeros: nginx reads 000.0.0.0/0 as every address).
+mailcow_admin_allow: []
+
+# noix error pages in mailcow's nginx for the errors nginx itself generates:
+# exported once from mailcow_error_pages_image (with Docker) to static files
+# below data/conf/nginx (excluded from Git in .git/info/exclude) and served
+# by nginx-mailcow through an internal location; no container keeps running.
+# mailcow's own error answers (API, logins, SOGo) pass unchanged. A new
+# image, theme, environment or codes exports them again. false removes the
+# error_page lines from the role's nginx files (the exported files stay).
+mailcow_error_pages_enabled: true
+mailcow_error_pages_image: noixdev/error-pages:1.0.0
+# One theme (glass, terminal, classic, status or clean; not random).
+mailcow_error_pages_theme: classic
+# Environment of the export, as for the error pages container on the Traefik
+# hosts (LANGUAGES, DEFAULT_LANGUAGE, SHOW_FOOTER, COPYRIGHT_NAME, LINKS, ...).
+# Each page carries every language; nginx starts it in the first language of
+# the browser that the pages offer. THEME is mailcow_error_pages_theme;
+# SHOW_DETAILS is always false; MAINTENANCE, MAINTENANCE_UNTIL, LISTEN and
+# CONFIG_FILE are ignored.
+mailcow_error_pages_env: {}
+# Status codes nginx answers with a noix page: an unreachable PHP-FPM or
+# backend (502, 504), a request body or URI that is too large (413, 414) and
+# the 403 of the admin restriction (and of mailcow's own deny rules). Keep to
+# codes nginx generates itself.
+mailcow_error_pages_codes: [502, 504, 413, 414, 403]
+
+# Anubis (the anubis role in nginx mode) in front of mailcow's web UI: its
+# URL, such as http://noixdev-anubis:8923 (http, no path). "" (the default)
+# switches it off. Run the anubis role first (anubis_mode: nginx; it creates
+# its network, mailcow_anubis_network): the role refuses to run while that
+# network is missing, writes docker-compose.override.yml in mailcow_dir (only
+# nginx-mailcow joins the network, so update.sh and docker compose down/up
+# keep it there; a docker-compose.override.yml that is not the role's is
+# refused), and checks that nginx-mailcow reaches Anubis before it changes
+# mailcow's nginx. Remove mailcow_anubis_url and run the role before you
+# remove Anubis or its network: mailcow does not start while the override
+# names a network that does not exist.
+# site.noix.custom then checks every request of mailcow's server blocks with
+# Anubis (auth_request), also /SOGo and /Microsoft-Server-ActiveSync through
+# mailcow's own auth check for SOGo; a browser without Anubis's cookie gets
+# Anubis's challenge page (401) at the URL it asked for, and that URL, query
+# and all, once solved. Requests nginx answers before the check are never
+# checked: the 403 of the admin restriction and mailcow's own redirects
+# (/.well-known/caldav, /principals, /sogo).
+# Fails closed: while Anubis is down every checked request answers 500, also
+# the paths the policy ALLOWs (mail clients, the API, ACME), because Anubis
+# decides them. Mail clients pass by the anubis role's policy; for mailcow:
+#   anubis_policy_allow:
+#     - name: mailcow-sync
+#       action: ALLOW
+#       path_regex: ^/(Microsoft-Server-ActiveSync|SOGo/dav(/|$)|SOGo/Microsoft-Server-ActiveSync|\.well-known/(caldav|carddav)$)
+#     - name: mailcow-autoconfig
+#       action: ALLOW
+#       path_regex: (?i)^/autodiscover/autodiscover\.(xml|json)
+#     - name: mailcow-thunderbird
+#       action: ALLOW
+#       path_regex: ^/(\.well-known/autoconfig/)?[mM]ail/[cC]onfig-v1\.1\.xml$
+#     - name: mailcow-api-acme
+#       action: ALLOW
+#       path_regex: ^/(api/v1/|\.well-known/acme-challenge/|\.well-known/mta-sts\.txt$)
+#     - name: admins
+#       action: ALLOW
+#       remote_addresses: [100.64.0.0/10, "fd7a:115c:a1e0::/48"]
+# The rules ignore case where mailcow does (Autodiscover; Mail/Config).
+# anubis_redirect_domains lists MAILCOW_HOSTNAME and every other name
+# browsers use. The address Anubis binds its cookie to and matches IP rules
+# with is the one that connected to nginx, as for mailcow_admin_allow (never
+# X-Forwarded-For, which mailcow's nginx believes from private networks), so
+# the same limits apply: clients carried by Docker's userland proxy appear as
+# mailcow's bridge, and Anubis is not for a mailcow behind a reverse proxy.
+# mailcow's SOGo auth check passes on mailcow's address only, so a request
+# whose address nginx took from X-Forwarded-For gets 403 on /SOGo and
+# /Microsoft-Server-ActiveSync.
+# With mailcow_anubis_url set, mailcow_error_pages_codes cannot contain 401.
+mailcow_anubis_url: ""
+# The network nginx-mailcow joins to reach Anubis: the anubis role's
+# anubis_nginx_network. Every member reaches nginx-mailcow's listeners there,
+# its internal ones (rspamd's 8081/9081, 9082) included, and comes from a
+# private address whose X-Forwarded-For mailcow's nginx believes: keep it to
+# Anubis (which never connects to nginx) and containers trusted like
+# mailcow's own.
+mailcow_anubis_network: noixdev-anubis

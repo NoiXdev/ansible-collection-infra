@@ -1,0 +1,51 @@
+---
+# A fresh install: the clone (branch master), mailcow.conf from mailcow's
+# generate_config.sh (host name and time zone from the environment, so it
+# asks nothing), mailcow_install_settings on top, then mailcow pulled and
+# started. The health check in main.yml follows.
+
+- name: Clone mailcow
+  ansible.builtin.command:
+    argv: [git, clone, --branch, master, "{{ mailcow_git_repo }}", "{{ mailcow_dir }}"]
+    creates: "{{ mailcow_dir }}/.git"
+
+# generate_config.sh refuses to run without the link; the clone has it.
+- name: Check the link from .env to mailcow.conf
+  ansible.builtin.file:
+    path: "{{ mailcow_dir }}/.env"
+    src: mailcow.conf
+    state: link
+    force: true
+
+- name: Write mailcow.conf with generate_config.sh
+  ansible.builtin.command:
+    cmd: ./generate_config.sh
+    chdir: "{{ mailcow_dir }}"
+    creates: "{{ mailcow_conf }}"
+  environment:
+    MAILCOW_HOSTNAME: "{{ mailcow_hostname }}"
+    MAILCOW_TZ: "{{ mailcow_timezone }}"
+    MAILCOW_BRANCH: master
+
+- name: Set the compose project and mailcow_install_settings in mailcow.conf
+  ansible.builtin.lineinfile:
+    path: "{{ mailcow_conf }}"
+    regexp: "^{{ item.key | regex_escape }}="
+    line: "{{ item.key }}={{ item.value }}"
+    mode: "0600"
+  loop: "{{ {'COMPOSE_PROJECT_NAME': mailcow_project} | combine(mailcow_install_settings) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Start mailcow
+  community.docker.docker_compose_v2:
+    project_src: "{{ mailcow_dir }}"
+    state: present
+    pull: missing
+
+- name: Report the default admin login
+  noixdev.infra.warn:
+    msg: >-
+      mailcow was installed in {{ mailcow_dir }} with its default admin login
+      (admin / moohoo). Change the password now at
+      https://{{ mailcow_hostname }}/admin.

@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: mailcow dockerized installed or taken over, kept on the latest stable release with a backup before every update
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+    - name: Debian
+      versions: [bookworm, trixie]
+dependencies: []

@@ -1,0 +1,177 @@
+---
+# Keeps an integrated Roundcube (data/web/rc, installed as mailcow's guide
+# describes) on the newest release of its series (1.7.x stays on 1.7.x), the
+# way the guide updates it: bin/installto.sh of the new release and
+# composer update --no-dev -o inside php-fpm-mailcow, then a restart of
+# php-fpm-mailcow and the health check (with /rc/). Does nothing without
+# Roundcube in data/web/rc. Runs after mailcow's update and its health check.
+#
+# The release list comes from GitHub's API (mailcow_roundcube_api_url): the
+# -complete.tar.gz must match the SHA-256 digest GitHub publishes for that
+# release asset, or nothing is installed (a missing digest fails the same
+# way). A newer series (1.8 for 1.7) needs config and nginx changes: it is
+# only reported. The backup before the update is update_backup.yml, shared
+# with mailcow's update: one backup per run. Failing from the install on (an
+# install step or /rc/ afterwards) fails the run naming the step and the
+# backup, and writes the marker of a failed update (update_failed.yml), so
+# the next run does not go on over a broken state.
+# Sets mailcow_roundcube_updated (and mailcow_roundcube_version when it is
+# installed). Roundcube's config and the nginx snippet are never changed.
+
+# Work directories of an update that was killed (roundcube_update.yml removes
+# its own).
+- name: Look for work directories of a killed Roundcube update
+  ansible.builtin.find:
+    paths: "{{ mailcow_dir }}/data/web"
+    patterns: ".noix-roundcube-*"
+    file_type: directory
+    hidden: true
+    age: 1h
+  register: mailcow_rc_stale
+
+- name: Remove work directories of a killed Roundcube update
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ mailcow_rc_stale.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Look for an integrated Roundcube
+  ansible.builtin.stat:
+    path: "{{ mailcow_dir }}/data/web/rc/{{ item }}"
+    get_checksum: false
+  loop: [index.php, public_html/index.php]
+  register: mailcow_rc_index
+
+- name: Note whether Roundcube is integrated
+  ansible.builtin.set_fact:
+    mailcow_roundcube_updated: false
+    mailcow_rc_present: "{{ mailcow_rc_index.results | selectattr('stat.exists') | list | length > 0 }}"
+
+- name: Read the installed Roundcube version
+  ansible.builtin.slurp:
+    src: "{{ mailcow_rc_iniset }}"
+  register: mailcow_rc_iniset_read
+  failed_when: false
+  when: mailcow_rc_present
+
+- name: Note the installed Roundcube version
+  ansible.builtin.set_fact:
+    mailcow_roundcube_version: "{{ mailcow_rc_version_found | first | default('') }}"
+  vars:
+    mailcow_rc_version_found: >-
+      {{ (mailcow_rc_iniset_read.content | default('') | b64decode)
+         | regex_findall('RCMAIL_VERSION\W+([0-9][0-9a-z.-]*)') }}
+  when: mailcow_rc_present
+
+# Release candidates and other unusual versions are not updated by a tool.
+- name: Report a Roundcube version the role cannot update
+  noixdev.infra.warn:
+    msg: >-
+      {{ mailcow_dir }}/data/web/rc is not updated: its version
+      "{{ mailcow_roundcube_version }}" (from {{ mailcow_rc_iniset }}) is not a
+      release such as 1.7.5. Update it by hand, or set
+      mailcow_roundcube_update to false.
+  when:
+    - mailcow_rc_present
+    - mailcow_roundcube_version is not match('^[0-9]+\.[0-9]+\.[0-9]+\Z')
+
+- name: Update the integrated Roundcube
+  when:
+    - mailcow_rc_present
+    - mailcow_roundcube_version is match('^[0-9]+\.[0-9]+\.[0-9]+\Z')
+  block:
+    - name: Read the Roundcube releases
+      ansible.builtin.uri:
+        url: "{{ mailcow_roundcube_api_url | regex_replace('/+$', '') }}/releases?per_page=100"
+        headers:
+          Accept: application/vnd.github+json
+        status_code: [200, 403, 429]
+        return_content: true
+        timeout: 30
+      register: mailcow_rc_api
+      failed_when: false
+
+    # GitHub answers 403 (or 429) when the 60 unauthenticated calls per hour
+    # of this address are used up.
+    - name: Check the Roundcube release list
+      ansible.builtin.assert:
+        that:
+          - mailcow_rc_api.status | default(-1) == 200
+          - mailcow_rc_api.json is defined
+          - mailcow_rc_api.json is sequence
+          - mailcow_rc_api.json is not string
+        fail_msg: >-
+          {% if mailcow_rc_api.status | default(-1) in [403, 429] -%}
+          GitHub's API refused the request for Roundcube's releases (HTTP
+          {{ mailcow_rc_api.status }}){{ ' because the rate limit of this address is used up' if mailcow_rc_limited else '' }}{{
+            ' (it resets in about ' ~ mailcow_rc_reset_minutes ~ ' minutes)' if mailcow_rc_limited and mailcow_rc_reset_minutes != '' else '' }}.
+          Run the role again later; Roundcube was not updated.
+          {%- else -%}
+          Could not read Roundcube's releases from {{ mailcow_roundcube_api_url }}/releases (HTTP
+          {{ mailcow_rc_api.status | default(-1) }}: {{ mailcow_rc_api.msg | default('no answer') | trim }}).
+          Roundcube was not updated; nothing was changed.
+          {%- endif %}
+        quiet: true
+      vars:
+        mailcow_rc_limited: "{{ mailcow_rc_api.status | default(-1) == 429 or mailcow_rc_api.x_ratelimit_remaining | default('') == '0' }}"
+        mailcow_rc_reset_minutes: >-
+          {{ (((mailcow_rc_api.x_ratelimit_reset | int) - now().timestamp()) / 60) | round(0, 'ceil') | int
+             if mailcow_rc_api.x_ratelimit_reset | default('') is match('^[0-9]+$') else '' }}
+
+    # Stable releases only (x.y.z). The keys are zero-padded, so strings sort
+    # as the numbers do.
+    - name: Work out the newest Roundcube releases
+      ansible.builtin.set_fact:
+        mailcow_rc_installed_key: "{{ '%08d%08d%08d' | format(mailcow_rc_parts[0], mailcow_rc_parts[1], mailcow_rc_parts[2]) }}"
+        mailcow_rc_installed_series: "{{ mailcow_rc_parts[0] }}.{{ mailcow_rc_parts[1] }}"
+        mailcow_rc_releases: >-
+          {%- set ns = namespace(out=[]) -%}
+          {%- for tag in mailcow_rc_api.json | rejectattr('prerelease', 'true') | rejectattr('draft', 'true')
+                         | map(attribute='tag_name') | select('match', '^[0-9]+[.][0-9]+[.][0-9]+\\Z') -%}
+          {%- set p = tag.split('.') | map('int') | list -%}
+          {%- set ns.out = ns.out + [{'tag': tag, 'series': p[0] ~ '.' ~ p[1],
+                                      'series_key': '%08d%08d' | format(p[0], p[1]),
+                                      'key': '%08d%08d%08d' | format(p[0], p[1], p[2])}] -%}
+          {%- endfor -%}
+          {{ ns.out | sort(attribute='key') }}
+      vars:
+        mailcow_rc_parts: "{{ mailcow_roundcube_version.split('.') | map('int') | list }}"
+
+    - name: Note the Roundcube release to install and the newer series
+      ansible.builtin.set_fact:
+        mailcow_rc_target: >-
+          {{ (mailcow_rc_same_series | last).tag
+             if mailcow_rc_same_series | length > 0 and (mailcow_rc_same_series | last).key > mailcow_rc_installed_key
+             else '' }}
+        mailcow_rc_newer_series: "{{ (mailcow_rc_newer | last).tag if mailcow_rc_newer | length > 0 else '' }}"
+      vars:
+        mailcow_rc_installed_series_key: >-
+          {{ '%08d%08d' | format(mailcow_roundcube_version.split('.')[0] | int, mailcow_roundcube_version.split('.')[1] | int) }}
+        mailcow_rc_same_series: "{{ mailcow_rc_releases | selectattr('series_key', 'equalto', mailcow_rc_installed_series_key) | list }}"
+        mailcow_rc_newer: "{{ mailcow_rc_releases | selectattr('series_key', 'gt', mailcow_rc_installed_series_key) | list }}"
+
+    - name: Report an installed Roundcube the release list does not know
+      noixdev.infra.warn:
+        msg: >-
+          Roundcube {{ mailcow_roundcube_version }} in {{ mailcow_rc_dir }} is not in the
+          {{ mailcow_rc_api.json | length }} releases read from {{ mailcow_roundcube_api_url }}
+          (the newest 100), so the role cannot tell whether a newer release of
+          its series exists. Update it by hand if needed.
+      when: mailcow_roundcube_version not in mailcow_rc_api.json | map(attribute='tag_name') | list
+
+    - name: Report a newer Roundcube series
+      noixdev.infra.warn:
+        msg: >-
+          Roundcube {{ mailcow_rc_newer_series }} is out, a newer series than
+          the {{ mailcow_rc_installed_series }} in {{ mailcow_dir }}/data/web/rc
+          ({{ mailcow_roundcube_version }}). A new series needs changes to its
+          config and mailcow's nginx snippet (see Roundcube's UPGRADING and
+          mailcow's Roundcube guide), so the role does not install it. It keeps
+          {{ mailcow_rc_installed_series }}.x current.
+      when: mailcow_rc_newer_series | length > 0
+
+    - name: Update Roundcube to the newest release of its series
+      ansible.builtin.include_tasks: roundcube_update.yml
+      when: mailcow_rc_target | length > 0

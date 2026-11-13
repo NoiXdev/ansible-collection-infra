@@ -66,6 +66,149 @@
   a *noop* run, a postponed run starts and restarts nothing, but fails when the app container is
   not running or listmonk does not answer `/health`. A run that goes ahead with the update
   removes the count, and so does any other successful run.
+- `mailcow`: new role for mailcow: dockerized in `mailcow_dir` (default `/opt/mailcow-dockerized`,
+  compose project `mailcow_project`, default `mailcowdockerized`). An existing clone with
+  `mailcow.conf` is taken over in place (same directory, project, volumes and `mailcow.conf`,
+  which the role never changes); without `mailcow.conf` the role clones `mailcow_git_repo`
+  (branch `master`), writes `mailcow.conf` with mailcow's `generate_config.sh`
+  (`mailcow_hostname`, `mailcow_timezone`, both required for an install only), sets
+  `mailcow_install_settings` (such as `SKIP_CLAMD: "y"`) on top, starts mailcow and warns that
+  the default admin password must be changed. Before anything changes it checks Docker 24+ with
+  Compose v2, that the clone is on `master` (another branch, a tag or a detached HEAD is
+  refused, never switched), that no merge conflict is left from an earlier update, that
+  `COMPOSE_PROJECT_NAME` is `mailcow_project`, that `mailcow_backup_dir` (required; it may be a
+  symbolic link to the backup disk) and `mailcow_dir` are not nested (compared with symbolic links
+  resolved), and that the backups are on another file system (device) than `/`, `mailcow_dir` and
+  Docker's root directory (`mailcow_backup_require_mount`, default true).
+- `mailcow`: latest stable release, no pin: every run (`mailcow_update`, default true) runs
+  `update.sh --check` (0: due, 3: none; any other exit, such as GitHub out of reach, updates
+  nothing and fails the run after the health and backup checks, together with their errors). When
+  a release is due: a full backup first (no backup, no update), then `update.sh --force` (at most
+  two hours; an `update.sh` that runs longer is stopped and fails the run naming the backup); an
+  `update.sh` that updated itself or its `_modules` and
+  asks to be started again is started once more (for the check and for the update). Files
+  `update.sh` left unmerged fail the run naming them, with the tree left as `update.sh` left it;
+  local changes its merge (`-Xtheirs`) replaced with the release's version are reported by name
+  (found with `git merge-tree`, kept in the "Before update" commit). After every run a health check (`mailcow_health_timeout`, default 300 seconds):
+  every compose service running and healthy, the UI over HTTPS (200 for `MAILCOW_HOSTNAME`), the
+  SMTP banner, IMAP over TLS and `/rc/` when Roundcube is integrated (`data/web/rc/index.php` or
+  `data/web/rc/public_html/index.php`). A failure names the step and, after an update, the backup
+  to restore from; the role never rolls back. The marker `/var/lib/noix-mailcow/update-failed`
+  (`backup`, `time`, `failed_step`) is written before `update.sh --force` runs (a marker that
+  cannot be written, such as on a full disk, fails the run before the update), rewritten with the
+  failed step when the update fails (update.sh failing or running out of time, a file left
+  unmerged, or mailcow unhealthy afterwards) and removed once the health check after the update
+  passed, so a run that stops during the update (a lost connection, a stopped worker) leaves it
+  too. While it exists every run fails at once without changes, naming it, and `mailcow-backup`
+  never prunes the backup it names; remove it after fixing mailcow.
+  Facts: `mailcow_updated`, `mailcow_last_backup`, and `mailcow_update_backup` (the folder of
+  the backup before the update, taken at most once per run by `tasks/update_backup.yml`).
+- `mailcow`: backups with `/usr/local/sbin/mailcow-backup [--reason daily|update]` (mailcow's
+  `backup_and_restore.sh backup all` into `mailcow_backup_dir`), daily from
+  `mailcow-backup.timer` at `mailcow_backup_time` (default `06:25`) and before every update. One
+  at a time (`flock` on `/run/lock/mailcow-backup.lock`; a second one waits); a daily backup is
+  skipped when one succeeded less than `mailcow_backup_skip_hours` (default 12, at least 1) ago.
+  Backup folders (`mailcow-YYYY-MM-DD-HH-MM-SS` only) older than `mailcow_backup_keep_days`
+  (default 3) are removed, never the last successful backup, the newest complete folder or the
+  failed update's backup; with a backup on record before the backup (so the space check counts
+  the room), otherwise only after this backup succeeded. The free space must be at least 1.2
+  times the newest backup. A backup counts only with
+  exit 0, every archive present and not empty and both mariabackup steps completed; it gets
+  `extra-files.tar.gz` (Roundcube's `data/web/rc`, own nginx `*.custom`/`*.conf`, Dovecot's
+  `extra.conf`, `docker-compose.override.yml`, `mailcow.conf`, `vars.local.inc.php`) and is
+  recorded in `/var/lib/noix-mailcow/last-backup`; a failed or stopped one's folder is removed and
+  the error goes to stderr (the journal). `tar` reporting files changed while it read them is a
+  warning, not a failure. The script's own files (`extra-files.tar.gz`, `last-backup`,
+  `backup.log`) are mode `0600`. A run without an update fails when the last successful backup is
+  older than `mailcow_backup_max_age_hours` (default 26); with none recorded it makes the first.
+  The backup cron script from mailcow's documentation (`/etc/cron.daily/mailcow-backup`) is
+  removed; one with other content, and other cron jobs running `backup_and_restore.sh`, are
+  reported and kept.
+- `mailcow`: `/admin` and `/rspamd/` only from `mailcow_admin_allow` (CIDRs, IPv4 and IPv6;
+  default `[]` switches the restriction off), 403 for everyone else; the match ignores case and
+  takes any first path segment that starts with `admin` or `rspamd` followed by something other
+  than a letter, digit, `-` or `_` (`/Admin/`, `/admin;x`); the decision uses the address that
+  connected to nginx (`$realip_remote_addr`), so a forged `X-Forwarded-For` does not count.
+  `mailcow_admin_allow` with `0.0.0.0/0`, `::/0` or an entry that overlaps mailcow's own network
+  (`IPV4_NETWORK`/`IPV6_NETWORK` of `mailcow.conf`, default `172.22.1.0/24` and
+  `fd4d:6169:6c63:6f77::/64`), where proxied clients come from, is refused before anything
+  changes, and so is an entry that does not parse as a network (such as leading zeros,
+  `000.0.0.0/0`, which nginx would read as every address).
+  Everything else (`/domainadmin`, `/`, `/SOGo`, the API, DAV, ActiveSync, Autodiscover, ACME)
+  stays open. Clients that Docker's userland proxy carries (IPv6 with `ENABLE_IPV6=false`, the
+  loopback) appear as mailcow's bridge and are refused. noix error pages
+  (`mailcow_error_pages_enabled`, default true; `mailcow_error_pages_image`, `_theme`, `_env`,
+  `_codes`, default `[502, 504, 413, 414, 403]`) for the errors nginx generates itself, exported
+  with `error_pages_export` to `data/conf/nginx/noix-error-pages` (listed in `.git/info/exclude`).
+  The role's files are `data/conf/nginx/noix.conf` and `site.noix.custom` (git-ignored by
+  mailcow, kept by `update.sh`), written before the update; `nginx -t` runs in `nginx-mailcow`
+  before it is restarted (only when a file changed), and a configuration nginx rejects is put
+  back from copies kept outside the clone (`/var/lib/noix-mailcow/nginx-previous`). A restart
+  that is due is flagged (`/var/lib/noix-mailcow/nginx-restart-pending`) before the files change,
+  so the next run makes it when a run stopped before restarting `nginx-mailcow`.
+- `mailcow`: Anubis in front of mailcow's web UI with `mailcow_anubis_url` (default `""`, off;
+  such as `http://noixdev-anubis:8923`, http with a host and an optional port, no path), with
+  the `anubis` role in nginx mode run first. Before anything changes the role refuses a missing
+  `mailcow_anubis_network` (default `noixdev-anubis`, the `anubis` role's `anubis_nginx_network`),
+  401 in `mailcow_error_pages_codes`, and a `docker-compose.override.yml` it did not write. It
+  writes `docker-compose.override.yml` (marker line; git-ignored by mailcow, in its backups) that
+  puts only `nginx-mailcow` on that network, so `update.sh` and `docker compose down`/`up` keep it
+  there and mailcow's own network never carries a foreign container (which would stop
+  `docker compose up` whenever mailcow's network must be recreated, such as when `update.sh`
+  switches `ENABLE_IPV6`); `nginx-mailcow` is recreated when the file changes. It then checks
+  from inside `nginx-mailcow` that Anubis answers, and fails naming it otherwise, before it
+  changes mailcow's nginx. `site.noix.custom` checks every request of mailcow's server blocks
+  (`auth_request` to Anubis's check with `X-Original-Uri` and `X-Forwarded-Uri` from
+  `$request_uri` and `X-Real-IP` from `$realip_remote_addr`, the address that connected, as for
+  the admin restriction, whatever the client sent; the name resolves per request through
+  Docker's DNS, so `nginx -t` and nginx's start do not need Anubis). A browser without Anubis's
+  cookie gets Anubis's challenge page (401) at the URL it asked for (Anubis renders it for the
+  request as a GET), so once solved it goes back there with the whole query;
+  `/.within.website/` goes to Anubis unchecked and unrestricted. IP rules (such as the admins'
+  networks) therefore never match an address claimed with `X-Forwarded-For`; not for a mailcow
+  behind a reverse proxy. `/SOGo` and
+  `/Microsoft-Server-ActiveSync`, which have an `auth_request` of their own, are checked in
+  mailcow's own SOGo auth check on its internal listener `127.0.0.1:65510` with the original URI
+  and address mailcow passes there (its `$remote_addr`, so a request whose address nginx took
+  from `X-Forwarded-For` gets 403 on those two paths); a challenge goes back from there marked, so a wrong SOGo or
+  ActiveSync password stays a plain 401 (a warning when a mailcow release no longer uses that
+  listener). The 403 of the admin restriction and mailcow's own redirects come first; the noix
+  error pages are never checked. While Anubis is down every checked request answers 500 (fails
+  closed), also the paths the policy ALLOWs; the health check then names Anubis. The role's
+  defaults show the `anubis_policy_allow` rules for mailcow's mail clients (ActiveSync, DAV,
+  Autodiscover and Thunderbird's autoconfig, ignoring case where mailcow does, the API, ACME,
+  MTA-STS). Removing `mailcow_anubis_url` removes the Anubis lines and the role's override: the
+  nginx files without Anubis are tested and `nginx-mailcow` restarted first, then the override
+  goes and `nginx-mailcow` is recreated off Anubis's network, so no request answers 500 meanwhile.
+  `nginx-mailcow` is recreated whenever its networks differ from what the override says (read
+  from the container), so a recreate that failed or a run that stopped is made up by the next
+  run. `mailcow_anubis_url` is refused with `NGINX_USE_PROXY_PROTOCOL` or `TRUSTED_PROXIES` set in
+  `mailcow.conf` (before the install: in `mailcow_install_settings`, which an installed mailcow
+  no longer reads): behind a reverse proxy every client would share
+  the proxy's address and `/SOGo` and ActiveSync would answer 403; a proxy that `mailcow.conf`
+  does not name cannot be detected. The challenge page and nginx's own 401s carry mailcow's
+  security headers (HSTS, `X-Frame-Options`, `nosniff`, `Referrer-Policy` and the rest), repeated
+  in the role's 401 location. The check that `nginx-mailcow` reaches Anubis takes any answer of
+  Anubis's policy (also 401 or 403) as reachable.
+- `mailcow`: keeps an integrated Roundcube (`data/web/rc`, as mailcow's guide installs it) on the
+  newest release of its series (`mailcow_roundcube_update`, default true; nothing happens without
+  `data/web/rc/index.php` or `data/web/rc/public_html/index.php`). After mailcow's update and its
+  health check, and with the same backup
+  (one per run), the release's `-complete.tar.gz` is downloaded, must match the SHA-256 digest
+  GitHub publishes for that release asset (a mismatch or a missing digest fails before anything is
+  installed), and `bin/installto.sh` and `composer update --no-dev -o` run in `php-fpm-mailcow`
+  (rsync is added to the running container first, Alpine's PHP image has none), which is restarted;
+  then the health check, with `/rc/`, runs again. A newer series (1.8 for 1.7) is only reported.
+  A release whose `composer.json` asks for a newer PHP than `php-fpm-mailcow` runs is skipped with
+  a warning naming both versions (no backup, no change; a constraint the role cannot read is
+  reported and does not block). The marker of a failed update is written before the install and
+  removed once the health check with `/rc/` passed; a failed install step or a `/rc/` that does
+  not answer fails the run naming the step and the backup. A failure before the install (the
+  release list, GitHub's rate limit, the download or its checksum) changes nothing and fails the
+  run after the backup checks. Roundcube's config and nginx snippet are never changed.
+  `mailcow_roundcube_api_url` (GitHub's API) is for tests and mirrors; it and the download URLs
+  must be https unless `mailcow_roundcube_allow_insecure_mirror` (test-only, default false) is
+  true. Fact: `mailcow_roundcube_updated`.
 - `anubis`: new role that runs one Anubis container (`anubis_image`, default
   `ghcr.io/techarohq/anubis:v1.28.2`; compose project `anubis` in `anubis_dir`, default
   `/opt/anubis`; service and container `noixdev-anubis`, its only DNS name on its networks, at

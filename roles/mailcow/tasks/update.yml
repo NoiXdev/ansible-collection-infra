@@ -1,0 +1,241 @@
+---
+# Checks for a new mailcow release on master with update.sh --check (exit 0:
+# due, 3: none). When one is due: the backup first (update_backup.yml; no
+# backup, no update), then update.sh --force, which asks nothing. update.sh
+# that updated itself (or its _modules) and asks to be started again is
+# started once more, for the check and for the update. A file update.sh left
+# unmerged fails the run; local changes it resolved in favour of the release
+# (its merge -Xtheirs) are reported. Every failure names the step and, after
+# the backup, the backup folder. The marker (update_failed.yml) is written
+# before update.sh --force and rewritten with the failed step; main.yml
+# removes it after the health check passed. A failing update.sh --check (such
+# as GitHub out of reach) updates nothing and is kept in mailcow_check_error
+# until the health and backup checks have run (main.yml fails then). Sets
+# mailcow_updated.
+
+- name: Check for a mailcow update
+  ansible.builtin.command:
+    cmd: ./update.sh --check
+    chdir: "{{ mailcow_dir }}"
+  register: mailcow_check_first
+  changed_when: false
+  failed_when: false
+
+- name: Check for a mailcow update again (update.sh updated itself)
+  ansible.builtin.command:
+    cmd: ./update.sh --check
+    chdir: "{{ mailcow_dir }}"
+  register: mailcow_check_again
+  changed_when: false
+  failed_when: false
+  when:
+    - mailcow_check_first.rc not in [0, 3]
+    - (mailcow_check_first.stdout ~ mailcow_check_first.stderr) is search(mailcow_rerun_regex)
+
+- name: Note the result of the update check
+  ansible.builtin.set_fact:
+    mailcow_check: "{{ mailcow_check_first if mailcow_check_again is skipped else mailcow_check_again }}"
+
+- name: Keep a failed update check for the end of the run
+  ansible.builtin.set_fact:
+    mailcow_check_error: >-
+      update.sh --check in {{ mailcow_dir }} failed (exit {{ mailcow_check.rc }}):
+      {{ mailcow_check_output }}. Nothing was updated.
+  vars:
+    mailcow_check_output: >-
+      {{ ((mailcow_check.stdout_lines + mailcow_check.stderr_lines) | map('regex_replace', '\x1b\[[0-9;]*m', '')
+          | map('trim') | select | list)[-mailcow_tail_lines:] | join(' / ') }}
+  when: mailcow_check.rc not in [0, 3]
+
+- name: Update mailcow
+  when: mailcow_check.rc == 0
+  block:
+    - name: Read the release before the update
+      ansible.builtin.command:
+        argv: "{{ mailcow_git + ['rev-parse', 'HEAD'] }}"
+      register: mailcow_head_before
+      changed_when: false
+
+    - name: Back up mailcow before the update
+      ansible.builtin.include_tasks: update_backup.yml
+
+    # Before update.sh: a run that stops while it runs leaves the marker.
+    - name: Write the marker of the update before update.sh runs
+      ansible.builtin.include_tasks: update_failed.yml
+      vars:
+        mailcow_failed_step: >-
+          update.sh --force started and did not report back: the run stopped while it ran or before the
+          health check after it, such as on a lost connection or a stopped worker
+        mailcow_marker_required: true
+        mailcow_marker_what: update.sh --force
+
+    # Stops mailcow, merges the release, pulls and starts it again.
+    - name: Run update.sh
+      ansible.builtin.command:
+        cmd: ./update.sh --force
+        chdir: "{{ mailcow_dir }}"
+      register: mailcow_update_first
+      changed_when: true
+      failed_when: false
+      async: "{{ mailcow_update_timeout | int }}"
+      poll: 10
+
+    - name: Run update.sh again (it updated itself)
+      ansible.builtin.command:
+        cmd: ./update.sh --force
+        chdir: "{{ mailcow_dir }}"
+      register: mailcow_update_again
+      changed_when: true
+      failed_when: false
+      async: "{{ mailcow_update_timeout | int }}"
+      poll: 10
+      when:
+        - mailcow_update_first.rc is defined
+        - mailcow_update_first.rc != 0
+        - (mailcow_update_first.stdout ~ mailcow_update_first.stderr) is search(mailcow_rerun_regex)
+
+    - name: Note the result of update.sh
+      ansible.builtin.set_fact:
+        mailcow_update_run: "{{ mailcow_update_first if mailcow_update_again is skipped else mailcow_update_again }}"
+        mailcow_updated: true
+
+    # Ansible stops an async job at its time limit (SIGKILL) and returns no
+    # exit code.
+    - name: Note the marker of an update.sh that ran out of time
+      ansible.builtin.include_tasks: update_failed.yml
+      vars:
+        mailcow_failed_step: update.sh --force did not finish within {{ mailcow_update_timeout }} seconds and was stopped
+      when: mailcow_update_run.rc is not defined
+
+    - name: Fail when update.sh ran out of time
+      ansible.builtin.fail:
+        msg: >-
+          update.sh --force in {{ mailcow_dir }} did not finish within
+          {{ mailcow_update_timeout }} seconds, so it was stopped
+          ({{ mailcow_update_run.msg | default('no result') | trim }}). mailcow
+          may be down or half updated. The backup taken before the update is
+          {{ mailcow_update_backup }}; restore from it by hand
+          (helper-scripts/backup_and_restore.sh restore with
+          MAILCOW_BACKUP_LOCATION={{ mailcow_backup_dir }}) or from a server
+          snapshot. The role does not roll back and does not run again until
+          {{ mailcow_update_failed_file }} is removed.
+      when: mailcow_update_run.rc is not defined
+
+    - name: Look for files update.sh left unmerged
+      ansible.builtin.command:
+        argv: "{{ mailcow_git + ['ls-files', '--unmerged'] }}"
+      register: mailcow_unmerged
+      changed_when: false
+
+    # update.sh merges with -Xtheirs: a local change that conflicts with the
+    # release is replaced by the release's version without a conflict. The
+    # same merge without -Xtheirs (git merge-tree, which changes nothing in
+    # the clone) names those files. Only for update.sh's own merge ("After
+    # update on ..."), not for a fast-forward to an upstream merge.
+    - name: Look for local changes that conflicted with the release
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          git=({{ mailcow_git | map('quote') | join(' ') }})
+          [ "$("${git[@]}" rev-parse HEAD)" != {{ mailcow_head_before.stdout | trim | quote }} ] || exit 0
+          case "$("${git[@]}" log -1 --format=%s HEAD)" in
+            "After update on "*) ;;
+            *) exit 0 ;;
+          esac
+          read -r -a parents <<<"$("${git[@]}" log -1 --format=%P HEAD)"
+          # Exactly two parents: a merge.
+          [ -n "${parents[1]:-}" ] && [ -z "${parents[2]:-}" ] || exit 0
+          echo "local: ${parents[0]}"
+          rc=0
+          files="$("${git[@]}" merge-tree --write-tree --name-only --no-messages "${parents[0]}" "${parents[1]}")" || rc=$?
+          [ "$rc" = 0 ] || [ "$rc" = 1 ] || exit "$rc"
+          [ "$rc" = 0 ] || tail -n +2 <<<"$files" | sed '/^$/d; s/^/conflict: /'
+      register: mailcow_conflicts
+      changed_when: false
+      failed_when: false
+
+    - name: Report a conflict check that could not run
+      noixdev.infra.warn:
+        msg: >-
+          After the mailcow update the role could not check {{ mailcow_dir }}
+          for local changes that conflicted with the release (git merge-tree
+          --write-tree needs Git 2.38 or newer):
+          {{ (mailcow_conflicts.stderr | trim) or ('exit ' ~ mailcow_conflicts.rc) }}.
+      when: mailcow_conflicts.rc != 0
+
+    - name: Note the marker of an update left in conflict
+      ansible.builtin.include_tasks: update_failed.yml
+      vars:
+        mailcow_failed_step: >-
+          update.sh left a merge conflict in
+          {{ mailcow_unmerged.stdout_lines | map('regex_replace', '^[^\t]*\t', '') | unique | join(', ') }}
+      when: mailcow_unmerged.stdout_lines | length > 0
+
+    - name: Fail when the update left a merge conflict
+      ansible.builtin.fail:
+        msg: >-
+          The mailcow update in {{ mailcow_dir }} left a merge conflict in
+          {{ mailcow_unmerged_files | join(', ') }}: a local change to these
+          tracked files conflicts with the release. The role left the tree as
+          update.sh left it{{ '' if mailcow_update_run.rc == 0 else ' (update.sh exited ' ~ mailcow_update_run.rc ~ ')' }};
+          mailcow may be down. Resolve the files by hand (git status in
+          {{ mailcow_dir }}), then start mailcow (docker compose up -d) and run
+          the role again. The backup taken before the update is
+          {{ mailcow_update_backup }}. The role does not run again until
+          {{ mailcow_update_failed_file }} is removed.
+      vars:
+        mailcow_unmerged_files: >-
+          {{ mailcow_unmerged.stdout_lines | map('regex_replace', '^[^\t]*\t', '') | unique }}
+      when: mailcow_unmerged_files | length > 0
+
+    # Reported, not failed: mailcow's own containers and generate_config.sh
+    # change tracked files too (such as the snake-oil certificate), and
+    # update.sh resolving them in favour of the release is how mailcow
+    # updates; the owner decides what to put back.
+    - name: Report local changes the update replaced
+      noixdev.infra.warn:
+        msg: >-
+          The mailcow update in {{ mailcow_dir }} met local changes that
+          conflict with the release in {{ mailcow_conflict_files | join(', ') }};
+          update.sh resolved them in favour of the release, so those local
+          changes are no longer in the files. They are kept in the commit
+          {{ mailcow_local_commit }} ("Before update"; see git diff
+          {{ mailcow_local_commit }} HEAD -- <file> in {{ mailcow_dir }}). Put
+          back by hand what is still needed. The backup taken before the
+          update is {{ mailcow_update_backup }}.
+      vars:
+        mailcow_conflict_files: >-
+          {{ mailcow_conflicts.stdout_lines | select('match', '^conflict: ') | map('regex_replace', '^conflict: ', '') | unique }}
+        mailcow_local_commit: >-
+          {{ (mailcow_conflicts.stdout_lines | select('match', '^local: ') | first | default('local: ?'))[7:19] }}
+      when: mailcow_conflict_files | length > 0
+
+    - name: Note the marker of a failed update.sh
+      ansible.builtin.include_tasks: update_failed.yml
+      vars:
+        mailcow_failed_step: update.sh --force exited {{ mailcow_update_run.rc }}
+      when: mailcow_update_run.rc != 0
+
+    - name: Fail when update.sh failed
+      ansible.builtin.fail:
+        msg: >-
+          update.sh --force in {{ mailcow_dir }} failed (exit
+          {{ mailcow_update_run.rc }}{{ mailcow_update_twice }}):
+          {{ mailcow_update_output }}.
+          mailcow may be down. The backup taken before the update is
+          {{ mailcow_update_backup }}; restore from it by hand
+          (helper-scripts/backup_and_restore.sh restore with
+          MAILCOW_BACKUP_LOCATION={{ mailcow_backup_dir }}) or from a server
+          snapshot. The role does not roll back and does not run again until
+          {{ mailcow_update_failed_file }} is removed.
+      vars:
+        mailcow_update_output: >-
+          {{ ((mailcow_update_run.stdout_lines + mailcow_update_run.stderr_lines) | map('regex_replace', '\x1b\[[0-9;]*m', '')
+              | map('trim') | select | list)[-mailcow_tail_lines:] | join(' / ') }}
+        mailcow_update_twice: >-
+          {{ ', after it asked twice to be started again'
+             if mailcow_update_again is not skipped
+                and (mailcow_update_run.stdout ~ mailcow_update_run.stderr) is search(mailcow_rerun_regex)
+             else '' }}
+      when: mailcow_update_run.rc != 0

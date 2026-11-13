@@ -1,0 +1,55 @@
+---
+# Writes mailcow_update_failed_file (mailcow_failed_step: what is running or
+# what failed). update.yml writes it before update.sh --force and
+# roundcube_update.yml before the Roundcube install (a step "... did not
+# report back"), so a run that stops while they run (a lost connection, a
+# killed worker, a time limit) leaves it too; a failure rewrites it with the
+# failed step; update_done.yml removes it once the health check after the
+# update passed. While the file exists the role refuses to run (main.yml) and
+# mailcow-backup never prunes the backup it names, so nightly retries and
+# daily backups cannot replace the backup taken before the update.
+#
+# mailcow_marker_required: true before the update (a marker that cannot be
+# written, such as on a full disk, fails the run before anything is
+# updated); false for a rewrite after a failure (the marker written before
+# the update stays, and the run fails with the failure's own message).
+
+- name: Write the marker of the update
+  block:
+    - name: Write the marker file
+      ansible.builtin.copy:
+        dest: "{{ mailcow_update_failed_file }}"
+        content: |
+          # Written by the noixdev.infra.mailcow role: an update of mailcow
+          # started and did not complete (failed_step). The role does not
+          # update or change mailcow while this file exists, and mailcow-backup
+          # keeps the backup named here. Fix mailcow (restore from the backup by
+          # hand if needed), then remove this file.
+          backup: {{ mailcow_update_backup }}
+          time: {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}
+          failed_step: {{ mailcow_failed_step | trim | to_json }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Note that the marker is written
+      ansible.builtin.set_fact:
+        mailcow_update_marker_written: true
+
+  rescue:
+    - name: Fail when the marker cannot be written before the update
+      ansible.builtin.fail:
+        msg: >-
+          No update: the role cannot write {{ mailcow_update_failed_file }}
+          ({{ ansible_failed_result.msg | default('') | trim }}), which must be in
+          place before {{ mailcow_marker_what | default('the update') }} starts. Nothing was updated;
+          the backup {{ mailcow_update_backup }} was made. Free space (df
+          {{ mailcow_state_dir }}) or fix the cause, then run the role again.
+      when: mailcow_marker_required | default(false)
+
+    - name: Report a marker that cannot be rewritten
+      noixdev.infra.warn:
+        msg: >-
+          The role cannot rewrite {{ mailcow_update_failed_file }} with the failed step
+          ({{ mailcow_failed_step | trim }}): {{ ansible_failed_result.msg | default('') | trim }}.
+          The marker written before the update stays in place.

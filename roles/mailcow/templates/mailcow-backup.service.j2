@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Daily mailcow backup into {{ mailcow_backup_dir }}
+Documentation=file://{{ mailcow_backup_script }}
+After=docker.service
+RequiresMountsFor={{ mailcow_backup_dir }}
+
+[Service]
+Type=oneshot
+ExecStart={{ mailcow_backup_script }} --reason daily

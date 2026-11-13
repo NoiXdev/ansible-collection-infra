@@ -1,0 +1,330 @@
+---
+# The role's additions to mailcow's nginx: the admin restriction
+# (mailcow_admin_allow), the noix error pages and Anubis (mailcow_anubis_url,
+# with nginx-mailcow on Anubis's network through docker-compose.override.yml),
+# in two files mailcow keeps
+# across updates (data/conf/nginx/noix.conf at http level, site.noix.custom at
+# server level) and the exported pages in data/conf/nginx/noix-error-pages
+# (excluded from Git in .git/info/exclude). nginx -t runs in nginx-mailcow
+# before nginx-mailcow is restarted; a configuration it rejects is put back
+# from copies kept outside the clone (mailcow_nginx_previous_dir). A restart
+# that is due is flagged (mailcow_nginx_restart_flag) before the files
+# change, so a run that stopped before the restart is finished by the next
+# one. Runs after the install and before the update, so update.sh restarts
+# nginx with the files in place.
+
+# The configuration is rendered when the container starts (mailcow's
+# bootstrap.py, after PHP-FPM, SOGo and rspamd answer); nginx -t before that
+# would test the image's default configuration.
+- name: Wait until nginx-mailcow runs
+  ansible.builtin.command:
+    argv: [docker, compose, exec, -T, "{{ mailcow_nginx_service }}", test, -s, /var/run/nginx.pid]
+    chdir: "{{ mailcow_dir }}"
+  register: mailcow_nginx_running
+  until: mailcow_nginx_running.rc == 0
+  retries: "{{ (mailcow_health_timeout | int / 5) | round(0, 'ceil') | int }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Check that nginx-mailcow runs
+  ansible.builtin.assert:
+    that: mailcow_nginx_running.rc == 0
+    fail_msg: >-
+      {{ mailcow_nginx_service }} in {{ mailcow_dir }} does not run (after
+      {{ mailcow_health_timeout }} seconds), so the role cannot test its nginx
+      configuration (nginx -t) for the admin restriction and the error pages:
+      {{ (mailcow_nginx_running.stderr | default('') | trim) or (mailcow_nginx_running.stdout | default('') | trim) }}.
+      Start mailcow (docker compose up -d in {{ mailcow_dir }}), then run the
+      role again. Nothing was changed in mailcow's nginx.
+    quiet: true
+
+# A run that stopped after writing the files and before restarting
+# nginx-mailcow: the files it wrote go back to what nginx-mailcow runs (so
+# the test below judges mailcow's configuration), and this run writes,
+# tests and restarts again.
+- name: Look for a pending restart of nginx-mailcow
+  ansible.builtin.stat:
+    path: "{{ mailcow_nginx_restart_flag }}"
+    get_checksum: false
+  register: mailcow_nginx_pending
+
+- name: Put back the nginx files of a run that stopped before the restart
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: "{{ mailcow_nginx_restore_cmd }}"
+  changed_when: true
+  when: mailcow_nginx_pending.stat.exists
+
+# A configuration that is already broken is not the role's doing, and every
+# nginx -t below would fail on it.
+- name: Test nginx-mailcow's configuration before the role's files
+  ansible.builtin.command:
+    argv: [docker, compose, exec, -T, "{{ mailcow_nginx_service }}", nginx, -t, -q]
+    chdir: "{{ mailcow_dir }}"
+  register: mailcow_nginx_pretest
+  changed_when: false
+  failed_when: false
+
+- name: Check nginx-mailcow's configuration before the role's files
+  ansible.builtin.assert:
+    that: mailcow_nginx_pretest.rc == 0
+    fail_msg: >-
+      nginx -t in {{ mailcow_nginx_service }} fails before the role changed
+      anything in mailcow's nginx, so the cause is elsewhere (a file in
+      {{ mailcow_nginx_dir }}). Fix it, then run again:
+      {{ (mailcow_nginx_pretest.stderr | default('') | trim) or (mailcow_nginx_pretest.stdout | default('') | trim) }}
+    quiet: true
+
+# Anubis (mailcow_anubis_url): nginx-mailcow joins Anubis's network through
+# mailcow's compose override, so update.sh and docker compose down/up keep it
+# there; mailcow's own network stays mailcow's. Without mailcow_anubis_url the
+# role's override goes, and nginx-mailcow leaves the network
+# (nginx_network.yml). Switching Anubis on, nginx-mailcow joins before the
+# role's nginx files name Anubis; switching it off, it leaves only once it
+# runs files without Anubis (the end of this file), so no request meets a
+# check whose Anubis it cannot reach (500).
+- name: Write the compose override for Anubis's network
+  ansible.builtin.template:
+    src: docker-compose.override.yml.j2
+    dest: "{{ mailcow_compose_override }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: mailcow_override_written
+  when: mailcow_anubis_url | length > 0
+
+- name: Put nginx-mailcow on Anubis's network
+  ansible.builtin.include_tasks: nginx_network.yml
+  vars:
+    mailcow_override_changed: "{{ mailcow_override_written is changed }}"
+  when: mailcow_anubis_url | length > 0
+
+# Before the role's nginx files name Anubis: a check from inside nginx-mailcow
+# over Anubis's network, by name, as nginx asks (busybox wget). Any answer of
+# the policy (200, or 401 and 403 should the policy challenge or deny this
+# User-Agent) shows that Anubis answers; a name that does not resolve, a
+# refused connection, a time-out or a 5xx do not.
+- name: Check that nginx-mailcow reaches Anubis
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - "{{ mailcow_nginx_service }}"
+      - wget
+      - -q
+      - -O
+      - /dev/null
+      - -T
+      - "5"
+      - -U
+      - noix-mailcow-check
+      - --header
+      - "X-Real-IP: 127.0.0.1"
+      - "{{ mailcow_anubis_url }}/.within.website/x/cmd/anubis/api/check"
+    chdir: "{{ mailcow_dir }}"
+  register: mailcow_anubis_reach
+  until: >-
+    mailcow_anubis_reach.rc == 0
+    or mailcow_anubis_reach.stderr is search('server returned error: HTTP/1.[01] 40[13]')
+  retries: 6
+  delay: 5
+  changed_when: false
+  failed_when: false
+  when: mailcow_anubis_url | length > 0
+
+- name: Fail when nginx-mailcow does not reach Anubis
+  ansible.builtin.fail:
+    msg: >-
+      {{ mailcow_nginx_service }} does not reach Anubis at {{ mailcow_anubis_url }}
+      on the network {{ mailcow_anubis_network }}:
+      {{ (mailcow_anubis_reach.stderr | default('') | trim) or (mailcow_anubis_reach.stdout | default('') | trim) or ('exit ' ~ mailcow_anubis_reach.rc) }}.
+      Run the anubis role in nginx mode (its container noixdev-anubis must be
+      running and healthy on {{ mailcow_anubis_network }}), then this role.
+      The role's nginx files were not changed; while they name Anubis (from
+      an earlier run), every request that nginx checks with it answers 500.
+  when:
+    - mailcow_anubis_url | length > 0
+    - mailcow_anubis_reach.rc != 0
+    - "mailcow_anubis_reach.stderr is not search('server returned error: HTTP/1.[01] 40[13]')"
+
+# The exported pages are not mailcow's: neither update.sh's git add -A nor
+# git status sees them.
+- name: Exclude the error pages from mailcow's Git
+  ansible.builtin.lineinfile:
+    path: "{{ mailcow_git_exclude }}"
+    line: /data/conf/nginx/{{ mailcow_error_pages_name }}/
+    create: true
+    mode: "0644"
+
+- name: Export the error pages
+  when: mailcow_error_pages_enabled
+  block:
+    - name: Export the error pages
+      ansible.builtin.include_role:
+        name: noixdev.infra.error_pages_export
+      vars:
+        error_pages_export_dir: "{{ mailcow_error_pages_dir }}"
+        error_pages_export_image: "{{ mailcow_error_pages_image }}"
+        error_pages_export_theme: "{{ mailcow_error_pages_theme }}"
+        error_pages_export_env: "{{ mailcow_error_pages_export_env }}"
+        error_pages_export_codes: "{{ mailcow_error_pages_export_codes }}"
+        error_pages_export_script: "{{ mailcow_error_pages_export }}"
+
+    # error_pages_export's facts are host-wide: another role's export later in
+    # the play would overwrite them, so the languages are copied right away.
+    - name: Note the languages of the error pages
+      ansible.builtin.set_fact:
+        mailcow_error_pages_languages: "{{ error_pages_export_languages }}"
+
+- name: Work out which of the role's nginx files change
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ mailcow_nginx_templates }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  check_mode: true
+  register: mailcow_nginx_planned
+
+- name: Note whether nginx-mailcow needs a test and a restart
+  ansible.builtin.set_fact:
+    mailcow_nginx_restart: >-
+      {{ mailcow_nginx_pending.stat.exists or mailcow_nginx_planned.results | selectattr('changed') | list | length > 0 }}
+
+# Before the files change: copies of what nginx-mailcow runs, and the flag.
+- name: Keep the previous nginx files and flag the restart
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      previous={{ mailcow_nginx_previous_dir | quote }}
+      mkdir -p -m 0700 "$previous"
+      for file in {{ mailcow_nginx_templates | map(attribute='dest') | map('quote') | join(' ') }}; do
+        name="$(basename "$file")"
+        if [ -f "$file" ]; then
+          cp -p -- "$file" "$previous/$name"
+          rm -f -- "$previous/$name.absent"
+        else
+          rm -f -- "$previous/$name"
+          : >"$previous/$name.absent"
+        fi
+      done
+      echo "Written by the noixdev.infra.mailcow role: nginx-mailcow is due for a restart." >{{ mailcow_nginx_restart_flag | quote }}
+  changed_when: true
+  when: mailcow_nginx_planned.results | selectattr('changed') | list | length > 0
+
+- name: Install the role's nginx configuration
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ mailcow_nginx_templates }}"
+  loop_control:
+    label: "{{ item.dest }}"
+
+# nginx-mailcow mounts data/conf/nginx, so it sees the new files at once.
+- name: Test the role's nginx configuration
+  ansible.builtin.command:
+    argv: [docker, compose, exec, -T, "{{ mailcow_nginx_service }}", nginx, -t, -q]
+    chdir: "{{ mailcow_dir }}"
+  register: mailcow_nginx_test
+  changed_when: false
+  failed_when: false
+  when: mailcow_nginx_restart
+
+# A configuration nginx rejects is never left in place (it would stop
+# nginx-mailcow at its next start): the files nginx-mailcow runs go back, so
+# no restart is due any more.
+- name: Put back the nginx configuration nginx rejected
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: "{{ mailcow_nginx_restore_cmd }}"
+  changed_when: true
+  when: mailcow_nginx_test.rc | default(0) != 0
+
+- name: Remove the flag of the restart and the copies after a rejected configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ mailcow_nginx_restart_flag }}"
+    - "{{ mailcow_nginx_previous_dir }}"
+  when: mailcow_nginx_test.rc | default(0) != 0
+
+- name: Check the nginx test
+  ansible.builtin.assert:
+    that: mailcow_nginx_test.rc | default(0) == 0
+    fail_msg: >-
+      nginx -t in {{ mailcow_nginx_service }} failed with the role's new
+      configuration ({{ mailcow_nginx_http_conf }}, {{ mailcow_nginx_site_custom }});
+      the previous files are back in place and nginx-mailcow was not restarted:
+      {{ (mailcow_nginx_test.stderr | default('') | trim) or (mailcow_nginx_test.stdout | default('') | trim) }}
+    quiet: true
+
+- name: Restart nginx-mailcow
+  community.docker.docker_compose_v2:
+    project_src: "{{ mailcow_dir }}"
+    services: ["{{ mailcow_nginx_service }}"]
+    state: restarted
+  when: mailcow_nginx_restart
+
+- name: Remove the flag of the restart and the previous nginx files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ mailcow_nginx_restart_flag }}"
+    - "{{ mailcow_nginx_previous_dir }}"
+  when: mailcow_nginx_restart
+
+# Anubis switched off: nginx-mailcow runs files without Anubis by now (the
+# restart above), so it can leave Anubis's network.
+- name: Remove the role's compose override
+  ansible.builtin.file:
+    path: "{{ mailcow_compose_override }}"
+    state: absent
+  register: mailcow_override_removed
+  when:
+    - mailcow_anubis_url | length == 0
+    - mailcow_override_grep.rc == 0
+
+- name: Take nginx-mailcow off Anubis's network
+  ansible.builtin.include_tasks: nginx_network.yml
+  vars:
+    mailcow_override_changed: "{{ mailcow_override_removed is changed }}"
+  when: mailcow_anubis_url | length == 0
+
+# /SOGo and /Microsoft-Server-ActiveSync have an auth_request of their own
+# (mailcow's SOGo auth check), so Anubis sees them only through that check on
+# its internal listener. Should a mailcow release ask SOGo's auth check
+# another way, they would go unchecked: reported, not fatal.
+- name: Look for mailcow's SOGo auth check on its internal listener
+  ansible.builtin.shell:
+    executable: /bin/bash
+    chdir: "{{ mailcow_dir }}"
+    cmd: >-
+      set -o pipefail;
+      docker compose exec -T {{ mailcow_nginx_service | quote }} nginx -T 2>/dev/null
+      | grep -Ec 'proxy_pass +http://127\.0\.0\.1:{{ mailcow_sogo_auth_port }}/sogo-auth;' || true
+  register: mailcow_sogo_auth_hook
+  changed_when: false
+  when: mailcow_anubis_url | length > 0
+
+- name: Report that Anubis does not see /SOGo and ActiveSync
+  noixdev.infra.warn:
+    msg: >-
+      mailcow's nginx does not ask its SOGo auth check through
+      127.0.0.1:{{ mailcow_sogo_auth_port }}/sogo-auth, where the role checks /SOGo and
+      /Microsoft-Server-ActiveSync with Anubis: those paths are not checked by
+      Anubis in this mailcow release.
+  when:
+    - mailcow_anubis_url | length > 0
+    - mailcow_sogo_auth_hook.stdout | trim | int == 0

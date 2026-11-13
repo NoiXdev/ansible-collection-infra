@@ -1,0 +1,213 @@
+---
+# Waits up to mailcow_health_timeout seconds (in all) for: every compose
+# service running (and healthy where it has a health check), the UI over
+# HTTPS (200 for MAILCOW_HOSTNAME), the SMTP banner, IMAP over TLS and, when
+# Roundcube is integrated (data/web/rc/index.php or
+# data/web/rc/public_html/index.php, as for the Roundcube update), /rc/. Addresses and ports come from
+# mailcow.conf, as compose publishes them. Sets mailcow_health_error to the
+# first step that failed ('' when mailcow is healthy); never fails by itself.
+
+- name: Read mailcow.conf for the health check
+  ansible.builtin.slurp:
+    src: "{{ mailcow_conf }}"
+  register: mailcow_health_conf_read
+  # It holds the database passwords.
+  no_log: true
+
+# HTTPS is published on HTTPS_BIND:HTTPS_PORT, SMTP and IMAPS on SMTP_PORT and
+# IMAPS_PORT ([address:]port). All addresses (or none) are reached on the
+# loopback.
+- name: Note what the health check connects to
+  ansible.builtin.set_fact:
+    mailcow_health_start: "{{ now().timestamp() }}"
+    mailcow_health_error: ""
+    mailcow_health_hostname: "{{ mailcow_health_conf.MAILCOW_HOSTNAME | default('') | trim('\"') }}"
+    mailcow_health_https: >-
+      {%- macro host(address) -%}
+      {{ '127.0.0.1' if address in ['', '0.0.0.0', '*'] else '[::1]' if address in ['::', '[::]']
+         else address if address.startswith('[') else '[' ~ address ~ ']' if ':' in address else address }}
+      {%- endmacro -%}
+      {{ host(mailcow_health_conf.HTTPS_BIND | default('') | trim('"')) }}:{{ mailcow_health_conf.HTTPS_PORT | default('443', true) | trim('"') }}
+    mailcow_health_smtp: >-
+      {%- set value = mailcow_health_conf.SMTP_PORT | default('25', true) | trim('"') -%}
+      {%- set address = value.rsplit(':', 1)[0] if ':' in value else '' -%}
+      {{ '127.0.0.1' if address in ['', '0.0.0.0'] else address | regex_replace('^\[|\]$', '') }} {{ value.rsplit(':', 1)[-1] }}
+    mailcow_health_imaps: >-
+      {%- set value = mailcow_health_conf.IMAPS_PORT | default('993', true) | trim('"') -%}
+      {%- set address = value.rsplit(':', 1)[0] if ':' in value else '' -%}
+      {{ '127.0.0.1' if address in ['', '0.0.0.0'] else address | regex_replace('^\[|\]$', '') }} {{ value.rsplit(':', 1)[-1] }}
+  vars:
+    mailcow_health_conf: >-
+      {{ dict((mailcow_health_conf_read.content | b64decode).splitlines()
+              | select('match', '^[A-Z_][A-Z0-9_]*=')
+              | map('regex_findall', '^([A-Z_][A-Z0-9_]*)=(.*)$') | map('first') | list) }}
+
+- name: Look for an integrated Roundcube
+  ansible.builtin.stat:
+    path: "{{ mailcow_rc_dir }}/{{ item }}"
+    get_checksum: false
+  loop: [index.php, public_html/index.php]
+  register: mailcow_health_rc
+
+# Lists the services that are not running, or not healthy, one per line.
+- name: Wait until every mailcow container runs
+  ansible.builtin.shell:
+    executable: /bin/bash
+    chdir: "{{ mailcow_dir }}"
+    cmd: |
+      set -euo pipefail
+      services="$(docker compose config --services)"
+      # One JSON object per line, or one array from older Compose releases.
+      states="$(docker compose ps --all --format json | jq -rs 'flatten | .[] | "\(.Service) \(.State) \(.Health // "")"')"
+      bad=0
+      for service in $services; do
+        read -r _ state health < <(awk -v s="$service" '$1 == s' <<<"$states"; echo) || true
+        if [ -z "${state:-}" ]; then
+          echo "$service (no container)"
+          bad=1
+        elif [ "$state" != running ] || { [ -n "${health:-}" ] && [ "$health" != healthy ]; }; then
+          echo "$service ($state${health:+, $health})"
+          bad=1
+        fi
+      done
+      exit "$bad"
+  register: mailcow_health_containers
+  until: >-
+    mailcow_health_containers.rc == 0
+    or now().timestamp() - mailcow_health_start | float >= mailcow_health_timeout | int
+  retries: "{{ (mailcow_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Note a container that does not run
+  ansible.builtin.set_fact:
+    mailcow_health_error: >-
+      containers: not running or not healthy after {{ mailcow_health_timeout }} seconds:
+      {{ (mailcow_health_containers.stdout_lines | join(', ')) or (mailcow_health_containers.stderr | trim) }}
+  when: mailcow_health_containers.rc != 0
+
+- name: Wait until the mailcow UI answers over HTTPS
+  ansible.builtin.uri:
+    url: https://{{ mailcow_health_https }}/
+    headers:
+      Host: "{{ mailcow_health_hostname }}"
+    # Connected by address; the certificate is for the host name.
+    validate_certs: false
+    follow_redirects: none
+    timeout: 10
+  register: mailcow_health_ui
+  until: >-
+    mailcow_health_ui.status | default(-1) == 200
+    or now().timestamp() - mailcow_health_start | float >= mailcow_health_timeout | int
+  retries: "{{ (mailcow_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  failed_when: false
+  when: mailcow_health_error | length == 0
+
+- name: Note a UI that does not answer
+  ansible.builtin.set_fact:
+    mailcow_health_error: >-
+      HTTPS: https://{{ mailcow_health_https }}/ (Host {{ mailcow_health_hostname }}) answered
+      {{ mailcow_health_ui.status | default('nothing') }}, not 200
+      ({{ mailcow_health_ui.msg | default('') | trim }}){{
+      '; with mailcow_anubis_url every request answers 500 while Anubis (' ~ mailcow_anubis_url ~ ') is down'
+      if mailcow_anubis_url | length > 0 and mailcow_health_ui.status | default(-1) == 500 else '' }}
+  when:
+    - mailcow_health_ui is not skipped
+    - mailcow_health_ui.status | default(-1) != 200
+
+- name: Wait for the SMTP banner
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "10"
+      - bash
+      - -c
+      - exec 3<>"/dev/tcp/$1/$2" && head -n 1 <&3
+      - smtp
+      - "{{ mailcow_health_smtp.split(' ')[0] }}"
+      - "{{ mailcow_health_smtp.split(' ')[1] }}"
+  register: mailcow_health_smtp_banner
+  until: >-
+    mailcow_health_smtp_banner.stdout | default('') is match('^220[ -]')
+    or now().timestamp() - mailcow_health_start | float >= mailcow_health_timeout | int
+  retries: "{{ (mailcow_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  when: mailcow_health_error | length == 0
+
+- name: Note SMTP that does not answer
+  ansible.builtin.set_fact:
+    mailcow_health_error: >-
+      SMTP: {{ mailcow_health_smtp | replace(' ', ':') }} did not greet with 220
+      ({{ (mailcow_health_smtp_banner.stdout | trim) or (mailcow_health_smtp_banner.stderr | trim) or 'no answer' }})
+  when:
+    - mailcow_health_smtp_banner is not skipped
+    - mailcow_health_smtp_banner.stdout | default('') is not match('^220[ -]')
+
+# The greeting, then LOGOUT, so openssl ends on its own.
+- name: Wait for IMAP over TLS
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "20"
+      - bash
+      - -c
+      - >-
+        set -o pipefail;
+        { sleep 2; printf 'a LOGOUT\r\n'; }
+        | openssl s_client -quiet -connect "$1:$2" -servername "$3" 2>/dev/null
+        | head -n 1
+      - imaps
+      - "{{ mailcow_health_imaps.split(' ')[0] }}"
+      - "{{ mailcow_health_imaps.split(' ')[1] }}"
+      - "{{ mailcow_health_hostname }}"
+  register: mailcow_health_imap
+  until: >-
+    mailcow_health_imap.stdout | default('') is match('^[*] OK')
+    or now().timestamp() - mailcow_health_start | float >= mailcow_health_timeout | int
+  retries: "{{ (mailcow_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  when: mailcow_health_error | length == 0
+
+- name: Note IMAP that does not answer
+  ansible.builtin.set_fact:
+    mailcow_health_error: >-
+      IMAP: {{ mailcow_health_imaps | replace(' ', ':') }} did not greet with * OK over TLS
+      ({{ (mailcow_health_imap.stdout | trim) or 'no answer' }})
+  when:
+    - mailcow_health_imap is not skipped
+    - mailcow_health_imap.stdout | default('') is not match('^[*] OK')
+
+- name: Wait until Roundcube answers
+  ansible.builtin.uri:
+    url: https://{{ mailcow_health_https }}/rc/
+    headers:
+      Host: "{{ mailcow_health_hostname }}"
+    validate_certs: false
+    follow_redirects: none
+    timeout: 10
+  register: mailcow_health_roundcube
+  until: >-
+    mailcow_health_roundcube.status | default(-1) == 200
+    or now().timestamp() - mailcow_health_start | float >= mailcow_health_timeout | int
+  retries: "{{ (mailcow_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  failed_when: false
+  when:
+    - mailcow_health_error | length == 0
+    - mailcow_health_rc.results | selectattr('stat.exists') | list | length > 0
+
+- name: Note a Roundcube that does not answer
+  ansible.builtin.set_fact:
+    mailcow_health_error: >-
+      Roundcube: https://{{ mailcow_health_https }}/rc/ (Host {{ mailcow_health_hostname }}) answered
+      {{ mailcow_health_roundcube.status | default('nothing') }}, not 200
+      ({{ mailcow_health_roundcube.msg | default('') | trim }})
+  when:
+    - mailcow_health_roundcube is not skipped
+    - mailcow_health_roundcube.status | default(-1) != 200

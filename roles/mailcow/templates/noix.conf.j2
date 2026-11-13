@@ -1,0 +1,74 @@
+# {{ ansible_managed }}
+#
+# noix additions to mailcow's nginx, http level: nginx-mailcow includes
+# {{ mailcow_nginx_container_dir }}/*.conf in its http block. The server-level
+# part is site.noix.custom next to this file. Both are git-ignored by mailcow
+# (data/conf/nginx/*.conf, *.custom), so update.sh keeps them.
+{% if mailcow_admin_allow | length > 0 %}
+
+# 1 when the client may reach /admin and /rspamd/. Decided on the address that
+# connected to nginx ($realip_remote_addr), never on X-Forwarded-For: mailcow's
+# nginx takes that header from any private address (set_real_ip_from), which
+# would make $remote_addr whatever the client claims.
+geo $realip_remote_addr $noix_admin_allowed {
+    default 0;
+{% for network in mailcow_admin_allow %}
+    {{ network }} 1;
+{% endfor %}
+}
+{% endif %}
+{% if mailcow_error_pages_enabled %}
+
+# The error page's language: the first language of the browser's
+# Accept-Language, when the pages offer it.
+map $http_accept_language $noix_error_pages_lang {
+    default {{ mailcow_error_pages_languages.default }};
+{% for lang in mailcow_error_pages_languages.languages if lang != mailcow_error_pages_languages.default %}
+    "~*^{{ lang }}(-|;|,|$)" {{ lang }};
+{% endfor %}
+}
+{% endif %}
+{% if mailcow_anubis_url | length > 0 %}
+
+# Anubis (mailcow_anubis_url), used by site.noix.custom. What the check
+# sends: the request's own URI and the address that connected to nginx
+# ($realip_remote_addr, as the admin restriction: mailcow's nginx believes
+# X-Forwarded-For from private networks, which would let such a client pick
+# the address Anubis binds its cookie to and matches IP rules against). On
+# {{ mailcow_sogo_auth_port }}, mailcow's internal listener for SOGo's auth check (/sogo-auth-verify,
+# used by /SOGo and /Microsoft-Server-ActiveSync, which have an auth_request
+# of their own), both come from the headers mailcow's nginx sets for that
+# check (X-Original-URI, and X-Real-IP from its $remote_addr), which no client
+# can reach; site.noix.custom refuses those paths when $remote_addr is not
+# the connecting address, so there it is the same address.
+map $server_port $noix_anubis_uri {
+    {{ mailcow_sogo_auth_port }} $http_x_original_uri;
+    default $request_uri;
+}
+map $server_port $noix_anubis_client {
+    {{ mailcow_sogo_auth_port }} $http_x_real_ip;
+    default $realip_remote_addr;
+}
+# 1 when nginx took the client address from X-Forwarded-For ($remote_addr is
+# not the address that connected).
+map "$realip_remote_addr $remote_addr" $noix_anubis_forwarded {
+    "~^(\S+) \1$" 0;
+    default 1;
+}
+# On {{ mailcow_sogo_auth_port }} Anubis's challenge goes back to SOGo's auth check as a 401
+# with this WWW-Authenticate, which nginx copies into the client's answer:
+# that tells it apart from a wrong SOGo password (a 401 without it).
+map $server_port $noix_anubis_mark {
+    {{ mailcow_sogo_auth_port }} noix-anubis;
+    default "";
+}
+# 1 when a 401 of the client's request is Anubis's challenge: the role's own
+# check answered 401 ($noix_anubis_status), or SOGo's auth check carried the
+# mark. Every other 401 (a wrong SOGo or ActiveSync password) stays a 401.
+map "$server_port:$noix_anubis_status:$sent_http_www_authenticate" $noix_anubis_challenge {
+    default 0;
+    "~^{{ mailcow_sogo_auth_port }}:" 0;
+    "~^[0-9]+:([0-9]+, )*401:" 1;
+    "~^[0-9]+:[^:]*:noix-anubis$" 1;
+}
+{% endif %}

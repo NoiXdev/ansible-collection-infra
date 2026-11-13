@@ -1,0 +1,18 @@
+{{ mailcow_compose_override_marker }}
+# {{ ansible_managed }}
+#
+# nginx-mailcow on Anubis's network ({{ mailcow_anubis_network }}, made by the
+# anubis role in nginx mode), so it reaches {{ mailcow_anubis_url }}. Only
+# nginx-mailcow joins it; mailcow's own network stays mailcow's, and compose
+# never removes an external network. mailcow does not start while this file
+# names a network that does not exist: remove mailcow_anubis_url and run the
+# mailcow role before you remove Anubis.
+services:
+  nginx-mailcow:
+    networks:
+      {{ mailcow_anubis_network }}: {}
+
+networks:
+  {{ mailcow_anubis_network }}:
+    name: {{ mailcow_anubis_network }}
+    external: true

@@ -1,0 +1,326 @@
+---
+# Installs Roundcube mailcow_rc_target over the installed one (roundcube.yml
+# includes this when a newer release of the series exists). First the release
+# is downloaded and checked against the digest GitHub publishes (nothing is
+# changed and no backup made when that fails), then the backup shared with
+# mailcow's update, then the marker of the update (update_failed.yml, removed
+# once the health check after the install passed), then the install; a
+# failure there rewrites the marker with the step.
+
+- name: Find the Roundcube release in the list
+  ansible.builtin.set_fact:
+    mailcow_rc_asset_name: roundcubemail-{{ mailcow_rc_target }}-complete.tar.gz
+    mailcow_rc_asset: >-
+      {{ (mailcow_rc_api.json | selectattr('tag_name', 'equalto', mailcow_rc_target) | first).assets | default([])
+         | selectattr('name', 'equalto', 'roundcubemail-' ~ mailcow_rc_target ~ '-complete.tar.gz') | list | first | default({}) }}
+
+- name: Check that the release has a download and a published checksum
+  ansible.builtin.assert:
+    that:
+      - mailcow_rc_url_ok
+      - mailcow_rc_asset.digest | default('') is match('^sha256:[0-9a-fA-F]{64}$')
+    fail_msg: >-
+      Roundcube {{ mailcow_rc_target }} is the newest release of the
+      {{ mailcow_rc_installed_series }} series, but the release list has
+      {{ 'no ' ~ mailcow_rc_asset_name if mailcow_rc_asset | length == 0
+         else 'no https download URL for ' ~ mailcow_rc_asset_name
+              if not mailcow_rc_url_ok
+         else 'no SHA-256 checksum published for ' ~ mailcow_rc_asset_name }}.
+      Nothing was installed.
+    quiet: true
+  vars:
+    mailcow_rc_url: "{{ mailcow_rc_asset.browser_download_url | default('') }}"
+    mailcow_rc_url_ok: "{{ mailcow_rc_url is match('^https://') or (mailcow_roundcube_allow_insecure_mirror and mailcow_rc_url is match('^http://')) }}"
+
+# In data/web, where php-fpm-mailcow sees it (as /web); only root can read it.
+- name: Make a work directory for the update
+  ansible.builtin.tempfile:
+    state: directory
+    path: "{{ mailcow_dir }}/data/web"
+    prefix: .noix-roundcube-
+  register: mailcow_rc_work
+  # A directory made and removed again in one run is no change; the install
+  # steps report theirs.
+  changed_when: false
+
+- name: Update Roundcube
+  vars:
+    mailcow_rc_failed_output: >-
+      {{ (((ansible_failed_result.msg | default('') | string).splitlines()
+          + (ansible_failed_result.stderr | default('') | string).splitlines()
+          + (ansible_failed_result.stdout | default('') | string).splitlines())
+         | map('regex_replace', '\x1b\[[0-9;]*m', '') | map('trim') | select | list)[-mailcow_tail_lines:] | join(' / ') }}
+  block:
+    - name: Download the Roundcube release
+      ansible.builtin.get_url:
+        url: "{{ mailcow_rc_asset.browser_download_url }}"
+        dest: "{{ mailcow_rc_work.path }}/{{ mailcow_rc_asset_name }}"
+        checksum: "{{ mailcow_rc_asset.digest | lower }}"
+        mode: "0600"
+        timeout: 120
+      register: mailcow_rc_download
+      ignore_errors: true
+      changed_when: false
+
+    - name: Fail when the download fails or does not match its checksum
+      ansible.builtin.fail:
+        msg: >-
+          Roundcube {{ mailcow_rc_target }}: {{ mailcow_rc_asset_name }}
+          {{ 'does not match the SHA-256 digest GitHub publishes for it (' ~ mailcow_rc_asset.digest ~ ')'
+             if mailcow_rc_download.msg | default('') is search('(?i)checksum')
+             else 'could not be downloaded from ' ~ mailcow_rc_asset.browser_download_url }}:
+          {{ mailcow_rc_download.msg | default('') | trim }}.
+          Nothing was installed.
+      when: mailcow_rc_download is failed
+
+    # The PHP the release asks for (composer.json require.php, or
+    # composer.json-dist) against the PHP of php-fpm-mailcow. Not satisfied:
+    # a warning, nothing installed, no backup for Roundcube's sake.
+    - name: Read the PHP requirement of the release
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          tarball={{ (mailcow_rc_work.path ~ '/' ~ mailcow_rc_asset_name) | quote }}
+          for name in composer.json composer.json-dist; do
+            member={{ ('roundcubemail-' ~ mailcow_rc_target ~ '/') | quote }}"$name"
+            if tar -tzf "$tarball" "$member" >/dev/null 2>&1; then
+              tar -xzOf "$tarball" "$member" | jq -r '.require.php // ""'
+              exit 0
+            fi
+          done
+      register: mailcow_rc_php_require
+      changed_when: false
+
+    - name: Read the PHP version of php-fpm-mailcow
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, php-fpm-mailcow, php, -r, "echo PHP_VERSION;"]
+        chdir: "{{ mailcow_dir }}"
+      register: mailcow_rc_php_version
+      changed_when: false
+
+    - name: Check the PHP version against the release's requirement
+      ansible.builtin.set_fact:
+        mailcow_rc_php_ok: "{{ mailcow_rc_php_satisfied.split('@@')[0] | trim == 'true' }}"
+        mailcow_rc_php_unread: "{{ mailcow_rc_php_satisfied.split('@@')[1] | trim }}"
+        mailcow_rc_php_constraint: "{{ mailcow_rc_php_require.stdout | trim }}"
+        mailcow_rc_php_installed: "{{ mailcow_rc_php_version.stdout | trim }}"
+      vars:
+        # Composer's version constraints, as far as php requirements use them:
+        # >= > <= < = ^ ~ x.y.* and *, joined by space or comma (and) and ||
+        # (or). Output: true|false, @@, then the tokens not understood (hyphen
+        # ranges, !=, @dev, ...), which do not block.
+        mailcow_rc_php_satisfied: >-
+          {%- set php = mailcow_rc_php_version.stdout | trim -%}
+          {%- set ns = namespace(any=false, unknown=[]) -%}
+          {%- set text = mailcow_rc_php_require.stdout | trim | regex_replace('(>=|<=|>|<|==|=|\\^|~)\\s+', '\\1')
+                         | regex_replace('\\s*\\|\\|?\\s*', '||') | regex_replace(',', ' ') -%}
+          {%- if text | length == 0 -%}{%- set ns.any = true -%}{%- endif -%}
+          {%- for group in text.split('||') if group | trim | length > 0 -%}
+          {%- set g = namespace(ok=true) -%}
+          {%- if group is search('\\s-\\s') -%}
+          {%- set ns.unknown = ns.unknown + [group | trim] -%}
+          {%- else -%}
+          {%- for token in group.split() -%}
+          {%- set m = token | regex_findall('^(>=|<=|>|<|==|=|\\^|~)?v?([0-9]+(?:\\.[0-9]+)*)(\\.\\*)?\\Z') -%}
+          {%- if token == '*' -%}
+          {%- elif m | length == 0 -%}
+          {%- set ns.unknown = ns.unknown + [token] -%}
+          {%- else -%}
+          {%- set op = m[0][0] -%}{%- set v = m[0][1] -%}{%- set parts = v.split('.') -%}
+          {%- set padded = (parts + ['0', '0'])[:3] | join('.') -%}
+          {%- if op in ['>=', '>', '<=', '<'] -%}
+          {%- if not (php is version(padded, op)) -%}{%- set g.ok = false -%}{%- endif -%}
+          {%- elif op in ['^', '~'] or m[0][2] == '.*' -%}
+          {#- ^A.B and ~A.B up to the next major; ~A.B.C and A.B.* up to the next minor. -#}
+          {%- if op == '~' and parts | length >= 3 or m[0][2] == '.*' and parts | length >= 2 -%}
+          {%- set upper = parts[0] ~ '.' ~ (parts[1] | int + 1) -%}
+          {%- else -%}
+          {%- set upper = (parts[0] | int + 1) | string -%}
+          {%- endif -%}
+          {%- if not (php is version(padded, '>=') and php is version(upper, '<')) -%}{%- set g.ok = false -%}{%- endif -%}
+          {%- elif not (php is version(padded, '==')) and not (php.startswith(v ~ '.')) -%}{%- set g.ok = false -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {%- if g.ok -%}{%- set ns.any = true -%}{%- endif -%}
+          {%- endfor -%}
+          {{ 'true' if ns.any else 'false' }}@@{{ ns.unknown | join(' ') }}
+
+    - name: Report a PHP requirement the role cannot read
+      noixdev.infra.warn:
+        msg: >-
+          The PHP requirement "{{ mailcow_rc_php_constraint }}" of Roundcube
+          {{ mailcow_rc_target }} was not fully understood (not read:
+          {{ mailcow_rc_php_unread }}); it is ignored in the check against
+          PHP {{ mailcow_rc_php_installed }} of php-fpm-mailcow, and the
+          update goes on.
+      when: mailcow_rc_php_unread | length > 0
+
+    - name: Report a release that needs a newer PHP
+      noixdev.infra.warn:
+        msg: >-
+          Roundcube {{ mailcow_rc_target }} (newest release of the
+          {{ mailcow_rc_installed_series }} series) needs PHP
+          {{ mailcow_rc_php_constraint }}, but php-fpm-mailcow runs PHP
+          {{ mailcow_rc_php_installed }}. The role does not install it and
+          keeps {{ mailcow_roundcube_version }}; it tries again when mailcow's
+          PHP is newer.
+      when: not mailcow_rc_php_ok
+
+    - name: Back up mailcow before the update
+      ansible.builtin.include_tasks: update_backup.yml
+      when: mailcow_rc_php_ok
+
+    # Before the install: a run that stops during it leaves the marker.
+    - name: Write the marker of the update before the Roundcube install
+      ansible.builtin.include_tasks: update_failed.yml
+      vars:
+        mailcow_failed_step: >-
+          Roundcube {{ mailcow_roundcube_version }} to {{ mailcow_rc_target }}: the install started and did
+          not report back; the run stopped during the install or before the health check after it, such as
+          on a lost connection or a stopped worker
+        mailcow_marker_required: true
+        mailcow_marker_what: the Roundcube install
+      when: mailcow_rc_php_ok
+
+    # From here on a failure rewrites the marker (main.yml fails at once).
+    - name: Note that the Roundcube install begins
+      ansible.builtin.set_fact:
+        mailcow_rc_installing: true
+      when: mailcow_rc_php_ok
+
+    - name: Install Roundcube
+      when: mailcow_rc_php_ok
+      block:
+        - name: Unpack the Roundcube release
+          ansible.builtin.unarchive:
+            src: "{{ mailcow_rc_work.path }}/{{ mailcow_rc_asset_name }}"
+            dest: "{{ mailcow_rc_work.path }}"
+            remote_src: true
+            owner: root
+            group: root
+
+        # installto.sh copies with rsync, which mailcow's PHP image (Alpine)
+        # lacks; it is added to the running container (gone with the next
+        # recreate, added again by the next update).
+        - name: Install rsync in php-fpm-mailcow
+          ansible.builtin.command:
+            argv: [docker, compose, exec, -T, php-fpm-mailcow, apk, add, --no-cache, rsync]
+            chdir: "{{ mailcow_dir }}"
+          changed_when: true
+
+        - name: Run bin/installto.sh of the release in php-fpm-mailcow
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - exec
+              - -T
+              - -w
+              - /web/{{ mailcow_rc_work.path | basename }}/roundcubemail-{{ mailcow_rc_target }}
+              - php-fpm-mailcow
+              - php
+              - bin/installto.sh
+              - -y
+              - /web/rc
+            chdir: "{{ mailcow_dir }}"
+          changed_when: true
+          async: 3600
+          poll: 10
+
+        - name: Run composer update --no-dev -o in php-fpm-mailcow
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - exec
+              - -T
+              - -e
+              - COMPOSER_ALLOW_SUPERUSER=1
+              - -w
+              - /web/rc
+              - php-fpm-mailcow
+              - composer
+              - update
+              - --no-dev
+              - -o
+              - --no-interaction
+            chdir: "{{ mailcow_dir }}"
+          changed_when: true
+          async: 3600
+          poll: 10
+
+        - name: Restart php-fpm-mailcow
+          ansible.builtin.command:
+            argv: [docker, compose, restart, php-fpm-mailcow]
+            chdir: "{{ mailcow_dir }}"
+          changed_when: true
+
+        # installto.sh can end without installing (cancelled, or an error it
+        # only reports).
+        - name: Read the Roundcube version after the update
+          ansible.builtin.slurp:
+            src: "{{ mailcow_rc_iniset }}"
+          register: mailcow_rc_iniset_after
+
+        - name: Check the Roundcube version after the update
+          ansible.builtin.assert:
+            that: mailcow_rc_version_after == mailcow_rc_target
+            fail_msg: >-
+              {{ mailcow_rc_iniset }} says Roundcube
+              {{ mailcow_rc_version_after or 'with no version' }} after the update, not
+              {{ mailcow_rc_target }}.
+            quiet: true
+          vars:
+            mailcow_rc_version_after: >-
+              {{ (mailcow_rc_iniset_after.content | b64decode) | regex_findall('RCMAIL_VERSION\W+([0-9][0-9a-z.-]*)') | first | default('') }}
+
+        - name: Check mailcow and Roundcube after the update
+          ansible.builtin.include_tasks: health.yml
+
+        - name: Fail when mailcow or Roundcube is unhealthy after the update
+          ansible.builtin.fail:
+            msg: "{{ mailcow_health_error | trim }}"
+          when: mailcow_health_error | length > 0
+
+        - name: Remove the marker of the update now that Roundcube answers
+          ansible.builtin.include_tasks: update_done.yml
+
+        - name: Note the Roundcube update
+          ansible.builtin.set_fact:
+            mailcow_roundcube_updated: true
+            mailcow_roundcube_version: "{{ mailcow_rc_target }}"
+
+      rescue:
+        # First: a failing marker rewrite below has a rescue of its own, which
+        # would replace ansible_failed_task and ansible_failed_result.
+        - name: Note the failed Roundcube step
+          ansible.builtin.set_fact:
+            mailcow_rc_failed_step: "{{ ansible_failed_task.name }}"
+            mailcow_rc_failed_text: "{{ mailcow_rc_failed_output }}"
+
+        - name: Note the marker of the failed Roundcube update
+          ansible.builtin.include_tasks: update_failed.yml
+          vars:
+            mailcow_failed_step: >-
+              Roundcube {{ mailcow_roundcube_version }} to {{ mailcow_rc_target }}, step "{{ mailcow_rc_failed_step }}":
+              {{ mailcow_rc_failed_text }}
+
+        - name: Fail naming the step and the backup
+          ansible.builtin.fail:
+            msg: >-
+              The Roundcube update from {{ mailcow_roundcube_version }} to {{ mailcow_rc_target }} in
+              {{ mailcow_rc_dir }} failed at the step "{{ mailcow_rc_failed_step }}":
+              {{ mailcow_rc_failed_text }}. Roundcube and mailcow may be broken. The backup taken
+              before the update is {{ mailcow_update_backup }} (it has data/web/rc); restore from it
+              by hand or from a server snapshot. The role does not roll back and does not run again
+              until {{ mailcow_update_failed_file }} is removed.
+
+  always:
+    - name: Remove the work directory of the Roundcube update
+      ansible.builtin.file:
+        path: "{{ mailcow_rc_work.path }}"
+        state: absent
+      changed_when: false

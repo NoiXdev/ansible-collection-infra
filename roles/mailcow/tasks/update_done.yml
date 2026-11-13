@@ -1,0 +1,12 @@
+---
+# Removes the marker of the update (update_failed.yml) once the health check
+# after the update passed.
+
+- name: Remove the marker of the update
+  ansible.builtin.file:
+    path: "{{ mailcow_update_failed_file }}"
+    state: absent
+
+- name: Note that the marker is removed
+  ansible.builtin.set_fact:
+    mailcow_update_marker_written: false

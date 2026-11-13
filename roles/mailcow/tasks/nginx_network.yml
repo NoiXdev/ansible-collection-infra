@@ -1,0 +1,42 @@
+---
+# nginx-mailcow on Anubis's network exactly when mailcow_anubis_url is set
+# (nginx.yml includes this before the role's nginx files when it is, after
+# them when it is not): recreated with the compose override when the override
+# changed (mailcow_override_changed) or its networks differ from it (read from
+# the container, so a recreate that failed or a run that stopped is made up
+# by the next run).
+
+- name: Read the networks of nginx-mailcow
+  ansible.builtin.shell:
+    executable: /bin/bash
+    chdir: "{{ mailcow_dir }}"
+    cmd: >-
+      set -o pipefail;
+      docker inspect --format '{{ '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}' }}'
+      $(docker compose ps -q {{ mailcow_nginx_service | quote }})
+  register: mailcow_nginx_networks
+  changed_when: false
+  failed_when: false
+
+- name: Recreate nginx-mailcow with the compose override
+  ansible.builtin.command:
+    argv: [docker, compose, up, -d, --no-deps, "{{ mailcow_nginx_service }}"]
+    chdir: "{{ mailcow_dir }}"
+  changed_when: true
+  when: >-
+    mailcow_override_changed | bool
+    or mailcow_nginx_networks.rc != 0
+    or (mailcow_anubis_network in mailcow_nginx_networks.stdout.split()) != (mailcow_anubis_url | length > 0)
+  register: mailcow_nginx_recreate
+
+- name: Wait until the recreated nginx-mailcow runs
+  ansible.builtin.command:
+    argv: [docker, compose, exec, -T, "{{ mailcow_nginx_service }}", test, -s, /var/run/nginx.pid]
+    chdir: "{{ mailcow_dir }}"
+  register: mailcow_nginx_recreated
+  until: mailcow_nginx_recreated.rc == 0
+  retries: "{{ (mailcow_health_timeout | int / 5) | round(0, 'ceil') | int }}"
+  delay: 5
+  changed_when: false
+  failed_when: mailcow_nginx_recreated.rc != 0
+  when: mailcow_nginx_recreate is not skipped

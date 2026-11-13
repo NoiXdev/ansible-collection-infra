@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# mailcow-backup [--reason daily|update]
+#
+# A full mailcow backup (helper-scripts/backup_and_restore.sh backup all) into
+# a new mailcow-<YYYY-MM-DD-HH-MM-SS> folder in {{ mailcow_backup_dir }},
+# plus extra-files.tar.gz with what mailcow's backup leaves out (Roundcube in
+# data/web/rc, own nginx and Dovecot configuration,
+# docker-compose.override.yml, mailcow.conf, vars.local.inc.php).
+#
+# Runs one at a time: a second call waits for the first
+# ({{ mailcow_backup_lock }}). With --reason daily (the timer, the default) it
+# backs up nothing when the last successful backup is younger than
+# {{ mailcow_backup_skip_hours }} hours; --reason update (before an update)
+# always backs up.
+#
+# Retention: backup folders (only names mailcow-<YYYY-MM-DD-HH-MM-SS>) older
+# than {{ mailcow_backup_keep_days }} days are removed (as --delete-days does),
+# never the last successful backup, the newest complete folder or the backup
+# named in {{ mailcow_update_failed_file }} (a failed update). With a
+# successful backup on record this happens before the backup, so the space
+# check counts the freed space; without one only after this backup succeeded.
+# The space check needs 1.2 times the size of the newest backup free.
+#
+# With mailcow_backup_require_mount the backup directory must be on another
+# file system than /, {{ mailcow_dir }} and Docker's root directory.
+#
+# A backup counts only when backup_and_restore.sh exits 0, exactly one new
+# folder appeared and it holds every archive of "backup all" (none empty),
+# mailcow.conf and both mariabackup steps' "completed OK!". Then
+# {{ mailcow_last_backup_file }} names it (folder, time, reason), and the
+# last line of the output is "mailcow-backup: done: <folder>". A failed or
+# stopped (TERM, INT, HUP) backup's new folder is removed and never recorded
+# (stopped in the instant between the last check and the record, the
+# complete folder stays unrecorded);
+# the error goes to stderr with a non-zero exit code. backup_and_restore.sh's
+# output stays in {{ mailcow_state_dir }}/backup.log. What the script writes
+# itself (the log, extra-files.tar.gz, last-backup) is mode 0600.
+set -Eeuo pipefail
+
+mailcow_dir={{ mailcow_dir | quote }}
+backup_dir={{ mailcow_backup_dir | regex_replace('/+$', '') | quote }}
+require_mount={{ mailcow_backup_require_mount | bool | ternary('1', '0') }}
+keep_days={{ mailcow_backup_keep_days | int }}
+skip_hours={{ mailcow_backup_skip_hours | int }}
+state_dir={{ mailcow_state_dir | quote }}
+last_file={{ mailcow_last_backup_file | quote }}
+lock={{ mailcow_backup_lock | quote }}
+failed_file={{ mailcow_update_failed_file | quote }}
+log="$state_dir/backup.log"
+# The archives of backup_and_restore.sh backup all (.tar.zst; .tar.gz from
+# older mailcow releases).
+components=(vmail crypt redis rspamd postfix mariadb)
+{# The rest is plain shell (${#array[@]} would start a Jinja comment). #}
+{% raw %}
+
+say() { echo "mailcow-backup: $*"; }
+die() {
+  echo "mailcow-backup: $*" >&2
+  exit 1
+}
+usage() { die "usage: mailcow-backup [--reason daily|update]"; }
+
+reason=daily
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --reason)
+      [ "$#" -ge 2 ] || usage
+      reason="$2"
+      shift 2
+      ;;
+    --reason=*)
+      reason="${1#--reason=}"
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+case "$reason" in
+  daily | update) ;;
+  *) usage ;;
+esac
+[ "$(id -u)" = 0 ] || die "run it as root"
+
+mkdir -p "$state_dir" "$(dirname "$lock")"
+exec 9>"$lock"
+if ! flock --nonblock 9; then
+  say "another backup is running; waiting for it to finish"
+  flock 9
+fi
+
+# The last successful backup (after the wait: the other run may have made one).
+last_folder=""
+last_time=""
+if [ -f "$last_file" ]; then
+  last_folder="$(sed -n 's/^folder: //p' "$last_file" | head -n 1)"
+  last_time="$(sed -n 's/^time: //p' "$last_file" | head -n 1)"
+fi
+[ -n "$last_folder" ] && [ -d "$last_folder" ] || last_folder=""
+
+if [ "$reason" = daily ] && [ -n "$last_folder" ] && [ -n "$last_time" ]; then
+  last_epoch="$(date -d "$last_time" +%s 2>/dev/null)" || last_epoch=0
+  if [ $(($(date +%s) - last_epoch)) -lt $((skip_hours * 3600)) ]; then
+    say "skipped: the last backup ($last_folder, $last_time) is younger than $skip_hours hours"
+    exit 0
+  fi
+fi
+
+umask 077
+[ -d "$backup_dir" ] || die "the backup directory $backup_dir does not exist"
+[ -f "$mailcow_dir/mailcow.conf" ] || die "$mailcow_dir/mailcow.conf is missing; is mailcow installed there?"
+if [ "$require_mount" = 1 ]; then
+  backup_dev="$(stat -L -c %d -- "$backup_dir")"
+  docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || die "cannot read Docker's root directory (docker info)"
+  for other in / "$mailcow_dir" "$docker_root"; do
+    if [ "$(stat -L -c %d -- "$other")" = "$backup_dev" ]; then
+      die "the backup directory $backup_dir is on the same file system as $other; no backup (backups need a disk of their own)"
+    fi
+  done
+fi
+
+# Backup folders as backup_and_restore.sh names them, oldest first (-H: the
+# backup directory may be a symbolic link to the backup disk).
+folders() {
+  find -H "$backup_dir" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended \
+    -regex '.*/mailcow-[0-9]{4}(-[0-9]{2}){5}' | sort
+}
+complete() {
+  local component
+  for component in "${components[@]}"; do
+    [ -s "$1/backup_$component.tar.zst" ] || [ -s "$1/backup_$component.tar.gz" ] || return 1
+  done
+  [ -s "$1/mailcow.conf" ]
+}
+newest_complete() {
+  local folder
+  while IFS= read -r folder; do
+    if complete "$folder"; then
+      echo "$folder"
+      return 0
+    fi
+  done < <(folders | sort -r)
+}
+# The folder named by a failed update stays until its marker is removed.
+failed_folder=""
+[ ! -f "$failed_file" ] || failed_folder="$(sed -n 's/^backup: //p' "$failed_file" | head -n 1)"
+prune() {
+  local keep_newest old
+  keep_newest="$(newest_complete)"
+  while IFS= read -r old; do
+    [ -n "$old" ] || continue
+    case "$old" in "$last_folder" | "$keep_newest" | "$failed_folder") continue ;; esac
+    [ -n "$(find "$old" -maxdepth 0 -mmin +$((keep_days * 1440)))" ] || continue
+    say "removing $old (older than $keep_days days)"
+    rm -rf -- "$old"
+  done < <(folders)
+}
+
+# With a backup on record, prune first so the space check counts the room.
+[ -z "$last_folder" ] || prune
+
+# Space: the newest backup's size plus 20 %.
+reference="${last_folder:-$(newest_complete)}"
+reference="${reference:-$(folders | tail -n 1)}"
+if [ -n "$reference" ]; then
+  size="$(du -sb -- "$reference" | cut -f1)"
+  need=$((size * 12 / 10))
+  avail="$(df -B1 --output=avail -- "$backup_dir" | tail -n 1 | tr -d ' ')"
+  if [ "$avail" -lt "$need" ]; then
+    die "space check failed: $backup_dir has $avail bytes free, but the newest backup ($reference) takes $size bytes, so a new one needs $need (its size + 20 %); no backup"
+  fi
+fi
+
+before=""
+started=0
+done_ok=0
+# Removes the folders this run created unless it succeeded, also when it is
+# stopped while backup_and_restore.sh runs.
+cleanup() {
+  local folder
+  [ "$started" = 1 ] && [ "$done_ok" != 1 ] || return 0
+  while IFS= read -r folder; do
+    [ -z "$folder" ] || rm -rf -- "$folder"
+  done < <(comm -13 <(printf '%s\n' "$before") <(folders))
+}
+trap cleanup EXIT
+trap 'exit 143' TERM INT HUP
+
+before="$(folders)"
+started=1
+say "backing up mailcow ($mailcow_dir) into $backup_dir (reason: $reason)"
+rc=0
+# mailcow's script with the usual umask, as when run by hand.
+(umask 022 && cd "$mailcow_dir" && MAILCOW_BACKUP_LOCATION="$backup_dir" ./helper-scripts/backup_and_restore.sh backup all) \
+  </dev/null >"$log" 2>&1 || rc=$?
+chmod 0600 "$log"
+mapfile -t created < <(comm -13 <(printf '%s\n' "$before") <(folders) | sed '/^$/d')
+
+if [ "$rc" != 0 ]; then
+  tail -n 20 "$log" >&2 || true
+  die "backup_and_restore.sh backup all failed (exit $rc); see $log"
+fi
+[ "${#created[@]}" = 1 ] || die "backup_and_restore.sh made ${#created[@]} new backup folders instead of one; see $log"
+folder="${created[0]}"
+
+missing=()
+for component in "${components[@]}"; do
+  [ -s "$folder/backup_$component.tar.zst" ] || [ -s "$folder/backup_$component.tar.gz" ] || missing+=("backup_$component")
+done
+[ -s "$folder/mailcow.conf" ] || missing+=(mailcow.conf)
+[ "${#missing[@]}" = 0 ] || die "the backup $folder is incomplete, missing or empty: ${missing[*]}; see $log"
+# mariabackup reports both its steps (backup, prepare) as "completed OK!".
+[ "$(grep -c 'completed OK!' "$log" || true)" -ge 2 ] || die "the database backup in $folder did not complete (no \"completed OK!\" from mariabackup for both steps); see $log"
+
+# What mailcow's backup leaves out, those that exist.
+extra=()
+cd "$mailcow_dir"
+[ ! -e data/web/rc ] || extra+=(data/web/rc)
+for file in data/conf/nginx/*.custom data/conf/nginx/*.conf; do
+  [ -f "$file" ] || continue
+  case "$file" in
+    # Upstream's own *.conf are mailcow's, restored with the clone.
+    *.conf) ! git -c safe.directory="$mailcow_dir" ls-files --error-unmatch -- "$file" >/dev/null 2>&1 || continue ;;
+  esac
+  extra+=("$file")
+done
+for file in data/conf/dovecot/extra.conf docker-compose.override.yml mailcow.conf data/web/inc/vars.local.inc.php; do
+  [ ! -e "$file" ] || extra+=("$file")
+done
+# Exit 1 is "file changed as we read it" (a live Roundcube writing its logs):
+# the archive is written, so it is a warning, not a failed backup.
+tar_rc=0
+tar --create --gzip --file "$folder/extra-files.tar.gz.partial" -- "${extra[@]}" || tar_rc=$?
+[ "$tar_rc" -le 1 ] || die "cannot write $folder/extra-files.tar.gz (tar exit $tar_rc)"
+[ "$tar_rc" = 0 ] || echo "mailcow-backup: warning: files changed while extra-files.tar.gz was written (tar exit 1); the archive holds them as tar read them" >&2
+mv -- "$folder/extra-files.tar.gz.partial" "$folder/extra-files.tar.gz"
+
+printf 'folder: %s\ntime: %s\nreason: %s\n' "$folder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" >"$last_file.tmp"
+# Before the record: a stop (TERM) right after the mv must not let cleanup
+# remove the folder last-backup now names. A stop before the mv leaves a
+# complete folder that is not on record (pruned in time like any other).
+done_ok=1
+mv -- "$last_file.tmp" "$last_file"
+last_folder="$folder"
+# Without a backup on record nothing was pruned before; now one is. The
+# backup stands even if this fails.
+prune || echo "mailcow-backup: warning: removing old backup folders failed" >&2
+say "done: $folder"
+{% endraw %}
