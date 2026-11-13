@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `error_pages_export`: new internal role, used by `cloudpanel` and `mailcow`, that exports the noix
+  error pages to static files. `cloudpanel` behaves as before: same files, same export script.
 - `dns`: a `dns_records` entry has either `addresses` or the new `tailscale_peer` (exactly one;
   both or neither fails before anything changes). `tailscale_peer` is a node's host name as in
   `tailscale status --json` (`Peer[*].HostName`, matched case-insensitively; the DNS host itself,

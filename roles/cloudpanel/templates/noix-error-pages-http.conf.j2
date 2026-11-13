@@ -10,8 +10,8 @@
 # The page's language: the first language of the browser's Accept-Language,
 # when the pages offer it.
 map $http_accept_language $noix_error_pages_lang {
-    default {{ cloudpanel_error_pages_languages.default }};
-{% for lang in cloudpanel_error_pages_languages.languages if lang != cloudpanel_error_pages_languages.default %}
+    default {{ error_pages_export_languages.default }};
+{% for lang in error_pages_export_languages.languages if lang != error_pages_export_languages.default %}
     "~*^{{ lang }}(-|;|,|$)" {{ lang }};
 {% endfor %}
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # {{ ansible_managed }}
 #
-# Exports the noix error pages ({{ cloudpanel_error_pages_image }}, theme
-# {{ cloudpanel_error_pages_theme }}) to static files: it runs the image once on a loopback
+# Exports the noix error pages ({{ error_pages_export_image }}, theme
+# {{ error_pages_export_theme }}) to static files: it runs the image once on a loopback
 # port, saves every page in every language it offers and removes the
 # container again. nginx serves the files; nothing runs afterwards.
 #
@@ -19,12 +19,12 @@
 # on any failure.
 set -Eeuo pipefail
 
-dir={{ cloudpanel_error_pages_dir | quote }}
-image={{ cloudpanel_error_pages_image | quote }}
-theme={{ cloudpanel_error_pages_theme | quote }}
-codes=({{ cloudpanel_error_pages_export_codes | join(' ') }})
+dir={{ error_pages_export_dir | quote }}
+image={{ error_pages_export_image | quote }}
+theme={{ error_pages_export_theme | quote }}
+codes=({{ error_pages_export_codes | join(' ') }})
 env=(
-{% for key, value in cloudpanel_error_pages_export_env | dictsort %}
+{% for key, value in error_pages_export_env | dictsort %}
   --env '{{ (key ~ '=' ~ value) | replace("'", "'\\''") }}'
 {% endfor %}
 )

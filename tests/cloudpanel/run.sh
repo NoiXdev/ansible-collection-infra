@@ -287,6 +287,13 @@ if grep -A1 'Reboot the host' "$out/idempotence.log" | grep -q '^changed'; then
 fi
 
 echo "== error pages"
+# The export keeps its layout: a relative link current to releases/<id>, and export.json in it.
+current_target="$(hx readlink /var/www/noix-error-pages/current)"
+case "$current_target" in
+  releases/*) ;;
+  *) fail "the link current is not relative to releases/<id>: $current_target" ;;
+esac
+hx test -f /var/www/noix-error-pages/current/export.json || fail "current/export.json is missing"
 hx systemctl stop php8.2-fpm
 expect_page 502 down.test / 'data-page="502"' 'ep-theme-classic' '<html lang="en"'
 curl_args="-H Accept-Language:de-DE,de;q=0.9" expect_page 502 down.test / '<html lang="de"'

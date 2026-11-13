@@ -1,0 +1,7 @@
+---
+# Internal role: used by cloudpanel and mailcow through include_role, which
+# pass these values in. Only the environment has a default.
+#
+# Environment of the export (LANGUAGES, DEFAULT_LANGUAGE, ...), passed to the
+# image as it is. The caller adds THEME itself and sets SHOW_DETAILS to false.
+error_pages_export_env: {}

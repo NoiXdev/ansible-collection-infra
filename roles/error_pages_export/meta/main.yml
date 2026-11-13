@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Internal role, used by cloudpanel and mailcow - exports the noix error pages to static files
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

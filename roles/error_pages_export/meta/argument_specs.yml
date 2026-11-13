@@ -1,0 +1,36 @@
+---
+argument_specs:
+  main:
+    short_description: Static export of the noix error pages (internal; used by cloudpanel and mailcow)
+    description:
+      - Runs the error pages image once, saves every page in every language
+        it offers as static files and removes the container again. The files
+        are written to a release of their own under `error_pages_export_dir`
+        and go live with one rename of the relative link `current`.
+      - Sets the facts `error_pages_export_changed` (bool, whether the export
+        ran) and `error_pages_export_languages` (the parsed `export.json`).
+    options:
+      error_pages_export_dir:
+        type: path
+        required: true
+        description: Directory of the export (`releases/`, `current`); created if missing.
+      error_pages_export_image:
+        type: str
+        required: true
+        description: Error pages image.
+      error_pages_export_theme:
+        type: str
+        required: true
+        description: Theme the export checks every page for.
+      error_pages_export_env:
+        type: dict
+        description: Environment of the export container.
+      error_pages_export_codes:
+        type: list
+        elements: int
+        required: true
+        description: Status codes to export (plus the maintenance page).
+      error_pages_export_script:
+        type: path
+        required: true
+        description: Where the export script is installed; its directory is created if missing.

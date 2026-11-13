@@ -26,6 +26,7 @@ are on the documentation site.
 | `dns` | CoreDNS for internal names on private addresses, forwarding the rest |
 | `harbor` | Harbor registry behind Traefik, with safe upgrades and backup scripts |
 | `cloudpanel` | CloudPanel installed and kept updated: CloudPanel and system updates, reboots when required, health checks, error pages and a maintenance switch |
+| `error_pages_export` | Internal: static export of the noix error pages, used by `cloudpanel` and `mailcow` (not meant to be run on its own) |
 | `pulsix_manager` | Pulsix manager, database and any number of local workers |
 | `pulsix_worker` | Any number of remote Pulsix workers, enrolled with one-time tokens |
 | `fail2ban` | fail2ban on the systemd journal with nftables bans |

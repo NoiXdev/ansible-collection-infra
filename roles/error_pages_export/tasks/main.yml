@@ -1,0 +1,78 @@
+---
+# Exports the error pages image to static files (see the script's header for
+# the layout). Nothing here knows the caller's paths: the caller passes them.
+
+- name: Create the error pages directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ error_pages_export_dir }}"
+    - "{{ error_pages_export_script | dirname }}"
+
+- name: Install the error pages export
+  ansible.builtin.template:
+    src: noix-error-pages-export.sh.j2
+    dest: "{{ error_pages_export_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: error_pages_export_installed
+
+- name: Read the last export of the error pages
+  ansible.builtin.slurp:
+    src: "{{ error_pages_export_dir }}/current/export.json"
+  register: error_pages_export_last
+  failed_when: false
+
+# Again whenever the export changed (image, theme, environment, codes) or did
+# not finish. Only then is Docker needed.
+- name: Note whether the error pages need an export
+  ansible.builtin.set_fact:
+    error_pages_export_needed: >-
+      {{ error_pages_export_last.content is not defined
+         or (error_pages_export_last.content | b64decode | from_json).script | default('')
+            != error_pages_export_installed.checksum }}
+
+- name: Look for Docker
+  ansible.builtin.command:
+    argv: [docker, version, --format, "{{ '{{' }}.Server.Version{{ '}}' }}"]
+  register: error_pages_export_docker
+  changed_when: false
+  failed_when: false
+  when: error_pages_export_needed | bool
+
+- name: Check that Docker runs
+  ansible.builtin.assert:
+    that: error_pages_export_docker.rc == 0
+    fail_msg: >-
+      The error pages are exported from {{ error_pages_export_image }} with Docker
+      (run the docker role first), but `docker version` failed:
+      {{ error_pages_export_docker.stderr | default(error_pages_export_docker.msg | default('')) }}
+    quiet: true
+  when: error_pages_export_needed | bool
+
+- name: Export the error pages
+  ansible.builtin.command:
+    argv: ["{{ error_pages_export_script }}"]
+  register: error_pages_export_run
+  changed_when: true
+  failed_when: false
+  when: error_pages_export_needed | bool
+
+- name: Check the export of the error pages
+  ansible.builtin.assert:
+    that: error_pages_export_run.rc == 0
+    fail_msg: "{{ error_pages_export_script }} failed: {{ error_pages_export_run.stderr }}"
+    quiet: true
+  when: error_pages_export_run is not skipped
+
+- name: Note the result of the export
+  ansible.builtin.set_fact:
+    error_pages_export_changed: "{{ error_pages_export_run is not skipped }}"
+    error_pages_export_languages: >-
+      {{ (error_pages_export_run.stdout if error_pages_export_run is not skipped
+          else error_pages_export_last.content | b64decode) | from_json }}

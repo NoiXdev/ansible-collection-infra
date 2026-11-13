@@ -22,82 +22,26 @@
       {{ cloudpanel_nginx_dir }}). Fix it, then run again: {{ cloudpanel_nginx_pretest.stderr }}
     quiet: true
 
-- name: Create the error pages directories
+- name: Create the error pages state directory
   ansible.builtin.file:
-    path: "{{ item.path }}"
+    path: "{{ cloudpanel_error_pages_state | dirname }}"
     state: directory
     owner: root
     group: root
-    mode: "{{ item.mode }}"
-  loop:
-    - {path: "{{ cloudpanel_error_pages_dir }}", mode: "0755"}
-    - {path: "{{ cloudpanel_error_pages_export | dirname }}", mode: "0755"}
-    - {path: "{{ cloudpanel_error_pages_state | dirname }}", mode: "0700"}
-  loop_control:
-    label: "{{ item.path }}"
+    mode: "0700"
 
-- name: Install the error pages export
-  ansible.builtin.template:
-    src: noix-error-pages-export.sh.j2
-    dest: "{{ cloudpanel_error_pages_export }}"
-    owner: root
-    group: root
-    mode: "0755"
-  register: cloudpanel_error_pages_export_script
-
-- name: Read the last export of the error pages
-  ansible.builtin.slurp:
-    src: "{{ cloudpanel_error_pages_dir }}/current/export.json"
-  register: cloudpanel_error_pages_exported
-  failed_when: false
-
-# Again whenever the export changed (image, theme, environment, codes) or did
-# not finish. Only then is Docker needed.
-- name: Note whether the error pages need an export
-  ansible.builtin.set_fact:
-    cloudpanel_error_pages_export_needed: >-
-      {{ cloudpanel_error_pages_exported.content is not defined
-         or (cloudpanel_error_pages_exported.content | b64decode | from_json).script | default('')
-            != cloudpanel_error_pages_export_script.checksum }}
-
-- name: Look for Docker
-  ansible.builtin.command:
-    argv: [docker, version, --format, "{{ '{{' }}.Server.Version{{ '}}' }}"]
-  register: cloudpanel_docker_version
-  changed_when: false
-  failed_when: false
-  when: cloudpanel_error_pages_export_needed | bool
-
-- name: Check that Docker runs
-  ansible.builtin.assert:
-    that: cloudpanel_docker_version.rc == 0
-    fail_msg: >-
-      The error pages are exported from {{ cloudpanel_error_pages_image }} with Docker
-      (run the docker role first), but `docker version` failed:
-      {{ cloudpanel_docker_version.stderr | default(cloudpanel_docker_version.msg | default('')) }}
-    quiet: true
-  when: cloudpanel_error_pages_export_needed | bool
-
+# The export itself is the internal role error_pages_export; it sets
+# error_pages_export_languages for the nginx configuration below.
 - name: Export the error pages
-  ansible.builtin.command:
-    argv: ["{{ cloudpanel_error_pages_export }}"]
-  register: cloudpanel_error_pages_export_run
-  changed_when: true
-  failed_when: false
-  when: cloudpanel_error_pages_export_needed | bool
-
-- name: Check the export of the error pages
-  ansible.builtin.assert:
-    that: cloudpanel_error_pages_export_run.rc == 0
-    fail_msg: "{{ cloudpanel_error_pages_export }} failed: {{ cloudpanel_error_pages_export_run.stderr }}"
-    quiet: true
-  when: cloudpanel_error_pages_export_run is not skipped
-
-- name: Note the languages of the error pages
-  ansible.builtin.set_fact:
-    cloudpanel_error_pages_languages: >-
-      {{ (cloudpanel_error_pages_export_run.stdout if cloudpanel_error_pages_export_run is not skipped
-          else cloudpanel_error_pages_exported.content | b64decode) | from_json }}
+  ansible.builtin.include_role:
+    name: noixdev.infra.error_pages_export
+  vars:
+    error_pages_export_dir: "{{ cloudpanel_error_pages_dir }}"
+    error_pages_export_image: "{{ cloudpanel_error_pages_image }}"
+    error_pages_export_theme: "{{ cloudpanel_error_pages_theme }}"
+    error_pages_export_env: "{{ cloudpanel_error_pages_export_env }}"
+    error_pages_export_codes: "{{ cloudpanel_error_pages_export_codes }}"
+    error_pages_export_script: "{{ cloudpanel_error_pages_export }}"
 
 # Kept with a backup until nginx -t passed: a configuration nginx rejects is
 # never left in place.
