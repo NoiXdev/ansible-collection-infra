@@ -1,0 +1,127 @@
+---
+- name: Verify
+  hosts: all
+  vars_files: [vars.yml]
+  vars:
+    verify_dir: /opt/anubis
+  tasks:
+    - name: Read the signing key's metadata
+      ansible.builtin.stat:
+        path: "{{ verify_dir }}/ed25519.key"
+        checksum_algorithm: sha256
+      register: verify_key
+
+    - name: Check the signing key's mode and owner
+      ansible.builtin.assert:
+        that:
+          - verify_key.stat.exists
+          - verify_key.stat.mode == '0600'
+          - verify_key.stat.uid == 65532
+          - verify_key.stat.size == 65
+        fail_msg: "{{ verify_dir }}/ed25519.key must be 0600, owned by 65532, 64 hex digits and a newline: {{ verify_key.stat }}"
+
+    # compose.yaml holds anubis_env; the check container's env file is gone.
+    - name: Read the metadata of the policy and the compose files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop:
+        - "{{ verify_dir }}/policy.yaml"
+        - "{{ verify_dir }}/compose.yaml"
+        - "{{ verify_dir }}/staged/compose.yaml"
+        - "{{ verify_dir }}/staged/check.env"
+      register: verify_files
+
+    - name: Check the modes of the policy and the compose files
+      ansible.builtin.assert:
+        that:
+          - verify_files.results[0].stat.mode == '0644'
+          - verify_files.results[1].stat.mode == '0600'
+          - verify_files.results[2].stat.mode == '0600'
+          - not verify_files.results[3].stat.exists
+        fail_msg: "policy.yaml must be 0644, compose.yaml 0600 and no check.env left: {{ verify_files.results | map(attribute='stat') }}"
+
+    - name: Read the policy
+      ansible.builtin.slurp:
+        src: "{{ verify_dir }}/policy.yaml"
+      register: verify_policy_raw
+
+    - name: Check the policy
+      vars:
+        verify_policy: "{{ verify_policy_raw.content | b64decode | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          - verify_policy.bots[0].name == 'anubis-own-paths'
+          - verify_policy.bots[0].action == 'ALLOW'
+          - verify_policy.bots[1] == anubis_policy_allow[0]
+          - "verify_policy.bots[-1] == {'import': '(data)/meta/default-config.yaml'}"
+          - "verify_policy.status_codes == {'CHALLENGE': 200, 'DENY': 403}"
+          - verify_policy.thresholds[1].challenge.difficulty == 4
+          - verify_policy.impressum == anubis_impressum
+        fail_msg: "Unexpected policy: {{ verify_policy }}"
+
+    - name: Read the Traefik dynamic file
+      ansible.builtin.slurp:
+        src: "{{ traefik_dir }}/dynamic/anubis.yml"
+      register: verify_dynamic_raw
+
+    - name: Check the Traefik dynamic file
+      vars:
+        verify_dynamic: "{{ verify_dynamic_raw.content | b64decode | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          - verify_dynamic.http.middlewares.anubis.chain.middlewares == ['anubis-strip', 'anubis-challenge', 'anubis-check']
+          - verify_dynamic.http.middlewares['anubis-check'].forwardAuth.trustForwardHeader
+          - verify_dynamic.http.middlewares['anubis-check'].forwardAuth.address
+            == 'http://noixdev-anubis:8923/.within.website/x/cmd/anubis/api/check'
+          - >-
+            verify_dynamic.http.middlewares['anubis-strip'].headers.customRequestHeaders
+            == {'X-Original-Uri': '', 'X-Forwarded-Uri': ''}
+          - "verify_dynamic.http.services.anubis.loadBalancer.servers == [{'url': 'http://noixdev-anubis:8923'}]"
+          - verify_dynamic.http.routers.keys() | sort == ['anubis-opt', 'anubis-web']
+          - verify_dynamic.http.routers['anubis-web'].priority == 100000
+          - verify_dynamic.http.routers['anubis-web'].entryPoints == ['web']
+        fail_msg: "Unexpected Traefik dynamic file: {{ verify_dynamic }}"
+
+    - name: Read Traefik's static configuration
+      ansible.builtin.slurp:
+        src: "{{ traefik_dir }}/traefik.yml"
+      register: verify_static_raw
+
+    # The chain must work behind the error pages middlewares.
+    - name: Check the order of web's middlewares
+      vars:
+        verify_static: "{{ verify_static_raw.content | b64decode | from_yaml }}"
+      ansible.builtin.assert:
+        that:
+          - verify_static.entryPoints.web.http.middlewares == ['error-pages-compress@file', 'error-pages-errors@file', 'anubis@file']
+          - verify_static.entryPoints.opt.http is not defined
+        fail_msg: "Unexpected entrypoints: {{ verify_static.entryPoints }}"
+
+    - name: Read the Anubis container
+      ansible.builtin.command:
+        cmd: docker inspect noixdev-anubis
+      register: verify_container
+      changed_when: false
+
+    - name: Check the Anubis container
+      vars:
+        verify_c: "{{ (verify_container.stdout | from_json)[0] }}"
+        verify_env: "{{ verify_c.Config.Env }}"
+      ansible.builtin.assert:
+        that:
+          - verify_c.State.Health.Status == 'healthy'
+          - verify_c.Config.User == '65532:65532'
+          - verify_c.HostConfig.ReadonlyRootfs
+          - verify_c.HostConfig.CapDrop == ['ALL']
+          - verify_c.HostConfig.PortBindings | default({}, true) | length == 0
+          - verify_c.NetworkSettings.Networks.keys() | list == ['proxy']
+          - "'noixdev-anubis' in verify_c.NetworkSettings.Networks.proxy.DNSNames"
+          - "'anubis' not in verify_c.NetworkSettings.Networks.proxy.DNSNames"
+          - "'anubis' not in verify_c.NetworkSettings.Networks.proxy.Aliases | default([], true)"
+          - "'REDIRECT_DOMAINS=*.example.test,*.other.test,c.example.test:8080,f.example.test:8080' in verify_env"
+          - "'ED25519_PRIVATE_KEY_HEX_FILE=/anubis/ed25519.key' in verify_env"
+          - verify_env | select('match', '^ED25519_PRIVATE_KEY_HEX=') | list | length == 0
+          - verify_c.Config.Labels['noixdev.infra.anubis.policy-sha256'] == verify_files.results[0].stat.checksum
+          - verify_c.Config.Labels['noixdev.infra.anubis.key-sha256'] == verify_key.stat.checksum
+        fail_msg: "Unexpected Anubis container: {{ verify_c.Config }} {{ verify_c.HostConfig }}"

@@ -1,0 +1,51 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+# {{ ansible_managed }}
+# Anubis answers forwardAuth / auth_request checks only (TARGET " ": it
+# proxies nothing) and serves its own /.within.website/ paths.
+services:
+  # Service and container share the unique name, so it is the only DNS name
+  # of Anubis on its networks.
+  {{ anubis_name }}:
+    image: {{ q(anubis_image) }}
+    container_name: {{ anubis_name }}
+    user: "{{ anubis_uid }}:{{ anubis_uid }}"
+    # What the container starts with (SHA-256 of policy.yaml and of
+    # ed25519.key, never the key): a new policy or key changes the compose
+    # configuration, so compose recreates the container.
+    labels:
+      noixdev.infra.anubis.policy-sha256: {{ q(anubis_policy_sha256) }}
+      noixdev.infra.anubis.key-sha256: {{ q(anubis_key_sha256) }}
+    environment:
+{% for key, value in anubis_environment.items() %}
+      {{ q(key) }}: {{ q(value) }}
+{% endfor %}
+    volumes:
+      - ./policy.yaml:/anubis/policy.yaml:ro
+      - ./ed25519.key:/anubis/ed25519.key:ro
+    healthcheck:
+      # GET :9090/healthz (METRICS_BIND).
+      test: ["CMD", "/ko-app/anubis", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+{% for net in anubis_networks_joined %}
+      {{ q(net) }}: {}
+{% endfor %}
+    cpus: {{ q(anubis_cpus) }}
+    mem_limit: {{ q(anubis_memory) }}
+    restart: unless-stopped
+
+networks:
+{% for net in anubis_networks_joined %}
+  {{ q(net) }}:
+    name: {{ q(net) }}
+    external: true
+{% endfor %}

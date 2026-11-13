@@ -66,6 +66,80 @@
   a *noop* run, a postponed run starts and restarts nothing, but fails when the app container is
   not running or listmonk does not answer `/health`. A run that goes ahead with the update
   removes the count, and so does any other successful run.
+- `anubis`: new role that runs one Anubis container (`anubis_image`, default
+  `ghcr.io/techarohq/anubis:v1.28.2`; compose project `anubis` in `anubis_dir`, default
+  `/opt/anubis`; service and container `noixdev-anubis`, its only DNS name on its networks, at
+  `http://noixdev-anubis:8923`) that protects web apps with a proof-of-work challenge.
+  `anubis_mode` `traefik` (default) joins `anubis_traefik_network` (default `traefik_network`,
+  else `proxy`) and writes `anubis.yml` to Traefik's file provider directory
+  `anubis_traefik_dynamic_dir` (default `traefik_dir` with `/dynamic`, else
+  `/opt/traefik/dynamic`; it must exist, and the traefik role leaves the file alone): the
+  middleware `anubis@file` to add to a router's or an entrypoint's `middlewares` (one name for
+  the chain `anubis-strip` (deletes a client-sent `X-Original-Uri` and `X-Forwarded-Uri`, which
+  would let a client pick the path Anubis checks), `anubis-challenge` (`errors`: Anubis's 401
+  becomes the challenge page for the original URL) and `anubis-check` (`forwardAuth` with
+  `trustForwardHeader`)), and a router `anubis-<entrypoint>` for `PathPrefix(/.within.website/)`
+  at priority `100000` on each of `anubis_traefik_entrypoints` (required in this mode, each one
+  of `traefik_entrypoints` when that is set; the routers have no `tls` section, so TLS is set at
+  entrypoint level, as the traefik role does). One instance serves any number of hosts on any
+  number of domains; the cookie is set per host, so each host name is solved once. On an
+  entrypoint it works behind the traefik role's error pages middlewares. Anubis's cookies are
+  `Secure`: protect TLS entrypoints only, or set `COOKIE_SECURE` through `anubis_env`.
+  `anubis_mode: nginx` (for nginx `auth_request`) joins its own network `anubis_nginx_network`
+  (default `noixdev-anubis`), which the role creates as an internal bridge network when it is
+  missing (an existing one that is not internal is refused): it never becomes the gateway of the
+  nginx container that joins it, and Anubis has no internet access there. Every member reaches
+  the nginx container's listeners on it (internal ones included) and Anubis never connects to
+  nginx, so only containers trusted like the nginx container may join it. `anubis_networks`
+  (default `[]`) names further existing networks to join. nginx mode writes no Traefik objects
+  and removes an `anubis.yml` only when it carries the role's marker line (one written by
+  traefik mode); a file of that name from elsewhere stays. A host runs one mode: Traefik routers
+  and an nginx cannot share its Anubis.
+- `anubis`: a limitation of traefik mode: `anubis-challenge` turns every 401 from behind
+  `anubis@file` into the challenge page, the 401s of the backend and of the router's own
+  middlewares (such as `basicAuth`) included, also on paths the policy ALLOWs and for clients
+  Anubis lets through. The client gets Anubis's answer with status 401 (a browser the challenge
+  page, a client Anubis lets pass such as `curl` a short page pointing back at the same URL),
+  without the backend's `WWW-Authenticate` and body. Routers whose legitimate clients get a 401 (container registries, Basic auth, token
+  APIs, SPAs that answer 401) must therefore not use `anubis@file`, and entrypoint mode suits only
+  entrypoints that carry no such router. nginx mode is not affected: upstream 401s pass through.
+  A redirect mode with its own Anubis host (Anubis's `PUBLIC_URL` setup) would avoid this; it is
+  not part of the role yet.
+- `anubis`: `anubis_redirect_domains` (host names with at least one dot, `*.example.com` for
+  subdomains, a host on another port than 80/443 with its port; a bare `*` or `*.*` is refused)
+  is required in both modes: without it Anubis would redirect a solved challenge to any host.
+  The policy (`policy.yaml`) is Anubis's own asset and pass-challenge paths, then
+  `anubis_policy_allow` (Anubis bot rules, such as ALLOW rules for API and sync paths), then
+  Anubis's default bot list, with `status_codes` CHALLENGE 200 and DENY 403. Unlike Anubis's
+  graded default thresholds (metarefresh for weight 1-9, difficulty 2 for browsers), there is
+  one tier: weight 0 or less passes (curl), anything above (browsers) gets the proof of work at
+  `anubis_difficulty` (default `4`); an empty User-Agent is denied (403), as in Anubis's default
+  policy. `anubis_impressum` sets Anubis's imprint block. The signing key (`ed25519.key`, mode
+  `0600`) is generated once on the host, or written from `anubis_private_key` (64 hex digits,
+  never logged), so cookies survive restarts and recreates. `anubis_env` adds container
+  environment but cannot set `BIND`, `METRICS_BIND`, `TARGET`, `PUBLIC_URL`, `REDIRECT_DOMAINS`,
+  `DIFFICULTY`, `ED25519_PRIVATE_KEY_HEX(_FILE)` or `HS512_SECRET` (names without `=` or
+  whitespace, values without line breaks); its values are in `compose.yaml` (mode `0600`) and
+  reach the check container through a `0600` env file, never a command line or the log, and a
+  secret among them belongs in a vault. `anubis_cpus` and `anubis_memory` limit the container
+  (read-only, no capabilities, no published port).
+- `anubis`: new settings (policy, `anubis_env`, image or given key) are rendered to
+  `anubis_dir/staged/` and first run in a throwaway container (`noixdev-anubis-check`, no
+  network); only when its health check answers within `anubis_health_timeout` seconds (default
+  `60`) do they replace the running Anubis's files and container. Otherwise the run fails with
+  "Anubis is not healthy with the new settings" and Anubis's log, and the running Anubis, its
+  files and `anubis.yml` stay as they were. Every run then waits for the container's health
+  check (`/healthz` on the metrics port) and fails with "Anubis is not healthy" otherwise; a
+  stopped container is started again. `anubis.yml` is written only once Anubis is healthy, so a
+  failed first install leaves routers that name `anubis@file` without the middleware (404).
+  While Anubis is down, every router that uses `anubis@file` answers 500 (fails closed), also
+  behind error pages that replace only 502-504; Anubis's own `/.within.website/` paths answer
+  500 on an entrypoint with `anubis@file` and 502 where only single routers use it. A given key
+  is staged only when it differs from the running one (compared by checksum) and the staged copy
+  is removed once it is in place, or after a failed check. The container carries the SHA-256 of
+  `policy.yaml` and of the key file as labels (`noixdev.infra.anubis.policy-sha256`,
+  `noixdev.infra.anubis.key-sha256`; never the key), so a run that stopped after putting new
+  files in place is finished by the next one, which recreates the container.
 - `crowdsec`: reports what the role did not install or write, with a warning that never counts as
   a change; nothing is deleted. Reported are collections that `crowdsec_collections` does not list
   (the dependencies of listed collections, and of the reported ones, are not), sources in

@@ -1,0 +1,117 @@
+---
+# Runs the image with the staged policy, the signing key and the new
+# environment in a throwaway container without a network, waits for its
+# health check and removes it. Fails the run, before the running Anubis, its
+# files or Traefik's anubis.yml change, when it does not get healthy. The
+# environment goes in through a 0600 env file, so anubis_env values are
+# neither on docker's command line nor in the log.
+
+- name: Remove a leftover check container
+  ansible.builtin.command:
+    argv: [docker, rm, --force, "{{ anubis_check_name }}"]
+  changed_when: false
+  failed_when: false
+
+- name: Run the new settings in a check container
+  block:
+    # docker reads each line as NAME=value, the value as it stands.
+    - name: Write the check container's environment
+      ansible.builtin.copy:
+        dest: "{{ anubis_check_env_file }}"
+        content: |
+          {% for key, value in anubis_environment.items() %}
+          {{ key }}={{ value }}
+          {% endfor %}
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      diff: false
+
+    - name: Start the check container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name
+          - "{{ anubis_check_name }}"
+          - --network
+          - none
+          - --read-only
+          - --cap-drop
+          - ALL
+          - --security-opt
+          - no-new-privileges:true
+          - --user
+          - "{{ anubis_uid }}:{{ anubis_uid }}"
+          - --memory
+          - "{{ anubis_memory }}"
+          - --cpus
+          - "{{ anubis_cpus }}"
+          - --volume
+          - "{{ anubis_staged_dir }}/policy.yaml:/anubis/policy.yaml:ro"
+          - --volume
+          - "{{ (anubis_staged_dir ~ '/ed25519.key' if anubis_key_differs else anubis_key_file) }}:/anubis/ed25519.key:ro"
+          - --env-file
+          - "{{ anubis_check_env_file }}"
+          - "{{ anubis_image }}"
+      register: anubis_check_start
+      changed_when: false
+      failed_when: false
+
+    - name: Note when the check starts
+      ansible.builtin.set_fact:
+        anubis_check_since: "{{ now().timestamp() }}"
+
+    # Ends early when the container stops (Anubis exits on a bad setting).
+    - name: Wait until the check container answers its health check
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ anubis_check_name }}", /ko-app/anubis, --healthcheck]
+      register: anubis_check_health
+      changed_when: false
+      failed_when: false
+      until: >-
+        anubis_check_health.rc == 0
+        or 'is not running' in anubis_check_health.stderr
+        or now().timestamp() - anubis_check_since | float >= anubis_health_timeout | int
+      retries: "{{ anubis_health_timeout | int + 1 }}"
+      delay: 1
+      when: anubis_check_start.rc == 0
+
+    - name: Read the check container's log
+      ansible.builtin.command:
+        argv: [docker, logs, --tail, "10", "{{ anubis_check_name }}"]
+      register: anubis_check_log
+      changed_when: false
+      failed_when: false
+      when: anubis_check_health.rc | default(1) != 0
+  always:
+    - name: Remove the check container
+      ansible.builtin.command:
+        argv: [docker, rm, --force, "{{ anubis_check_name }}"]
+      changed_when: false
+      failed_when: false
+
+    - name: Remove the check container's environment
+      ansible.builtin.file:
+        path: "{{ anubis_check_env_file }}"
+        state: absent
+      changed_when: false
+
+- name: Remove the staged signing key after a failed check
+  ansible.builtin.file:
+    path: "{{ anubis_staged_dir }}/ed25519.key"
+    state: absent
+  when: anubis_check_health.rc | default(1) != 0
+
+- name: Fail when the new settings do not get healthy
+  ansible.builtin.fail:
+    msg: >-
+      Anubis is not healthy with the new settings (policy, anubis_env, image
+      or key) within {{ anubis_health_timeout }} seconds in a check
+      container, so the running Anubis, its files in {{ anubis_dir }} and
+      Traefik's anubis.yml are unchanged. Output:
+      {{ (anubis_check_start.stderr if anubis_check_start.rc != 0
+          else (anubis_check_log.stdout | default('') ~ ' ' ~ anubis_check_log.stderr | default(''))) | trim }}
+  when: anubis_check_health.rc | default(1) != 0

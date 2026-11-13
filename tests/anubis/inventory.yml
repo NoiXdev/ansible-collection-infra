@@ -1,0 +1,7 @@
+---
+all:
+  hosts:
+    anubishost:
+      ansible_connection: community.docker.docker
+      ansible_host: "{{ test_host }}"
+      ansible_python_interpreter: /usr/bin/python3

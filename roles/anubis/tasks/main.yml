@@ -1,0 +1,408 @@
+---
+# Required in both modes: without it pass-challenge redirects anywhere after
+# a solved challenge (an open redirect).
+- name: Check that anubis_redirect_domains is set
+  ansible.builtin.assert:
+    that:
+      - anubis_redirect_domains is sequence
+      - anubis_redirect_domains is not string
+      - anubis_redirect_domains is not mapping
+      - anubis_redirect_domains | length > 0
+    fail_msg: >-
+      anubis_redirect_domains is required: every host name Anubis protects
+      (globs such as *.example.com work). Without it pass-challenge redirects
+      to any host.
+    quiet: true
+
+- name: Check the anubis settings
+  ansible.builtin.assert:
+    that:
+      - anubis_image | length > 0
+      - anubis_dir is match('^/')
+      - anubis_redirect_domains | map('string') | reject('match', '^(\\*\\.)?[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+(:[0-9]+)?$') | list | length == 0
+      - anubis_difficulty | int >= 1
+      - anubis_policy_allow is sequence and anubis_policy_allow is not string and anubis_policy_allow is not mapping
+      - anubis_policy_allow | reject('mapping') | list | length == 0
+      - anubis_impressum is mapping
+      - anubis_env is mapping
+      - anubis_env.keys() | map('upper') | intersect(anubis_env_reserved) | length == 0
+      - anubis_env.keys() | map('string') | reject('match', '^[^=\\s]+$') | list | length == 0
+      - anubis_env.values() | map('string') | select('search', '[\\r\\n]') | list | length == 0
+      - anubis_health_timeout | int > 0
+    fail_msg: >-
+      anubis_redirect_domains entries are host names with at least one dot,
+      optionally starting with *. for every subdomain (such as
+      *.example.com; one per entry), with :port for a host on another port
+      than 80 or 443; anubis_env cannot set
+      {{ anubis_env_reserved | join(', ') }}, its names have no = or whitespace
+      and its values no line breaks; anubis_dir must be an absolute path,
+      anubis_image set, anubis_difficulty and anubis_health_timeout positive;
+      anubis_policy_allow is a list of Anubis bot rules (mappings);
+      anubis_impressum and anubis_env are mappings.
+    quiet: true
+
+- name: Check anubis_private_key
+  ansible.builtin.assert:
+    that: anubis_private_key is match('^[0-9a-fA-F]{64}$')
+    fail_msg: anubis_private_key must be 64 hex digits (an ed25519 seed), or empty to generate one.
+    quiet: true
+  no_log: true
+  when: anubis_private_key | length > 0
+
+- name: Check the Traefik mode settings
+  when: anubis_mode == 'traefik'
+  block:
+    - name: Check the Traefik settings
+      ansible.builtin.assert:
+        that:
+          - anubis_traefik_entrypoints is sequence and anubis_traefik_entrypoints is not string
+          - anubis_traefik_entrypoints | length > 0
+          - anubis_traefik_entrypoints | map('string') | reject('match', '^[A-Za-z0-9_-]+$') | list | length == 0
+          - anubis_traefik_network | length > 0
+          - anubis_traefik_dynamic_dir is match('^/')
+          - "'anubis.yml' not in traefik_dynamic_files | default({})"
+          - traefik_entrypoints is not defined
+            or anubis_traefik_entrypoints | difference(traefik_entrypoints | map(attribute='name')) | length == 0
+        fail_msg: >-
+          Traefik mode needs anubis_traefik_entrypoints: the entrypoints whose
+          routers use anubis@file (names of letters, digits, _ and -), which
+          get the /.within.website/ router, each one of traefik_entrypoints
+          when that is set; anubis_traefik_network must be set
+          and anubis_traefik_dynamic_dir an absolute path; traefik_dynamic_files
+          cannot contain anubis.yml (the anubis role writes it).
+        quiet: true
+
+    - name: Read Traefik's dynamic directory
+      ansible.builtin.stat:
+        path: "{{ anubis_traefik_dynamic_dir }}"
+      register: anubis_dynamic_dir_stat
+
+    - name: Check Traefik's dynamic directory
+      ansible.builtin.assert:
+        that: anubis_dynamic_dir_stat.stat.isdir | default(false)
+        fail_msg: >-
+          {{ anubis_traefik_dynamic_dir }} (anubis_traefik_dynamic_dir) is not
+          a directory: run the traefik role first, or point it at Traefik's
+          file provider directory.
+        quiet: true
+
+- name: Check the nginx mode settings
+  when: anubis_mode == 'nginx'
+  block:
+    - name: Check the nginx settings
+      ansible.builtin.assert:
+        that:
+          - anubis_nginx_network is string
+          - anubis_nginx_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+          - anubis_networks is sequence and anubis_networks is not string and anubis_networks is not mapping
+          - anubis_nginx_network not in anubis_networks
+        fail_msg: >-
+          nginx mode needs anubis_nginx_network, the name of Anubis's own
+          network (letters, digits, _, . and -), which nginx joins;
+          anubis_networks is a list of further existing networks and does not
+          name it again.
+        quiet: true
+
+    # The role creates it as an internal network (below, once the settings
+    # passed their check). One that is not internal could become the gateway
+    # of the nginx container that joins it, and so change which address
+    # Docker hands its published ports to.
+    - name: Read Anubis's own network
+      ansible.builtin.command:
+        argv: [docker, network, inspect, --format, "{{ '{{.Internal}}' }}", "{{ anubis_nginx_network }}"]
+      register: anubis_nginx_network_inspect
+      changed_when: false
+      failed_when: false
+
+    - name: Check Anubis's own network
+      ansible.builtin.assert:
+        that: anubis_nginx_network_inspect.rc != 0 or anubis_nginx_network_inspect.stdout | trim == 'true'
+        fail_msg: >-
+          The Docker network {{ anubis_nginx_network }} (anubis_nginx_network)
+          exists but is not internal. Remove it (docker network rm) so the role
+          creates it, or name another one.
+        quiet: true
+
+- name: Check that the networks exist
+  ansible.builtin.command:
+    argv: [docker, network, inspect, --format, "{{ '{{.Name}}' }}", "{{ item }}"]
+  loop: "{{ [anubis_traefik_network] if anubis_mode == 'traefik' else anubis_networks }}"
+  register: anubis_network_inspect
+  changed_when: false
+  failed_when: false
+
+- name: Fail on a missing network
+  ansible.builtin.fail:
+    msg: >-
+      The Docker network(s) {{ anubis_missing_networks | join(', ') }} do not
+      exist; {{ 'run the traefik role first' if anubis_mode == 'traefik'
+      else 'anubis_networks names existing networks only (the role creates anubis_nginx_network)' }}.
+  vars:
+    anubis_missing_networks: "{{ anubis_network_inspect.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+  when: anubis_missing_networks | length > 0
+
+- name: Create the anubis directory
+  ansible.builtin.file:
+    path: "{{ anubis_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the directory for new settings
+  ansible.builtin.file:
+    path: "{{ anubis_staged_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Look at the signing key file
+  ansible.builtin.stat:
+    path: "{{ anubis_key_file }}"
+    get_checksum: false
+    get_attributes: false
+    get_mime: false
+  register: anubis_key_file_stat
+
+# Docker makes a missing bind-mount source into a directory (an Anubis
+# container that started before its files were there).
+- name: Check that the signing key is a file
+  ansible.builtin.assert:
+    that: not anubis_key_file_stat.stat.exists or anubis_key_file_stat.stat.isreg
+    fail_msg: >-
+      {{ anubis_key_file }} is not a file (a directory Docker made for a bind
+      mount whose file was missing?). Remove it and run the role again.
+    quiet: true
+
+# Once; written by the host's Python so the key never passes through Ansible.
+- name: Generate the signing key
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - >-
+        import os, secrets, sys;
+        fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600);
+        os.write(fd, (secrets.token_hex(32) + "\n").encode()); os.close(fd)
+      - "{{ anubis_key_file }}"
+    creates: "{{ anubis_key_file }}"
+  when: anubis_private_key | length == 0
+  register: anubis_key_generated
+
+- name: Set the signing key's owner and mode
+  ansible.builtin.file:
+    path: "{{ anubis_key_file }}"
+    owner: "{{ anubis_uid }}"
+    group: "{{ anubis_uid }}"
+    mode: "0600"
+  when: anubis_private_key | length == 0
+
+# Compared by checksum, so the key file is never read into Ansible.
+- name: Read the running signing key's checksum
+  ansible.builtin.stat:
+    path: "{{ anubis_key_file }}"
+    checksum_algorithm: sha256
+    get_attributes: false
+    get_mime: false
+  register: anubis_key_stat
+  no_log: true
+
+# anubis_key_sha256: the key file's SHA-256 once this run is done, a label
+# of the container (compose.yaml), never the key.
+- name: Note whether the given signing key differs from the running one
+  ansible.builtin.set_fact:
+    anubis_key_differs: >-
+      {{ anubis_private_key | length > 0
+         and anubis_key_stat.stat.checksum | default('') != anubis_key_line | hash('sha256') }}
+    anubis_key_sha256: >-
+      {{ (anubis_key_line | hash('sha256')) if anubis_private_key | length > 0
+         else anubis_key_stat.stat.checksum | default('') }}
+  vars:
+    # The key file as the next task writes it.
+    anubis_key_line: "{{ anubis_private_key | lower }}\n"
+  no_log: true
+
+# Staged like the policy: the running Anubis keeps the key it started with
+# until the new settings passed the check. Removed once it is in place.
+- name: Stage the given signing key
+  ansible.builtin.copy:
+    dest: "{{ anubis_staged_dir }}/ed25519.key"
+    content: "{{ anubis_private_key | lower }}\n"
+    owner: "{{ anubis_uid }}"
+    group: "{{ anubis_uid }}"
+    mode: "0600"
+  no_log: true
+  when: anubis_key_differs
+
+# Rendered next to the running ones; they replace them only after a check
+# container has run healthy with them.
+- name: Render the new policy
+  ansible.builtin.template:
+    src: policy.yaml.j2
+    dest: "{{ anubis_staged_dir }}/policy.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the new policy's checksum
+  ansible.builtin.stat:
+    path: "{{ anubis_staged_dir }}/policy.yaml"
+    checksum_algorithm: sha256
+    get_attributes: false
+    get_mime: false
+  register: anubis_policy_stat
+
+# The policy's and the key's checksums are labels of the container: a new
+# policy or key changes the compose configuration, so compose recreates the
+# container also when a run put the files in place and stopped before it
+# (single-file bind mounts: the running container keeps the old files).
+# 0600 and no diff: anubis_env may hold a secret.
+- name: Render the new compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ anubis_staged_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  vars:
+    anubis_policy_sha256: "{{ anubis_policy_stat.stat.checksum }}"
+  diff: false
+
+- name: Compare the new and the running settings
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    get_attributes: false
+    get_mime: false
+  loop:
+    - "{{ anubis_staged_dir }}/policy.yaml"
+    - "{{ anubis_dir }}/policy.yaml"
+    - "{{ anubis_staged_dir }}/compose.yaml"
+    - "{{ anubis_dir }}/compose.yaml"
+  register: anubis_settings_stat
+
+- name: Note whether the settings change
+  ansible.builtin.set_fact:
+    anubis_settings_change: >-
+      {{ anubis_sums[0] != anubis_sums[1] or anubis_sums[2] != anubis_sums[3]
+         or anubis_key_differs or anubis_key_generated is changed }}
+  vars:
+    anubis_sums: "{{ anubis_settings_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"
+
+- name: Try the new settings
+  ansible.builtin.include_tasks: check.yml
+  when: anubis_settings_change
+
+# The policy first: compose.yaml names its checksum.
+- name: Put the new settings in place
+  ansible.builtin.copy:
+    src: "{{ anubis_staged_dir }}/{{ item.name }}"
+    dest: "{{ anubis_dir }}/{{ item.name }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: policy.yaml, mode: "0644" }
+    - { name: compose.yaml, mode: "0600" }
+  loop_control:
+    label: "{{ item.name }}"
+  register: anubis_settings_copy
+  diff: false
+
+- name: Put the given signing key in place
+  ansible.builtin.copy:
+    src: "{{ anubis_staged_dir }}/ed25519.key"
+    dest: "{{ anubis_key_file }}"
+    remote_src: true
+    owner: "{{ anubis_uid }}"
+    group: "{{ anubis_uid }}"
+    mode: "0600"
+  no_log: true
+  when: anubis_key_differs
+
+# Also one left by an earlier run (a failed check, a key given before).
+- name: Remove the staged signing key
+  ansible.builtin.file:
+    path: "{{ anubis_staged_dir }}/ed25519.key"
+    state: absent
+
+- name: Create Anubis's own network
+  ansible.builtin.command:
+    argv: [docker, network, create, --internal, --label, noixdev.infra.anubis=nginx, "{{ anubis_nginx_network }}"]
+  changed_when: true
+  when:
+    - anubis_mode == 'nginx'
+    - anubis_nginx_network_inspect.rc != 0
+
+- name: Start Anubis
+  community.docker.docker_compose_v2:
+    project_src: "{{ anubis_dir }}"
+    project_name: anubis
+    state: present
+    pull: missing
+    # Single-file bind mounts: a rewrite replaces the file, the running
+    # container keeps the old one, and Anubis reads both only at start. A
+    # new policy or key changes compose.yaml's labels, so auto recreates;
+    # always only when this run put back a policy.yaml that was changed by
+    # hand (the labels then still match the role's policy).
+    recreate: "{{ 'always' if anubis_settings_copy.results[0] is changed else 'auto' }}"
+    remove_orphans: true
+
+- name: Note when the health check starts
+  ansible.builtin.set_fact:
+    anubis_health_start: "{{ now().timestamp() }}"
+
+# retries is an upper bound; the deadline ends the wait after
+# anubis_health_timeout seconds.
+- name: Wait until Anubis is healthy
+  ansible.builtin.command:
+    argv: [docker, inspect, --format, "{{ '{{.State.Status}} {{.State.Health.Status}}' }}", "{{ anubis_name }}"]
+  register: anubis_health
+  changed_when: false
+  failed_when: false
+  until: >-
+    anubis_health.stdout == 'running healthy'
+    or now().timestamp() - anubis_health_start | float >= anubis_health_timeout | int
+  retries: "{{ anubis_health_timeout | int + 1 }}"
+  delay: 1
+
+- name: Fail when Anubis is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      Anubis is not healthy after {{ anubis_health_timeout }} seconds
+      (container state: {{ anubis_health.stdout | default('') or anubis_health.stderr | default('unknown') }}).
+      Every router that uses it fails closed until it is. See docker logs
+      {{ anubis_name }}.
+  when: anubis_health.stdout != 'running healthy'
+
+# Only once Anubis answers: on a first install that fails, the routers that
+# name anubis@file find no middleware (404) instead of a dead one (500). The
+# traefik role leaves files it did not write alone.
+- name: Write the Traefik objects
+  ansible.builtin.template:
+    src: traefik.yml.j2
+    dest: "{{ anubis_traefik_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: anubis_mode == 'traefik'
+
+# Left by traefik mode, it would route /.within.website/ to an Anubis that is
+# no longer on Traefik's network. Only the role's own file (its marker line):
+# a file of that name from elsewhere stays.
+- name: Look for the role's Traefik objects in nginx mode
+  ansible.builtin.command:
+    argv: [grep, -qxF, -e, "{{ anubis_traefik_marker }}", --, "{{ anubis_traefik_file }}"]
+  register: anubis_traefik_own
+  changed_when: false
+  failed_when: false
+  when: anubis_mode == 'nginx'
+
+- name: Remove the role's Traefik objects in nginx mode
+  ansible.builtin.file:
+    path: "{{ anubis_traefik_file }}"
+    state: absent
+  when:
+    - anubis_mode == 'nginx'
+    - anubis_traefik_own.rc == 0

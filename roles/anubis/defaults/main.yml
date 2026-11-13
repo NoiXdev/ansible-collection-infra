@@ -1,0 +1,103 @@
+---
+anubis_image: ghcr.io/techarohq/anubis:v1.28.2
+# Compose project directory: compose.yaml, policy.yaml and ed25519.key (and
+# staged/, where new settings are tried first). The compose project is
+# anubis; the service and container are noixdev-anubis, the only DNS name of
+# Anubis on its networks: http://noixdev-anubis:8923.
+anubis_dir: /opt/anubis
+
+# New settings (policy, anubis_env, image, key) first run in a throwaway
+# container without a network; the running Anubis is replaced only when that
+# gets healthy, else the run fails and nothing changes.
+#
+# traefik: the container joins anubis_traefik_network and, once healthy, the
+# role writes the Traefik objects to anubis_traefik_dynamic_dir/anubis.yml:
+#   anubis@file            the chain to add to a router or an entrypoint:
+#                          anubis-strip, anubis-challenge, anubis-check
+#   anubis-strip@file      deletes a client-sent X-Original-Uri and
+#                          X-Forwarded-Uri (the paths Anubis checks)
+#   anubis-challenge@file  turns Anubis's 401 into the challenge page
+#   anubis-check@file      forwardAuth to Anubis
+#   router anubis-<entrypoint> per anubis_traefik_entrypoints entry, for
+#   PathPrefix(`/.within.website/`) at priority 100000, to service anubis
+# Every 401 from behind anubis@file (the backend's, the router's own
+# middlewares' such as basicAuth, also on ALLOWed paths) reaches the client
+# as the challenge page, without WWW-Authenticate and body: routers whose
+# legitimate clients get a 401 (registries, Basic auth, token APIs, SPAs)
+# must not use it, and an entrypoint with such a router must not carry it.
+# nginx mode passes upstream 401s through. A redirect mode with its own
+# Anubis host (Anubis's PUBLIC_URL setup) would avoid this; not part of the
+# role yet.
+# nginx: the container joins anubis_nginx_network, which the role creates
+# (an internal bridge network, so it never becomes a gateway of the nginx
+# container that joins it; Anubis has no internet access there), and
+# anubis_networks; no Traefik objects (the role's own anubis.yml of traefik
+# mode is removed). nginx's auth_request asks http://noixdev-anubis:8923:
+# the nginx container joins anubis_nginx_network (the mailcow role does that
+# for nginx-mailcow).
+#
+# One mode per host: the container is noixdev-anubis in both, and
+# anubis_networks applies to nginx mode only, so Traefik routers and an nginx
+# (mailcow's) cannot share one host's Anubis.
+anubis_mode: traefik
+# The traefik role's network and file provider directory when it set them.
+anubis_traefik_network: "{{ traefik_network | default('proxy') }}"
+anubis_traefik_dynamic_dir: "{{ traefik_dir | default('/opt/traefik') }}/dynamic"
+# Entrypoints that get the /.within.website/ router: every entrypoint with a
+# router that uses anubis@file (required in traefik mode; each one of
+# traefik_entrypoints when that is set). TLS entrypoints only: Anubis's
+# cookies are Secure, so a browser on plain HTTP is challenged on every
+# visit, unless anubis_env sets COOKIE_SECURE: "false". The routers have no
+# tls section of their own: the entrypoint must set TLS at entrypoint level,
+# as the traefik role does (tls: true), else HTTPS requests for
+# /.within.website/ miss them and no challenge can be solved.
+anubis_traefik_entrypoints: []
+# nginx mode: Anubis's own network (created when missing; an existing one
+# must be internal) and further existing networks to join. Only containers
+# trusted like the nginx container itself may join it: every member reaches
+# nginx's listeners there, internal ones included (mailcow's rspamd and auth
+# listeners, and 80/443 from a private address whose X-Forwarded-For
+# mailcow's nginx believes). Anubis itself never connects to nginx.
+anubis_nginx_network: noixdev-anubis
+anubis_networks: []
+
+# Host names pass-challenge may redirect to after a solved challenge, each
+# with at least one dot; *.example.com covers its subdomains (a bare * or
+# *.* is refused). A host on another port than 80/443 is matched with its
+# port (host:8443). Required: every host Anubis protects; on a host missing
+# here the challenge shows but pass-challenge answers 400.
+anubis_redirect_domains: []
+
+# Leading zeros of the proof of work for every client the policy weighs above
+# 0 (browsers get 10 from the default bot list). Unlike Anubis's own default
+# thresholds (metarefresh for weight 1-9, difficulty 2 for browsers, more
+# above), the role has one tier: weight 0 or less passes, anything above gets
+# the proof of work at this difficulty.
+anubis_difficulty: 4
+# Anubis bot rules before the default bot list, such as
+#   - name: api
+#     action: ALLOW
+#     path_regex: ^/api/
+# A path_regex is matched against the request path AND Anubis's own check
+# path /.within.website/x/cmd/anubis/api/check: a rule that matches that path
+# (such as .* or ^/\.within) lets every request through.
+anubis_policy_allow: []
+# Anubis's impressum block: {footer: HTML, page: {title: ..., body: HTML}}.
+anubis_impressum: {}
+
+# 64 hex digits (ed25519 seed). Empty: the role generates one on the host
+# once and keeps it (also a key written from this variable earlier), so
+# cookies survive restarts. A new key ends every issued cookie.
+anubis_private_key: ""
+
+# Extra container environment (such as COOKIE_SECURE or SLOG_LEVEL). It
+# cannot set BIND, METRICS_BIND, TARGET, PUBLIC_URL, REDIRECT_DOMAINS,
+# DIFFICULTY, ED25519_PRIVATE_KEY_HEX(_FILE) or HS512_SECRET. Names without
+# = or whitespace, values without line breaks. The values are written to
+# compose.yaml (mode 0600) and to a 0600 env file for the check container,
+# never to the command line or the log; a secret here belongs in a vault.
+anubis_env: {}
+anubis_cpus: "0.5"
+anubis_memory: 256M
+# Seconds to wait for the container's health check after a start.
+anubis_health_timeout: 60

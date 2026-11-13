@@ -1,0 +1,133 @@
+---
+argument_specs:
+  main:
+    short_description: Anubis proof-of-work bot protection in front of Traefik routers, entrypoints or nginx
+    description:
+      - >-
+        One Anubis container (compose project anubis, container and DNS name
+        noixdev-anubis, http://noixdev-anubis:8923) with a policy and a
+        persistent signing key rendered by the role, health checked on every
+        run. New settings run in a throwaway check container first; the
+        running Anubis is replaced only when that gets healthy. The container
+        carries the policy's and the key's SHA-256 as labels, so a run that
+        stopped after putting new files in place is finished by the next one.
+        One mode per host.
+      - >-
+        traefik mode writes the middleware anubis@file to add to a router or
+        an entrypoint (the chain anubis-strip, anubis-challenge,
+        anubis-check) and a /.within.website/ router per entrypoint. While
+        Anubis is down, every router that uses it answers 500 (fails closed).
+        Every 401 from behind anubis@file (backend, the router's own
+        middlewares, ALLOWed paths too) is replaced by the challenge page,
+        WWW-Authenticate and body included, so routers whose legitimate
+        clients get a 401 (registries, Basic auth, token APIs) must not use
+        it. A PUBLIC_URL redirect mode would avoid this; not part of the role
+        yet.
+      - >-
+        nginx mode, for nginx auth_request: the container joins its own
+        internal network anubis_nginx_network (created by the role), which the
+        nginx container joins (the mailcow role does that for nginx-mailcow
+        with mailcow_anubis_url), and anubis_networks; it removes the role's
+        own anubis.yml left by traefik mode. While Anubis is down, every
+        request that nginx checks with it fails closed.
+    options:
+      anubis_image:
+        type: str
+        description: Anubis image with its tag.
+      anubis_dir:
+        type: path
+        description: >-
+          Directory of the compose project (compose.yaml, mode 0600 as it holds
+          anubis_env; policy.yaml; ed25519.key).
+      anubis_mode:
+        type: str
+        choices: [traefik, nginx]
+        description: >-
+          traefik writes the Traefik objects and joins anubis_traefik_network;
+          nginx joins anubis_nginx_network and anubis_networks and writes no
+          Traefik objects. One mode per host: Traefik routers and an nginx
+          cannot share one host's Anubis.
+      anubis_traefik_network:
+        type: str
+        description: >-
+          Traefik's Docker network (traefik mode); it must exist. Default
+          traefik_network, else proxy.
+      anubis_traefik_dynamic_dir:
+        type: path
+        description: >-
+          Traefik's file provider directory (traefik mode); it must exist. The
+          role writes anubis.yml there. Default traefik_dir/dynamic, else
+          /opt/traefik/dynamic.
+      anubis_traefik_entrypoints:
+        type: list
+        elements: str
+        description: >-
+          Entrypoints whose routers use anubis@file; each gets the
+          /.within.website/ router anubis-<entrypoint> (required in traefik
+          mode; each must be one of traefik_entrypoints when that is set). TLS
+          entrypoints only, or set COOKIE_SECURE through anubis_env. The
+          routers have no tls section: the entrypoint sets TLS at entrypoint
+          level, as the traefik role does.
+      anubis_nginx_network:
+        type: str
+        description: >-
+          Anubis's own network in nginx mode, created by the role as an
+          internal bridge network when it is missing (an existing one must be
+          internal): it never becomes the gateway of the nginx container that
+          joins it, and Anubis has no internet access on it. The nginx
+          container joins it to reach http://noixdev-anubis:8923. Only
+          containers trusted like the nginx container may join it: every
+          member reaches nginx's listeners there, internal ones included;
+          Anubis itself never connects to nginx.
+      anubis_networks:
+        type: list
+        elements: str
+        description: Further Docker networks the container joins in nginx mode; they must exist.
+      # Not required here: the role's own check names it when it is missing.
+      anubis_redirect_domains:
+        type: list
+        elements: str
+        description: >-
+          Host names pass-challenge may redirect to, each with at least one
+          dot, *.example.com for subdomains, host:port for another port than
+          80/443: every host Anubis protects (required).
+      anubis_difficulty:
+        type: int
+        description: >-
+          Leading zeros of the proof of work for every client weighed above 0
+          (one tier, unlike Anubis's graded default thresholds).
+      anubis_policy_allow:
+        type: list
+        elements: dict
+        description: >-
+          Anubis bot rules placed before the default bot list (ALLOW rules for
+          API, sync and webhook paths). A path_regex also matches Anubis's own
+          check path /.within.website/x/cmd/anubis/api/check; a rule that
+          matches it lets every request through.
+      anubis_impressum:
+        type: dict
+        description: Anubis's impressum block (footer, page.title, page.body); empty for none.
+      anubis_private_key:
+        type: str
+        no_log: true
+        description: >-
+          Signing key, 64 hex digits (an ed25519 seed). Empty: the role
+          generates one on the host once and keeps it.
+      anubis_env:
+        type: dict
+        description: >-
+          Extra container environment. It cannot set BIND, METRICS_BIND,
+          TARGET, PUBLIC_URL, REDIRECT_DOMAINS, DIFFICULTY,
+          ED25519_PRIVATE_KEY_HEX(_FILE) or HS512_SECRET; names have no = or
+          whitespace, values no line breaks. Written to compose.yaml (0600)
+          and a 0600 env file for the check container, never to a command line
+          or the log; keep a secret here in a vault.
+      anubis_cpus:
+        type: str
+        description: CPU limit of the container.
+      anubis_memory:
+        type: str
+        description: Memory limit of the container.
+      anubis_health_timeout:
+        type: int
+        description: Seconds to wait for the container's health check after a start.

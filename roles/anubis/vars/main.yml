@@ -1,0 +1,54 @@
+---
+# Compose service, container and the only DNS name of Anubis on its networks;
+# unique, so another stack's "anubis" on a shared network cannot answer the
+# checks. Traefik and nginx's auth_request use anubis_url.
+anubis_name: noixdev-anubis
+anubis_url: "http://{{ anubis_name }}:8923"
+# The throwaway container that tries new settings before the running Anubis
+# gets them.
+anubis_check_name: noixdev-anubis-check
+# Its environment (anubis_environment), 0600, removed after the check.
+anubis_check_env_file: "{{ anubis_staged_dir }}/check.env"
+# The image's user is replaced by this one, which owns the signing key; it is
+# no account on a usual host.
+anubis_uid: 65532
+anubis_key_file: "{{ anubis_dir }}/ed25519.key"
+# The new policy and compose file are rendered here and tried before they
+# replace the ones in anubis_dir.
+anubis_staged_dir: "{{ anubis_dir }}/staged"
+anubis_traefik_file: "{{ anubis_traefik_dynamic_dir }}/anubis.yml"
+# A line of the role's anubis.yml: nginx mode removes the file only when it
+# carries it.
+anubis_traefik_marker: "# Written by the noixdev.infra.anubis role (traefik mode)."
+# The networks the container joins.
+anubis_networks_joined: "{{ [anubis_traefik_network] if anubis_mode == 'traefik' else [anubis_nginx_network] + anubis_networks }}"
+# Environment the role sets for the checks, the redirects and the key;
+# anubis_env cannot set these (the difficulty has its own variable).
+anubis_env_reserved:
+  - BIND
+  - METRICS_BIND
+  - TARGET
+  - PUBLIC_URL
+  - REDIRECT_DOMAINS
+  - DIFFICULTY
+  - ED25519_PRIVATE_KEY_HEX
+  - ED25519_PRIVATE_KEY_HEX_FILE
+  - HS512_SECRET
+anubis_environment: >-
+  {{ {
+       'BIND': ':8923',
+       'METRICS_BIND': ':9090',
+       'TARGET': ' ',
+       'POLICY_FNAME': '/anubis/policy.yaml',
+       'ED25519_PRIVATE_KEY_HEX_FILE': '/anubis/ed25519.key',
+       'REDIRECT_DOMAINS': anubis_redirect_domains | join(','),
+       'DIFFICULTY': anubis_difficulty | string,
+     } | combine(anubis_env) }}
+# Anubis's own paths that must pass the check: assets, the extension CSS,
+# pass-challenge and the imprint. Not api/check (the check request's own
+# path, which path_regex also matches) and not /.within.website/ itself (the
+# challenge page must evaluate to CHALLENGE to render).
+anubis_own_paths_rule:
+  name: anubis-own-paths
+  action: ALLOW
+  path_regex: ^/\.within\.website/x/(xess/|cmd/anubis/(static/|ext/|api/(pass-challenge|imprint)$))

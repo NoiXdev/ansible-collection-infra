@@ -1,0 +1,49 @@
+# {{ ansible_managed }}
+{{ anubis_traefik_marker }}
+# Anubis in front of Traefik routers. Add anubis@file to a router's or an
+# entrypoint's middlewares; it chains the three parts below in this order.
+# While Anubis is down, every router that uses it answers 500 (fails closed).
+http:
+  middlewares:
+    anubis:
+      chain:
+        middlewares: [anubis-strip, anubis-challenge, anubis-check]
+    # Anubis checks the path of X-Original-Uri, else of X-Forwarded-Uri.
+    # Traefik never sets the first, and forwardAuth with trustForwardHeader
+    # keeps an existing second one, which a trusted proxy (trustedIPs) passes
+    # through from the client: deleted, forwardAuth sets X-Forwarded-Uri from
+    # the real request. X-Real-Ip and X-Forwarded-Host/-Proto come from the
+    # entrypoint (client values dropped unless trusted); Anubis reads no
+    # X-Forwarded-Method or -Prefix.
+    anubis-strip:
+      headers:
+        customRequestHeaders:
+          X-Original-Uri: ""
+          X-Forwarded-Uri: ""
+    # Anubis answers 401 for a client that must solve the challenge; the page
+    # comes from Anubis for the original URL (status 401, the address stays).
+    anubis-challenge:
+      errors:
+        status: ["401"]
+        service: anubis
+        query: "/.within.website/?redir={url}"
+    # trustForwardHeader keeps X-Real-Ip (set by the entrypoint), which Anubis
+    # needs; without it the check answers 500 for clients on private addresses.
+    anubis-check:
+      forwardAuth:
+        address: {{ anubis_url }}/.within.website/x/cmd/anubis/api/check
+        trustForwardHeader: true
+  # Anubis's own paths on every host of these entrypoints, above any router.
+  routers:
+{% for ep in anubis_traefik_entrypoints %}
+    anubis-{{ ep }}:
+      rule: PathPrefix(`/.within.website/`)
+      priority: 100000
+      entryPoints: [{{ ep }}]
+      service: anubis
+{% endfor %}
+  services:
+    anubis:
+      loadBalancer:
+        servers:
+          - url: {{ anubis_url }}

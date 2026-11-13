@@ -1,0 +1,26 @@
+# {{ ansible_managed }}
+# Anubis's own paths, the anubis_policy_allow rules, then Anubis's default bot
+# list. Read once at start; the role recreates the container on a change.
+{{ {'bots': [anubis_own_paths_rule] + anubis_policy_allow + [{'import': '(data)/meta/default-config.yaml'}]}
+   | to_nice_yaml(indent=2, width=1000, sort_keys=False) }}
+# Proxies read a 200 from the check as "pass": DENY must not be 200.
+status_codes:
+  CHALLENGE: 200
+  DENY: 403
+
+# Weight 0 or less passes (such as curl), anything above gets the proof of
+# work (browsers weigh 10).
+thresholds:
+  - name: minimal-suspicion
+    expression: weight <= 0
+    action: ALLOW
+  - name: suspicion
+    expression: weight > 0
+    action: CHALLENGE
+    challenge:
+      algorithm: fast
+      difficulty: {{ anubis_difficulty | int }}
+{% if anubis_impressum | length > 0 %}
+
+{{ {'impressum': anubis_impressum} | to_nice_yaml(indent=2, width=1000, sort_keys=False) }}
+{%- endif %}

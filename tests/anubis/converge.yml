@@ -1,0 +1,69 @@
+---
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  roles:
+    - noixdev.infra.traefik
+    - noixdev.infra.anubis
+
+# Two whoami routers on unrelated domains on each entrypoint. On web the
+# entrypoint protects both; on opt only c.example.test adds anubis@file. The
+# web rule is longer than the /.within.website/ router's, so it would win
+# without that router's explicit priority. Three more answer 401 with
+# WWW-Authenticate (Traefik basicAuth, test-only credentials): behind the
+# web entrypoint's anubis@file, behind the router's own anubis@file on opt,
+# and on opt without Anubis.
+- name: Whoami fixtures
+  hosts: all
+  vars_files: [vars.yml]
+  tasks:
+    - name: Create the fixtures directory
+      ansible.builtin.file:
+        path: "{{ fixtures_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the fixtures compose file
+      ansible.builtin.copy:
+        dest: "{{ fixtures_dir }}/compose.yaml"
+        content: "{{ fixtures_compose | to_nice_yaml(indent=2) }}"
+        mode: "0644"
+      vars:
+        fixtures_compose:
+          services:
+            whoami:
+              image: "{{ fixtures_whoami_image }}"
+              networks: [proxy]
+              labels:
+                traefik.enable: "true"
+                traefik.http.routers.global.rule: Host(`a.example.test`) || Host(`b.other.test`)
+                traefik.http.routers.global.entrypoints: web
+                traefik.http.routers.opted-in.rule: Host(`c.example.test`)
+                traefik.http.routers.opted-in.entrypoints: opt
+                traefik.http.routers.opted-in.middlewares: anubis@file
+                traefik.http.routers.plain.rule: Host(`d.other.test`)
+                traefik.http.routers.plain.entrypoints: opt
+                traefik.http.middlewares.test-auth.basicauth.users: "{{ fixtures_basic_auth_user }}"
+                traefik.http.middlewares.test-auth.basicauth.realm: noix-test
+                traefik.http.routers.auth-global.rule: Host(`e.example.test`)
+                traefik.http.routers.auth-global.entrypoints: web
+                traefik.http.routers.auth-global.middlewares: test-auth
+                traefik.http.routers.auth-opted-in.rule: Host(`f.example.test`)
+                traefik.http.routers.auth-opted-in.entrypoints: opt
+                traefik.http.routers.auth-opted-in.middlewares: anubis@file,test-auth
+                traefik.http.routers.auth-plain.rule: Host(`g.other.test`)
+                traefik.http.routers.auth-plain.entrypoints: opt
+                traefik.http.routers.auth-plain.middlewares: test-auth
+                traefik.http.services.whoami.loadbalancer.server.port: "80"
+              restart: unless-stopped
+          networks:
+            proxy:
+              name: "{{ anubis_traefik_network | default('proxy') }}"
+              external: true
+
+    - name: Start the fixtures
+      community.docker.docker_compose_v2:
+        project_src: "{{ fixtures_dir }}"
+        project_name: anubis-fixtures
+        state: present
+        pull: missing

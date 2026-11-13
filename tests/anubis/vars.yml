@@ -1,0 +1,40 @@
+---
+# Test-only values; nothing here is a real secret.
+traefik_dir: /opt/traefik
+traefik_docker_allow_empty_services: true
+# web: every router goes through Anubis (entrypoint middleware), behind the
+# error pages middlewares. opt: only the routers that add anubis@file.
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+    as_default: true
+    middlewares: [anubis@file]
+  - name: opt
+    port: 8080
+    bind: [127.0.0.1]
+traefik_error_pages_enabled: true
+traefik_error_pages_env:
+  THEME: terminal
+  LANGUAGES: en
+  SHOW_DETAILS: "false"
+traefik_error_pages_entrypoints: [web]
+
+anubis_traefik_entrypoints: [web, opt]
+# A host on another port than 80/443 is matched with its port.
+anubis_redirect_domains: ["*.example.test", "*.other.test", "c.example.test:8080", "f.example.test:8080"]
+anubis_policy_allow:
+  - name: test-api
+    action: ALLOW
+    path_regex: ^/api/
+anubis_impressum:
+  footer: <a href="/imprint">Imprint</a>
+  page:
+    title: Imprint
+    body: <p>Test imprint.</p>
+
+# The whoami fixture (converge.yml): one router per entrypoint.
+fixtures_dir: /opt/anubis-fixtures
+fixtures_whoami_image: traefik/whoami:v1.12.0
+# htpasswd line for the basicAuth routers: noix / noix-test-only ({SHA}).
+fixtures_basic_auth_user: "noix:{SHA}/HKQ8zY7tklKNV5+ZFweKLDLiA0="
