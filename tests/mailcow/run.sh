@@ -1226,9 +1226,10 @@ no_match "a request answered 500 while Anubis was switched off ($off_statuses)" 
 restart_line="$(grep -n 'TASK \[noixdev.infra.mailcow : Restart nginx-mailcow\]' "$out/anubis-off.log" | cut -d: -f1)"
 remove_line="$(grep -n "TASK \[noixdev.infra.mailcow : Remove the role's compose override\]" "$out/anubis-off.log" | cut -d: -f1)"
 recreate_line="$(grep -n 'TASK \[noixdev.infra.mailcow : Recreate nginx-mailcow with the compose override\]' "$out/anubis-off.log" | cut -d: -f1)"
-[ -n "$restart_line" ] && [ -n "$remove_line" ] && [ -n "$recreate_line" ] \
-  && [ "$restart_line" -lt "$remove_line" ] && [ "$remove_line" -lt "$recreate_line" ] \
-  || fail "switching Anubis off did not restart nginx with the new files before removing the override and recreating (lines $restart_line, $remove_line, $recreate_line)"
+if ! { [ -n "$restart_line" ] && [ -n "$remove_line" ] && [ -n "$recreate_line" ] \
+  && [ "$restart_line" -lt "$remove_line" ] && [ "$remove_line" -lt "$recreate_line" ]; }; then
+  fail "switching Anubis off did not restart nginx with the new files before removing the override and recreating (lines $restart_line, $remove_line, $recreate_line)"
+fi
 for task in "Restart nginx-mailcow" "Remove the role's compose override" "Recreate nginx-mailcow with the compose override"; do
   grep -A1 -F "TASK [noixdev.infra.mailcow : $task]" "$out/anubis-off.log" | grep -q '^changed:' \
     || fail "switching Anubis off did not run: $task"

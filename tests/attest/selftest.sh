@@ -131,10 +131,10 @@ printf 'namespace: noixdev\nname: infra\nversion: 0.1.0\ndescription: selftest\n
 printf '# Changelog\n\n## Unreleased\n' >"$repo/CHANGELOG.md"
 read -r -a suites <<<"$(sed -nE 's/^all_suites=\(([^)]*)\)$/\1/p' "$repo/tests/all.sh")"
 read -r -a releases <<<"$(sed -nE 's/^host_releases=\(([^)]*)\)$/\1/p' "$repo/tests/all.sh")"
-[ "${#suites[@]}" -gt 0 ] && [ "${#releases[@]}" -gt 1 ] || {
+if [ "${#suites[@]}" -eq 0 ] || [ "${#releases[@]}" -lt 2 ]; then
   echo "selftest: tests/all.sh needs all_suites=(...) and host_releases=(...) with two releases or more" >&2
   exit 1
-}
+fi
 last_suite="${suites[${#suites[@]} - 1]}"
 last_host="host-${releases[${#releases[@]} - 1]}"
 # A stub per suite: fails when its label is in STUB_FAIL.

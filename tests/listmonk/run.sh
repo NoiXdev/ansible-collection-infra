@@ -70,7 +70,9 @@ new_host() {
 # Loads the role's default images and the older listmonk into the host,
 # pulled once per version.
 load_images() {
-  [ -n "$version" ] && [ -n "$postgres" ] || fail "no listmonk_version or listmonk_postgres_image in $defaults"
+  if [ -z "$version" ] || [ -z "$postgres" ]; then
+    fail "no listmonk_version or listmonk_postgres_image in $defaults"
+  fi
   local images="$out/images-$version-$older.tar"
   if [ ! -s "$images" ]; then
     docker pull -q "$postgres" >/dev/null

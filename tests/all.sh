@@ -54,7 +54,7 @@ while [ "$#" -gt 0 ]; do
   case "$arg" in
     --keep-going) keep_going=1 ;;
     --summary)
-      [ "$#" -gt 0 ] && [ -n "$1" ] || usage
+      if [ "$#" -eq 0 ] || [ -z "$1" ]; then usage; fi
       summary="$1"
       shift
       ;;
