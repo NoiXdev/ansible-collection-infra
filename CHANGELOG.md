@@ -11,6 +11,13 @@
   not on the tailnet yet gives a warning and no record, so the run stays green (also on a tailnet
   without peers, `"Peer": null`, and for a node without addresses, `"TailscaleIPs": null`); a host
   name shared by two nodes fails the run instead of picking one.
+- `crowdsec`: reports what the role did not install or write, with a warning that never counts as
+  a change; nothing is deleted. Reported are collections that `crowdsec_collections` does not list
+  (the dependencies of listed collections, and of the reported ones, are not), sources in
+  `/etc/crowdsec/acquis.yaml` and files in `/etc/crowdsec/acquis.d/` other than `noixdev-*.yaml`.
+  The package's `setup.*.yaml` are still removed (`crowdsec_remove_setup_acquisitions`).
+- `fail2ban`: warns about files in `/etc/fail2ban/jail.d/` that neither the role
+  (`50-noixdev.local`) nor the fail2ban package wrote, and keeps them.
 - `dashy`: new role that runs the Dashy start page (`dashy_image` and `dashy_version`, default
   `4.9.0`) behind Traefik on `dashy_host` (`dashy_traefik_network`, `dashy_traefik_entrypoint`),
   publishing no host port. `dashy_config` holds the whole config (`pageInfo`, `appConfig`,

@@ -5,17 +5,72 @@
   register: crowdsec_installed_collections
   changed_when: false
 
+- name: Remember the installed collections
+  ansible.builtin.set_fact:
+    crowdsec_installed_names: "{{ (crowdsec_installed_collections.stdout | from_json).collections | default([], true) | map(attribute='name') | list }}"
+
 - name: Install the missing collections
   ansible.builtin.command:
     argv: "{{ ['cscli', 'collections', 'install'] + crowdsec_missing_collections }}"
   vars:
     crowdsec_missing_collections: >-
       {{ crowdsec_collections
-         | difference((crowdsec_installed_collections.stdout | from_json).collections | default([], true)
-                      | map(attribute='name')) }}
+         | difference(crowdsec_installed_names) }}
   when: crowdsec_missing_collections | length > 0
   changed_when: true
   notify: Reload crowdsec
+
+# Report, don't delete: what the role did not install or write may belong to
+# the owner. A collection counts as the role's when crowdsec_collections lists
+# it or when it is a dependency, at any depth, of one that is listed.
+- name: Read the collections again after the install
+  ansible.builtin.command:
+    cmd: cscli collections list -o json
+  register: crowdsec_installed_collections
+  changed_when: false
+
+- name: Inspect the installed collections
+  ansible.builtin.command:
+    argv: [cscli, collections, inspect, "{{ item }}", -o, json]
+  loop: "{{ crowdsec_current_names }}"
+  register: crowdsec_inspected_collections
+  changed_when: false
+  vars:
+    crowdsec_current_names: "{{ (crowdsec_installed_collections.stdout | from_json).collections | default([], true) | map(attribute='name') | list }}"
+
+- name: Map every installed collection to its dependencies
+  ansible.builtin.set_fact:
+    crowdsec_current_names: "{{ (crowdsec_installed_collections.stdout | from_json).collections | default([], true) | map(attribute='name') | list }}"
+    crowdsec_collection_children: >-
+      {{ dict(crowdsec_inspected_collections.results | map(attribute='stdout') | map('from_json') | map(attribute='name')
+              | zip(crowdsec_inspected_collections.results | map(attribute='stdout') | map('from_json')
+                    | map(attribute='collections', default=[]) | map('default', [], true))) }}
+    crowdsec_wanted_collections: "{{ crowdsec_collections }}"
+
+# One round per installed collection is enough to reach every depth.
+- name: Add the dependencies of the listed collections
+  ansible.builtin.set_fact:
+    crowdsec_wanted_collections: >-
+      {{ crowdsec_wanted_collections
+         | union(crowdsec_wanted_collections | select('in', crowdsec_collection_children)
+                 | map('extract', crowdsec_collection_children) | flatten) }}
+  loop: "{{ crowdsec_current_names }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Warn about collections that crowdsec_collections does not list
+  noixdev.infra.warn:
+    msg: >-
+      CrowdSec has collections that crowdsec_collections does not list:
+      {{ crowdsec_foreign_collections | join(', ') }}. They were kept; add them to
+      crowdsec_collections or remove them with 'cscli collections remove'.
+  vars:
+    # The dependencies of a foreign collection are reported through it, not on their own.
+    crowdsec_foreign_collections: >-
+      {{ crowdsec_current_names | difference(crowdsec_wanted_collections)
+         | difference(crowdsec_collection_children.values() | flatten) | sort }}
+  when: crowdsec_foreign_collections | length > 0
+  register: crowdsec_foreign_collections_warning
 
 - name: Write the acquisitions
   ansible.builtin.copy:
@@ -46,6 +101,45 @@
   loop_control:
     label: "{{ item.path }}"
   notify: Reload crowdsec
+
+- name: Find acquisition files the role did not write
+  ansible.builtin.find:
+    paths: /etc/crowdsec/acquis.d
+    file_type: file
+    patterns: ["*"]
+    excludes: ["noixdev-*.yaml", "setup.*.yaml"]
+  register: crowdsec_foreign_acquisition_files
+
+- name: Check for acquis.yaml
+  ansible.builtin.stat:
+    path: /etc/crowdsec/acquis.yaml
+  register: crowdsec_acquis_stat
+
+- name: Read acquis.yaml
+  ansible.builtin.slurp:
+    src: /etc/crowdsec/acquis.yaml
+  register: crowdsec_acquis_yaml
+  when: crowdsec_acquis_stat.stat.exists
+
+- name: Warn about acquisitions the role did not write
+  noixdev.infra.warn:
+    msg: >-
+      CrowdSec reads acquisitions the role did not write:
+      {{ (([crowdsec_acquis_label_text] if crowdsec_acquis_label_text else [])
+         + (crowdsec_foreign_acquisition_files.files | map(attribute='path') | sort | list)) | join(', ') }}.
+      They were kept; remove them if they read the same logs as crowdsec_acquisitions.
+  vars:
+    crowdsec_acquis_sources: >-
+      {{ (crowdsec_acquis_yaml.content | default('') | b64decode | from_yaml_all) | select('mapping') | list }}
+    crowdsec_acquis_label_text: >-
+      {%- set labels = [] -%}
+      {%- for source in crowdsec_acquis_sources -%}
+      {%- set what = source.filenames | default(source.filename | default(source.source | default('unknown source'), true), true) -%}
+      {%- set _ = labels.append('/etc/crowdsec/acquis.yaml (' ~ ((what if what is string else what | join(' '))) ~ ')') -%}
+      {%- endfor -%}
+      {{ labels | join(', ') }}
+  when: (crowdsec_acquis_sources | length > 0) or (crowdsec_foreign_acquisition_files.files | length > 0)
+  register: crowdsec_foreign_acquisitions_warning
 
 - name: Write the allowlist parser
   ansible.builtin.copy:

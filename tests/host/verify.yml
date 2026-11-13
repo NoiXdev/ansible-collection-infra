@@ -150,7 +150,7 @@
           - "'crowdsecurity/sshd' in verify_collections"
           - "'noixdev/allowlist' in (verify_cs.results[3].stdout | from_json).parsers | map(attribute='name')"
           - verify_cs.results[4].stdout_lines == ['active', 'active']
-          - verify_cs.results[5].stdout_lines == ['noixdev-sshd.yaml']
+          - verify_cs.results[5].stdout_lines == ['noixdev-sshd.yaml', 'other.yaml']
           - "'CROWDSEC_CHAIN' in verify_cs.results[6].stdout"
           - "'CROWDSEC_CHAIN' in verify_cs.results[7].stdout"
           - verify_cs.results[8].stdout_lines | length == 1
@@ -194,6 +194,30 @@
           done
           exit 1
       changed_when: false
+
+- name: Verify that foreign configuration was kept
+  hosts: testhost
+  gather_facts: false
+  tasks:
+    - name: Read what the roles must not delete
+      ansible.builtin.command:
+        cmd: "{{ item }}"
+      loop:
+        - cscli collections list -o json
+        - ls /etc/crowdsec/acquis.d
+        - ls /etc/fail2ban/jail.d
+        - cat /etc/crowdsec/acquis.yaml
+      register: verify_foreign
+      changed_when: false
+
+    - name: Check that all of it is still there
+      ansible.builtin.assert:
+        that:
+          - "'crowdsecurity/nginx' in (verify_foreign.results[0].stdout | from_json).collections | map(attribute='name')"
+          - verify_foreign.results[1].stdout_lines == ['noixdev-sshd.yaml', 'other.yaml']
+          - "'other.conf' in verify_foreign.results[2].stdout_lines"
+          - "'/var/log/legacy.log' in verify_foreign.results[3].stdout"
+        fail_msg: "{{ verify_foreign.results | map(attribute='stdout') | list }}"
 
 - name: Reject a malformed allowlist
   hosts: testhost

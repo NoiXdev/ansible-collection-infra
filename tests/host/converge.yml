@@ -15,11 +15,80 @@
     crowdsec_allowlist: [203.0.113.0/24]
     # Not the default, so the port override is exercised end to end.
     crowdsec_lapi_port: 8081
+  pre_tasks:
+    - name: Check whether the foreign configuration is already planted
+      ansible.builtin.stat:
+        path: /etc/fail2ban/jail.d/other.conf
+      register: converge_planted
   roles:
     - noixdev.infra.base
     - noixdev.infra.docker
     - noixdev.infra.fail2ban
     - noixdev.infra.crowdsec
+  post_tasks:
+    - name: Expect no foreign-configuration warning on a clean host
+      ansible.builtin.assert:
+        that:
+          - crowdsec_foreign_collections_warning is skipped
+          - crowdsec_foreign_acquisitions_warning is skipped
+          - fail2ban_foreign_jails_warning is skipped
+      when: not converge_planted.stat.exists
+
+    - name: Expect the warnings that name what is foreign
+      ansible.builtin.assert:
+        that:
+          - crowdsec_foreign_collections_warning.msg is search('crowdsecurity/nginx')
+          - crowdsec_foreign_collections_warning.msg is search('kept')
+          # The dependencies of the listed collections are not foreign.
+          - crowdsec_foreign_collections_warning.msg is not search('crowdsecurity/linux|crowdsecurity/sshd|whitelist-good-actors|base-http-scenarios|http-cve')
+          - crowdsec_foreign_acquisitions_warning.msg is search('/etc/crowdsec/acquis.yaml')
+          - crowdsec_foreign_acquisitions_warning.msg is search('/var/log/legacy.log')
+          - crowdsec_foreign_acquisitions_warning.msg is search('/etc/crowdsec/acquis.d/other.yaml')
+          - crowdsec_foreign_acquisitions_warning.msg is search('kept')
+          - crowdsec_foreign_acquisitions_warning.msg is not search('noixdev-sshd')
+          - fail2ban_foreign_jails_warning.msg is search('/etc/fail2ban/jail.d/other.conf')
+          # Only other.conf: neither the role's own file nor the package's defaults-debian.conf.
+          - "fail2ban_foreign_jails_warning.msg is search('wrote: /etc/fail2ban/jail.d/other.conf\\\\. They')"
+          - fail2ban_foreign_jails_warning.msg is search('kept')
+      when: converge_planted.stat.exists
+
+- name: Plant foreign configuration that the roles must report and keep
+  hosts: testhost
+  gather_facts: false
+  tasks:
+    - name: Install a collection that crowdsec_collections does not list
+      ansible.builtin.command:
+        cmd: cscli collections install crowdsecurity/nginx
+        creates: /etc/crowdsec/collections/nginx.yaml
+
+    - name: Add a source to acquis.yaml
+      ansible.builtin.copy:
+        dest: /etc/crowdsec/acquis.yaml
+        content: |
+          filenames:
+            - /var/log/legacy.log
+          labels:
+            type: syslog
+        mode: "0644"
+
+    - name: Add an acquisition file the role did not write
+      ansible.builtin.copy:
+        dest: /etc/crowdsec/acquis.d/other.yaml
+        content: |
+          source: file
+          filenames:
+            - /var/log/other.log
+          labels:
+            type: syslog
+        mode: "0644"
+
+    - name: Add a fail2ban jail file the role did not write
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/other.conf
+        content: |
+          [other]
+          enabled = false
+        mode: "0644"
 
 - name: Install Tailscale without joining
   hosts: testhost

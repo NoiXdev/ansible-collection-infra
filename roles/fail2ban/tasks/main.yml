@@ -29,3 +29,35 @@
     name: fail2ban
     state: started
     enabled: true
+
+# Report, don't delete: the role owns jail.d/50-noixdev.local only. Files the
+# fail2ban package ships are not foreign either.
+- name: Find jail files the role did not write
+  ansible.builtin.find:
+    paths: /etc/fail2ban/jail.d
+    file_type: file
+    excludes: ["50-noixdev.local"]
+  register: fail2ban_jail_files
+
+- name: Find the jail files the package ships
+  ansible.builtin.command:
+    argv: "{{ ['dpkg-query', '-S'] + fail2ban_jail_files.files | map(attribute='path') | list }}"
+  register: fail2ban_packaged_jail_files
+  changed_when: false
+  failed_when: false
+  when: fail2ban_jail_files.files | length > 0
+
+- name: Warn about jail files the role did not write
+  noixdev.infra.warn:
+    msg: >-
+      fail2ban reads jail files that neither the role nor the package wrote:
+      {{ fail2ban_foreign_jail_files | join(', ') }}. They were kept; the role manages
+      /etc/fail2ban/jail.d/50-noixdev.local only.
+  vars:
+    fail2ban_packaged: >-
+      {{ fail2ban_packaged_jail_files.stdout_lines | default([])
+         | map('regex_replace', '^[^:]+: ', '') | list }}
+    fail2ban_foreign_jail_files: >-
+      {{ fail2ban_jail_files.files | map(attribute='path') | difference(fail2ban_packaged) | sort }}
+  when: fail2ban_foreign_jail_files | length > 0
+  register: fail2ban_foreign_jails_warning
