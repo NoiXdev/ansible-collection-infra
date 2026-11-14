@@ -51,8 +51,13 @@ play() {
     -e "test_mount_dev_ext4=$dev_ext4" -e "test_mount_dev_xfs=$dev_xfs" "$@"
 }
 
-# oh_my_zsh: a local file of the user's own that the role must source and never write.
-docker exec "$host" sh -c 'mkdir -p /srv/deploy && echo "export NOIX_LOCAL=1" >/srv/deploy/.zshrc.local'
+# oh_my_zsh: a user whose home is not under /home and belongs to the user
+# (useradd creates it), with files of its own: a ~/.zshrc.local that the role
+# must source and never write, and a hand-written ~/.zshrc that the role must
+# back up before it takes the file over.
+docker exec "$host" useradd -m -d /srv/deploy -s /bin/bash deploy
+docker exec -u deploy "$host" sh -c 'echo "export NOIX_LOCAL=1" >/srv/deploy/.zshrc.local
+  printf "# hand-written\nexport NOIX_OWN=1\n" >/srv/deploy/.zshrc && chmod 0600 /srv/deploy/.zshrc'
 
 # motd: stock and older managed snippets that the role must remove.
 docker exec "$host" sh -c 'mkdir -p /etc/update-motd.d && for f in 05-old-banner 50-motd-news; do printf "#!/bin/sh\necho old-%s\n" "$f" >"/etc/update-motd.d/$f"; chmod 0755 "/etc/update-motd.d/$f"; done'

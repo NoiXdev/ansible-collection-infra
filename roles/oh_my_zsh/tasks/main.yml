@@ -5,6 +5,20 @@
     fail_msg: "oh_my_zsh_version must be a full 40-character commit SHA, not '{{ oh_my_zsh_version }}'."
     quiet: true
 
+# The theme name goes into a path in the checkout and into each ~/.zshrc.
+- name: Check the theme name
+  ansible.builtin.assert:
+    that: oh_my_zsh_theme is string and oh_my_zsh_theme is match('^[A-Za-z0-9._-]+\\Z')
+    fail_msg: "oh_my_zsh_theme must be a name of letters, digits, '.', '_' and '-', not '{{ oh_my_zsh_theme }}'."
+    quiet: true
+
+- name: Check the plugin names
+  ansible.builtin.assert:
+    that: item is string and item is match('^[A-Za-z0-9._-]+\\Z')
+    fail_msg: "oh_my_zsh_plugins: '{{ item }}' is not a name of letters, digits, '.', '_' and '-'."
+    quiet: true
+  loop: "{{ oh_my_zsh_plugins }}"
+
 - name: Look up the users
   ansible.builtin.command:
     cmd: getent passwd {{ item | quote }}
@@ -23,6 +37,29 @@
   loop_control:
     label: "{{ item.item }}"
 
+- name: Look at each home
+  ansible.builtin.stat:
+    path: "{{ item.stdout.split(':')[5] }}"
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop: "{{ oh_my_zsh_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: oh_my_zsh_homes
+
+# Writing a ~/.zshrc would otherwise create a missing home, owned by root.
+- name: Check that every home exists
+  ansible.builtin.assert:
+    that: item.stat.isdir | default(false)
+    fail_msg: >-
+      oh_my_zsh_users: the home {{ item.item.stdout.split(':')[5] }} of the user '{{ item.item.item }}'
+      does not exist or is not a directory; create it first.
+    quiet: true
+  loop: "{{ oh_my_zsh_homes.results }}"
+  loop_control:
+    label: "{{ item.item.item }}"
+
 - name: Install zsh and git
   ansible.builtin.apt:
     name: "{{ oh_my_zsh_packages }}"
@@ -40,14 +77,17 @@
   environment:
     GIT_CONFIG_GLOBAL: /dev/null
 
-- name: Make the checkout root's alone and read-only for everyone else
+# Readable for everyone, writable only by root, whatever the umask of the
+# clone was. X keeps the execute bits that git set (git status stays clean).
+- name: Make the checkout root's and read-only for everyone else
   ansible.builtin.file:
     path: "{{ oh_my_zsh_dir }}"
     state: directory
     owner: root
     group: root
-    mode: "go-w"
+    mode: "u=rwX,go=rX"
     recurse: true
+    follow: false
 
 - name: Install the noix theme
   ansible.builtin.copy:
@@ -67,16 +107,36 @@
     mode: "0644"
   when: oh_my_zsh_theme_content | length > 0
 
-- name: Create the cache directory in each home
-  ansible.builtin.file:
-    path: "{{ item.stdout.split(':')[5] }}/.cache/oh-my-zsh"
-    state: directory
-    owner: "{{ item.item }}"
-    group: "{{ item.stdout.split(':')[3] }}"
-    mode: "0755"
+# The cache in ~/.cache/oh-my-zsh is left to Oh My Zsh, which creates it as
+# the user: the home is the user's, and a link there must not make root
+# change what it points at.
+
+# As the user, for the same reason: the copy reads and writes only what the
+# user could. A link as ~/.zshrc is not copied (its target stays as it is),
+# and an existing backup is never overwritten.
+- name: Keep a ~/.zshrc that the role did not write
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ item.item }}"
+      - --
+      - /bin/sh
+      - -c
+      - |
+        rc="$1/.zshrc" pre="$1/.zshrc.pre-oh_my_zsh"
+        [ -f "$rc" ] && [ ! -L "$rc" ] || exit 0
+        [ -e "$pre" ] || [ -L "$pre" ] && exit 0
+        IFS= read -r first <"$rc" || true
+        case "$first" in "# Managed by noixdev.infra (oh_my_zsh role)."*) exit 0 ;; esac
+        cp -p "$rc" "$pre" && echo kept
+      - sh
+      - "{{ item.stdout.split(':')[5] }}"
   loop: "{{ oh_my_zsh_passwd.results }}"
   loop_control:
     label: "{{ item.item }}"
+  register: oh_my_zsh_kept
+  changed_when: oh_my_zsh_kept.stdout == 'kept'
 
 - name: Write ~/.zshrc
   ansible.builtin.template:
@@ -94,4 +154,4 @@
     name: "{{ item }}"
     shell: "{{ oh_my_zsh_shell }}"
   loop: "{{ oh_my_zsh_users }}"
-  when: oh_my_zsh_login_shell
+  when: oh_my_zsh_login_shell | bool

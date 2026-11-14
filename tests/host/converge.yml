@@ -24,7 +24,8 @@
         path: /srv/data-xfs/
         fstype: xfs
         opts: defaults,nofail,noatime
-    # Two users: root (home /root) and one whose home is not under /home.
+    # Two users: root (home /root) and deploy, whose home is not under /home
+    # (tests/host/run.sh creates it).
     oh_my_zsh_users: [root, deploy]
     # Characters a shell would interpret must come out as they went in.
     motd_remove_snippets: [10-help-text, 50-landscape-sysinfo, 50-motd-news, 05-old-banner]
@@ -32,22 +33,6 @@
       - "Ops: example.test"
       - "literal $HOME `id` \"q\" 'a'"
   pre_tasks:
-    # Only once: the oh_my_zsh role changes the shell, so a second run of this
-    # task would undo it and the idempotence check would see that.
-    - name: Look for the user whose home is not under /home
-      ansible.builtin.command: getent passwd deploy
-      register: converge_deploy
-      changed_when: false
-      failed_when: false
-
-    - name: Create a user whose home is not under /home
-      ansible.builtin.user:
-        name: deploy
-        home: /srv/deploy
-        shell: /bin/bash
-        create_home: true
-      when: converge_deploy.rc != 0
-
     - name: Check whether the foreign configuration is already planted
       ansible.builtin.stat:
         path: /etc/fail2ban/jail.d/other.conf

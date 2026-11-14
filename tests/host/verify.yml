@@ -298,10 +298,17 @@
         - cat /srv/deploy/.zshrc
         - getent passwd root deploy
         - su - deploy -c 'zsh -i -c "echo \$NOIX_LOCAL"'
-        - ls -d /srv/deploy/.cache/oh-my-zsh /root/.cache/oh-my-zsh
+        # Oh My Zsh made the cache itself, as deploy, in the shell above.
+        - stat -c '%U %F' /srv/deploy/.cache/oh-my-zsh
         - find {{ omz_dir }} -name '.zcompdump*' -o -name '.zsh-update'
         - cat /srv/deploy/.zshrc.local
         - stat -c '%U' /srv/deploy/.zshrc
+        - stat -c '%U' /srv/deploy
+        # The hand-written ~/.zshrc from tests/host/run.sh, kept once.
+        - cat /srv/deploy/.zshrc.pre-oh_my_zsh
+        - stat -c '%U %a' /srv/deploy/.zshrc.pre-oh_my_zsh
+        # root had no ~/.zshrc: nothing to keep.
+        - test ! -e /root/.zshrc.pre-oh_my_zsh
       register: omz_state
       changed_when: false
       failed_when: false
@@ -327,11 +334,15 @@
           - omz_state.results[6].rc == 0
           - omz_state.results[6].stdout == '1'
           - omz_state.results[6].stderr == ''
-          # The cache is in each home; the checkout stays clean.
-          - omz_state.results[7].rc == 0
+          # The cache is in the home; the checkout stays clean.
+          - omz_state.results[7].stdout == 'deploy directory'
           - omz_state.results[8].stdout == ''
           - omz_state.results[9].stdout == 'export NOIX_LOCAL=1'
           - omz_state.results[10].stdout == 'deploy'
+          - omz_state.results[11].stdout == 'deploy'
+          - omz_state.results[12].stdout == "# hand-written\nexport NOIX_OWN=1"
+          - omz_state.results[13].stdout == 'deploy 600'
+          - omz_state.results[14].rc == 0
         fail_msg: "{{ omz_state.results | map(attribute='stdout') | list }} {{ omz_state.results | map(attribute='stderr') | list }}"
 
     # root has no ~/.zshrc.local: a failed test in ~/.zshrc must not leak into $? of the first prompt.
@@ -346,6 +357,18 @@
         that:
           - omz_first_status.stdout == '0'
           - omz_first_status.stderr == ''
+
+    # The role does not create the cache: root's first shell above did.
+    - name: Check the cache of root
+      ansible.builtin.stat:
+        path: /root/.cache/oh-my-zsh
+      register: omz_root_cache
+
+    - name: Expect the cache in root's home
+      ansible.builtin.assert:
+        that:
+          - omz_root_cache.stat.isdir
+          - omz_root_cache.stat.pw_name == 'root'
 
     - name: Refuse an unknown user before cloning
       block:
@@ -371,6 +394,82 @@
     - name: Expect no checkout
       ansible.builtin.assert:
         that: not omz_refused.stat.exists
+
+    - name: Add a user whose home does not exist
+      ansible.builtin.user:
+        name: nohome
+        home: /srv/nohome
+        create_home: false
+
+    - name: Refuse a user whose home does not exist
+      block:
+        - name: Include the oh_my_zsh role for a user without a home
+          ansible.builtin.include_role:
+            name: noixdev.infra.oh_my_zsh
+          vars:
+            oh_my_zsh_users: [deploy, nohome]
+            oh_my_zsh_dir: /usr/local/share/oh-my-zsh-nohome
+        - name: Not reached
+          ansible.builtin.fail:
+            msg: oh_my_zsh accepted a user without a home
+      rescue:
+        - name: Expect the message that names the user and the home
+          ansible.builtin.assert:
+            that: "\"the home /srv/nohome of the user 'nohome' does not exist\" in ansible_failed_result | to_json"
+
+    - name: Check that nothing was created
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: [/usr/local/share/oh-my-zsh-nohome, /srv/nohome]
+      register: omz_nohome
+
+    - name: Expect no checkout and no home
+      ansible.builtin.assert:
+        that: omz_nohome.results | selectattr('stat.exists') | list | length == 0
+
+    - name: Refuse a theme name that is a path
+      block:
+        - name: Include the oh_my_zsh role with the theme ../x
+          ansible.builtin.include_role:
+            name: noixdev.infra.oh_my_zsh
+          vars:
+            oh_my_zsh_users: [deploy]
+            oh_my_zsh_dir: /usr/local/share/oh-my-zsh-badtheme
+            oh_my_zsh_theme: ../x
+            oh_my_zsh_theme_content: 'PROMPT="x> "'
+        - name: Not reached
+          ansible.builtin.fail:
+            msg: oh_my_zsh accepted a bad theme name
+      rescue:
+        - name: Expect the message that names the theme
+          ansible.builtin.assert:
+            that: "\"oh_my_zsh_theme must be a name of letters, digits, '.', '_' and '-', not '../x'\" in ansible_failed_result | to_json"
+
+    - name: Refuse a plugin name with a space
+      block:
+        - name: Include the oh_my_zsh role with the plugin "a b"
+          ansible.builtin.include_role:
+            name: noixdev.infra.oh_my_zsh
+          vars:
+            oh_my_zsh_users: [deploy]
+            oh_my_zsh_dir: /usr/local/share/oh-my-zsh-badtheme
+            oh_my_zsh_plugins: [git, a b]
+        - name: Not reached
+          ansible.builtin.fail:
+            msg: oh_my_zsh accepted a bad plugin name
+      rescue:
+        - name: Expect the message that names the plugin
+          ansible.builtin.assert:
+            that: "\"oh_my_zsh_plugins: 'a b' is not a name of letters, digits, '.', '_' and '-'\" in ansible_failed_result | to_json"
+
+    - name: Check that nothing was cloned for the bad names
+      ansible.builtin.stat:
+        path: /usr/local/share/oh-my-zsh-badtheme
+      register: omz_badtheme
+
+    - name: Expect no checkout for the bad names
+      ansible.builtin.assert:
+        that: not omz_badtheme.stat.exists
 
     - name: Move to an older commit
       ansible.builtin.include_role:
@@ -400,6 +499,109 @@
         that:
           - omz_head_old.stdout == omz_older
           - omz_head_new.stdout == omz_pin
+
+    # A second hand-written ~/.zshrc is replaced again, but the first backup stays.
+    - name: Hand-write ~/.zshrc of deploy again
+      ansible.builtin.command:
+        argv: [runuser, -u, deploy, --, sh, -c, 'echo "# second" >/srv/deploy/.zshrc']
+      changed_when: true
+
+    - name: Take ~/.zshrc over again
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [root, deploy]
+
+    - name: Read ~/.zshrc and the backup
+      ansible.builtin.command:
+        argv: [cat, /srv/deploy/.zshrc, /srv/deploy/.zshrc.pre-oh_my_zsh]
+      register: omz_retaken
+      changed_when: false
+
+    - name: Expect the managed file and the first backup
+      ansible.builtin.assert:
+        that:
+          - omz_retaken.stdout_lines[0] is search('Managed by noixdev.infra')
+          - omz_retaken.stdout_lines[-2:] == ['# hand-written', 'export NOIX_OWN=1']
+          - omz_retaken.stdout is not search('# second')
+        fail_msg: "{{ omz_retaken.stdout }}"
+
+    # A listed user owns its home and can put a link where the role used to
+    # create the cache; the role must not chown what the link points at.
+    - name: Point the cache of deploy at a root-owned directory
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -eo pipefail
+          install -d -o root -g root -m 0755 /opt/omz-link-target
+          runuser -u deploy -- sh -c 'rm -rf /srv/deploy/.cache/oh-my-zsh && ln -s /opt/omz-link-target /srv/deploy/.cache/oh-my-zsh'
+      changed_when: true
+
+    - name: Run the role with the link in place
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [root, deploy]
+
+    - name: Check the link target
+      ansible.builtin.stat:
+        path: /opt/omz-link-target
+      register: omz_link_target
+
+    - name: Remove the link again
+      ansible.builtin.command:
+        argv: [runuser, -u, deploy, --, rm, /srv/deploy/.cache/oh-my-zsh]
+      changed_when: true
+
+    - name: Start a shell as deploy without the link
+      ansible.builtin.command:
+        argv: [su, -, deploy, -c, "zsh -i -c exit"]
+      register: omz_after_link
+      changed_when: false
+
+    - name: Check the new cache of deploy
+      ansible.builtin.command:
+        argv: [stat, -c, '%U %F', /srv/deploy/.cache/oh-my-zsh]
+      register: omz_after_link_cache
+      changed_when: false
+
+    - name: Expect the target still root's and the shell working
+      ansible.builtin.assert:
+        that:
+          - omz_link_target.stat.pw_name == 'root'
+          - omz_link_target.stat.gr_name == 'root'
+          - omz_after_link.stderr == ''
+          - omz_after_link_cache.stdout == 'deploy directory'
+        fail_msg: "{{ omz_link_target.stat.pw_name }}:{{ omz_link_target.stat.gr_name }} {{ omz_after_link.stderr }} {{ omz_after_link_cache.stdout }}"
+
+    # A checkout made under a strict umask (027, 077) is unreadable for the
+    # other users; the role must make it readable again.
+    - name: Take read access to the checkout away from group and other
+      ansible.builtin.command:
+        argv: [chmod, -R, go-rwx, "{{ omz_dir }}"]
+      changed_when: true
+
+    - name: Run the role on the unreadable checkout
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [root, deploy]
+
+    - name: Start a shell as deploy and read the git status of the checkout
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [su, -, deploy, -c, "zsh -i -c exit"]
+        - [git, -C, "{{ omz_dir }}", status, --porcelain]
+      register: omz_umask
+      changed_when: false
+
+    - name: Expect a working shell and a clean checkout
+      ansible.builtin.assert:
+        that:
+          - omz_umask.results[0].stderr == ''
+          - omz_umask.results[1].stdout == ''
+        fail_msg: "{{ omz_umask.results | map(attribute='stderr') | list }} {{ omz_umask.results[1].stdout }}"
 
     - name: Use a theme of one's own for deploy
       ansible.builtin.include_role:

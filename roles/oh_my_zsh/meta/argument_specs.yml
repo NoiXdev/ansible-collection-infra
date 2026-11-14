@@ -4,7 +4,10 @@ argument_specs:
     short_description: Oh My Zsh pinned to a commit, one shared checkout, a ~/.zshrc per user
     description:
       - Installs zsh and git, checks Oh My Zsh out at a commit into a root-owned directory and writes a managed ~/.zshrc for each listed user.
-      - Each user's home comes from the passwd database. The cache lives in ~/.cache/oh-my-zsh, never in the shared checkout.
+      - >-
+        Each user's home comes from the passwd database. The cache lives in ~/.cache/oh-my-zsh, which Oh My Zsh
+        creates as the user, never in the shared checkout.
+      - A ~/.zshrc that the role did not write is copied to ~/.zshrc.pre-oh_my_zsh once, before the role replaces it.
       - The managed ~/.zshrc sources ~/.zshrc.local if it exists; the role never writes that file.
     options:
       oh_my_zsh_version:
@@ -19,10 +22,14 @@ argument_specs:
       oh_my_zsh_users:
         type: list
         elements: str
-        description: Users that get a managed ~/.zshrc. Each must exist; the run stops before changing anything otherwise.
+        description: >-
+          Users that get a managed ~/.zshrc. Each must exist and have its home directory; the run stops before
+          changing anything otherwise.
       oh_my_zsh_theme:
         type: str
-        description: Theme name. "noix" ships with the role; any other name is an Oh My Zsh theme (or the one given in oh_my_zsh_theme_content).
+        description: >-
+          Theme name. "noix" ships with the role; any other name is an Oh My Zsh theme (or the one given in
+          oh_my_zsh_theme_content). Letters, digits, '.', '_' and '-' only.
       oh_my_zsh_theme_content:
         type: str
         description: >-
@@ -31,7 +38,7 @@ argument_specs:
       oh_my_zsh_plugins:
         type: list
         elements: str
-        description: Oh My Zsh plugins to load.
+        description: Oh My Zsh plugins to load. Letters, digits, '.', '_' and '-' only.
       oh_my_zsh_login_shell:
         type: bool
         description: Set the login shell of the listed users to zsh.
