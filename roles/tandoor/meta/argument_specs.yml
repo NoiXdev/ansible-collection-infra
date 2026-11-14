@@ -116,7 +116,11 @@ argument_specs:
             description: Sender address (required with a host).
       tandoor_s3:
         type: dict
-        description: Media in an S3 bucket instead of tandoor_data_dir; on when access_key is set.
+        description: >-
+          Media in an S3 bucket instead of tandoor_data_dir; on when
+          access_key is set, with secret_key and bucket then required. An
+          installation keeps the media where it was made: a run that switches
+          between local media and S3 is refused.
         options:
           access_key:
             type: str
@@ -125,10 +129,12 @@ argument_specs:
           secret_key:
             type: str
             no_log: true
-            description: Secret key. Keep it in a vault.
+            description: >-
+              Secret key, written to tandoor_dir/s3-secret (0600) for the
+              container, not to the compose file. Keep it in a vault.
           bucket:
             type: str
-            description: Bucket name.
+            description: Bucket name (the role does not create it).
           endpoint:
             type: str
             description: Endpoint URL of an S3-compatible service; empty for AWS.

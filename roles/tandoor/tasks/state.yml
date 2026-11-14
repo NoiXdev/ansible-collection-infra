@@ -2,14 +2,14 @@
 # Reads the host and sets tandoor_state:
 #   install      no compose file and none of tandoor_data_subdirs
 #   reconfigure  the compose file the role writes differs from the one on
-#                disk
+#                disk, or the S3 secret file from the secret key
 #   noop         everything as the role writes it
 # Also sets tandoor_installed (a compose file exists), tandoor_compose_before
 # (the compose file on disk, which tandoor_installed_version reads),
 # tandoor_data_found (the data subdirectories that exist) and tandoor_down
 # (the expected services that are not running). Changes nothing; refuses an
-# install that did not complete (its marker) and left-over data without a
-# compose file.
+# install that did not complete (its marker), left-over data without a
+# compose file, and a change between local media and S3.
 
 - name: Read the compose file
   ansible.builtin.slurp:
@@ -61,6 +61,31 @@
     - not tandoor_installed
     - tandoor_data_found | length > 0
 
+# Before any change: the media would stay behind in the old place.
+- name: Refuse a change between local media and S3
+  ansible.builtin.fail:
+    msg: >-
+      {{ tandoor_compose_file }} records the media of Tandoor as
+      {{ tandoor_installed_media }}, but this run sets them to
+      {{ tandoor_media }} (tandoor_s3.access_key is
+      {{ 'set' if tandoor_s3_enabled | bool else 'empty' }}). The role does
+      not move an installation between local media and S3, as the files
+      would stay behind in the old place, and changes nothing; run it with
+      the tandoor_s3 of the installation.
+  when:
+    - tandoor_installed
+    - tandoor_installed_media != tandoor_media
+
+- name: Read the S3 secret file
+  ansible.builtin.slurp:
+    src: "{{ tandoor_s3_secret_file }}"
+  register: tandoor_s3_secret_read
+  failed_when: false
+  no_log: true
+  when:
+    - tandoor_installed
+    - tandoor_s3_enabled | bool
+
 - name: Read the services that run
   ansible.builtin.command:
     argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
@@ -76,5 +101,7 @@
     tandoor_state: >-
       {{ 'install' if not tandoor_installed
          else 'reconfigure' if tandoor_compose_before != tandoor_compose
+         or (tandoor_s3_enabled | bool
+             and tandoor_s3_secret_read.content | default('') | b64decode != tandoor_s3_settings.secret_key | string)
          else 'noop' }}
   no_log: true

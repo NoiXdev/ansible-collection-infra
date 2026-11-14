@@ -2,7 +2,10 @@
 # Checks a fresh install through Traefik: containers, environment and mounts;
 # the browser login (CSRF) and an API token; the admin's space and a recipe;
 # no open registration, but an invite that lets a new user sign up; and a
-# password reset mail in Mailpit. Tandoor rate-limits logins (3 a minute),
+# password reset mail in Mailpit. With tandoor_s3 (-e @s3.yml): the S3
+# settings, the secret key only in its file, and a recipe image that is an
+# object in the bucket, behind a signed URL, and not on the host. Tandoor
+# rate-limits logins (3 a minute),
 # signups (2) and password resets (1) per client address, so this playbook
 # logs in once and runs once per installation.
 - name: Verify
@@ -16,6 +19,9 @@
     verify_host:
       Host: tandoor.test
     verify_mailpit: http://127.0.0.1:8025
+    verify_s3: "{{ (tandoor_s3 | default({})).access_key | default('') | length > 0 }}"
+    # A PNG of one pixel.
+    verify_png: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==
     # The mails in Mailpit to the admin (verify_mail is registered below).
     verify_reset_mails: >-
       {%- set found = [] -%}
@@ -42,6 +48,11 @@
       ansible.builtin.stat:
         path: "{{ tandoor_dir }}/compose.yaml"
       register: verify_compose
+
+    - name: Read the compose file
+      ansible.builtin.slurp:
+        src: "{{ tandoor_dir }}/compose.yaml"
+      register: verify_compose_content
 
     - name: Check the containers, their ports, environment and mounts, and the compose file
       ansible.builtin.assert:
@@ -73,7 +84,12 @@
           - db.Mounts[0].Type == 'bind'
           - db.Mounts[0].Source == tandoor_dir ~ '/data/postgres'
           - db.Mounts[0].Destination == '/var/lib/postgresql'
-          - (web.Mounts | selectattr('Destination', 'equalto', '/opt/recipes/mediafiles') | first).Source == tandoor_dir ~ '/data/mediafiles'
+          # Local media on the data directory and on the API router; none
+          # with S3.
+          - >-
+            web.Mounts | selectattr('Destination', 'equalto', '/opt/recipes/mediafiles') | map(attribute='Source') | list
+            == ([] if verify_s3 else [tandoor_dir ~ '/data/mediafiles'])
+          - (web.Config.Labels['traefik.http.routers.tandoor-api.rule'] is search('/media/')) != verify_s3
           - (web.Mounts | selectattr('Destination', 'equalto', '/opt/recipes/staticfiles') | first).Type == 'volume'
           - verify_compose.stat.mode == '0600'
         fail_msg: "{{ verify_inspect.stdout }}"
@@ -87,6 +103,63 @@
           {{ found }}
         web: "{{ containers.web }}"
         db: "{{ containers.db }}"
+
+    - name: Check the S3 settings of the web container
+      ansible.builtin.assert:
+        that:
+          - ('S3_ACCESS_KEY=' ~ tandoor_s3.access_key) in web.Config.Env
+          - ('S3_BUCKET_NAME=' ~ tandoor_s3.bucket) in web.Config.Env
+          - ('S3_ENDPOINT_URL=' ~ tandoor_s3.endpoint) in web.Config.Env
+          - ('S3_REGION_NAME=' ~ tandoor_s3.region) in web.Config.Env
+          - "'S3_QUERYSTRING_AUTH=1' in web.Config.Env"
+          - "'S3_SECRET_ACCESS_KEY_FILE=/run/secrets/s3-secret' in web.Config.Env"
+          - web.Config.Env | select('match', 'S3_SECRET_ACCESS_KEY=') | list | length == 0
+          - secret_mount | length == 1
+          - secret_mount[0].Type == 'bind'
+          - secret_mount[0].Source == tandoor_dir ~ '/s3-secret'
+          - not secret_mount[0].RW
+        fail_msg: "{{ web.Config.Env | reject('match', '(SECRET_KEY|POSTGRES_PASSWORD|EMAIL_HOST_PASSWORD)=') | list }} {{ web.Mounts }}"
+        quiet: true
+      vars:
+        web: "{{ verify_inspect.stdout | from_json | selectattr('Name', 'search', '-web-') | first }}"
+        secret_mount: "{{ web.Mounts | selectattr('Destination', 'equalto', '/run/secrets/s3-secret') | list }}"
+      when: verify_s3
+
+    # A task of its own: its failure message must not show what it found.
+    - name: Check that the S3 secret key is in neither the compose file nor docker inspect
+      ansible.builtin.assert:
+        that:
+          - tandoor_s3.secret_key not in verify_inspect.stdout
+          - tandoor_s3.secret_key not in (verify_compose_content.content | b64decode)
+        fail_msg: The S3 secret key is in the compose file or in docker inspect.
+        quiet: true
+      when: verify_s3
+
+    - name: Stat the S3 secret file
+      ansible.builtin.stat:
+        path: "{{ tandoor_dir }}/s3-secret"
+      register: verify_s3_secret_stat
+      when: verify_s3
+
+    - name: Read the S3 secret file
+      ansible.builtin.slurp:
+        src: "{{ tandoor_dir }}/s3-secret"
+      register: verify_s3_secret
+      no_log: true
+      when: verify_s3
+
+    - name: Check the S3 secret file
+      ansible.builtin.assert:
+        that:
+          - verify_s3_secret_stat.stat.pw_name == 'root'
+          - verify_s3_secret_stat.stat.mode == '0600'
+          - (verify_s3_secret.content | b64decode) == tandoor_s3.secret_key
+        fail_msg: >-
+          {{ tandoor_dir }}/s3-secret must be root's, mode 0600, and hold the
+          secret key: {{ verify_s3_secret_stat.stat.pw_name }}
+          {{ verify_s3_secret_stat.stat.mode }}
+        quiet: true
+      when: verify_s3
 
     # The single-page app's login: the page sets the CSRF cookie, the login
     # goes to allauth's browser API with the token, as Tandoor's UI sends it.
@@ -173,6 +246,116 @@
           name: Noix test soup
           steps: []
         status_code: [201]
+      register: verify_recipe
+
+    - name: Write a test image
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - import base64, sys; open(sys.argv[1], 'wb').write(base64.b64decode(sys.argv[2]))
+          - /tmp/noix-test.png
+          - "{{ verify_png }}"
+        creates: /tmp/noix-test.png
+      when: verify_s3
+
+    - name: Upload an image of the recipe
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/recipe/{{ verify_recipe.json.id }}/image/"
+        method: PUT
+        headers: "{{ verify_api }}"
+        body_format: form-multipart
+        body:
+          image:
+            filename: /tmp/noix-test.png
+            mime_type: image/png
+        remote_src: true
+        status_code: [200]
+      when: verify_s3
+
+    - name: Read the recipe
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/recipe/{{ verify_recipe.json.id }}/"
+        headers: "{{ verify_api }}"
+      register: verify_recipe_read
+      when: verify_s3
+
+    # Path-style: the endpoint, then the bucket, then the key.
+    - name: Note the image URL and its key
+      ansible.builtin.set_fact:
+        verify_image_url: "{{ verify_recipe_read.json.image | default('', true) }}"
+        verify_image_key: >-
+          {{ (verify_recipe_read.json.image | default('', true) | urlsplit('path'))
+             | regex_replace('^/' ~ tandoor_s3.bucket ~ '/', '') }}
+      when: verify_s3
+
+    - name: Check that the image URL is signed and points into the bucket
+      ansible.builtin.assert:
+        that:
+          - verify_image_url.startswith(tandoor_s3.endpoint ~ '/' ~ tandoor_s3.bucket ~ '/')
+          - "'X-Amz-Signature=' in verify_image_url"
+        fail_msg: "{{ verify_recipe_read.json | to_json }}"
+        quiet: true
+      when: verify_s3
+
+    - name: Download the image with its signed URL
+      ansible.builtin.uri:
+        url: "{{ verify_image_url }}"
+        status_code: [200]
+      register: verify_image
+      failed_when: verify_image.status != 200 or verify_image.content_type != 'image/png'
+      when: verify_s3
+
+    - name: Refuse the image without the signature
+      ansible.builtin.uri:
+        url: "{{ verify_image_url.split('?') | first }}"
+        status_code: [403]
+      when: verify_s3
+
+    # The keys are on the command line. The next task fails with the answer.
+    - name: Look up the image in the bucket
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - "--network={{ traefik_network | default('proxy') }}"
+          - "--env=AWS_ACCESS_KEY_ID={{ tandoor_s3.access_key }}"
+          - "--env=AWS_SECRET_ACCESS_KEY={{ tandoor_s3.secret_key }}"
+          - "--env=AWS_DEFAULT_REGION={{ tandoor_s3.region }}"
+          - "{{ s3_aws_cli_image }}"
+          - "--endpoint-url={{ tandoor_s3.endpoint }}"
+          - s3api
+          - head-object
+          - "--bucket={{ tandoor_s3.bucket }}"
+          - "--key={{ verify_image_key }}"
+      register: verify_object
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: verify_s3
+
+    - name: Check that the image is an object in the bucket
+      ansible.builtin.assert:
+        that: verify_object.rc == 0
+        fail_msg: "{{ verify_image_key }}: {{ verify_object.stderr | default('') }}"
+        quiet: true
+      when: verify_s3
+
+    - name: Look for the image on the host
+      ansible.builtin.find:
+        paths: ["{{ tandoor_dir }}"]
+        patterns: ["{{ verify_image_key | basename }}"]
+        recurse: true
+      register: verify_image_on_host
+      when: verify_s3
+
+    - name: Check that the image is not on the host
+      ansible.builtin.assert:
+        that: verify_image_on_host.matched == 0
+        fail_msg: "{{ verify_image_on_host.files | map(attribute='path') | list }}"
+        quiet: true
+      when: verify_s3
 
     - name: Read the server settings
       ansible.builtin.uri:

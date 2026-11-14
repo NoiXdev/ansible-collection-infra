@@ -14,6 +14,15 @@ tandoor_s3_settings: >-
      | combine(tandoor_s3 if tandoor_s3 is mapping else {}) }}
 # Media in S3 instead of tandoor_data_dir/mediafiles.
 tandoor_s3_enabled: "{{ tandoor_s3_settings.access_key | string | length > 0 }}"
+# Where the media are, S3 or local. The compose file records it
+# (x-tandoor-media); a run that would change it is refused.
+tandoor_media: "{{ 'S3' if tandoor_s3_enabled | bool else 'local' }}"
+# The S3 secret key, mode 0600, bound read-only into the web container at
+# tandoor_s3_secret_target; the image's boot script reads it from the file
+# S3_SECRET_ACCESS_KEY_FILE names, so it is in neither the compose file nor
+# docker inspect.
+tandoor_s3_secret_file: "{{ tandoor_dir }}/s3-secret"
+tandoor_s3_secret_target: /run/secrets/s3-secret
 
 # The subdirectories of tandoor_data_dir whose absence means the data is
 # missing (an unmounted volume): only install creates them, and the
@@ -30,12 +39,17 @@ tandoor_marker_file: "{{ tandoor_dir }}/update-failed"
 # refuses.
 tandoor_install_marker: "{{ tandoor_dir }}/install-incomplete"
 
+# The compose file on disk, parsed; empty when there is none.
+# tandoor_compose_before is set by state.yml.
+tandoor_compose_on_disk: "{{ (tandoor_compose_before | default('', true) or '{}') | from_yaml }}"
 # The Tandoor version of the compose file on disk (the tag of the web image),
-# empty when there is none. tandoor_compose_before is set by state.yml.
+# empty when there is none.
 tandoor_installed_version: >-
-  {%- set compose = tandoor_compose_before | default('', true) | from_yaml if tandoor_compose_before | default('', true) else {} -%}
-  {%- set image = (((compose if compose is mapping else {}).services | default({})).web | default({})).image | default('') | string -%}
+  {%- set image = ((tandoor_compose_on_disk.services | default({})).web | default({})).image | default('') | string -%}
   {{ image.rpartition(':')[2] if ':' in image.rpartition('/')[2] else '' }}
+# The media of the compose file on disk, S3 or local. One without the record
+# has local media: the role writes the S3 settings only with the record.
+tandoor_installed_media: "{{ tandoor_compose_on_disk['x-tandoor-media'] | default('local') }}"
 
 # The PostgreSQL major of tandoor_postgres_image: the leading digits of its
 # tag (postgres:18, postgres:18.1-alpine), empty without them.
@@ -103,7 +117,8 @@ tandoor_install_hint: >-
   finished one. To install again, first check that nothing in it is worth
   keeping (for example recipes in Tandoor), then run docker compose down in
   {{ tandoor_dir }} (if {{ tandoor_compose_file }} exists), remove
-  {{ tandoor_compose_file }}, {{ tandoor_install_marker }} and the
+  {{ tandoor_compose_file }},{{ (' ' ~ tandoor_s3_secret_file ~ ',') if tandoor_s3_enabled | bool else '' }}
+  {{ tandoor_install_marker }} and the
   {{ 'subdirectories' if tandoor_data_subdirs | length > 1 else 'subdirectory' }}
   {{ tandoor_data_subdirs | join(' and ') }} of
   {{ tandoor_data_dir }}, then run the role again.

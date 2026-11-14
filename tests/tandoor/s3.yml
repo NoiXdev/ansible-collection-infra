@@ -1,0 +1,14 @@
+---
+# Test-only values for the s3 scenario (-e @s3.yml); nothing here is a real
+# secret. RustFS (converge.yml) takes these keys as its own; s3.test is its
+# name on the Traefik network and on the test host. The secret key holds a $
+# that must reach Tandoor verbatim.
+converge_s3: true
+s3_rustfs_image: rustfs/rustfs:1.0.4
+s3_aws_cli_image: amazon/aws-cli:2.31.0
+tandoor_s3:
+  access_key: test-s3-access-key
+  secret_key: test-s3-se$cret-key-0
+  bucket: recipes
+  endpoint: http://s3.test:9000
+  region: us-east-1

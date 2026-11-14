@@ -3,10 +3,13 @@
 {%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
 {#- A bind mount that compose must not create: a missing data directory (an
     unmounted volume) stops the container instead of starting it empty. -#}
-{%- macro bind(source, target) %}
+{%- macro bind(source, target, read_only=false) %}
       - type: bind
         source: {{ q(source) }}
         target: {{ q(target) }}
+{% if read_only %}
+        read_only: true
+{% endif %}
         bind:
           create_host_path: false
 {%- endmacro %}
@@ -37,10 +40,28 @@
         'DEFAULT_FROM_EMAIL': tandoor_mail['from'],
       }) -%}
 {%- endif -%}
+{%- if tandoor_s3_enabled | bool -%}
+{%-   set s3 = tandoor_s3_settings -%}
+{#-   The secret key only as a file: the image's boot script reads it. -#}
+{%-   set _ = env.update({
+        'S3_ACCESS_KEY': s3.access_key,
+        'S3_SECRET_ACCESS_KEY_FILE': tandoor_s3_secret_target,
+        'S3_BUCKET_NAME': s3.bucket,
+        'S3_QUERYSTRING_AUTH': 1 if s3.querystring_auth | bool else 0,
+      }) -%}
+{%-   for key, name in [('endpoint', 'S3_ENDPOINT_URL'), ('region', 'S3_REGION_NAME'), ('custom_domain', 'S3_CUSTOM_DOMAIN')]
+        if s3[key] | string | length > 0 -%}
+{%-     set _ = env.update({name: s3[key]}) -%}
+{%-   endfor -%}
+{%- endif -%}
 {%- set router = tandoor_project -%}
 {%- set api_router = tandoor_project ~ '-api' -%}
 {%- set host_rule = 'Host(`' ~ tandoor_hostname ~ '`)' -%}
 # Managed by the noixdev.infra.tandoor role; changes are overwritten.
+# Where the media are: S3 or local. The role refuses a run that would change
+# it.
+x-tandoor-media: {{ tandoor_media }}
+
 services:
   db:
     image: {{ q(tandoor_postgres_image) }}
@@ -71,7 +92,9 @@ services:
       {{ key }}: {{ q((1 if value else 0) if value is boolean else value) }}
 {% endfor %}
     volumes:
-{% if not tandoor_s3_enabled | bool %}
+{% if tandoor_s3_enabled | bool %}
+{{ bind(tandoor_s3_secret_file, tandoor_s3_secret_target, read_only=true) }}
+{% else %}
 {{ bind(tandoor_data_dir ~ '/mediafiles', tandoor_container_dirs.media) }}
 {% endif %}
       # Collected from the image on every start; not data.

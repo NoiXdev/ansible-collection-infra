@@ -6,6 +6,9 @@
     # false runs the tandoor role alone (the refusals need no Traefik).
     converge_traefik: true
     converge_mailpit_image: axllent/mailpit:v1.33.1
+    # true (s3.yml) starts RustFS as the S3 service of tandoor_s3, with a
+    # bucket tandoor_s3.bucket.
+    converge_s3: false
   tasks:
     - name: Run the traefik role
       ansible.builtin.include_role:
@@ -36,6 +39,63 @@
       when:
         - converge_traefik | bool
         - converge_mailpit.stdout | length == 0
+
+    # RustFS on the Traefik network as s3.test, with tandoor_s3's keys as its
+    # own; its API also on 127.0.0.1:9000 of the test host, where s3.test
+    # resolves to 127.0.0.1 (run.sh), so that signed URLs work in both places.
+    # The keys are on the command lines: no_log.
+    - name: Look for RustFS
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, name=^rustfs$]
+      register: converge_rustfs
+      changed_when: false
+      when: converge_s3 | bool
+
+    - name: Start RustFS
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name=rustfs
+          - "--network={{ traefik_network | default('proxy') }}"
+          - --network-alias=s3.test
+          - --restart=unless-stopped
+          - --publish=127.0.0.1:9000:9000
+          - "--env=RUSTFS_ACCESS_KEY={{ tandoor_s3.access_key }}"
+          - "--env=RUSTFS_SECRET_KEY={{ tandoor_s3.secret_key }}"
+          - "{{ s3_rustfs_image }}"
+      changed_when: true
+      no_log: true
+      when:
+        - converge_s3 | bool
+        - converge_rustfs.stdout | length == 0
+
+    # Along with RustFS, retried until it answers.
+    - name: Create the bucket
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - "--network={{ traefik_network | default('proxy') }}"
+          - "--env=AWS_ACCESS_KEY_ID={{ tandoor_s3.access_key }}"
+          - "--env=AWS_SECRET_ACCESS_KEY={{ tandoor_s3.secret_key }}"
+          - "--env=AWS_DEFAULT_REGION={{ tandoor_s3.region }}"
+          - "{{ s3_aws_cli_image }}"
+          - "--endpoint-url={{ tandoor_s3.endpoint }}"
+          - s3api
+          - create-bucket
+          - "--bucket={{ tandoor_s3.bucket }}"
+      register: converge_bucket
+      until: converge_bucket.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: true
+      no_log: true
+      when:
+        - converge_s3 | bool
+        - converge_rustfs.stdout | length == 0
 
     - name: Run the tandoor role
       ansible.builtin.include_role:

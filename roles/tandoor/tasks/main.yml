@@ -86,6 +86,27 @@
       from (the sender address) is required; no value may hold a line break.
     quiet: true
 
+- name: Check tandoor_s3
+  ansible.builtin.assert:
+    that:
+      - tandoor_s3 is mapping
+      - tandoor_s3.keys() | difference(['access_key', 'secret_key', 'bucket', 'endpoint', 'region', 'querystring_auth', 'custom_domain']) | length == 0
+      - not tandoor_s3_enabled | bool or tandoor_s3_settings.secret_key | string | length > 0
+      - not tandoor_s3_enabled | bool or tandoor_s3_settings.bucket | string | length > 0
+      - tandoor_s3_settings.bucket | string is match('^([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])?$')
+      - tandoor_s3_settings.endpoint | string is match('^(https?://[A-Za-z0-9.-]+(:[0-9]+)?/?)?$')
+      - tandoor_s3_settings.region | string is match('^[a-z0-9-]*$')
+      - tandoor_s3_settings.custom_domain | string is match('^([A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(/\S*)?)?$')
+      - (tandoor_s3_settings.access_key ~ tandoor_s3_settings.secret_key) is not search('[\r\n]')
+    fail_msg: >-
+      tandoor_s3 takes access_key, secret_key, bucket, endpoint, region,
+      querystring_auth and custom_domain; with an access_key (media in S3),
+      secret_key and bucket are required. bucket must be an S3 bucket name,
+      endpoint an http(s) URL without a path (empty for AWS), region a region
+      name, custom_domain a host name with an optional path; no value may hold
+      a line break.
+    quiet: true
+
 - name: Check tandoor_env
   ansible.builtin.assert:
     that:

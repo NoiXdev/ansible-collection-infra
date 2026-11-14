@@ -69,7 +69,14 @@ tandoor_email:
   from: ""
 
 # Media in an S3 bucket instead of tandoor_data_dir, on when access_key is
-# set.
+# set; secret_key and bucket are then required. endpoint is the URL of an
+# S3-compatible service (empty for AWS). querystring_auth signs the media
+# URLs; custom_domain serves them from another host than the endpoint. The
+# secret key goes into tandoor_dir/s3-secret (0600), which the container
+# reads, not into the compose file. An installation keeps the media where it
+# was made: a run that switches between local media and S3 is refused. The
+# role neither creates the bucket nor backs it up. Keep the secret key in a
+# vault.
 tandoor_s3:
   access_key: ""
   secret_key: ""

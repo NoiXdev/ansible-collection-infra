@@ -12,13 +12,20 @@
 #             through Traefik with CSRF, an API token, the admin's space and a
 #             recipe, no open registration, an invite that lets a new user
 #             sign up, a password reset mail from the configured sender, a $
-#             reaching the container verbatim, no published port), and a run
+#             reaching the container verbatim, no published port), a run with
+#             tandoor_s3 on this local installation that is refused, and a run
 #             without changes that fails on a stopped container
 #   router    the pages and the API on their own routers: with a middleware
 #             that denies everything on the pages, / is denied by Traefik
 #             while /api/, /_allauth/ and /media/ still reach Tandoor (its own
 #             JSON 403 without credentials, 200 with an app session); with it
 #             on the API router only, the reverse
+#   s3        media in S3 (RustFS as s3.test, a bucket made with the AWS CLI,
+#             s3.yml): an image uploaded through the API is an object in the
+#             bucket and not on the host, its signed URL downloads it, the
+#             secret key is in a 0600 file and in neither the compose file nor
+#             docker inspect, /media/ is not on the API router; a new secret
+#             key recreates Tandoor; a run without tandoor_s3 is refused
 # The failed install runs at -v, the install and a reconfigure at -vvv, every
 # repeated converge at -v; their output must not hold a test secret. Every
 # successful converge is repeated and must change nothing.
@@ -48,12 +55,19 @@ images=(
   "$(value_of "$traefik_defaults" traefik_socket_proxy_image)"
   "$(sed -n 's/^ *converge_mailpit_image: *//p' "$here/converge.yml")"
 )
+# RustFS and the AWS CLI, for the s3 scenario only.
+s3_images=(
+  "$(value_of "$here/s3.yml" s3_rustfs_image)"
+  "$(value_of "$here/s3.yml" s3_aws_cli_image)"
+)
+s3_secret="$(sed -n 's/^  secret_key: *//p' "$here/s3.yml")"
 admin_password="$(value_of "$here/vars.yml" tandoor_admin_password)"
 # The test secrets, which no run's output may hold.
 secrets=(
   "$(value_of "$here/vars.yml" tandoor_secret_key)"
   "$(value_of "$here/vars.yml" tandoor_db_password)"
   "$admin_password"
+  "$s3_secret"
 )
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
@@ -223,6 +237,12 @@ test_settings() {
   role_fails no-from -e '{"tandoor_email": {"host": "mailpit"}}'
   expect_in_log no-from tandoor_email
   expect_in_log no-from from
+  role_fails s3-no-bucket -e '{"tandoor_s3": {"access_key": "test-access", "secret_key": "test-secret"}}'
+  expect_in_log s3-no-bucket tandoor_s3
+  expect_in_log s3-no-bucket bucket
+  role_fails s3-no-secret -e '{"tandoor_s3": {"access_key": "test-access", "bucket": "recipes"}}'
+  expect_in_log s3-no-secret tandoor_s3
+  expect_in_log s3-no-secret secret_key
   role_fails v1 -e tandoor_version=1.5.0
   expect_in_log v1 tandoor_version
   role_fails v-prefix -e tandoor_version=v2.7.2
@@ -275,6 +295,14 @@ test_install() {
   hx test ! -e "$dir/install-incomplete" || fail "the install kept its marker"
   expect_idempotent
   play "$here/verify.yml"
+
+  echo "== a run with tandoor_s3 on a local installation must be refused before any change"
+  compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  play_fails to-s3 "$here/converge.yml" -e '{"tandoor_s3": {"access_key": "test-access", "secret_key": "test-secret", "bucket": "recipes"}}'
+  expect_in_log to-s3 "records the media of Tandoor as local, but this run sets them to S3"
+  expect_unchanged to-s3
+  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run changed the compose file"
+  hx test ! -e "$dir/s3-secret" || fail "the refused run wrote $dir/s3-secret"
 
   echo "== a run without changes must fail on a stopped container and start nothing"
   hx sh -c "cd $dir && docker compose stop web" >/dev/null 2>&1
@@ -332,12 +360,48 @@ test_router() {
   expect_idempotent
 }
 
+test_s3() {
+  echo "== media in S3"
+  new_host
+  load_images
+  load_set "${s3_images[@]}"
+  # Signed URLs name the endpoint; the test host reaches RustFS's published
+  # port by the name Tandoor uses on the Traefik network.
+  hx sh -c 'echo "127.0.0.1 s3.test" >>/etc/hosts'
+  converge -vvv -e "@$here/s3.yml"
+  expect_no_secrets converge
+  expect_idempotent -e "@$here/s3.yml"
+  hx test ! -e "$dir/data/mediafiles" || fail "an S3 installation has $dir/data/mediafiles"
+  play "$here/verify.yml" -e "@$here/s3.yml"
+
+  echo "== a new S3 secret key must recreate Tandoor"
+  web_before="$(hx sh -c "cd $dir && docker compose ps --quiet web")"
+  converge -e '{"tandoor_s3": {"access_key": "test-s3-access-key", "secret_key": "test-s3-other-key-0", "bucket": "recipes", "endpoint": "http://s3.test:9000", "region": "us-east-1"}}'
+  grep -q "reconfigure.yml" "$out/converge.log" || fail "the new secret key was not a reconfigure"
+  [ "$(hx cat "$dir/s3-secret")" = test-s3-other-key-0 ] || fail "$dir/s3-secret does not hold the new secret key"
+  [ "$(hx sh -c "cd $dir && docker compose ps --quiet web")" != "$web_before" ] || fail "the new secret key did not recreate web"
+  converge -v -e "@$here/s3.yml"
+  expect_no_secrets converge
+  expect_idempotent -e "@$here/s3.yml"
+
+  echo "== a run without tandoor_s3 on an S3 installation must be refused before any change"
+  compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  containers_before="$(containers)"
+  play_fails from-s3 "$here/converge.yml" -v
+  expect_in_log from-s3 "records the media of Tandoor as S3, but this run sets them to local"
+  expect_unchanged from-s3
+  expect_no_secrets from-s3
+  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run changed the compose file"
+  [ "$(containers)" = "$containers_before" ] || fail "the refused run created or removed containers"
+  hx test ! -e "$dir/data/mediafiles" || fail "the refused run created $dir/data/mediafiles"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_TANDOOR_TESTS="settings router"
 # runs only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router}; do
+for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3}; do
   case "$scenario" in
-    settings | install | router) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, router)" ;;
+    settings | install | router | s3) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, router, s3)" ;;
   esac
 done
 

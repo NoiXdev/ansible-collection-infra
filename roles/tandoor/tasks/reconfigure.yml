@@ -1,6 +1,19 @@
 ---
-# Same installation, other settings: the compose file is written, the stack
-# brought to it, and Tandoor checked.
+# Same installation, other settings: the S3 secret file and the compose file
+# are written, the stack brought to them, and Tandoor checked.
+
+# The image reads it on start, and a bind of a single file keeps the old one
+# after the copy replaced it: a new secret key recreates the containers.
+- name: Write the S3 secret file
+  ansible.builtin.copy:
+    dest: "{{ tandoor_s3_secret_file }}"
+    content: "{{ tandoor_s3_settings.secret_key }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  register: tandoor_s3_secret_copy
+  when: tandoor_s3_enabled | bool
 
 - name: Write the compose file
   ansible.builtin.copy:
@@ -18,6 +31,7 @@
     state: present
     pull: missing
     remove_orphans: true
+    recreate: "{{ 'always' if tandoor_s3_secret_copy is changed else 'auto' }}"
 
 - name: Check that Tandoor is healthy
   ansible.builtin.include_tasks: health.yml
