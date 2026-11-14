@@ -10,6 +10,7 @@
 #               (default: host_releases below, "24.04 26.04")
 #   harbor      tests/harbor/run.sh
 #   listmonk    tests/listmonk/run.sh
+#   paperless   tests/paperless/run.sh (Paperless-ngx, Traefik and Samba; about 4 GB of images)
 #   anubis      tests/anubis/run.sh
 #   mailcow     tests/mailcow/run.sh (real mailcow: network, about 5 GB of images)
 #   cloudpanel  tests/cloudpanel/run.sh (CloudPanel's real installer)
@@ -38,7 +39,7 @@ out="$here/output/all"
 # The required suites and the host suite's default releases. tests/attest.sh
 # and .github/scripts/verify-tests-attestation.sh read both lines (keep each
 # on one line): an attestation needs every suite, host once per release.
-all_suites=(e2e host harbor listmonk anubis mailcow cloudpanel)
+all_suites=(e2e host harbor listmonk paperless anubis mailcow cloudpanel)
 host_releases=(24.04 26.04)
 
 usage() {

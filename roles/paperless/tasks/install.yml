@@ -1,0 +1,91 @@
+---
+# A fresh install: the directories (the data subdirectories only here), the
+# files, the stack, then the first admin once Paperless is healthy.
+
+- name: Create the Paperless directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ paperless_dir }}"
+    - "{{ paperless_data_dir }}"
+
+# Samba writes the scans into consume as paperless_uid:paperless_gid; its
+# image makes an empty share 0770, so it is created that way.
+- name: Create the Paperless data directories
+  ansible.builtin.file:
+    path: "{{ paperless_data_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ paperless_uid }}"
+    group: "{{ paperless_gid }}"
+    mode: "{{ '0770' if item == 'consume' else '0750' }}"
+  loop: "{{ paperless_owned_subdirs + [paperless_export_dir | basename] }}"
+
+# PostgreSQL and Valkey run as their own users and chown their data on start.
+- name: Create the database and broker directories
+  ansible.builtin.file:
+    path: "{{ paperless_data_dir }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ paperless_data_subdirs | difference(paperless_owned_subdirs) }}"
+
+- name: Write the compose file and the Samba files
+  ansible.builtin.copy:
+    dest: "{{ item.path }}"
+    content: "{{ item.content }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop: "{{ paperless_files | rejectattr('content', 'none') | list }}"
+  loop_control:
+    label: "{{ item.path }}"
+  # They hold the secret key and the passwords.
+  no_log: true
+
+- name: Start Paperless
+  community.docker.docker_compose_v2:
+    project_src: "{{ paperless_dir }}"
+    state: present
+    pull: missing
+
+- name: Check that Paperless is healthy
+  ansible.builtin.include_tasks: health.yml
+
+- name: Fail when Paperless is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      Paperless {{ paperless_version }} in {{ paperless_dir }} is not healthy
+      within {{ paperless_health_timeout }} seconds
+      ({{ paperless_health_lines | join('; ') }}); see docker compose logs in
+      {{ paperless_dir }}. The first admin is not created yet: remove
+      {{ paperless_dir }} and {{ paperless_data_dir }} to install again.
+  when: not paperless_healthy
+
+# As the paperless user, as the image's own wrappers run manage.py; the
+# password comes from the environment, so it stays out of the compose file
+# and the command line. The e-mail is Paperless' own default for its admin.
+- name: Create the first admin
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - --user=paperless
+      - --env=DJANGO_SUPERUSER_PASSWORD
+      - webserver
+      - python3
+      - manage.py
+      - createsuperuser
+      - --noinput
+      - --username={{ paperless_admin_user }}
+      - --email=root@localhost
+    chdir: "{{ paperless_dir }}"
+  environment:
+    DJANGO_SUPERUSER_PASSWORD: "{{ paperless_admin_password }}"
+  changed_when: true

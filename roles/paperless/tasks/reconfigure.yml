@@ -1,0 +1,54 @@
+---
+# Same version, other settings: the files are written (the Samba files
+# removed when Samba is off), the stack is brought to the compose file,
+# Samba restarted when its files changed (it reads them on start only), and
+# Paperless checked.
+
+- name: Write the changed files
+  ansible.builtin.copy:
+    dest: "{{ item.path }}"
+    content: "{{ item.content }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop: "{{ paperless_files | rejectattr('content', 'none') | list }}"
+  loop_control:
+    label: "{{ item.path }}"
+  # They hold the secret key and the passwords.
+  no_log: true
+
+- name: Remove the Samba files
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ paperless_files | selectattr('content', 'none') | list }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Start Paperless with the new configuration
+  community.docker.docker_compose_v2:
+    project_src: "{{ paperless_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+
+- name: Restart Samba with its new files
+  community.docker.docker_compose_v2:
+    project_src: "{{ paperless_dir }}"
+    services: [samba]
+    state: restarted
+  when:
+    - paperless_samba | bool
+    - paperless_files_changed | intersect([paperless_smb_conf, paperless_samba_pass_file]) | length > 0
+
+- name: Check that Paperless is healthy
+  ansible.builtin.include_tasks: health.yml
+
+- name: Fail when Paperless is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      Paperless in {{ paperless_dir }} is not healthy within
+      {{ paperless_health_timeout }} seconds after the reconfigure
+      ({{ paperless_health_lines | join('; ') }}); see docker compose logs in
+      {{ paperless_dir }}.
+  when: not paperless_healthy

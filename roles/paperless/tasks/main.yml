@@ -1,0 +1,127 @@
+---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
+- name: Check that paperless_secret_key is set
+  ansible.builtin.assert:
+    that: paperless_secret_key | default('') | string | length >= 32
+    fail_msg: paperless_secret_key is required and must have at least 32 characters.
+    quiet: true
+
+- name: Check that paperless_db_password is set
+  ansible.builtin.assert:
+    that: paperless_db_password | default('') | string | length > 0
+    fail_msg: paperless_db_password is required.
+    quiet: true
+
+- name: Check the Samba settings
+  ansible.builtin.assert:
+    that:
+      - paperless_samba_bind | default('') | string | length > 0
+      - paperless_samba_password | default('') | string | length > 0
+      - paperless_samba_password | default('') | string is not search('[\r\n]')
+      - paperless_samba_share is match('^[A-Za-z0-9][A-Za-z0-9_-]*$')
+      - paperless_samba_user is match('^[a-z_][a-z0-9_-]*$')
+    fail_msg: >-
+      With paperless_samba on, paperless_samba_bind (the address port 445 is
+      published on) and paperless_samba_password (one line) are required;
+      paperless_samba_share may hold only letters, digits, - and _, and
+      paperless_samba_user only lowercase letters, digits, - and _.
+    quiet: true
+  when: paperless_samba | bool
+
+# The names end up in compose, Traefik rules and docker filters unquoted.
+- name: Check the paperless settings
+  ansible.builtin.assert:
+    that:
+      - paperless_version is match('^3\.\d+\.\d+$')
+      - paperless_image | length > 0
+      - paperless_dir is match('^/')
+      - paperless_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - paperless_data_dir is match('^/')
+      - paperless_hostname is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+      - paperless_url is match('^https?://')
+      - paperless_traefik_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - paperless_traefik_priority | int >= 1
+      - paperless_trusted_proxy_count | int >= 0
+      - paperless_uid | int >= 0 and paperless_gid | int >= 0
+      - paperless_dumps_keep | int >= 1
+      - paperless_health_timeout | int > 0
+    fail_msg: >-
+      paperless_version must look like 3.X.Y (major 3, no v); paperless_dir
+      and paperless_data_dir must be absolute paths, the basename of
+      paperless_dir (the compose project) only lowercase letters, digits, -
+      and _; paperless_hostname (required) a host name; paperless_url an
+      http(s) URL; paperless_traefik_network a network name;
+      paperless_image must be set; paperless_traefik_priority,
+      paperless_dumps_keep and paperless_health_timeout must be positive,
+      paperless_trusted_proxy_count, paperless_uid and paperless_gid not
+      negative.
+    quiet: true
+
+- name: Check paperless_env
+  ansible.builtin.assert:
+    that:
+      - paperless_env.keys() | reject('match', '^[A-Z][A-Z0-9_]*$') | list | length == 0
+      - paperless_owned | length == 0
+    fail_msg: >-
+      paperless_env keys must be environment variable names (uppercase
+      letters, digits and _), and the role sets these itself:
+      {{ paperless_owned | join(', ') if paperless_owned else 'none' }}.
+      Use the role's variables instead (paperless_db_password,
+      paperless_secret_key, paperless_url, paperless_tika, ...).
+    quiet: true
+  vars:
+    paperless_owned: "{{ paperless_env.keys() | select('in', paperless_env_owned) | list }}"
+
+- name: Read the installation
+  ansible.builtin.include_tasks: state.yml
+
+- name: Check the first admin for the install
+  ansible.builtin.assert:
+    that:
+      - paperless_admin_user | length > 0
+      - paperless_admin_password | length > 0
+    fail_msg: >-
+      Paperless is not installed in {{ paperless_dir }}; a fresh install needs
+      paperless_admin_user and paperless_admin_password.
+    quiet: true
+  when: paperless_state == 'install'
+
+- name: Install Paperless
+  ansible.builtin.include_tasks: install.yml
+  when: paperless_state == 'install'
+
+- name: Reconfigure Paperless
+  ansible.builtin.include_tasks: reconfigure.yml
+  when: paperless_state == 'reconfigure'
+
+# Read-only: a run without changes starts and restarts nothing, but stays red
+# while a container is down.
+- name: Check that Paperless runs
+  when: paperless_state == 'noop'
+  block:
+    - name: Fail when a container is not running
+      ansible.builtin.fail:
+        msg: >-
+          Paperless in {{ paperless_dir }} is down: the services
+          {{ paperless_down | join(', ') }} are not running. The role starts
+          nothing on a run without changes; start them with docker compose up
+          -d in {{ paperless_dir }}.
+      when: paperless_down | length > 0
+
+    - name: Check that Paperless is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Paperless is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Paperless in {{ paperless_dir }} is unhealthy: the webserver and the
+          database are not both healthy within {{ paperless_health_timeout }}
+          seconds ({{ paperless_health_lines | join('; ') }}). The role
+          restarts nothing on a run without changes; see docker compose logs
+          in {{ paperless_dir }}.
+      when: not paperless_healthy

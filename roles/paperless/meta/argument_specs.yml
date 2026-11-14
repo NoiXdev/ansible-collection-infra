@@ -1,0 +1,128 @@
+---
+argument_specs:
+  main:
+    short_description: Paperless-ngx with PostgreSQL, Tika and a scanner share in Docker Compose, behind Traefik
+    # The required settings are not required here: the role's own checks
+    # name them when they are missing.
+    options:
+      paperless_version:
+        type: str
+        description: Paperless-ngx image tag (X.Y.Z, no v); the major must be 3.
+      paperless_image:
+        type: str
+        description: Paperless-ngx image without its tag.
+      paperless_dir:
+        type: path
+        description: >-
+          Directory of the compose project (compose.yaml, smb.conf, markers).
+          Its basename is the compose project name.
+      paperless_data_dir:
+        type: path
+        description: >-
+          Directory of the data (media, data, consume, export, PostgreSQL and
+          Redis data); can be a mountpoint of its own.
+      paperless_data_dir_mountpoint:
+        type: bool
+        description: Fail every run unless paperless_data_dir is a mountpoint.
+      paperless_hostname:
+        type: str
+        description: Host name of the Traefik route (required).
+      paperless_url:
+        type: str
+        description: URL Paperless is reached at (PAPERLESS_URL).
+      paperless_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      paperless_traefik_entrypoints:
+        type: list
+        elements: str
+        description: Traefik entrypoints of the route; empty uses Traefik's default ones.
+      paperless_traefik_priority:
+        type: int
+        description: Priority of the Traefik router; keep it above catch-all routers.
+      paperless_trusted_proxy_count:
+        type: int
+        description: >-
+          Proxies in front of Paperless that add to X-Forwarded-For; the login
+          rate limit reads the client address from it.
+      paperless_secret_key:
+        type: str
+        no_log: true
+        description: Django secret key of Paperless (required, at least 32 characters). Keep it in a vault.
+      paperless_db_password:
+        type: str
+        no_log: true
+        description: Password of the PostgreSQL user (required). Keep it in a vault.
+      paperless_admin_user:
+        type: str
+        description: Name of the first admin; required for a fresh install, unused otherwise.
+      paperless_admin_password:
+        type: str
+        no_log: true
+        description: >-
+          Password of the first admin; required for a fresh install, unused
+          otherwise. Keep it in a vault.
+      paperless_uid:
+        type: int
+        description: User ID Paperless runs as and Samba writes the scans as.
+      paperless_gid:
+        type: int
+        description: Group ID Paperless runs as and Samba writes the scans as.
+      paperless_env:
+        type: dict
+        description: >-
+          More PAPERLESS_* settings for the Paperless container; the settings
+          the role sets itself are refused.
+      paperless_postgres_image:
+        type: str
+        description: PostgreSQL image with its tag.
+      paperless_redis_image:
+        type: str
+        description: Redis-compatible broker image (Valkey) with its tag.
+      paperless_tika_image:
+        type: str
+        description: Apache Tika image with its tag.
+      paperless_gotenberg_image:
+        type: str
+        description: Gotenberg image with its tag.
+      paperless_samba_image:
+        type: str
+        description: Samba image (dockurr/samba) with its tag.
+      paperless_tika:
+        type: bool
+        description: Run Tika and Gotenberg (Office documents and e-mails).
+      paperless_samba:
+        type: bool
+        description: Run the Samba share on the consume directory.
+      paperless_samba_bind:
+        type: str
+        description: Address port 445 is published on (required when Samba is on).
+      paperless_samba_share:
+        type: str
+        description: Name of the share.
+      paperless_samba_user:
+        type: str
+        description: The one Samba user.
+      paperless_samba_password:
+        type: str
+        no_log: true
+        description: Password of the Samba user (required when Samba is on). Keep it in a vault.
+      paperless_samba_min_protocol:
+        type: str
+        choices: [SMB2, SMB2_02, SMB2_10, SMB3, SMB3_00, SMB3_02, SMB3_11]
+        description: The oldest protocol the share offers; SMB1 is never offered.
+      paperless_import_dir:
+        type: str
+        description: >-
+          Export of the same Paperless version to import into an empty
+          installation; empty imports nothing.
+      paperless_import_passphrase:
+        type: str
+        no_log: true
+        description: Passphrase the export was made with; empty for none.
+      paperless_dumps_keep:
+        type: int
+        description: Number of dumps and file snapshots kept before updates.
+      paperless_health_timeout:
+        type: int
+        description: Seconds to wait for the webserver and the database to become healthy.

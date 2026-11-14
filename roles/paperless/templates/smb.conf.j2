@@ -1,0 +1,22 @@
+# Managed by the noixdev.infra.paperless role; changes are overwritten.
+[global]
+   server role = standalone server
+   security = user
+   map to guest = never
+   # SMB2 and newer only; SMB1 (NT1) is never offered.
+   server min protocol = {{ paperless_samba_min_protocol }}
+   smb ports = 445
+   disable netbios = yes
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+   disable spoolss = yes
+
+[{{ paperless_samba_share }}]
+   path = /shared
+   valid users = {{ paperless_samba_user }}
+   browseable = yes
+   writable = yes
+   guest ok = no
+   create mask = 0664
+   directory mask = 0775

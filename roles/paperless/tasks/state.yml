@@ -1,0 +1,79 @@
+---
+# Reads the host and sets paperless_state:
+#   install      no compose file and none of paperless_data_subdirs
+#   reconfigure  a file the role writes (compose file, smb.conf, Samba
+#                password) differs from the one on disk
+#   noop         everything as the role writes it
+# Also sets paperless_installed (a compose file exists),
+# paperless_compose_before (the compose file on disk, which
+# paperless_installed_version reads), paperless_files_changed (the paths of
+# the files that differ) and paperless_down (the expected services that are
+# not running). Changes nothing; refuses data without a compose file.
+
+- name: Read the files the role writes
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ paperless_files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: paperless_files_read
+  failed_when: false
+  # They hold the secret key and the passwords.
+  no_log: true
+
+- name: Look for the data subdirectories
+  ansible.builtin.stat:
+    path: "{{ paperless_data_dir }}/{{ item }}"
+    get_checksum: false
+  loop: "{{ paperless_data_subdirs }}"
+  register: paperless_subdirs_stat
+
+# Each file on disk (none when it is missing) against the one the role
+# writes (none when it must not exist).
+- name: Note what is on the host
+  ansible.builtin.set_fact:
+    paperless_compose_before: "{{ paperless_compose_read.content | default('') | b64decode }}"
+    paperless_installed: "{{ paperless_compose_read.content is defined }}"
+    paperless_files_changed: >-
+      {%- set changed = [] -%}
+      {%- for read in paperless_files_read.results -%}
+      {%-   set before = read.content | b64decode if read.content is defined else none -%}
+      {%-   if before != read.item.content -%}
+      {%-     set _ = changed.append(read.item.path) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ changed }}
+    paperless_data_found: >-
+      {{ paperless_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
+  vars:
+    paperless_compose_read: >-
+      {{ paperless_files_read.results | selectattr('item.path', 'equalto', paperless_compose_file) | first }}
+  no_log: true
+
+- name: Refuse data without a compose file
+  ansible.builtin.fail:
+    msg: >-
+      Paperless data is in {{ paperless_data_dir }}
+      ({{ paperless_data_found | join(', ') }}), but there is no compose file
+      {{ paperless_compose_file }}. The role does not install over it; move
+      it away, or put back the compose file that uses it.
+  when:
+    - not paperless_installed
+    - paperless_data_found | length > 0
+
+- name: Read the services that run
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
+    chdir: "{{ paperless_dir }}"
+  register: paperless_ps
+  changed_when: false
+  when: paperless_installed
+
+- name: Decide what to do
+  ansible.builtin.set_fact:
+    paperless_down: >-
+      {{ paperless_services | difference(paperless_ps.stdout_lines | default([])) }}
+    paperless_state: >-
+      {{ 'install' if not paperless_installed
+         else 'reconfigure' if paperless_files_changed | length > 0
+         else 'noop' }}

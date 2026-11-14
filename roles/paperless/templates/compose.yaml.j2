@@ -1,0 +1,138 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+{#- A bind mount that compose must not create: a missing data directory (an
+    unmounted volume) stops the container instead of starting it empty. -#}
+{%- macro bind(source, target, read_only=false) %}
+      - type: bind
+        source: {{ q(source) }}
+        target: {{ q(target) }}
+{% if read_only %}
+        read_only: true
+{% endif %}
+        bind:
+          create_host_path: false
+{%- endmacro %}
+{%- set env = {
+  'PAPERLESS_DBENGINE': 'postgresql',
+  'PAPERLESS_DBHOST': 'db',
+  'PAPERLESS_DBNAME': 'paperless',
+  'PAPERLESS_DBUSER': 'paperless',
+  'PAPERLESS_DBPASS': paperless_db_password,
+  'PAPERLESS_REDIS': 'redis://broker:6379',
+  'PAPERLESS_SECRET_KEY': paperless_secret_key,
+  'PAPERLESS_URL': paperless_url,
+  'PAPERLESS_ALLAUTH_TRUSTED_PROXY_COUNT': paperless_trusted_proxy_count,
+  'PAPERLESS_TIKA_ENABLED': 'true' if paperless_tika | bool else 'false',
+  'USERMAP_UID': paperless_uid,
+  'USERMAP_GID': paperless_gid,
+  'PAPERLESS_CONSUMPTION_DIR': paperless_container_dirs.consume,
+  'PAPERLESS_DATA_DIR': paperless_container_dirs.data,
+  'PAPERLESS_MEDIA_ROOT': paperless_container_dirs.media,
+} -%}
+{%- if paperless_tika | bool -%}
+{%-   set _ = env.update({
+        'PAPERLESS_TIKA_ENDPOINT': 'http://tika:9998',
+        'PAPERLESS_TIKA_GOTENBERG_ENDPOINT': 'http://gotenberg:3000',
+      }) -%}
+{%- endif -%}
+# Managed by the noixdev.infra.paperless role; changes are overwritten.
+services:
+  broker:
+    image: {{ q(paperless_redis_image) }}
+    volumes:
+{{ bind(paperless_data_dir ~ '/redis', '/data') }}
+    restart: unless-stopped
+
+  db:
+    image: {{ q(paperless_postgres_image) }}
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: {{ q(paperless_db_password) }}
+    healthcheck:
+      test: [CMD, pg_isready, -U, paperless, -d, paperless]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    volumes:
+{{ bind(paperless_data_dir ~ '/postgres', '/var/lib/postgresql') }}
+    restart: unless-stopped
+
+  webserver:
+    image: {{ q(paperless_image ~ ':' ~ paperless_version) }}
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_started
+{% if paperless_tika | bool %}
+      gotenberg:
+        condition: service_started
+      tika:
+        condition: service_started
+{% endif %}
+    environment:
+{% for key, value in env | dictsort %}
+      {{ key }}: {{ q(value) }}
+{% endfor %}
+{% for key, value in paperless_env | dictsort %}
+      {{ key }}: {{ q(value | lower if value is boolean else value) }}
+{% endfor %}
+    volumes:
+{{ bind(paperless_data_dir ~ '/data', paperless_container_dirs.data) }}
+{{ bind(paperless_data_dir ~ '/media', paperless_container_dirs.media) }}
+{{ bind(paperless_data_dir ~ '/consume', paperless_container_dirs.consume) }}
+{{ bind(paperless_export_dir, paperless_container_dirs.export) }}
+    networks: [default, traefik]
+    # No published port: Traefik reaches the web UI over its network.
+    labels:
+      - traefik.enable=true
+      - {{ q('traefik.docker.network=' ~ paperless_traefik_network) }}
+      - {{ q('traefik.http.routers.' ~ paperless_project ~ '.rule=Host(`' ~ paperless_hostname ~ '`)') }}
+{% if paperless_traefik_entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ paperless_project ~ '.entrypoints=' ~ paperless_traefik_entrypoints | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ paperless_project ~ '.priority=' ~ paperless_traefik_priority) }}
+      - {{ q('traefik.http.routers.' ~ paperless_project ~ '.service=' ~ paperless_project) }}
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - {{ q('traefik.http.services.' ~ paperless_project ~ '.loadbalancer.server.port=8000') }}
+    restart: unless-stopped
+{% if paperless_tika | bool %}
+
+  gotenberg:
+    image: {{ q(paperless_gotenberg_image) }}
+    # Only local files from Paperless; no JavaScript in the documents.
+    command:
+      - gotenberg
+      - "--chromium-disable-javascript=true"
+      - "--chromium-allow-list=^file:///tmp/.*"
+    restart: unless-stopped
+
+  tika:
+    image: {{ q(paperless_tika_image) }}
+    restart: unless-stopped
+{% endif %}
+{% if paperless_samba | bool %}
+
+  # The scanner share: one user on the consume directory, writing as
+  # paperless_uid:paperless_gid so Paperless can read and delete the scans.
+  samba:
+    image: {{ q(paperless_samba_image) }}
+    environment:
+      USER: {{ q(paperless_samba_user) }}
+      UID: {{ q(paperless_uid) }}
+      GID: {{ q(paperless_gid) }}
+    ports:
+      - {{ q(('[' ~ paperless_samba_bind ~ ']' if ':' in paperless_samba_bind else paperless_samba_bind) ~ ':445:445') }}
+    volumes:
+{{ bind(paperless_data_dir ~ '/consume', '/shared') }}
+{{ bind(paperless_smb_conf, '/etc/samba/smb.conf', true) }}
+{{ bind(paperless_samba_pass_file, '/run/secrets/pass', true) }}
+    restart: unless-stopped
+{% endif %}
+
+networks:
+  traefik:
+    name: {{ q(paperless_traefik_network) }}
+    external: true

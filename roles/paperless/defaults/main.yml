@@ -1,0 +1,75 @@
+---
+# Paperless-ngx release (tag of ghcr.io/paperless-ngx/paperless-ngx, X.Y.Z
+# without a v); the major must be 3.
+paperless_version: 3.4.2
+paperless_image: ghcr.io/paperless-ngx/paperless-ngx
+
+# Directory of the compose project (compose.yaml, smb.conf, markers). Its
+# basename is the compose project name.
+paperless_dir: /opt/paperless
+# The data: media, data (index, classifier), consume, export, PostgreSQL and
+# Redis data, one subdirectory each. It can be a mountpoint of its own (a
+# block volume); paperless_data_dir_mountpoint: true then fails every run
+# unless it is one.
+paperless_data_dir: "{{ paperless_dir }}/data"
+paperless_data_dir_mountpoint: false
+
+# The web UI, only through Traefik: paperless_hostname is required.
+paperless_hostname: ""
+paperless_url: https://{{ paperless_hostname }}
+# Traefik: external network and entrypoints of the route; empty entrypoints
+# use Traefik's default ones. The priority keeps the route above catch-all
+# routers such as the traefik role's error pages routes (priority 1 and 2).
+paperless_traefik_network: proxy
+paperless_traefik_entrypoints: []
+paperless_traefik_priority: 100
+# Proxies in front of Paperless that add to X-Forwarded-For (Traefik: 1).
+# Paperless' login rate limit reads the client address from it.
+paperless_trusted_proxy_count: 1
+
+# paperless_secret_key (at least 32 characters) and paperless_db_password are
+# required and have no default; keep them in a vault.
+
+# The first admin, created on a fresh install only (required there).
+paperless_admin_user: ""
+paperless_admin_password: ""
+
+# User and group Paperless runs as and owns its files with; Samba writes the
+# scans as the same IDs, so Paperless can read and delete them.
+paperless_uid: 1000
+paperless_gid: 1000
+
+# More PAPERLESS_* settings for the Paperless container (OCR language, time
+# zone, filename format, ...). The settings the role sets itself are refused.
+paperless_env: {}
+
+paperless_postgres_image: docker.io/library/postgres:18
+paperless_redis_image: docker.io/valkey/valkey:9-alpine
+paperless_tika_image: docker.io/apache/tika:3.3.1.0
+paperless_gotenberg_image: docker.io/gotenberg/gotenberg:8.38
+paperless_samba_image: docker.io/dockurr/samba:4.23.10
+
+# Tika and Gotenberg: Office documents and e-mails.
+paperless_tika: true
+
+# A Samba share on the consume directory, for scanners. Port 445 is
+# published on paperless_samba_bind only (required when Samba is on; Docker
+# bypasses the host firewall). paperless_samba_password is required when
+# Samba is on and has no default; keep it in a vault.
+paperless_samba: true
+paperless_samba_bind: ""
+paperless_samba_share: consume
+paperless_samba_user: scanner
+# The oldest protocol the share offers; SMB1 (NT1) is never offered.
+paperless_samba_min_protocol: SMB2
+
+# An export of the same Paperless version to import into an empty
+# installation, and the passphrase it was exported with.
+paperless_import_dir: ""
+paperless_import_passphrase: ""
+
+# Dumps and file snapshots taken before every update; the newest
+# paperless_dumps_keep are kept.
+paperless_dumps_keep: 3
+# Seconds to wait for the webserver and the database to become healthy.
+paperless_health_timeout: 300

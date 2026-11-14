@@ -1,0 +1,92 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  vars:
+    paperless_dir: /opt/paperless
+    verify_services: [broker, db, gotenberg, samba, tika, webserver]
+    verify_base: http://127.0.0.1
+    verify_headers:
+      Host: paperless.test
+  tasks:
+    - name: Find the containers of the compose project
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, label=com.docker.compose.project=paperless]
+      register: verify_ids
+      changed_when: false
+
+    - name: Inspect the containers
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'inspect'] + verify_ids.stdout_lines }}"
+      register: verify_inspect
+      changed_when: false
+
+    - name: Stat the compose file
+      ansible.builtin.stat:
+        path: "{{ paperless_dir }}/compose.yaml"
+      register: verify_compose
+
+    - name: Check the containers, their ports and environment, and the compose file
+      ansible.builtin.assert:
+        that:
+          - containers | sort == verify_services
+          - containers.values() | map(attribute='State.Running') | select | list | length == verify_services | length
+          - web.State.Health.Status == 'healthy'
+          # No published port: the web UI is reached through Traefik only.
+          - web.HostConfig.PortBindings | default({}, true) | length == 0
+          - "samba.HostConfig.PortBindings == {'445/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '445'}]}"
+          - "'NOIX_TEST=a$b' in web.Config.Env"
+          - "'PAPERLESS_OCR_LANGUAGE=eng' in web.Config.Env"
+          - ('PAPERLESS_DBPASS=' ~ paperless_db_password) in web.Config.Env
+          - ('POSTGRES_PASSWORD=' ~ paperless_db_password) in containers.db.Config.Env
+          - "'PAPERLESS_TIKA_ENABLED=true' in web.Config.Env"
+          - "'PAPERLESS_TIKA_ENDPOINT=http://tika:9998' in web.Config.Env"
+          - "'PAPERLESS_TIKA_GOTENBERG_ENDPOINT=http://gotenberg:3000' in web.Config.Env"
+          - web.Config.Env | select('match', 'PAPERLESS_ADMIN_') | list | length == 0
+          - verify_compose.stat.mode == '0600'
+        fail_msg: "{{ verify_inspect.stdout }}"
+        quiet: true
+      vars:
+        containers: >-
+          {%- set found = {} -%}
+          {%- for c in verify_inspect.stdout | from_json -%}
+          {%-   set _ = found.update({c.Config.Labels['com.docker.compose.service']: c}) -%}
+          {%- endfor -%}
+          {{ found }}
+        web: "{{ containers.webserver }}"
+        samba: "{{ containers.samba }}"
+
+    - name: Read the documents through Traefik as the admin
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/documents/"
+        headers: "{{ verify_headers }}"
+        url_username: "{{ paperless_admin_user }}"
+        url_password: "{{ paperless_admin_password }}"
+        force_basic_auth: true
+        status_code: [200]
+
+    # Paperless' login rate limit reads the client address from
+    # X-Forwarded-For, which Traefik adds; untrusted, the form answers 403.
+    - name: Open the login form through Traefik
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/accounts/login/"
+        headers: "{{ verify_headers }}"
+        return_content: true
+      register: verify_login_form
+
+    - name: Log in through Traefik
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/accounts/login/"
+        method: POST
+        headers: "{{ verify_headers | combine({'Cookie': 'csrftoken=' ~ verify_login_form.cookies.csrftoken}) }}"
+        body_format: form-urlencoded
+        body:
+          csrfmiddlewaretoken: "{{ verify_csrf_field.split('value=\"')[1].split('\"')[0] }}"
+          login: "{{ paperless_admin_user }}"
+          password: "{{ paperless_admin_password }}"
+        follow_redirects: none
+        status_code: [302]
+      vars:
+        verify_csrf_field: >-
+          {{ verify_login_form.content | regex_search('name="csrfmiddlewaretoken" value="[^"]+"') }}

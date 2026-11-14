@@ -1,0 +1,23 @@
+---
+# Test-only values; nothing here is a real secret. The database password
+# holds characters that need quoting in YAML and compose ($, ', "), and
+# paperless_env a $ that compose must not interpolate.
+traefik_dir: /opt/traefik
+# One plain-HTTP entrypoint: no TLS, so no ACME e-mail.
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+    as_default: true
+
+paperless_hostname: paperless.test
+paperless_url: http://paperless.test
+paperless_secret_key: test-secret-key-00000000000000000000000000
+paperless_db_password: test-db-pa$s'w"ord-0
+paperless_admin_user: admin
+paperless_admin_password: Test-admin-password-0
+paperless_samba_bind: 127.0.0.1
+paperless_samba_password: Test-scanner-password-0
+paperless_env:
+  PAPERLESS_OCR_LANGUAGE: eng
+  NOIX_TEST: a$b

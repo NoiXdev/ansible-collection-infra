@@ -1,0 +1,30 @@
+---
+# Waits up to paperless_health_timeout seconds until the webserver and the
+# database report the health status healthy, and sets paperless_healthy and
+# paperless_health_lines (service, state and health of each container).
+# Never fails by itself.
+
+- name: Note when the health check starts
+  ansible.builtin.set_fact:
+    paperless_health_start: "{{ now().timestamp() }}"
+
+# retries is an upper bound (every attempt takes at least the delay); the
+# deadline ends the wait after paperless_health_timeout seconds.
+- name: Wait until the webserver and the database are healthy
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --all, --format, "{{ '{{.Service}} {{.State}} {{.Health}}' }}"]
+    chdir: "{{ paperless_dir }}"
+  register: paperless_health
+  until: >-
+    ['webserver running healthy', 'db running healthy'] | difference(paperless_health.stdout_lines | default([])) | length == 0
+    or now().timestamp() - paperless_health_start | float >= paperless_health_timeout | int
+  retries: "{{ (paperless_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Note whether Paperless is healthy
+  ansible.builtin.set_fact:
+    paperless_health_lines: "{{ paperless_health.stdout_lines | default([]) | sort }}"
+    paperless_healthy: >-
+      {{ ['webserver running healthy', 'db running healthy'] | difference(paperless_health.stdout_lines | default([])) | length == 0 }}

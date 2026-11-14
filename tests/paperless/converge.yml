@@ -1,0 +1,11 @@
+---
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  vars:
+    # false runs the paperless role alone (the refusals need no Traefik).
+    converge_traefik: true
+  roles:
+    - role: noixdev.infra.traefik
+      when: converge_traefik | bool
+    - noixdev.infra.paperless

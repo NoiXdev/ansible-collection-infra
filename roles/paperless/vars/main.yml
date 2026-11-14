@@ -1,0 +1,87 @@
+---
+# The compose project name: compose's default for the directory.
+paperless_project: "{{ paperless_dir | basename }}"
+# Mode 0600: it holds the secret key and the database password.
+paperless_compose_file: "{{ paperless_dir }}/compose.yaml"
+paperless_smb_conf: "{{ paperless_dir }}/smb.conf"
+# Mode 0600; mounted at /run/secrets/pass, where the Samba image reads the
+# user's password from.
+paperless_samba_pass_file: "{{ paperless_dir }}/samba-pass"
+
+# The subdirectories of paperless_data_dir whose absence means the data is
+# missing (an unmounted volume): only install and import create them, and the
+# containers bind them with create_host_path false.
+paperless_data_subdirs: [media, data, consume, postgres, redis]
+# Owned by paperless_uid:paperless_gid; postgres and redis belong to their
+# images, which chown them on start.
+paperless_owned_subdirs: [media, data, consume]
+# Not in paperless_data_subdirs: an empty export directory is no data.
+paperless_export_dir: "{{ paperless_data_dir }}/export"
+# Database dumps and file snapshots before an update; on the filesystem of
+# media, so that the snapshot of media can be a hard-link copy.
+paperless_backup_dir: "{{ paperless_data_dir }}/backups"
+# Written after a failed update; that version is not tried again while it
+# exists.
+paperless_marker_file: "{{ paperless_dir }}/update-failed"
+# Written after an import, so a run with the same paperless_import_dir is not
+# a second import.
+paperless_import_record: "{{ paperless_dir }}/imported.yml"
+
+# The Paperless version of the compose file on disk (the tag of the
+# webserver image), empty when there is none. paperless_compose_before is set
+# by state.yml.
+paperless_installed_version: >-
+  {%- set compose = paperless_compose_before | default('', true) | from_yaml if paperless_compose_before | default('', true) else {} -%}
+  {%- set image = (((compose if compose is mapping else {}).services | default({})).webserver | default({})).image | default('') | string -%}
+  {{ image.rpartition(':')[2] if ':' in image.rpartition('/')[2] else '' }}
+
+# Container paths of the Paperless image.
+paperless_container_dirs:
+  data: /usr/src/paperless/data
+  media: /usr/src/paperless/media
+  consume: /usr/src/paperless/consume
+  export: /usr/src/paperless/export
+
+# The settings the role sets itself; paperless_env must not hold them. The
+# admin is created with createsuperuser on install, never from the
+# environment.
+paperless_env_owned:
+  - PAPERLESS_DBENGINE
+  - PAPERLESS_DBHOST
+  - PAPERLESS_DBNAME
+  - PAPERLESS_DBUSER
+  - PAPERLESS_DBPASS
+  - PAPERLESS_REDIS
+  - PAPERLESS_SECRET_KEY
+  - PAPERLESS_URL
+  - PAPERLESS_TIKA_ENABLED
+  - PAPERLESS_TIKA_ENDPOINT
+  - PAPERLESS_TIKA_GOTENBERG_ENDPOINT
+  - PAPERLESS_ALLAUTH_TRUSTED_PROXY_COUNT
+  - USERMAP_UID
+  - USERMAP_GID
+  - PAPERLESS_ADMIN_USER
+  - PAPERLESS_ADMIN_PASSWORD
+  - PAPERLESS_CONSUMPTION_DIR
+  - PAPERLESS_DATA_DIR
+  - PAPERLESS_MEDIA_ROOT
+
+# The compose services the configuration runs.
+paperless_services: >-
+  {{ ['broker', 'db', 'webserver']
+     + (['gotenberg', 'tika'] if paperless_tika | bool else [])
+     + (['samba'] if paperless_samba | bool else []) }}
+
+# The files as the role writes them; compared with the ones on disk. none
+# means the file must not exist (Samba off).
+paperless_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
+paperless_files:
+  - path: "{{ paperless_compose_file }}"
+    content: "{{ paperless_compose }}"
+    mode: "0600"
+  - path: "{{ paperless_smb_conf }}"
+    content: "{{ lookup('ansible.builtin.template', 'smb.conf.j2') if paperless_samba | bool else none }}"
+    mode: "0644"
+  - path: "{{ paperless_samba_pass_file }}"
+    content: "{{ paperless_samba_password | default('') if paperless_samba | bool else none }}"
+    mode: "0600"
