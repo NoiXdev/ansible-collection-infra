@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end test of the paperless role on throwaway Docker-in-Docker hosts
 # (a fresh one per scenario): the refusals of invalid settings before any
-# change; a fresh install behind Traefik (API and login form through Traefik,
-# no published HTTP port, Samba on 127.0.0.1 only, a $ reaching the container
-# verbatim), a scan written over the Samba share that Paperless consumes, SMB1
+# change; a failed install (a pull that fails) that every later run refuses
+# until it is removed; a fresh install behind Traefik (API and login form
+# through Traefik, no published HTTP port, Samba on 127.0.0.1 only, a $
+# reaching the container verbatim), a scan written over the Samba share that Paperless consumes, SMB1
 # refused, a reconfigure of the share, and a run without changes that fails on
 # a stopped container. Every successful converge is repeated and must change
 # nothing.
@@ -136,10 +137,30 @@ role_fails no-admin -e paperless_admin_user= -e paperless_admin_password=
 expect_in_log no-admin paperless_admin_user
 hx test ! -e "$dir" || fail "paperless touched the host before refusing its settings"
 
-echo "== install"
+echo "== a failed install must be refused until it is removed"
 new_host
 load_images
+# A release that does not exist: the pull fails after the compose file is written.
+play_fails install-failed "$here/converge.yml" -e paperless_version=3.99.0
+expect_in_log install-failed "The install of Paperless 3.99.0 in $dir failed (Start Paperless:"
+expect_in_log install-failed "docker compose down in $dir"
+hx test -e "$dir/install-incomplete" || fail "the failed install left no marker"
+compose_before="$(hx sha256sum "$dir/compose.yaml")"
+containers_before="$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)"
+play_fails install-incomplete "$here/converge.yml"
+expect_in_log install-incomplete "$dir/install-incomplete exists"
+expect_in_log install-incomplete "docker compose down in $dir"
+expect_unchanged install-incomplete
+[ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run changed the compose file"
+[ "$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)" = "$containers_before" ] \
+  || fail "the refused run created or removed containers"
+# As the message says; the install then starts afresh.
+hx sh -c "cd $dir && docker compose down" >/dev/null 2>&1
+hx rm -rf "$dir"
+
+echo "== install"
 converge
+hx test ! -e "$dir/install-incomplete" || fail "the install kept its marker"
 expect_idempotent
 play "$here/verify.yml"
 

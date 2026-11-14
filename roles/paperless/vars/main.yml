@@ -23,6 +23,9 @@ paperless_backup_dir: "{{ paperless_data_dir }}/backups"
 # Written after a failed update; that version is not tried again while it
 # exists.
 paperless_marker_file: "{{ paperless_dir }}/update-failed"
+# Written before an install creates anything in paperless_data_dir and
+# removed once the first admin exists; while it exists every run refuses.
+paperless_install_marker: "{{ paperless_dir }}/install-incomplete"
 # Written after an import, so a run with the same paperless_import_dir is not
 # a second import.
 paperless_import_record: "{{ paperless_dir }}/imported.yml"
@@ -85,3 +88,20 @@ paperless_files:
   - path: "{{ paperless_samba_pass_file }}"
     content: "{{ paperless_samba_password | default('') if paperless_samba | bool else none }}"
     mode: "0600"
+
+# In a rescue: the failed task and the first line of its error (the last line
+# of stderr for a command that only says it failed).
+paperless_failure: >-
+  {{ ansible_failed_task.name }}:
+  {{ ((ansible_failed_result.stderr | default('') | trim).splitlines() or ['']) | last
+     if ansible_failed_result.msg | default('') is search('non-zero return code')
+     else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
+
+# After a failed install: nothing in it is worth keeping (no admin, no
+# documents yet), so it is removed and the next run installs afresh.
+paperless_install_hint: >-
+  It left a partial installation, which the role does not take for a
+  finished one. To install again, run docker compose down in
+  {{ paperless_dir }} (if {{ paperless_compose_file }} exists), remove
+  {{ paperless_data_dir }} (only its contents when it is a mountpoint) and
+  {{ paperless_dir }}, then run the role again.

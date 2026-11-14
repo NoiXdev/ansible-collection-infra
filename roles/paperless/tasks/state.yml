@@ -8,7 +8,23 @@
 # paperless_compose_before (the compose file on disk, which
 # paperless_installed_version reads), paperless_files_changed (the paths of
 # the files that differ) and paperless_down (the expected services that are
-# not running). Changes nothing; refuses data without a compose file.
+# not running). Changes nothing; refuses an install that did not complete
+# and data without a compose file.
+
+- name: Look for the marker of an install in progress
+  ansible.builtin.stat:
+    path: "{{ paperless_install_marker }}"
+    get_checksum: false
+  register: paperless_install_marker_stat
+
+- name: Refuse an install that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_install_marker }} exists: an install of Paperless in
+      {{ paperless_dir }} did not complete, so the first admin may be
+      missing and the database half made. The role changes nothing.
+      {{ paperless_install_hint }}
+  when: paperless_install_marker_stat.stat.exists
 
 - name: Read the files the role writes
   ansible.builtin.slurp:
