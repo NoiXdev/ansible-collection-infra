@@ -18,6 +18,11 @@
 # unchanged, a downgrade and another PostgreSQL major refused; and an update
 # to an image that exits at once: rolled back with the document, the marker
 # that blocks the failed version, and the update once the marker is removed.
+# Then the data: left-over data without a compose file refused, and an
+# installation whose data directories are gone (an unmounted volume) refused
+# in every state without creating anything; with
+# paperless_data_dir_mountpoint a data directory that is not a mountpoint
+# refused, and an install onto one (a tmpfs) without Samba and Tika.
 # Every successful converge is repeated and must change nothing.
 # NOIXDEV_INFRA_PAPERLESS_TESTS selects scenarios (see the end of the file).
 # The single-quoted scripts expand inside the container, not here.
@@ -460,12 +465,90 @@ test_failed_update() {
   expect_idempotent
 }
 
+test_missing_data() {
+  echo "== left-over data without a compose file must be refused before any change"
+  new_host
+  hx mkdir -p "$dir/data/postgres"
+  tree() { hx sh -c "find $dir -exec stat -c '%n %a %u %g %s %Y' {} + | sort"; }
+  before="$(tree)"
+  role_fails leftover
+  expect_in_log leftover "left-over data"
+  expect_in_log leftover "$dir/data (postgres)"
+  expect_unchanged leftover
+  [ "$(tree)" = "$before" ] || fail "the refused run changed $dir"
+  hx rm -rf "$dir"
+
+  echo "== a missing data volume must be refused in every state and nothing created"
+  load_images
+  converge
+  hx sh -c "cd $dir && docker compose stop" >/dev/null 2>&1
+  # As an unmounted volume leaves it: its mountpoint, empty.
+  hx mv "$dir/data" "$dir/data.away"
+  hx mkdir "$dir/data"
+  if hx sh -c "cd $dir && docker compose start" >"$out/start-missing.log" 2>&1; then
+    fail "docker compose start succeeded without the data directories"
+  fi
+  [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet")" ] || fail "a container runs without the data directories"
+  compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  # missing_refused <name> [extra vars...]
+  missing_refused() {
+    local name="$1"
+    shift
+    play_fails "$name" "$here/converge.yml" "$@"
+    expect_in_log "$name" "$dir/data lacks media, data, consume, postgres, redis"
+    expect_in_log "$name" "is the volume mounted?"
+    expect_unchanged "$name"
+    [ -z "$(hx ls -A "$dir/data")" ] || fail "the refused run $name created in $dir/data: $(hx ls -A "$dir/data")"
+    [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run $name changed the compose file"
+    [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet")" ] || fail "the refused run $name started a container"
+  }
+  # A run without changes, a reconfigure (another share setting), an update
+  # (a newer version) and an import.
+  missing_refused missing-data
+  missing_refused missing-data-reconfigure -e paperless_samba_min_protocol=SMB3
+  missing_refused missing-data-update -e paperless_version=3.99.0
+  missing_refused missing-data-import -e "paperless_import_dir=$import"
+
+  echo "== with the data back the installation must run as before"
+  hx rmdir "$dir/data"
+  hx mv "$dir/data.away" "$dir/data"
+  hx sh -c "cd $dir && docker compose start" >/dev/null 2>&1
+  expect_idempotent
+}
+
+test_mountpoint() {
+  echo "== paperless_data_dir_mountpoint must refuse a data directory that is not a mountpoint"
+  new_host
+  mountpoint_vars=(-e '{"paperless_data_dir_mountpoint": true, "paperless_samba": false, "paperless_tika": false}')
+  role_fails not-mountpoint "${mountpoint_vars[@]}"
+  expect_in_log not-mountpoint "$dir/data is not a mountpoint"
+  expect_in_log not-mountpoint "is the volume mounted?"
+  hx test ! -e "$dir" || fail "the refused run created $dir"
+  hx mkdir -p "$dir/data"
+  role_fails not-mountpoint-dir "${mountpoint_vars[@]}"
+  expect_in_log not-mountpoint-dir "$dir/data is not a mountpoint"
+  [ -z "$(hx ls -A "$dir/data")" ] || fail "the refused run created in $dir/data: $(hx ls -A "$dir/data")"
+  [ "$(hx ls -A "$dir")" = data ] || fail "the refused run created in $dir: $(hx ls -A "$dir")"
+
+  echo "== install onto a mountpoint, without Samba and Tika"
+  hx mount -t tmpfs tmpfs "$dir/data"
+  load_images
+  converge "${mountpoint_vars[@]}"
+  hx mountpoint -q "$dir/data" || fail "$dir/data is no longer a mountpoint"
+  hx sh -c "find $dir/data/postgres -name PG_VERSION | grep -q ." || fail "the database is not on the mountpoint"
+  services="$(hx sh -c "cd $dir && docker compose ps --all --format '{{.Service}}'" | sort | tr '\n' ' ')"
+  [ "$services" = "broker db webserver " ] || fail "the services without Samba and Tika: $services"
+  if hx docker ps --format '{{.Ports}}' | grep -q ':445'; then fail "port 445 is published without Samba"; fi
+  hx test ! -e "$dir/smb.conf" || fail "smb.conf was written without Samba"
+  expect_idempotent "${mountpoint_vars[@]}"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_PAPERLESS_TESTS="update failed_update"
 # runs only these (import needs install in the same run).
-for scenario in ${NOIXDEV_INFRA_PAPERLESS_TESTS:-settings install import update failed_update}; do
+for scenario in ${NOIXDEV_INFRA_PAPERLESS_TESTS:-settings install import update failed_update missing_data mountpoint}; do
   case "$scenario" in
-    settings | install | import | update | failed_update) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, import, update, failed_update)" ;;
+    settings | install | import | update | failed_update | missing_data | mountpoint) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, import, update, failed_update, missing_data, mountpoint)" ;;
   esac
 done
 

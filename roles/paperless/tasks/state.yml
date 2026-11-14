@@ -13,48 +13,36 @@
 # disk, which a rollback puts back), paperless_files_changed (the paths of
 # the files that differ) and paperless_down (the expected services that are
 # not running). With an import record, paperless_import_dir is ignored.
-# Changes nothing; refuses an install or import that did not complete, data
-# without a compose file, a compose file without a Paperless version, a
+# Changes nothing; refuses, before anything else, a paperless_data_dir that is
+# not a mountpoint (with paperless_data_dir_mountpoint) and a compose file
+# without all of paperless_data_subdirs (an unmounted volume); then an
+# install or import that did not complete, left-over data without a compose
+# file, a compose file without a Paperless version, a
 # downgrade, a PostgreSQL major other than the database's, and an import
 # into an installation (no record), of an export outside
 # paperless_export_dir, without a manifest, of another Paperless version, or
 # made with a passphrase that is not given.
 
-- name: Read the marker of an install or import in progress
-  ansible.builtin.slurp:
-    src: "{{ paperless_install_marker }}"
-  register: paperless_install_marker_read
+# A block volume that is not mounted leaves its mountpoint as an empty
+# directory on the root filesystem; an install there would put the data
+# beside the volume.
+- name: Check that the data directory is a mountpoint
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ paperless_data_dir }}"]
+  register: paperless_data_dir_mounted
+  changed_when: false
   failed_when: false
+  when: paperless_data_dir_mountpoint | bool
 
-- name: Note what the marker is from
-  ansible.builtin.set_fact:
-    paperless_incomplete_source: >-
-      {{ (paperless_incomplete.source | default('') if paperless_incomplete is mapping else '') | string }}
-  when: paperless_install_marker_read.content is defined
-  vars:
-    paperless_incomplete: "{{ paperless_install_marker_read.content | b64decode | from_yaml }}"
-
-# An import's marker names its source.
-- name: Refuse an import that did not complete
+- name: Refuse a data directory that is not a mountpoint
   ansible.builtin.fail:
     msg: >-
-      {{ paperless_install_marker }} exists: an import of
-      {{ paperless_incomplete_source }} into Paperless in {{ paperless_dir }}
-      did not complete, so the installation is not empty (the database may
-      be half filled) and the import needs a fresh installation. The role
-      changes nothing. {{ paperless_import_hint }}
+      paperless_data_dir_mountpoint is on, but {{ paperless_data_dir }} is
+      not a mountpoint: is the volume mounted? The role changes nothing.
+      Mount the volume at {{ paperless_data_dir }}, then run the role again.
   when:
-    - paperless_install_marker_read.content is defined
-    - paperless_incomplete_source | length > 0
-
-- name: Refuse an install that did not complete
-  ansible.builtin.fail:
-    msg: >-
-      {{ paperless_install_marker }} exists: an install of Paperless in
-      {{ paperless_dir }} did not complete, so the first admin may be
-      missing and the database half made. The role changes nothing.
-      {{ paperless_install_hint }}
-  when: paperless_install_marker_read.content is defined
+    - paperless_data_dir_mountpoint | bool
+    - paperless_data_dir_mounted.rc != 0
 
 - name: Read the files the role writes
   ansible.builtin.slurp:
@@ -96,13 +84,68 @@
       {{ paperless_files_read.results | selectattr('item.path', 'equalto', paperless_compose_file) | first }}
   no_log: true
 
+# Only install and import create the subdirectories, and the containers do
+# not create a missing one, so their absence beside a compose file is data
+# that is not there (an unmounted volume), never a state to repair.
+- name: Refuse an installation without its data
+  ansible.builtin.fail:
+    msg: >-
+      Paperless is installed in {{ paperless_dir }} ({{ paperless_compose_file }}),
+      but {{ paperless_data_dir }} lacks {{ paperless_data_missing | join(', ') }}:
+      is the volume mounted? The role changes nothing and creates none of
+      them. Mount the volume (or put the data back) at
+      {{ paperless_data_dir }}, then run the role again.
+  vars:
+    # In the order of paperless_data_subdirs, which difference does not keep.
+    paperless_data_missing: "{{ paperless_data_subdirs | reject('in', paperless_data_found) | list }}"
+  when:
+    - paperless_installed
+    - paperless_data_missing | length > 0
+
+- name: Read the marker of an install or import in progress
+  ansible.builtin.slurp:
+    src: "{{ paperless_install_marker }}"
+  register: paperless_install_marker_read
+  failed_when: false
+
+- name: Note what the marker is from
+  ansible.builtin.set_fact:
+    paperless_incomplete_source: >-
+      {{ (paperless_incomplete.source | default('') if paperless_incomplete is mapping else '') | string }}
+  when: paperless_install_marker_read.content is defined
+  vars:
+    paperless_incomplete: "{{ paperless_install_marker_read.content | b64decode | from_yaml }}"
+
+# An import's marker names its source.
+- name: Refuse an import that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_install_marker }} exists: an import of
+      {{ paperless_incomplete_source }} into Paperless in {{ paperless_dir }}
+      did not complete, so the installation is not empty (the database may
+      be half filled) and the import needs a fresh installation. The role
+      changes nothing. {{ paperless_import_hint }}
+  when:
+    - paperless_install_marker_read.content is defined
+    - paperless_incomplete_source | length > 0
+
+- name: Refuse an install that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_install_marker }} exists: an install of Paperless in
+      {{ paperless_dir }} did not complete, so the first admin may be
+      missing and the database half made. The role changes nothing.
+      {{ paperless_install_hint }}
+  when: paperless_install_marker_read.content is defined
+
 - name: Refuse data without a compose file
   ansible.builtin.fail:
     msg: >-
       Paperless data is in {{ paperless_data_dir }}
       ({{ paperless_data_found | join(', ') }}), but there is no compose file
-      {{ paperless_compose_file }}. The role does not install over it; move
-      it away, or put back the compose file that uses it.
+      {{ paperless_compose_file }}. The role does not install over left-over
+      data and changes nothing; move it away, or put back the compose file
+      that uses it.
   when:
     - not paperless_installed
     - paperless_data_found | length > 0
