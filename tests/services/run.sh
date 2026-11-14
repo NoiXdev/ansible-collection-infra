@@ -60,11 +60,12 @@ play() {
 
 # converge ROLE NAME PLAYBOOK [args]: the run must pass, and a second one must
 # change nothing. The logs are $out/ROLE-NAME.log and
-# $out/ROLE-NAME-idempotence.log.
+# $out/ROLE-NAME-idempotence.log, with stdout and stderr (warnings and errors
+# go to stderr, and the secrets checks read these logs).
 converge() {
   local role="$1" name="$2"; shift 2
-  play "$role" "$@" | tee "$out/$role-$name.log"
-  play "$role" "$@" | tee "$out/$role-$name-idempotence.log"
+  play "$role" "$@" 2>&1 | tee "$out/$role-$name.log"
+  play "$role" "$@" 2>&1 | tee "$out/$role-$name-idempotence.log"
   grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/$role-$name-idempotence.log" \
     || fail "$role/$name: the second converge changed something"
 }
@@ -226,11 +227,13 @@ no_secret() {
 }
 
 # sql ROLE STATEMENT: run a statement as root over the socket, without
-# column names.
-sql() { hx "$1" mariadb -N -e "$2"; }
+# column names and raw (batch output would print \ as \\).
+sql() { hx "$1" mariadb -N -r -e "$2"; }
 
 suite_mariadb() {
-  local dir="$here/mariadb" version bound log grants
+  local dir="$here/mariadb" version bound log grants policy rc denied
+  local empty='{"mariadb_users": [], "mariadb_databases": []}'
+  local app_password=$'a\'b"c\\d$e%f g'
   # Parts of the test passwords that their raw and JSON-escaped forms share.
   local secrets=("a'b" '$e%f g' 'rep0rt-pass' "pa ss'%\$")
   local rotated='{"mariadb_test_app_password": "n3w\"pa ss'"'"'%$\\x"}'
@@ -247,6 +250,9 @@ suite_mariadb() {
     "$dir/converge.yml" -e '{"mariadb_test_extra_databases": [{"name": "d", "charset": "utf8mb4"}]}'
   refused mariadb collation "mariadb: mariadb_databases entry d has encoding latin1 and collation utf8mb4_unicode_ci; the collation must belong to the encoding" \
     "$dir/converge.yml" -e '{"mariadb_test_extra_databases": [{"name": "d", "encoding": "latin1"}]}'
+  refused mariadb password-typo "mariadb: mariadb_users entry x has unknown keys (pasword); its keys are name, password, host and privileges" \
+    "$dir/converge.yml" -v -e '{"mariadb_users": [{"name": "x", "password": "p", "pasword": "s3cr3t-typo", "privileges": []}]}'
+  no_secret "$out/mariadb-password-typo.log" s3cr3t-typo
   for key in bind-address bind_address port socket; do
     refused mariadb "settings-$key" "mariadb: mariadb_settings sets $key; bind-address, port and socket belong to the role (mariadb_bind_address sets the address)" \
       "$dir/converge.yml" -e "{\"mariadb_settings\": {\"$key\": \"0.0.0.0\"}}"
@@ -254,12 +260,44 @@ suite_mariadb() {
   hx mariadb sh -c 'test ! -e /usr/sbin/mariadbd && test ! -e /etc/apt/sources.list.d/mariadb.sources' \
     || fail "mariadb: a refused run installed something"
 
+  echo "== mariadb: a run whose repository refresh failed is not followed by another series"
+  # The first run adds the source and the pin, then its refresh fails: the
+  # package lists stay without the vendor's packages.
+  hx mariadb sh -c 'echo "127.0.0.1 deb.mariadb.org" >> /etc/hosts'
+  if play mariadb "$dir/converge.yml" -e "$empty" >"$out/mariadb-blocked.log" 2>&1; then
+    fail "mariadb: the run with deb.mariadb.org unreachable did not fail"
+  fi
+  hx mariadb sh -c 'grep -v deb.mariadb.org /etc/hosts > /tmp/hosts && cat /tmp/hosts > /etc/hosts'
+  hx mariadb test -e /etc/apt/sources.list.d/mariadb.sources || fail "mariadb: the blocked run did not add the source"
+  hx mariadb sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}" mariadb-server 2>/dev/null | grep -q "^.i"' \
+    || fail "mariadb: the blocked run installed mariadb-server"
+  converge mariadb stale-lists "$dir/converge.yml" -e "$empty"
+  version="$(hx mariadb dpkg-query -W -f='${Version}' mariadb-server)"
+  case "$version" in
+    *+maria~*) echo "   installed the vendor's $version" ;;
+    *) fail "mariadb: after a failed refresh the role installed $version, not the vendor's" ;;
+  esac
+  # The vendor's versions win by origin; every other version of the MariaDB
+  # packages (the distro's 11.8 on 26.04 too) is never installed.
+  policy="$(hx mariadb apt-cache policy mariadb-server mysql-common)"
+  awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
+         if ((v ~ /\+maria~/ && p != 990) || (v !~ /\+maria~/ && p != -1)) { print v, p; bad = 1 } }
+       END { exit bad }' <<<"$policy" || fail "mariadb: the pin gives the wrong priorities: $policy"
+
   echo "== mariadb: converge (the first run with --diff -v) and idempotence"
   converge mariadb install "$dir/converge.yml" --diff -v
   play mariadb "$dir/verify.yml"
   sql mariadb 'SELECT 1' >/dev/null || fail "mariadb: root cannot log in over the socket"
   bound="$(hx mariadb ss -Hltn 'sport = :3306' | awk '{print $4}' | sort -u | paste -sd' ' -)"
   [ "$bound" = "127.0.0.1:3306" ] || fail "mariadb: the server listens on '$bound', not 127.0.0.1:3306 only"
+
+  echo "== mariadb: the default grant covers the user's own database only, not one that _ matches"
+  sql mariadb 'CREATE DATABASE appXproduction'
+  rc=0
+  denied="$(hx mariadb mariadb -u app_production "--password=$app_password" -e 'CREATE TABLE appXproduction.t (id INT)' 2>&1)" || rc=$?
+  { [ "$rc" != 0 ] && grep -q 'denied' <<<"$denied"; } || fail "mariadb: app_production can use appXproduction (rc $rc): $denied"
+  hx mariadb mariadb -u app_production "--password=$app_password" -e 'CREATE TABLE IF NOT EXISTS app_production.own (id INT)' \
+    || fail "mariadb: app_production cannot use its own database"
 
   echo "== mariadb: an unknown setting fails before the restart, the server keeps running"
   refused mariadb unknown-setting "failed to validate" "$dir/converge.yml" -e '{"mariadb_settings": {"max_conections": 200}}'
@@ -276,13 +314,22 @@ suite_mariadb() {
     no_secret "$out/mariadb-$log.log" "${secrets[@]}"
   done
 
-  echo "== mariadb: a grant added by hand is revoked"
+  echo "== mariadb: grants added by hand are revoked, on other targets and on the listed one"
+  # report lists app_production.*:SELECT; the role grants it on the escaped
+  # target, so the hand grants go on both spellings.
   sql mariadb "GRANT SELECT ON mysql.* TO 'report'@'localhost'"
-  sql mariadb "SHOW GRANTS FOR 'report'@'localhost'" | grep -qF '`mysql`.*' || fail "mariadb: the hand grant did not apply"
+  for target in '`app_production`.*' '`app\_production`.*'; do
+    sql mariadb "GRANT INSERT ON $target TO 'report'@'localhost'"
+    sql mariadb "GRANT SELECT ON $target TO 'report'@'localhost' WITH GRANT OPTION"
+  done
+  grants="$(sql mariadb "SHOW GRANTS FOR 'report'@'localhost'")"
+  { grep -qF '`mysql`.*' <<<"$grants" && grep -qF 'WITH GRANT OPTION' <<<"$grants"; } \
+    || fail "mariadb: the hand grants did not apply: $grants"
   converge mariadb hand-grant "$dir/converge.yml" -e "$rotated"
   grants="$(sql mariadb "SHOW GRANTS FOR 'report'@'localhost'")"
-  ! grep -qF '`mysql`' <<<"$grants" || fail "mariadb: the hand grant on mysql.* is still there: $grants"
-  grep -qF 'GRANT SELECT ON `app_production`.*' <<<"$grants" || fail "mariadb: report lost its listed grant: $grants"
+  { [ "$(wc -l <<<"$grants" | tr -d ' ')" = 2 ] && grep -q '^GRANT USAGE ON \*\.\* TO `report`@`localhost`' <<<"$grants" \
+      && [ "$(sed -n 2p <<<"$grants")" = 'GRANT SELECT ON `app\_production`.* TO `report`@`localhost`' ]; } \
+    || fail "mariadb: report's grants are not exactly the listed one: $grants"
 
   echo "== mariadb: a user that leaves the list stays"
   converge mariadb no-report "$dir/converge.yml" -e "$rotated" -e mariadb_test_report=false

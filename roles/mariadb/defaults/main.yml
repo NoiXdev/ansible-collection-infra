@@ -28,7 +28,9 @@ mariadb_databases: []
 # Users. On every run the role sets each listed user's password and exactly
 # its listed privileges ("<db>.<table>:<privs>"; grants added by hand are
 # revoked). privileges defaults to ["<name>.*:ALL"] when mariadb_databases
-# lists a database of the user's name, and is required otherwise.
+# lists a database of the user's name, and is required otherwise. Names are
+# literal: in "<db>.*" the role escapes _ and %, which the server would read as
+# wildcards (app_production.* covers app_production, not appXproduction).
 #   - name: app_production
 #     password: "{{ vault_mariadb_app_production }}"
 #   - name: report

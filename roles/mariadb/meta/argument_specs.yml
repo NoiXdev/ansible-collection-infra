@@ -66,3 +66,7 @@ argument_specs:
             each <db>.<table> once. It defaults to ["<name>.*:ALL"] when mariadb_databases lists a
             database of the user's name, and is required otherwise. An empty list leaves the user
             with USAGE only.
+          - >-
+            Names are literal. In a database-level target (<db>.*) the server reads _ and % as
+            wildcards, so the role escapes them: app_production.* covers app_production only,
+            not appXproduction. Wildcard targets and backslashes are not supported.

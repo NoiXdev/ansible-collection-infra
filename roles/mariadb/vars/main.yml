@@ -15,12 +15,20 @@ mariadb_database_keys: [name, encoding, collation]
 mariadb_user_keys: [name, password, host, privileges]
 mariadb_database_names: "{{ mariadb_databases | map(attribute='name', default='') | list }}"
 
-# The user list without the passwords, for every loop that does not set
-# one: a loop prints its items with -v.
+# The packages the apt pin covers: the server, its libraries and mysql-common,
+# which the vendor ships as well.
+mariadb_apt_packages: mariadb-* libmariadb* libmysqlclient18 mysql-common
+
+# The user list with only the keys that hold no secret, for every loop that
+# does not set a password: a loop prints its items with -v. A misspelled
+# password key is left out too; it shows up by name in mariadb_users_key_names.
+mariadb_user_public_keys: [name, host, privileges]
 mariadb_users_public: >-
   {{ mariadb_users | map('dict2items')
-     | map('rejectattr', 'key', 'eq', 'password') | map('list')
+     | map('selectattr', 'key', 'in', mariadb_user_public_keys) | map('list')
      | map('items2dict') | list }}
+# The key names of each entry, in list order (no values).
+mariadb_users_key_names: "{{ mariadb_users | map('dict2items') | map('map', attribute='key') | map('list') | list }}"
 # Per entry, in list order: "set" when it has a password, "" when not
 # (nothing of the password itself).
 mariadb_users_password_set: >-

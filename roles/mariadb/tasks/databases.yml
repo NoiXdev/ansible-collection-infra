@@ -16,13 +16,27 @@
 # The listed password and exactly the listed privileges, on every run:
 # a changed password reaches the server, and grants added by hand are
 # revoked. A user that left the list stays.
+# In a database-level grant (<db>.*) _ and % are wildcards: app_production.*
+# would also cover appXproduction. The role escapes them there, so a listed
+# name means that database only; SHOW GRANTS returns the same escaped form.
 - name: Create the users
   ansible.mysql.mysql_user:
     name: "{{ item.name }}"
     host: "{{ item.host | default('localhost') }}"
     password: "{{ item.password }}"
     update_password: always
-    priv: "{{ mariadb_privileges | join('/') if mariadb_privileges | length > 0 else '*.*:USAGE' }}"
+    priv: >-
+      {%- set ns = namespace(targets=[]) -%}
+      {%- for entry in mariadb_privileges -%}
+      {%- set target = entry | regex_replace(':[^:]*$', '') -%}
+      {%- set db = target | regex_replace('[.][^.]*$', '') -%}
+      {%- set table = target | regex_replace('^.*[.]', '') -%}
+      {%- if table == '*' and db != '*' -%}
+      {%- set db = db | replace('_', '\\_') | replace('%', '\\%') -%}
+      {%- endif -%}
+      {%- set ns.targets = ns.targets + [db ~ '.' ~ table ~ ':' ~ (entry | regex_replace('^[^:]*:', ''))] -%}
+      {%- endfor -%}
+      {{ ns.targets | join('/') if ns.targets | length > 0 else '*.*:USAGE' }}
     append_privs: false
     state: present
     login_user: root

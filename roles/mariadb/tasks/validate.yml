@@ -96,7 +96,7 @@
     quiet: true
   vars:
     mariadb_entry: "{{ item.name | default('#' ~ (mariadb_index + 1)) }}"
-    mariadb_unknown: "{{ item.keys() | difference(mariadb_user_keys) | sort }}"
+    mariadb_unknown: "{{ mariadb_users_key_names[mariadb_index] | difference(mariadb_user_keys) | sort }}"
     mariadb_host: "{{ item.host | default('localhost') }}"
     mariadb_same_user: >-
       {{ mariadb_users_public | selectattr('name', 'defined') | selectattr('name', 'eq', item.name | default(''))
@@ -124,12 +124,12 @@
     that:
       - mariadb_privileges is sequence and mariadb_privileges is not string and mariadb_privileges is not mapping
       - mariadb_privileges | reject('string') | list | length == 0
-      - mariadb_privileges | reject('match', '^[^./:]+[.][^./:]+:[^/:]+$') | list | length == 0
+      - mariadb_privileges | reject('match', '^[^./:\\\\]+[.][^./:\\\\]+:[^/:]+$') | list | length == 0
       - mariadb_targets | length == mariadb_targets | unique | length
     fail_msg: >-
       mariadb: mariadb_users entry {{ item.name }} has invalid privileges; they are a
       list of "<db>.<table>:<privs>" such as "app_production.*:SELECT,INSERT",
-      each <db>.<table> once
+      each <db>.<table> once, with names as they are (no backslash escapes)
     quiet: true
   vars:
     mariadb_privileges: "{{ item.privileges }}"
