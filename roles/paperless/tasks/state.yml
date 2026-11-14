@@ -3,18 +3,22 @@
 #   import       paperless_import_dir set, no import record, and no compose
 #                file nor any of paperless_data_subdirs
 #   install      no compose file and none of paperless_data_subdirs
+#   update       paperless_version is newer than the installed version
 #   reconfigure  a file the role writes (compose file, smb.conf, Samba
 #                password) differs from the one on disk
 #   noop         everything as the role writes it
 # Also sets paperless_installed (a compose file exists),
 # paperless_compose_before (the compose file on disk, which
-# paperless_installed_version reads), paperless_files_changed (the paths of
+# paperless_installed_version reads), paperless_files_read (the files on
+# disk, which a rollback puts back), paperless_files_changed (the paths of
 # the files that differ) and paperless_down (the expected services that are
 # not running). With an import record, paperless_import_dir is ignored.
 # Changes nothing; refuses an install or import that did not complete, data
-# without a compose file, and an import into an installation (no record), of
-# an export outside paperless_export_dir, without a manifest, of another
-# Paperless version, or made with a passphrase that is not given.
+# without a compose file, a compose file without a Paperless version, a
+# downgrade, a PostgreSQL major other than the database's, and an import
+# into an installation (no record), of an export outside
+# paperless_export_dir, without a manifest, of another Paperless version, or
+# made with a passphrase that is not given.
 
 - name: Read the marker of an install or import in progress
   ansible.builtin.slurp:
@@ -102,6 +106,69 @@
   when:
     - not paperless_installed
     - paperless_data_found | length > 0
+
+- name: Check the installed version
+  when: paperless_installed
+  block:
+    - name: Check that the compose file names the Paperless version
+      ansible.builtin.assert:
+        that: paperless_installed_version is match('^\d+\.\d+\.\d+$')
+        fail_msg: >-
+          The webserver image in {{ paperless_compose_file }} has no tag X.Y.Z,
+          so the role cannot tell which Paperless version is installed and
+          changes nothing. Put back the compose file the role wrote.
+        quiet: true
+
+    # Paperless cannot migrate its database down.
+    - name: Refuse a downgrade
+      ansible.builtin.fail:
+        msg: >-
+          paperless_version {{ paperless_version }} is lower than the
+          installed version {{ paperless_installed_version }} in
+          {{ paperless_dir }}; the role refuses to downgrade, Paperless cannot
+          migrate its database down, and changes nothing. Set
+          paperless_version to {{ paperless_installed_version }} or newer.
+      when: paperless_version is version(paperless_installed_version, '<')
+
+# The PostgreSQL image keeps its cluster in a directory per major below the
+# mount (18/docker from PostgreSQL 18 on, data before): another major starts
+# an empty cluster or none at all, so the database's PG_VERSION must name the
+# major of paperless_postgres_image. Up to three levels deep, above the
+# PG_VERSION files of the databases inside a cluster.
+- name: Look for the PostgreSQL cluster
+  ansible.builtin.find:
+    paths: "{{ paperless_data_dir }}/postgres"
+    patterns: [PG_VERSION]
+    file_type: file
+    recurse: true
+    depth: 3
+  register: paperless_pg_version_files
+  when: "'postgres' in paperless_data_found"
+
+- name: Read the PostgreSQL major of the cluster
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ paperless_pg_version_files.files | default([]) | map(attribute='path') | sort }}"
+  register: paperless_pg_version_read
+
+- name: Refuse another PostgreSQL major
+  ansible.builtin.fail:
+    msg: >-
+      paperless_postgres_image {{ paperless_postgres_image }} is PostgreSQL
+      {{ paperless_postgres_major }}, but the database in
+      {{ paperless_data_dir }}/postgres is PostgreSQL
+      {{ paperless_pg_majors | join(' and ') }}
+      ({{ paperless_pg_version_read.results | map(attribute='item') | join(', ') }}).
+      A new major does not read the old cluster; the role changes nothing.
+      Set paperless_postgres_image back to PostgreSQL
+      {{ paperless_pg_majors | join(' or ') }}, or upgrade the cluster
+      (pg_upgrade, or a dump restored into the new major) first.
+  vars:
+    paperless_pg_majors: >-
+      {{ paperless_pg_version_read.results | map(attribute='content') | map('b64decode') | map('trim') | unique | list }}
+  when:
+    - paperless_pg_majors | length > 0
+    - paperless_postgres_major not in paperless_pg_majors
 
 - name: Look for the import record
   ansible.builtin.stat:
@@ -225,5 +292,6 @@
     paperless_state: >-
       {{ 'import' if paperless_import_wanted | bool
          else 'install' if not paperless_installed
+         else 'update' if paperless_version is version(paperless_installed_version, '>')
          else 'reconfigure' if paperless_files_changed | length > 0
          else 'noop' }}

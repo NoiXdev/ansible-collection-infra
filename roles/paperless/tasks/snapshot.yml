@@ -1,0 +1,75 @@
+---
+# The backup before an update, with the webserver and Samba stopped:
+# paperless_backup_dir/<UTC time>-<installed version>/ (mode 0700) with
+# paperless.dump (pg_dump -Fc, read back in full with pg_restore), data/ (a
+# full copy), media/ (a hard-link copy, cp -al: same filesystem, no space)
+# and compose.yaml (the compose file it ran with). Made below <name>.partial
+# and renamed once complete; sets paperless_backup last, so a failure before
+# that has changed nothing but the partial directory, which the caller
+# removes.
+
+- name: Create the backup directory
+  ansible.builtin.file:
+    path: "{{ paperless_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Name the backup
+  ansible.builtin.set_fact:
+    paperless_backup_next: >-
+      {{ paperless_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ paperless_installed_version }}
+
+- name: Create the partial backup
+  ansible.builtin.file:
+    path: "{{ paperless_backup_next }}.partial"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# Over the local socket of the database container, which needs no password.
+- name: Dump the database
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 077
+      dump={{ (paperless_backup_next ~ '.partial/paperless.dump') | quote }}
+      docker compose exec -T db pg_dump --format=custom --username=paperless --dbname=paperless >"$dump"
+      docker compose exec -T db pg_restore --file=/dev/null <"$dump"
+    chdir: "{{ paperless_dir }}"
+  changed_when: true
+
+- name: Copy the data and media directories
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [cp, -a, "{{ paperless_data_dir }}/data", "{{ paperless_backup_next }}.partial/data"]
+    - [cp, -al, "{{ paperless_data_dir }}/media", "{{ paperless_backup_next }}.partial/media"]
+  changed_when: true
+
+- name: Keep the compose file with the backup
+  ansible.builtin.copy:
+    dest: "{{ paperless_backup_next }}.partial/compose.yaml"
+    content: "{{ paperless_compose_before }}"
+    owner: root
+    group: root
+    mode: "0600"
+  # It holds the secret key and the database password.
+  diff: false
+
+# Not into a backup of that name (the same second), which mv would move it
+# into.
+- name: Complete the backup
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      backup={{ paperless_backup_next | quote }}
+      if [ -e "$backup" ]; then echo "$backup exists" >&2; exit 1; fi
+      mv "$backup.partial" "$backup"
+  changed_when: true
+
+- name: Note the backup
+  ansible.builtin.set_fact:
+    paperless_backup: "{{ paperless_backup_next }}"

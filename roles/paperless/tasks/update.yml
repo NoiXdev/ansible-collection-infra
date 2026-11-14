@@ -1,0 +1,176 @@
+---
+# The pin is newer than the installed version. The new image first (a failed
+# pull changes nothing); then the webserver and Samba stopped, the backup
+# (snapshot.yml: dump, data, media), the files written with the new version,
+# the stack started (Paperless migrates its schema on start) and checked, and
+# the backups pruned to the newest paperless_dumps_keep. A failure before the
+# backup is complete removes the partial backup, starts the stack as it was
+# and fails. After it, restore.yml rolls back to the backup, the marker
+# paperless_marker_file names the failed version, and the run fails.
+
+- name: Update Paperless
+  vars:
+    paperless_new_image: "{{ paperless_image }}:{{ paperless_version }}"
+  block:
+    - name: Look for the image of Paperless {{ paperless_version }}
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ paperless_new_image }}"]
+      register: paperless_new_image_local
+      changed_when: false
+      failed_when: false
+
+    - name: Pull Paperless {{ paperless_version }}
+      ansible.builtin.command:
+        argv: [docker, pull, --quiet, "{{ paperless_new_image }}"]
+      changed_when: true
+      when: paperless_new_image_local.rc != 0
+
+    # Nothing writes to the database or the files during the backup.
+    - name: Stop the webserver and Samba for the update
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'compose', 'stop'] + (['webserver', 'samba'] | intersect(paperless_services_before)) }}"
+        chdir: "{{ paperless_dir }}"
+      changed_when: true
+
+    - name: Back up the database and the files
+      ansible.builtin.include_tasks: snapshot.yml
+
+    - name: Write the files with Paperless {{ paperless_version }}
+      ansible.builtin.copy:
+        dest: "{{ item.path }}"
+        content: "{{ item.content }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop: "{{ paperless_files | rejectattr('content', 'none') | list }}"
+      loop_control:
+        label: "{{ item.path }}"
+      # They hold the secret key and the passwords.
+      no_log: true
+
+    - name: Remove the Samba files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ paperless_files | selectattr('content', 'none') | list }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Start Paperless {{ paperless_version }}
+      community.docker.docker_compose_v2:
+        project_src: "{{ paperless_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that Paperless is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Paperless is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Paperless {{ paperless_version }} is not healthy within
+          {{ paperless_health_timeout }} seconds ({{ paperless_health_lines | join('; ') }})
+      when: not paperless_healthy
+
+  rescue:
+    - name: Note what failed
+      ansible.builtin.set_fact:
+        paperless_update_error: "{{ paperless_failure | trim }}"
+
+    - name: Recover from a failure before the backup was complete
+      when: paperless_backup is not defined
+      block:
+        - name: Remove the partial backup
+          ansible.builtin.file:
+            path: "{{ paperless_backup_next }}.partial"
+            state: absent
+          when: paperless_backup_next is defined
+
+        # The compose file is still the one the run started with.
+        - name: Start Paperless again
+          block:
+            - name: Start the installed Paperless again
+              community.docker.docker_compose_v2:
+                project_src: "{{ paperless_dir }}"
+                state: present
+          rescue:
+            - name: Note the failed start
+              ansible.builtin.set_fact:
+                paperless_restart_error: "{{ paperless_failure | trim }}"
+
+        - name: Fail when the update failed before the backup
+          ansible.builtin.fail:
+            msg: >-
+              The Paperless update from {{ paperless_installed_version }} to
+              {{ paperless_version }} in {{ paperless_dir }} failed before
+              anything changed ({{ paperless_update_error }}).
+              {{ ('Paperless ' ~ paperless_installed_version ~ ' was started again.')
+                 if paperless_restart_error is not defined
+                 else ('Starting Paperless ' ~ paperless_installed_version ~ ' again failed too ('
+                       ~ paperless_restart_error ~ '); start it with docker compose up -d in '
+                       ~ paperless_dir ~ '.') }}
+
+    - name: Roll back to the backup
+      ansible.builtin.include_tasks: restore.yml
+
+    # Written whether or not the rollback worked: the failed version is not
+    # tried again on the next run.
+    - name: Write the marker of the failed update
+      ansible.builtin.copy:
+        dest: "{{ paperless_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.paperless role: the update to
+          # failed_version failed. The role does not try that version again
+          # while this file exists; remove it to retry.
+          {{ {'failed_version': paperless_version,
+              'rolled_back_to': paperless_installed_version if paperless_healthy else none,
+              'backup': paperless_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')}
+             | combine({} if paperless_healthy else {'restore_error': paperless_restore_error})
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Fail with the rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Paperless update from {{ paperless_installed_version }} to
+          {{ paperless_version }} in {{ paperless_dir }} failed, rolled back to
+          {{ paperless_installed_version }} ({{ paperless_update_error }}). The
+          role restored the database and the files from the backup
+          {{ paperless_backup }} with the previous compose file; what the
+          failed attempt left is in {{ paperless_backup }}-failed. It does not
+          try {{ paperless_version }} again while {{ paperless_marker_file }}
+          exists: remove it to retry, or set paperless_version to another
+          version.
+      when: paperless_healthy
+
+    - name: Fail with the failed rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Paperless update from {{ paperless_installed_version }} to
+          {{ paperless_version }} in {{ paperless_dir }} failed
+          ({{ paperless_update_error }}), and rolling back to
+          {{ paperless_installed_version }} failed too
+          ({{ paperless_restore_error }}), so Paperless may be down.
+          {{ paperless_restore_hint }} {{ paperless_marker_file }} stops
+          further updates to {{ paperless_version }}; remove it once Paperless
+          runs again.
+
+# Only after a successful update; the names start with the time, so they
+# sort by age. <backup>-failed directories of rolled back updates stay.
+- name: Find the backups
+  ansible.builtin.find:
+    paths: "{{ paperless_backup_dir }}"
+    file_type: directory
+    patterns: ['^\d{8}T\d{6}Z-\d+\.\d+\.\d+$']
+    use_regex: true
+  register: paperless_backups
+
+- name: Remove the oldest backups
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (paperless_backups.files | map(attribute='path') | sort)[: -(paperless_dumps_keep | int)] }}"

@@ -46,6 +46,18 @@ paperless_installed_version: >-
   {%- set image = (((compose if compose is mapping else {}).services | default({})).webserver | default({})).image | default('') | string -%}
   {{ image.rpartition(':')[2] if ':' in image.rpartition('/')[2] else '' }}
 
+# The services of the compose file on disk.
+paperless_services_before: >-
+  {%- set compose = paperless_compose_before | default('', true) | from_yaml if paperless_compose_before | default('', true) else {} -%}
+  {{ ((compose if compose is mapping else {}).services | default({})) | list }}
+
+# The PostgreSQL major of paperless_postgres_image: the leading digits of its
+# tag (postgres:18, postgres:18.1-alpine), empty without them. It must match
+# the PG_VERSION of the database in paperless_data_dir/postgres.
+paperless_postgres_major: >-
+  {%- set name = (paperless_postgres_image | string).split('@')[0].rpartition('/')[2] -%}
+  {{ (name.rpartition(':')[2] if ':' in name else '') | regex_search('^[0-9]+') | default('', true) }}
+
 # Container paths of the Paperless image.
 paperless_container_dirs:
   data: /usr/src/paperless/data
@@ -128,3 +140,16 @@ paperless_import_hint: >-
   {{ paperless_data_subdirs[-1] }} of {{ paperless_data_dir }} (only these:
   keep {{ paperless_export_dir }}, which holds the export), then run the role
   again.
+
+# After a failed rollback: how to put the backup back by hand.
+paperless_restore_hint: >-
+  Roll back by hand in {{ paperless_dir }}: run docker compose stop
+  webserver; recreate the database (docker compose exec -T db psql -U
+  paperless -d postgres -c 'DROP DATABASE IF EXISTS paperless WITH (FORCE)'
+  -c 'CREATE DATABASE paperless OWNER paperless') and load the dump with
+  docker compose exec -T db pg_restore --single-transaction -U paperless -d
+  paperless < {{ paperless_backup | default('?') }}/paperless.dump; put
+  {{ paperless_backup | default('?') }}/data and media back in place of
+  {{ paperless_data_dir }}/data and media (cp -a, and cp -al for media); copy
+  {{ paperless_backup | default('?') }}/compose.yaml to
+  {{ paperless_compose_file }}; then run docker compose up -d.

@@ -84,6 +84,16 @@ services:
 {{ bind(paperless_data_dir ~ '/media', paperless_container_dirs.media) }}
 {{ bind(paperless_data_dir ~ '/consume', paperless_container_dirs.consume) }}
 {{ bind(paperless_export_dir, paperless_container_dirs.export) }}
+    # The image's own check, probed every 5 seconds while Paperless starts
+    # instead of after 30, so a start (install, update, rollback) is seen
+    # healthy as soon as Paperless answers.
+    healthcheck:
+      test: [CMD, curl, -fsS, -L, --max-time, "2", http://localhost:8000]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+      start_interval: 5s
     networks: [default, traefik]
     # No published port: Traefik reaches the web UI over its network.
     labels:

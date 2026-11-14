@@ -39,6 +39,7 @@
     that:
       - paperless_version is match('^3\.\d+\.\d+$')
       - paperless_image | length > 0
+      - paperless_postgres_major | length > 0
       - paperless_dir is match('^/')
       - paperless_project is match('^[a-z0-9][a-z0-9_-]*$')
       - paperless_data_dir is match('^/')
@@ -56,7 +57,9 @@
       paperless_dir (the compose project) only lowercase letters, digits, -
       and _; paperless_hostname (required) a host name; paperless_url an
       http(s) URL; paperless_traefik_network a network name;
-      paperless_image must be set; paperless_traefik_priority,
+      paperless_image must be set, paperless_postgres_image with a tag that
+      starts with the PostgreSQL major (postgres:18, postgres:18.1-alpine);
+      paperless_traefik_priority,
       paperless_dumps_keep and paperless_health_timeout must be positive,
       paperless_trusted_proxy_count, paperless_uid and paperless_gid not
       negative.
@@ -80,6 +83,48 @@
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
 
+# Written by update.yml after a failed update; it names the failed version.
+- name: Read the marker of a failed update
+  ansible.builtin.slurp:
+    src: "{{ paperless_marker_file }}"
+  register: paperless_marker_read
+  failed_when: false
+
+# A marker that is not YAML cannot say which version failed.
+- name: Check the marker of a failed update
+  when: paperless_marker_read.content is defined
+  block:
+    - name: Parse the marker
+      ansible.builtin.set_fact:
+        paperless_marker_yaml: "{{ paperless_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Fail on a marker that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ paperless_marker_file }} exists, but it is not YAML, so the role
+          cannot tell which Paperless update failed and changes nothing. Check
+          Paperless, then remove the file (rm {{ paperless_marker_file }}).
+
+# A marker that names no version blocks every version.
+- name: Refuse the version of a failed update
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_marker_file }} exists: the Paperless update to
+      {{ paperless_version }} failed on {{ paperless_marker.time | default('?') }}
+      ({{ paperless_marker_outcome }}; backup {{ paperless_marker.backup | default('?') }}).
+      The role does not try {{ paperless_version }} again and changes nothing
+      while the marker names it. To try again, remove it (rm
+      {{ paperless_marker_file }}); or set paperless_version to another
+      version, and the marker is removed once a run with it succeeds.
+  vars:
+    paperless_marker: "{{ paperless_marker_yaml if paperless_marker_yaml is mapping else {} }}"
+    paperless_marker_outcome: >-
+      {{ ('rolled back to ' ~ paperless_marker.rolled_back_to) if paperless_marker.rolled_back_to | default(none)
+         else 'the rollback failed too' }}
+  when:
+    - paperless_marker_read.content is defined
+    - (paperless_marker.failed_version | default(paperless_version) | string) == paperless_version
+
 - name: Check the first admin for the install
   ansible.builtin.assert:
     that:
@@ -100,6 +145,11 @@
   ansible.builtin.include_tasks: import.yml
   when: paperless_state == 'import'
 
+- name: Update Paperless
+  ansible.builtin.include_tasks: update.yml
+  when: paperless_state == 'update'
+
+# A reconfigure keeps the version, so the schema stays and it takes no backup.
 - name: Reconfigure Paperless
   ansible.builtin.include_tasks: reconfigure.yml
   when: paperless_state == 'reconfigure'
@@ -130,3 +180,10 @@
           restarts nothing on a run without changes; see docker compose logs
           in {{ paperless_dir }}.
       when: not paperless_healthy
+
+# Reached only by a run that succeeded, so the marker names another version.
+- name: Remove the marker of a failed update of another version
+  ansible.builtin.file:
+    path: "{{ paperless_marker_file }}"
+    state: absent
+  when: paperless_marker_read.content is defined
