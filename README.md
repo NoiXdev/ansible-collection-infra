@@ -35,6 +35,8 @@ are on the documentation site.
 | `pulsix_worker` | Any number of remote Pulsix workers, enrolled with one-time tokens |
 | `fail2ban` | fail2ban on the systemd journal with nftables bans |
 | `crowdsec` | CrowdSec agent and its firewall bouncer, which also covers published Docker ports |
+| `oh_my_zsh` | zsh with one shared, pinned Oh My Zsh checkout and a managed `~/.zshrc` per user, with the noix theme or your own |
+| `motd` | Login banner in `/etc/update-motd.d` with a title, your own lines and system information |
 
 ## Install
 

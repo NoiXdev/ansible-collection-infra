@@ -20,6 +20,20 @@
   (Hetzner's own automount, for example), a path that is another device's mountpoint, not
   empty, a file or behind a symlink, a path with whitespace or a backslash, and repeated
   entries or devices. The host test suites use loop devices for it.
+- `oh_my_zsh`: new role that installs zsh and git, checks Oh My Zsh out once at a pinned commit
+  (`oh_my_zsh_version`, a full 40-character SHA; no branches, no auto-update) into the root-owned
+  `oh_my_zsh_dir` (default `/usr/local/share/oh-my-zsh`) and writes a managed `~/.zshrc` for each
+  user in `oh_my_zsh_users` (default `root`; the home comes from the passwd database, the cache goes
+  to `~/.cache/oh-my-zsh`, never into the checkout). The `noix` theme ships with the role; set
+  `oh_my_zsh_theme` to a built-in theme, or add your own with `oh_my_zsh_theme_content`.
+  `~/.zshrc.local` is sourced when present and never written. Also `oh_my_zsh_plugins` and
+  `oh_my_zsh_login_shell`. Moving the SHA moves the checkout on hosts that have an older one.
+- `motd`: new role that writes one banner to `/etc/update-motd.d/` (`motd_filename`, default
+  `05-noix-managed`): `motd_title`, `motd_lines` (printed verbatim, never executed) and, with
+  `motd_sysinfo`, host name, OS, uptime, load, memory, root disk and the running containers when
+  Docker answers. `motd_remove_snippets` lists the snippets the role removes (Ubuntu's help text,
+  Landscape and news, and two banner names from earlier setups). `motd_enabled: false` removes only
+  the managed file; after changing `motd_filename`, list the old name in `motd_remove_snippets`.
 
 ## 0.5.0 — 2026-11-14
 
