@@ -1,0 +1,22 @@
+---
+- name: Verify the nodejs role
+  hosts: testhost
+  tasks:
+    - name: Read the versions
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          echo "node=$(node --version)"
+          # semver 7.x has no --version; its help starts with "SemVer <version>".
+          echo "semver=$(semver -h | head -1)"
+          npm ls -g --depth=0 semver
+        executable: /bin/bash
+      register: nodejs_verify
+      changed_when: false
+
+    - name: Check the versions
+      ansible.builtin.assert:
+        that:
+          - nodejs_verify.stdout is search('^node=v24\.', multiline=True)
+          - nodejs_verify.stdout is search('semver=SemVer 7\.7\.2')
+          - nodejs_verify.stdout is search('semver@7\.7\.2$', multiline=True)

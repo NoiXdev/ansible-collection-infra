@@ -1,0 +1,62 @@
+---
+- name: Check the series and the npm packages
+  ansible.builtin.assert:
+    that:
+      - nodejs_version is string and nodejs_version is match('^[0-9]+$')
+    fail_msg: "nodejs: nodejs_version must be a major series such as \"24\", not '{{ nodejs_version }}'."
+    quiet: true
+
+- name: Check the npm package versions
+  ansible.builtin.assert:
+    that: item.version is string and item.version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      nodejs: nodejs_npm_packages entry {{ item.name }} has version
+      {{ item.version }}; it must be an exact x.y.z version.
+    quiet: true
+  loop: "{{ nodejs_npm_packages }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Read the installed nodejs
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Version}' nodejs
+  register: nodejs_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# ii|22.22.1+dfsg-1 or ii|1:24.1.0-1nodesource1: the epoch, if any, is not
+# part of the series.
+- name: Refuse another series
+  ansible.builtin.fail:
+    msg: >-
+      nodejs: installed nodejs {{ nodejs_installed_version }} is series
+      {{ nodejs_installed_series }}, nodejs_version is {{ nodejs_version }};
+      a series change is a separate, deliberate step
+  vars:
+    nodejs_installed_version: "{{ nodejs_installed.stdout.split('|')[1] }}"
+    nodejs_installed_series: "{{ nodejs_installed_version | regex_replace('^([0-9]+:)?([0-9]+)\\..*$', '\\2') }}"
+  when:
+    - nodejs_installed.rc == 0
+    - nodejs_installed.stdout is match('^ii')
+    - nodejs_installed_series != nodejs_version
+
+- name: Add the NodeSource repository
+  ansible.builtin.include_tasks: repository.yml
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install the npm packages
+  community.general.npm:
+    name: "{{ item.name }}"
+    version: "{{ item.version }}"
+    global: true
+    state: present
+  loop: "{{ nodejs_npm_packages }}"
+  loop_control:
+    label: "{{ item.name }}"

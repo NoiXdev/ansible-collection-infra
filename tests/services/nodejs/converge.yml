@@ -1,0 +1,5 @@
+---
+- name: Converge the nodejs role
+  hosts: testhost
+  roles:
+    - noixdev.infra.nodejs

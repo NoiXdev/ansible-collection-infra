@@ -1,0 +1,14 @@
+---
+# Major series from NodeSource. A different series installed already (the
+# distro's nodejs, another NodeSource series) is refused, never replaced.
+nodejs_version: "24"
+
+# Global npm packages, pinned to an exact version:
+#   - name: semver
+#     version: 7.7.2
+nodejs_npm_packages: []
+
+nodejs_apt_url: "https://deb.nodesource.com/node_{{ nodejs_version }}.x"
+nodejs_apt_suite: nodistro
+nodejs_apt_key_url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+nodejs_apt_key_fingerprint: 6F71F525282841EEDAF851B42F59B5F99B1BE0B4

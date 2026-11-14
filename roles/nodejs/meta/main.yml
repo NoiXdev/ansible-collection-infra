@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Node.js from NodeSource, with pinned global npm packages
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+dependencies: []
