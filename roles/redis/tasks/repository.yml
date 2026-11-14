@@ -1,0 +1,73 @@
+---
+- name: Install what the repository needs
+  ansible.builtin.apt:
+    name: [ca-certificates, gnupg, python3-debian]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the packages.redis.io apt key
+  ansible.builtin.get_url:
+    url: "{{ redis_apt_key_url }}"
+    dest: /etc/apt/keyrings/redis.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the key fingerprints
+  ansible.builtin.command:
+    cmd: gpg --batch --show-keys --with-colons /etc/apt/keyrings/redis.asc
+  register: redis_apt_key
+  changed_when: false
+
+- name: Reject an unexpected key
+  when: redis_apt_key.stdout is not search('^fpr:+' ~ redis_apt_key_fingerprint | upper ~ ':', multiline=True)
+  block:
+    - name: Remove the key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/redis.asc
+        state: absent
+
+    - name: Stop
+      ansible.builtin.fail:
+        msg: >-
+          {{ redis_apt_key_url }} does not carry the key
+          {{ redis_apt_key_fingerprint }}; the key file was removed.
+
+- name: Add the packages.redis.io apt repository
+  ansible.builtin.deb822_repository:
+    name: redis
+    types: [deb]
+    uris: "{{ redis_apt_url }}"
+    suites: ["{{ redis_apt_suite }}"]
+    components: [main]
+    signed_by: /etc/apt/keyrings/redis.asc
+  register: redis_apt_repository
+
+# The vendor's versions carry an epoch (6:8.10.3-...), which a plain "8.*"
+# pin does not match; the regex takes it with or without one.
+- name: Pin the series
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/redis
+    content: |
+      Package: redis redis-server redis-tools redis-sentinel
+      Pin: version /^([0-9]+:)?{{ redis_version }}\./
+      Pin-Priority: 990
+    owner: root
+    group: root
+    mode: "0644"
+
+# Without it the package comes from the distro whenever the package lists are
+# newer than the repository.
+- name: Refresh the package lists for the new repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: redis_apt_repository is changed # noqa: no-handler (the install follows at once)

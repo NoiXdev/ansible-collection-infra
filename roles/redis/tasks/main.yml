@@ -1,0 +1,88 @@
+---
+- name: Check the series and the default instance
+  ansible.builtin.assert:
+    that:
+      - redis_version is string and redis_version is match('^[0-9]+$')
+      - redis_bind_address is string and redis_bind_address | length > 0
+      - (redis_maxmemory | string) is match('^([0-9]+([kmg]b?)?)?$', ignorecase=True)
+    fail_msg: >-
+      redis: redis_version must be a major series such as "8", redis_bind_address
+      an address, and redis_maxmemory empty or a size such as 256mb.
+    quiet: true
+
+- name: Check the instances
+  ansible.builtin.include_tasks: validate.yml
+  when: redis_instances | length > 0
+
+- name: Read the installed redis-server
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Version}' redis-server
+  register: redis_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# ii|6:8.10.3-1rl1~resolute1 or ii|5:7.0.15-1build2: the epoch is not part
+# of the series.
+- name: Refuse another series
+  ansible.builtin.fail:
+    msg: >-
+      redis: installed redis-server {{ redis_installed_version }} is series
+      {{ redis_installed_series }}, redis_version is {{ redis_version }};
+      a series change is a separate, deliberate step
+  vars:
+    redis_installed_version: "{{ redis_installed.stdout.split('|')[1] }}"
+    redis_installed_series: "{{ redis_installed_version | regex_replace('^([0-9]+:)?([0-9]+)\\..*$', '\\2') }}"
+  when:
+    - redis_installed.rc == 0
+    - redis_installed.stdout is match('^ii')
+    - redis_installed_series != redis_version
+
+- name: Add the packages.redis.io repository
+  ansible.builtin.include_tasks: repository.yml
+
+- name: Install Redis
+  ansible.builtin.apt:
+    name: redis-server
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# The package's default config loads the modules it ships (JSON, search, ...);
+# the role's configs load them as well.
+- name: Find the bundled modules
+  ansible.builtin.find:
+    paths: /usr/lib/redis/modules
+    patterns: "*.so"
+  register: redis_module_files
+
+- name: Create the instance config directory
+  ansible.builtin.file:
+    path: /etc/redis/instances
+    state: directory
+    owner: redis
+    group: redis
+    mode: "0750"
+
+- name: Find the instance configs
+  ansible.builtin.find:
+    paths: /etc/redis/instances
+    patterns: "*.conf"
+  register: redis_instance_files
+
+- name: Stop the instances that left the list
+  ansible.builtin.systemd_service:
+    name: "redis-server@{{ item }}"
+    state: stopped
+    enabled: false
+  loop: >-
+    {{ redis_instance_files.files | map(attribute='path') | map('basename')
+       | map('regex_replace', '\.conf$', '') | difference(redis_instance_names) | sort }}
+
+- name: Configure the default instance
+  ansible.builtin.include_tasks: default.yml
+  when: redis_instances | length == 0
+
+- name: Configure the instances
+  ansible.builtin.include_tasks: instances.yml
+  when: redis_instances | length > 0

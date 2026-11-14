@@ -1,0 +1,13 @@
+---
+- name: Restart redis-server
+  ansible.builtin.systemd_service:
+    name: redis-server
+    state: restarted
+
+# One restart per changed instance: an instance whose config and unit stayed
+# the same keeps its process. A changed shared unit restarts all of them.
+- name: Restart the changed redis instances
+  ansible.builtin.systemd_service:
+    name: "redis-server@{{ item }}"
+    state: restarted
+  loop: "{{ redis_changed_instances }}"

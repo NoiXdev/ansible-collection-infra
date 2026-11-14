@@ -1,0 +1,44 @@
+# {{ ansible_managed }}
+{# A value in double quotes, escaped the way redis.conf parses it. #}
+{% macro quoted(value) %}"{{ value | replace('\\', '\\\\') | replace('"', '\\"') | replace('\n', '\\n') | replace('\r', '\\r') }}"{% endmacro %}
+{% if redis_conf.unixsocket %}
+port 0
+unixsocket {{ redis_conf.unixsocket }}
+unixsocketperm 660
+{% else %}
+bind {{ redis_bind_address }}
+port {{ redis_conf.port }}
+{% endif %}
+protected-mode yes
+tcp-backlog 511
+timeout 0
+tcp-keepalive 300
+daemonize no
+supervised systemd
+loglevel notice
+logfile {{ redis_conf.logfile }}
+databases 16
+always-show-logo no
+dir {{ redis_conf.dir }}
+dbfilename dump.rdb
+{% if redis_conf.password %}
+requirepass {{ quoted(redis_conf.password) }}
+{% endif %}
+{% if redis_conf.maxmemory %}
+maxmemory {{ redis_conf.maxmemory }}
+{% endif %}
+maxmemory-policy {{ redis_conf.maxmemory_policy }}
+{% if redis_conf.persistence == 'rdb' %}
+save 3600 1 300 100 60 10000
+appendonly no
+{% elif redis_conf.persistence == 'aof' %}
+save ""
+appendonly yes
+appendfsync everysec
+{% else %}
+save ""
+appendonly no
+{% endif %}
+{% for module in redis_module_files.files | map(attribute='path') | sort %}
+loadmodule {{ module }}
+{% endfor %}

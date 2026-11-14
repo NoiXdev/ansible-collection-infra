@@ -1,0 +1,32 @@
+---
+# Major series from packages.redis.io. A different series installed already
+# (the distro's redis 7 on 24.04, for example) is refused, never replaced.
+redis_version: "8"
+
+redis_apt_url: https://packages.redis.io/deb
+redis_apt_suite: "{{ ansible_facts['distribution_release'] }}"
+redis_apt_key_url: https://packages.redis.io/gpg
+redis_apt_key_fingerprint: 54318FA4052D1E61A6B6F7BB5F4349D6BF53AA0C
+
+# Address of the default instance and of every port instance.
+redis_bind_address: "127.0.0.1"
+
+# The default instance: the package's redis-server on redis_bind_address:6379,
+# used while redis_instances is empty.
+redis_password: ""
+redis_maxmemory: ""
+redis_maxmemory_policy: noeviction
+redis_persistence: rdb
+
+# One instance per environment instead of the default one, each as
+# redis-server@<name> with its own config, data dir and log:
+#   - name: production
+#     port: 6380
+#     password: "{{ vault_redis_production }}"
+#   - name: staging
+#     unixsocket: true          # /run/redis-staging/redis.sock
+#     password: "{{ vault_redis_staging }}"
+#     maxmemory: 256mb
+#     clients: [app_staging]    # system users allowed on the socket
+# Instances that leave the list are stopped and disabled; their data stays.
+redis_instances: []

@@ -1,0 +1,40 @@
+# {{ ansible_managed }}
+# One Redis instance per environment: /etc/redis/instances/%i.conf. A socket
+# instance has a drop-in that sets Group=redis-%i.
+[Unit]
+Description=Redis instance %i
+Documentation=https://redis.io/docs/ man:redis-server(1)
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/redis-server /etc/redis/instances/%i.conf
+TimeoutStopSec=0
+Restart=always
+User=redis
+Group=redis
+RuntimeDirectory=redis-%i
+RuntimeDirectoryMode=0750
+UMask=007
+LimitNOFILE=65535
+
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadOnlyPaths=/
+ReadWritePaths=-/var/lib/redis/%i
+ReadWritePaths=-/var/log/redis
+ReadWritePaths=-/run/redis-%i
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SYS_RESOURCE
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+
+[Install]
+WantedBy=multi-user.target

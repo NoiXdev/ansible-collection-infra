@@ -1,0 +1,96 @@
+---
+argument_specs:
+  main:
+    short_description: Redis from packages.redis.io, as one instance or one instance per environment
+    description:
+      - Installs redis-server of one major series from packages.redis.io, pinned to that series.
+      - >-
+        A redis-server of another series that is installed already (the distro's, for example)
+        is refused before any change; a series change is a separate, deliberate step.
+      - >-
+        Without redis_instances the package's redis-server runs on redis_bind_address:6379.
+        With redis_instances each entry runs as redis-server@<name>, and the package's service
+        is stopped and disabled. Instances that leave the list are stopped and disabled; their
+        data dir stays.
+    options:
+      redis_version:
+        type: str
+        description: Major series to install, for example "8".
+      redis_apt_url:
+        type: str
+        description: The packages.redis.io repository URL.
+      redis_apt_suite:
+        type: str
+        description: Suite of the repository; the host's release codename by default.
+      redis_apt_key_url:
+        type: str
+        description: Where the repository key is downloaded from.
+      redis_apt_key_fingerprint:
+        type: str
+        description: Fingerprint the key must carry; any other key is removed and the run fails.
+      redis_bind_address:
+        type: str
+        description: Address the default instance and every port instance listen on.
+      redis_password:
+        type: str
+        no_log: true
+        description: requirepass of the default instance; empty for none.
+      redis_maxmemory:
+        type: str
+        description: maxmemory of the default instance (for example 256mb); empty for no limit.
+      redis_maxmemory_policy:
+        type: str
+        choices: &redis_policies
+          - noeviction
+          - allkeys-lru
+          - allkeys-lfu
+          - allkeys-random
+          - volatile-lru
+          - volatile-lfu
+          - volatile-random
+          - volatile-ttl
+        description: maxmemory-policy of the default instance.
+      redis_persistence:
+        type: str
+        choices: &redis_persistence [rdb, aof, none]
+        description: Persistence of the default instance (RDB snapshots, an append-only file, or none).
+      redis_instances:
+        type: list
+        elements: dict
+        description:
+          - One instance per entry, instead of the default instance.
+          - Each entry has exactly one of port and unixsocket.
+        options:
+          name:
+            type: str
+            required: true
+            description: Instance name (^[a-z0-9_-]+$); the unit is redis-server@<name>.
+          port:
+            type: int
+            description: TCP port on redis_bind_address.
+          unixsocket:
+            type: bool
+            description: >-
+              true for a socket instance: /run/redis-<name>/redis.sock, owned
+              redis:redis-<name> with mode 0660.
+          password:
+            type: str
+            no_log: true
+            description: requirepass; empty or left out for none.
+          maxmemory:
+            type: str
+            description: maxmemory (for example 256mb); left out for no limit.
+          maxmemory_policy:
+            type: str
+            choices: *redis_policies
+            description: maxmemory-policy; noeviction by default.
+          persistence:
+            type: str
+            choices: *redis_persistence
+            description: rdb (default), aof or none.
+          clients:
+            type: list
+            elements: str
+            description: >-
+              System users added to the group redis-<name>, so they can open the socket
+              (socket instances only). Every user must exist already.

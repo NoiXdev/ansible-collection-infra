@@ -1,0 +1,29 @@
+---
+- name: Configure the default instance
+  ansible.builtin.template:
+    src: redis.conf.j2
+    dest: /etc/redis/redis.conf
+    owner: redis
+    group: redis
+    mode: "0640"
+  vars:
+    redis_conf:
+      port: 6379
+      unixsocket: ""
+      password: "{{ redis_password }}"
+      maxmemory: "{{ redis_maxmemory }}"
+      maxmemory_policy: "{{ redis_maxmemory_policy }}"
+      persistence: "{{ redis_persistence }}"
+      dir: /var/lib/redis
+      logfile: /var/log/redis/redis-server.log
+  no_log: true
+  notify: Restart redis-server
+
+- name: Restart the default instance on a changed config
+  ansible.builtin.meta: flush_handlers
+
+- name: Start the default instance
+  ansible.builtin.systemd_service:
+    name: redis-server
+    state: started
+    enabled: true

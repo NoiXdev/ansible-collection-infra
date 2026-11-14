@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Redis from packages.redis.io, as one instance or one instance per environment
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+dependencies: []

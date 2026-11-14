@@ -1,0 +1,18 @@
+---
+# The instance list without the passwords, for every loop that does not write
+# a config: a loop prints its items with -v.
+redis_instances_public: >-
+  {{ redis_instances | map('dict2items')
+     | map('rejectattr', 'key', 'eq', 'password') | map('list')
+     | map('items2dict') | list }}
+redis_instance_names: "{{ redis_instances_public | map(attribute='name') | list }}"
+redis_socket_instances: "{{ redis_instances_public | selectattr('unixsocket', 'defined') | selectattr('unixsocket') | list }}"
+
+# The instances whose config, unit or group drop-in changed in this run (the
+# registered results of tasks/instances.yml), by name only.
+redis_changed_instances: >-
+  {{ ((redis_instance_names if redis_unit is changed else [])
+      + (redis_instance_configs.results | selectattr('changed') | map(attribute='item.name') | list)
+      + (redis_socket_dropins.results | selectattr('changed') | map(attribute='item.name') | list)
+      + (redis_port_dropins.results | selectattr('changed') | map(attribute='item') | list))
+     | unique | list }}

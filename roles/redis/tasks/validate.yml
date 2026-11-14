@@ -1,0 +1,96 @@
+---
+# Every message names the entry. The loops use the list without passwords.
+- name: Check the instance names
+  ansible.builtin.assert:
+    that: item.name is match('^[a-z0-9_-]+$')
+    fail_msg: "redis: redis_instances entry '{{ item.name }}' has an invalid name; it must match ^[a-z0-9_-]+$"
+    quiet: true
+  loop: "{{ redis_instances_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that every name is used once
+  ansible.builtin.assert:
+    that: redis_instance_names | select('eq', item.name) | list | length == 1
+    fail_msg: "redis: redis_instances has more than one entry named {{ item.name }}"
+    quiet: true
+  loop: "{{ redis_instances_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the socket flag
+  ansible.builtin.assert:
+    that: item.unixsocket | bool
+    fail_msg: "redis: redis_instances entry {{ item.name }} has unixsocket false; leave it out and set port instead"
+    quiet: true
+  loop: "{{ redis_instances_public | selectattr('unixsocket', 'defined') | rejectattr('unixsocket', 'none') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that every instance has a port or a socket
+  ansible.builtin.assert:
+    that:
+      - not (redis_has_port and redis_has_socket)
+    fail_msg: "redis: redis_instances entry {{ item.name }} has both port and unixsocket; set exactly one of them"
+    quiet: true
+  vars: &redis_listener
+    redis_has_port: "{{ item.port | default(none) is not none }}"
+    redis_has_socket: "{{ item.unixsocket | default(none) is not none }}"
+  loop: "{{ redis_instances_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that no instance lacks both
+  ansible.builtin.assert:
+    that: redis_has_port or redis_has_socket
+    fail_msg: "redis: redis_instances entry {{ item.name }} has neither port nor unixsocket; set exactly one of them"
+    quiet: true
+  vars: *redis_listener
+  loop: "{{ redis_instances_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that every port is used once
+  ansible.builtin.assert:
+    that: redis_same_port | length == 1
+    fail_msg: "redis: redis_instances entries {{ redis_same_port | join(' and ') }} use the same port {{ item.port }}"
+    quiet: true
+  vars:
+    redis_same_port: >-
+      {{ redis_instances_public | selectattr('port', 'defined') | rejectattr('port', 'none')
+         | selectattr('port', 'in', [item.port | int, item.port | string]) | map(attribute='name') | list }}
+  loop: "{{ redis_instances_public | selectattr('port', 'defined') | rejectattr('port', 'none') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that only socket instances have clients
+  ansible.builtin.assert:
+    that: item.clients | default([]) | length == 0 or item.unixsocket | default(false) | bool
+    fail_msg: "redis: redis_instances entry {{ item.name }} has clients, but only a socket instance takes clients"
+    quiet: true
+  loop: "{{ redis_instances_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the maxmemory values
+  ansible.builtin.assert:
+    that: (item.maxmemory | default('') | string) is match('^([0-9]+([kmg]b?)?)?$', ignorecase=True)
+    fail_msg: "redis: redis_instances entry {{ item.name }} has maxmemory {{ item.maxmemory | default('') }}; use a size such as 256mb"
+    quiet: true
+  loop: "{{ redis_instances_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Read the system users
+  ansible.builtin.getent:
+    database: passwd
+  when: redis_socket_instances | selectattr('clients', 'defined') | map(attribute='clients') | flatten | length > 0
+
+- name: Check that every client exists
+  ansible.builtin.assert:
+    that: item.1 in ansible_facts.getent_passwd
+    fail_msg: "redis: redis_instances entry {{ item.0.name }} lists the user {{ item.1 }} in clients, which does not exist"
+    quiet: true
+  loop: "{{ redis_socket_instances | subelements('clients', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"

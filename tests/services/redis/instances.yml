@@ -1,0 +1,31 @@
+---
+# production on a port and staging on a socket. The knobs below change
+# staging between runs; -e redis_instances=[...] replaces the whole list.
+- name: Converge the redis role with two instances
+  hosts: testhost
+  vars:
+    redis_test_staging: true
+    redis_test_staging_maxmemory: 16mb
+    redis_test_staging_clients: [app_staging]
+    redis_test_production:
+      name: production
+      port: 6380
+      # Characters that break config quoting: ' " space $ % \
+      password: "p'r\"o d$%\\"
+    redis_test_staging_instance:
+      name: staging
+      unixsocket: true
+      password: s-pass
+      maxmemory: "{{ redis_test_staging_maxmemory }}"
+      clients: "{{ redis_test_staging_clients }}"
+    redis_instances: >-
+      {{ [redis_test_production]
+         + ([redis_test_staging_instance] if redis_test_staging | bool else []) }}
+  pre_tasks:
+    - name: Create the app users
+      ansible.builtin.user:
+        name: "{{ item }}"
+        shell: /bin/bash
+      loop: [app_staging, app_prod]
+  roles:
+    - noixdev.infra.redis

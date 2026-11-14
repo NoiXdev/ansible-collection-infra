@@ -1,0 +1,5 @@
+---
+- name: Converge the redis role (the default instance)
+  hosts: testhost
+  roles:
+    - noixdev.infra.redis

@@ -1,0 +1,120 @@
+---
+- name: Stop the package's service
+  ansible.builtin.systemd_service:
+    name: redis-server
+    state: stopped
+    enabled: false
+
+- name: Install the instance unit
+  ansible.builtin.template:
+    src: redis-server@.service.j2
+    dest: /etc/systemd/system/redis-server@.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: redis_unit
+  notify: Restart the changed redis instances
+
+- name: Create a group per socket instance
+  ansible.builtin.group:
+    name: "redis-{{ item.name }}"
+    system: true
+  loop: "{{ redis_socket_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# The role only adds users; it takes no user out of a group.
+- name: Let the clients open the socket
+  ansible.builtin.user:
+    name: "{{ item.1 }}"
+    groups: ["redis-{{ item.0.name }}"]
+    append: true
+  loop: "{{ redis_socket_instances | subelements('clients', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
+- name: Create the data dirs
+  ansible.builtin.file:
+    path: "/var/lib/redis/{{ item }}"
+    state: directory
+    owner: redis
+    group: redis
+    mode: "0750"
+  loop: "{{ redis_instance_names }}"
+
+- name: Create the unit drop-in dirs of the socket instances
+  ansible.builtin.file:
+    path: "/etc/systemd/system/redis-server@{{ item.name }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ redis_socket_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# A socket instance runs with the group redis-<name>, so its socket and its
+# runtime directory belong to that group.
+- name: Run the socket instances with their group
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/redis-server@{{ item.name }}.service.d/group.conf"
+    content: |
+      # Managed by noixdev.infra.redis
+      [Service]
+      Group=redis-{{ item.name }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ redis_socket_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: redis_socket_dropins
+  notify: Restart the changed redis instances
+
+- name: Remove the group drop-in of the port instances
+  ansible.builtin.file:
+    path: "/etc/systemd/system/redis-server@{{ item }}.service.d/group.conf"
+    state: absent
+  loop: "{{ redis_instance_names | difference(redis_socket_instances | map(attribute='name')) }}"
+  register: redis_port_dropins
+  notify: Restart the changed redis instances
+
+# The configs carry the passwords: no_log, and nothing of them is printed.
+- name: Write the instance configs
+  ansible.builtin.template:
+    src: redis.conf.j2
+    dest: "/etc/redis/instances/{{ item.name }}.conf"
+    owner: redis
+    group: redis
+    mode: "0640"
+  vars:
+    redis_conf:
+      port: "{{ item.port | default('') }}"
+      unixsocket: "{{ ('/run/redis-' ~ item.name ~ '/redis.sock') if item.unixsocket | default(false) else '' }}"
+      password: "{{ item.password | default('') }}"
+      maxmemory: "{{ item.maxmemory | default('') }}"
+      maxmemory_policy: "{{ item.maxmemory_policy | default('noeviction') }}"
+      persistence: "{{ item.persistence | default('rdb') }}"
+      dir: "/var/lib/redis/{{ item.name }}"
+      logfile: "/var/log/redis/{{ item.name }}.log"
+  loop: "{{ redis_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  register: redis_instance_configs
+  notify: Restart the changed redis instances
+
+- name: Reload systemd for the changed units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: redis_unit is changed or redis_socket_dropins is changed or redis_port_dropins is changed # noqa: no-handler
+
+- name: Restart the changed instances
+  ansible.builtin.meta: flush_handlers
+
+- name: Start the instances
+  ansible.builtin.systemd_service:
+    name: "redis-server@{{ item }}"
+    state: started
+    enabled: true
+  loop: "{{ redis_instance_names }}"

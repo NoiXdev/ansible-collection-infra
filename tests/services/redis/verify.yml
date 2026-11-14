@@ -1,0 +1,137 @@
+---
+- name: Verify the redis instances
+  hosts: testhost
+  vars:
+    redis_test_production_password: "p'r\"o d$%\\"
+    redis_test_staging_password: s-pass
+    redis_test_production_cli: [redis-cli, -h, 127.0.0.1, -p, "6380"]
+    redis_test_staging_cli: [redis-cli, -s, /run/redis-staging/redis.sock]
+  tasks:
+    - name: Ping production with its password
+      ansible.builtin.command:
+        argv: "{{ redis_test_production_cli + ['PING'] }}"
+      environment:
+        REDISCLI_AUTH: "{{ redis_test_production_password }}"
+      register: redis_verify_production
+      changed_when: false
+      failed_when: redis_verify_production.stdout != 'PONG'
+
+    - name: Ping production without a password
+      ansible.builtin.command:
+        argv: "{{ redis_test_production_cli + ['PING'] }}"
+      register: redis_verify_noauth
+      changed_when: false
+      failed_when: redis_verify_noauth.stdout is not search('NOAUTH')
+
+    - name: Ping staging with its password
+      ansible.builtin.command:
+        argv: "{{ redis_test_staging_cli + ['PING'] }}"
+      environment:
+        REDISCLI_AUTH: "{{ redis_test_staging_password }}"
+      register: redis_verify_staging
+      changed_when: false
+      failed_when: redis_verify_staging.stdout != 'PONG'
+
+    - name: Read the package service
+      ansible.builtin.shell:
+        cmd: |
+          echo "active=$(systemctl is-active redis-server)"
+          echo "enabled=$(systemctl is-enabled redis-server)"
+      register: redis_verify_package
+      changed_when: false
+
+    - name: Check the package service is stopped and disabled
+      ansible.builtin.assert:
+        that:
+          - "'active=inactive' in redis_verify_package.stdout_lines"
+          - "'enabled=disabled' in redis_verify_package.stdout_lines"
+
+    - name: Use the staging socket as app_staging
+      ansible.builtin.command:
+        cmd: su app_staging -c 'redis-cli -s /run/redis-staging/redis.sock -a s-pass PING'
+      register: redis_verify_app_staging
+      changed_when: false
+      failed_when: redis_verify_app_staging.stdout != 'PONG'
+
+    - name: Use the staging socket as app_prod
+      ansible.builtin.command:
+        cmd: su app_prod -c 'redis-cli -s /run/redis-staging/redis.sock -a s-pass PING'
+      register: redis_verify_app_prod
+      changed_when: false
+      failed_when: >-
+        redis_verify_app_prod.stdout == 'PONG'
+        or (redis_verify_app_prod.stdout ~ redis_verify_app_prod.stderr) is not search('Permission denied')
+
+    - name: Set a key in each instance and flush staging
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          REDISCLI_AUTH="$PRODUCTION" redis-cli -h 127.0.0.1 -p 6380 SET verify-key production
+          REDISCLI_AUTH="$STAGING" redis-cli -s /run/redis-staging/redis.sock SET verify-key staging
+          REDISCLI_AUTH="$STAGING" redis-cli -s /run/redis-staging/redis.sock FLUSHALL
+          echo "production=$(REDISCLI_AUTH="$PRODUCTION" redis-cli -h 127.0.0.1 -p 6380 GET verify-key)"
+          echo "staging=$(REDISCLI_AUTH="$STAGING" redis-cli -s /run/redis-staging/redis.sock DBSIZE)"
+      environment:
+        PRODUCTION: "{{ redis_test_production_password }}"
+        STAGING: "{{ redis_test_staging_password }}"
+      register: redis_verify_flush
+      changed_when: false
+
+    - name: Check that FLUSHALL on staging left production's key
+      ansible.builtin.assert:
+        that:
+          - "'production=production' in redis_verify_flush.stdout_lines"
+          - "'staging=0' in redis_verify_flush.stdout_lines"
+
+    - name: Read the main PIDs
+      ansible.builtin.shell:
+        cmd: |
+          echo "$(systemctl show -p MainPID --value redis-server@production)"
+          echo "$(systemctl show -p MainPID --value redis-server@staging)"
+      register: redis_verify_pids
+      changed_when: false
+
+    - name: Kill staging
+      ansible.builtin.command:
+        argv: [kill, -9, "{{ redis_verify_pids.stdout_lines[1] }}"]
+      changed_when: true
+
+    - name: Ping production after the kill
+      ansible.builtin.command:
+        argv: "{{ redis_test_production_cli + ['PING'] }}"
+      environment:
+        REDISCLI_AUTH: "{{ redis_test_production_password }}"
+      register: redis_verify_production_after
+      changed_when: false
+      failed_when: redis_verify_production_after.stdout != 'PONG'
+
+    - name: Wait for systemd to restart staging
+      ansible.builtin.shell:
+        cmd: |
+          echo "$(systemctl show -p MainPID --value redis-server@staging)"
+          echo "$(systemctl show -p MainPID --value redis-server@production)"
+          REDISCLI_AUTH=s-pass redis-cli -s /run/redis-staging/redis.sock PING
+      register: redis_verify_restart
+      changed_when: false
+      until:
+        - redis_verify_restart.stdout_lines | length == 3
+        - redis_verify_restart.stdout_lines[0] not in ['0', redis_verify_pids.stdout_lines[1]]
+        - redis_verify_restart.stdout_lines[2] == 'PONG'
+      retries: 30
+      delay: 1
+
+    - name: Check production kept its process
+      ansible.builtin.assert:
+        that: redis_verify_restart.stdout_lines[1] == redis_verify_pids.stdout_lines[0]
+
+    - name: Read staging's maxmemory
+      ansible.builtin.command:
+        argv: "{{ redis_test_staging_cli + ['CONFIG', 'GET', 'maxmemory'] }}"
+      environment:
+        REDISCLI_AUTH: "{{ redis_test_staging_password }}"
+      register: redis_verify_maxmemory
+      changed_when: false
+
+    - name: Check staging's maxmemory
+      ansible.builtin.assert:
+        that: redis_verify_maxmemory.stdout_lines[-1] == '16777216'
