@@ -11,4 +11,7 @@ zstyle ':omz:update' mode disabled
 DISABLE_AUTO_UPDATE="true"
 source "$ZSH/oh-my-zsh.sh"
 
-[[ -r "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"
+# An if, not "&&": a missing file must not leave status 1 in $? for the first prompt.
+if [[ -r "$HOME/.zshrc.local" ]]; then
+  source "$HOME/.zshrc.local"
+fi

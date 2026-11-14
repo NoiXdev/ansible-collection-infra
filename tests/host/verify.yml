@@ -334,6 +334,19 @@
           - omz_state.results[10].stdout == 'deploy'
         fail_msg: "{{ omz_state.results | map(attribute='stdout') | list }} {{ omz_state.results | map(attribute='stderr') | list }}"
 
+    # root has no ~/.zshrc.local: a failed test in ~/.zshrc must not leak into $? of the first prompt.
+    - name: Read the status the first prompt of root would show
+      ansible.builtin.command:
+        argv: [zsh, -i, -c, 'print -P "%?"']
+      register: omz_first_status
+      changed_when: false
+
+    - name: Expect status 0 and no message
+      ansible.builtin.assert:
+        that:
+          - omz_first_status.stdout == '0'
+          - omz_first_status.stderr == ''
+
     - name: Refuse an unknown user before cloning
       block:
         - name: Include the oh_my_zsh role for a user that does not exist
