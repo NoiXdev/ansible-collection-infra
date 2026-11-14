@@ -1,0 +1,46 @@
+---
+# major.minor series from MySQL's apt repository (8.4 is the current LTS).
+# A different series installed already (the distro's 8.0 on 24.04, for
+# example) is refused, never replaced. The repository is amd64 only.
+mysql_version: "8.4"
+
+mysql_apt_url: https://repo.mysql.com/apt/ubuntu
+mysql_apt_suite: "{{ ansible_facts['distribution_release'] }}"
+# The repository's component of the series (8.4 and 9.7 are LTS releases).
+mysql_apt_component: "mysql-{{ mysql_version }}-lts"
+# The 2025 file carries the same key as the 2023 one, with a later expiry.
+mysql_apt_key_url: https://repo.mysql.com/RPM-GPG-KEY-mysql-2025
+mysql_apt_key_fingerprint: BCA43417C3B485DD128EC6D4B7B3B788A8D3785C
+
+# The server listens on this address only (port 3306; the X protocol's port
+# 33060 too). root has no password and logs in through the unix socket only
+# (auth_socket).
+mysql_bind_address: "127.0.0.1"
+
+# More server settings, written under [mysqld]:
+#   innodb_buffer_pool_size: 1G
+#   max_connections: 200
+# bind-address, mysqlx-bind-address, port and socket belong to the role and are
+# refused here.
+mysql_settings: {}
+
+# Databases, created when missing. One that exists already keeps its charset.
+#   - name: app_production
+#     encoding: utf8mb4             # the default
+#     collation: utf8mb4_unicode_ci # the default
+mysql_databases: []
+
+# Users. On every run the role sets each listed user's password and exactly
+# its listed privileges ("<db>.<table>:<privs>"; grants added by hand are
+# revoked). privileges defaults to ["<name>.*:ALL"] when mysql_databases
+# lists a database of the user's name, and is required otherwise. Names are
+# literal: in "<db>.*" the role escapes _ and %, which the server would read as
+# wildcards (app_production.* covers app_production, not appXproduction).
+#   - name: app_production
+#     password: "{{ vault_mysql_app_production }}"
+#   - name: report
+#     password: "{{ vault_mysql_report }}"
+#     host: localhost               # the default
+#     privileges: ["app_production.*:SELECT"]
+# Databases and users that leave a list stay as they are.
+mysql_users: []

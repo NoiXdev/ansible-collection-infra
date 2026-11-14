@@ -1,0 +1,71 @@
+---
+# mysql_test_app_password is the password converge.yml set last;
+# mysql_test_old_password, when given, must no longer log in.
+- name: Verify the mysql role
+  hosts: testhost
+  vars:
+    mysql_test_app_password: "a'b\"c\\d$e%f g"
+    mysql_test_tcp: [mysql, --protocol=TCP, -h, 127.0.0.1, -P, "3306"]
+    mysql_test_socket: [mysql, --protocol=SOCKET]
+  tasks:
+    - name: Create a table as app_production over TCP
+      ansible.builtin.command:
+        argv: >-
+          {{ mysql_test_tcp + ['-u', 'app_production', '--password=' ~ mysql_test_app_password,
+             'app_production', '-N', '-e',
+             'CREATE TABLE IF NOT EXISTS verify_t (id INT); INSERT INTO verify_t VALUES (1); SELECT CURRENT_USER()'] }}
+      register: mysql_verify_tcp
+      changed_when: false
+      failed_when: mysql_verify_tcp.rc != 0 or mysql_verify_tcp.stdout != 'app_production@localhost'
+
+    - name: Log in as app_production over the socket
+      ansible.builtin.command:
+        argv: >-
+          {{ mysql_test_socket + ['-u', 'app_production', '--password=' ~ mysql_test_app_password,
+             'app_production', '-N', '-e', 'SELECT COUNT(*) > 0 FROM verify_t'] }}
+      register: mysql_verify_socket
+      changed_when: false
+      failed_when: mysql_verify_socket.rc != 0 or mysql_verify_socket.stdout != '1'
+
+    - name: Log in with the old password
+      ansible.builtin.command:
+        argv: "{{ mysql_test_tcp + ['-u', 'app_production', '--password=' ~ mysql_test_old_password, '-e', 'SELECT 1'] }}"
+      register: mysql_verify_old
+      changed_when: false
+      failed_when: mysql_verify_old.rc == 0 or mysql_verify_old.stderr is not search('Access denied')
+      when: mysql_test_old_password is defined
+
+    - name: Select as report
+      ansible.builtin.command:
+        argv: "{{ mysql_test_tcp + ['-u', 'report', '--password=rep0rt-pass', '-N', '-e', 'SELECT COUNT(*) > 0 FROM app_production.verify_t'] }}"
+      register: mysql_verify_report_select
+      changed_when: false
+      failed_when: mysql_verify_report_select.rc != 0 or mysql_verify_report_select.stdout != '1'
+
+    - name: Insert as report
+      ansible.builtin.command:
+        argv: "{{ mysql_test_tcp + ['-u', 'report', '--password=rep0rt-pass', '-e', 'INSERT INTO app_production.verify_t VALUES (2)'] }}"
+      register: mysql_verify_report_insert
+      changed_when: false
+      failed_when: >-
+        mysql_verify_report_insert.rc == 0
+        or mysql_verify_report_insert.stderr is not search('INSERT command denied')
+
+    - name: Read the database's charset as root over the socket
+      ansible.builtin.command:
+        argv: "{{ mysql_test_socket + ['-uroot', '-N', '-e', 'SHOW CREATE DATABASE app_production'] }}"
+      register: mysql_verify_charset
+      changed_when: false
+
+    - name: Check the charset and the collation
+      ansible.builtin.assert:
+        that:
+          - mysql_verify_charset.stdout is search('CHARACTER SET utf8mb4 ')
+          - mysql_verify_charset.stdout is search('COLLATE utf8mb4_unicode_ci ')
+
+    - name: Log in as root over TCP without a password
+      ansible.builtin.command:
+        argv: "{{ mysql_test_tcp + ['-uroot', '-e', 'SELECT 1'] }}"
+      register: mysql_verify_root_tcp
+      changed_when: false
+      failed_when: mysql_verify_root_tcp.rc == 0 or mysql_verify_root_tcp.stderr is not search('Access denied')

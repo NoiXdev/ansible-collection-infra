@@ -1,0 +1,42 @@
+---
+# The server's socket; root logs in through it. The package's default, and
+# a key mysql_settings may not change.
+mysql_socket: /run/mysqld/mysqld.sock
+
+# Keys of mysql_settings that belong to the role, in the server's spelling
+# (it reads _ as -, and loose- only turns errors into warnings). The X protocol
+# (mysqlx, port 33060) listens on * by default, so its address belongs to the
+# role as well.
+mysql_role_settings: [bind-address, mysqlx-bind-address, port, socket]
+
+# The server's own accounts: root logs in through the socket, mysql.sys owns
+# the system views, mysql.session and mysql.infoschema belong to the server's
+# internals, and debian-sys-maint is the Debian maintenance account (present
+# on hosts that came with the distro's package). A listed one would get a
+# password.
+mysql_server_accounts: [root, mysql.sys, mysql.session, mysql.infoschema, debian-sys-maint]
+
+mysql_database_keys: [name, encoding, collation]
+mysql_user_keys: [name, password, host, privileges]
+mysql_database_names: "{{ mysql_databases | map(attribute='name', default='') | list }}"
+
+# The packages the apt pin covers: the server, the client, mysql-common and the
+# libraries (the distro's mysql-server-8.0, mysql-client-8.0 and the like
+# included, which are never installed).
+mysql_apt_packages: mysql-* libmysqlclient*
+
+# The user list with only the keys that hold no secret, for every loop that
+# does not set a password: a loop prints its items with -v. A misspelled
+# password key is left out too; it shows up by name in mysql_users_key_names.
+mysql_user_public_keys: [name, host, privileges]
+mysql_users_public: >-
+  {{ mysql_users | map('dict2items')
+     | map('selectattr', 'key', 'in', mysql_user_public_keys) | map('list')
+     | map('items2dict') | list }}
+# The key names of each entry, in list order (no values).
+mysql_users_key_names: "{{ mysql_users | map('dict2items') | map('map', attribute='key') | map('list') | list }}"
+# Per entry, in list order: "set" when it has a password, "" when not
+# (nothing of the password itself).
+mysql_users_password_set: >-
+  {{ mysql_users | map(attribute='password', default='') | map('default', '', true)
+     | map('string') | map('regex_replace', '(?s)^.+$', 'set') | list }}

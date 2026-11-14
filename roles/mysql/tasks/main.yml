@@ -1,0 +1,103 @@
+---
+- name: Check the series and the address
+  ansible.builtin.assert:
+    that:
+      - mysql_version is string and mysql_version is match('^[0-9]+[.][0-9]+$')
+      - mysql_bind_address is string and mysql_bind_address is match('^[A-Za-z0-9.:,_-]+$')
+    fail_msg: >-
+      mysql: mysql_version must be a major.minor series such as "8.4", and
+      mysql_bind_address an address.
+    quiet: true
+
+- name: Check the settings, databases and users
+  ansible.builtin.include_tasks: validate.yml
+
+# ii, or hi when held: the second letter is the installed state.
+- name: Read the installed MariaDB server
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Package}\n' mariadb-server
+  register: mysql_mariadb_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Refuse a host with MariaDB
+  ansible.builtin.fail:
+    msg: "mysql: MariaDB is installed (mariadb-server); MariaDB and MySQL cannot share a host"
+  when: mysql_mariadb_installed.stdout_lines | select('match', '^.i') | list | length > 0
+
+# The vendor's server is mysql-community-server (mysql-server is its meta
+# package); the distro's is mysql-server-8.0 or mysql-server-8.4.
+- name: Read the installed MySQL servers
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Package}|${Version}\n' mysql-community-server mysql-server mysql-server-*
+  register: mysql_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# ii|mysql-community-server|8.4.13-1ubuntu24.04 or
+# hi|mysql-server-8.0|8.0.45-0ubuntu0.24.04.1 (held): the epoch, when there is
+# one, is not part of the series.
+- name: Refuse another series
+  ansible.builtin.fail:
+    msg: >-
+      mysql: installed {{ mysql_other[0].split('|')[1] }} {{ mysql_other[0].split('|')[2] }} is series
+      {{ mysql_other[0].split('|')[2] | regex_replace('^([0-9]+:)?([0-9]+\.[0-9]+)\..*$', '\2') }},
+      mysql_version is {{ mysql_version }};
+      a series change is a separate, deliberate step
+  vars:
+    mysql_other: >-
+      {{ mysql_installed.stdout_lines | select('match', '^.i')
+         | reject('regex', '^[^|]*[|][^|]*[|]([0-9]+:)?' ~ (mysql_version | regex_escape) ~ '[.]')
+         | list }}
+  when: mysql_other | length > 0
+
+- name: Add the MySQL repository
+  ansible.builtin.include_tasks: repository.yml
+
+# Only a first install reads these: an empty root password makes the package
+# keep root on auth_socket (no password, the unix socket only).
+- name: Preseed the root account of a first install
+  ansible.builtin.debconf:
+    name: mysql-community-server
+    question: "mysql-community-server/{{ item }}"
+    vtype: password
+    value: ""
+  loop: [root-pass, re-root-pass]
+  when: mysql_installed.stdout_lines | select('match', '^.i[|]mysql-community-server[|]') | list | length == 0
+
+# python3-pymysql is what the mysql_db and mysql_user modules connect with;
+# the server's start script calls apparmor's profile loader.
+- name: Install MySQL
+  ansible.builtin.apt:
+    name: [mysql-community-server, apparmor, python3-pymysql]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Configure the server
+  ansible.builtin.template:
+    src: zz-noixdev.cnf.j2
+    dest: /etc/mysql/mysql.conf.d/zz-noixdev.cnf
+    owner: root
+    group: root
+    mode: "0644"
+    # An unknown setting would stop the server at the restart; the server
+    # checks the names first.
+    validate: mysqld --defaults-file=%s --user=mysql --validate-config
+  notify: Restart mysql
+
+- name: Apply the config
+  ansible.builtin.meta: flush_handlers
+
+- name: Start MySQL
+  ansible.builtin.systemd_service:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Create the databases and users
+  ansible.builtin.include_tasks: databases.yml

@@ -37,8 +37,16 @@ fail() { echo "$*" >&2; exit 1; }
 start() {
   local name="$prefix-$1"
   docker rm -f -v "$name" >/dev/null 2>&1 || true
+  local image="noixdev-infra-host:$ubuntu" platform=()
+  # MySQL's apt repository carries amd64 packages only: the role's container
+  # runs linux/amd64 (emulated on another architecture, with its own image).
+  if [ "$1" = mysql ]; then
+    image="$image-amd64"
+    platform=(--platform linux/amd64)
+    docker build -q "${platform[@]}" --build-arg "UBUNTU=$ubuntu" -t "$image" "$tests/host" >/dev/null
+  fi
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-    --tmpfs /run --tmpfs /run/lock --name "$name" "noixdev-infra-host:$ubuntu" >/dev/null
+    --tmpfs /run --tmpfs /run/lock ${platform[@]+"${platform[@]}"} --name "$name" "$image" >/dev/null
   started+=("$name")
   local tries=0
   until (docker exec "$name" systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do
@@ -226,12 +234,13 @@ no_secret() {
   done
 }
 
-# sql ROLE STATEMENT: run a statement as root over the socket, without
+# sql ROLE STATEMENT: run a statement as root over the socket (ROLE is also
+# the client's name, mariadb or mysql), without
 # column names and raw (batch output would print \ as \\).
-sql() { hx "$1" mariadb -N -r -e "$2"; }
+sql() { hx "$1" "$1" -N -r -e "$2"; }
 
 suite_mariadb() {
-  local dir="$here/mariadb" version bound log grants policy rc denied
+  local dir="$here/mariadb" version bound log grants policy rc denied before
   local empty='{"mariadb_users": [], "mariadb_databases": []}'
   local app_password=$'a\'b"c\\d$e%f g'
   # Parts of the test passwords that their raw and JSON-escaped forms share.
@@ -349,7 +358,167 @@ suite_mariadb() {
     "$dir/converge.yml" -e "$rotated" -e mariadb_version=11.4
   hx mariadb grep -qF '/11.8/' /etc/apt/sources.list.d/mariadb.sources || fail "mariadb: the refused run changed the repository"
   [ "$(hx mariadb dpkg-query -W -f='${Version}' mariadb-server)" = "$version" ] || fail "mariadb: mariadb-server changed after a refused run"
+
+  echo "== mariadb: MySQL is refused on a host with MariaDB, before any change"
+  before="$(hx mariadb dpkg -l | md5sum)"
+  refused mariadb mysql-role "mysql: MariaDB is installed (mariadb-server); MariaDB and MySQL cannot share a host" \
+    "$here/mysql/converge.yml" -e '{"mysql_users": [], "mysql_databases": []}'
+  [ "$(hx mariadb dpkg -l | md5sum)" = "$before" ] || fail "mariadb: the refused mysql run changed the packages"
+  hx mariadb sh -c 'test ! -e /etc/apt/sources.list.d/mysql.sources' || fail "mariadb: the refused mysql run added its repository"
+  [ "$(hx mariadb systemctl is-active mariadb || true)" = active ] || fail "mariadb: the server stopped after the refused mysql run"
 }
+
+suite_mysql() {
+  local dir="$here/mysql" version bound log grants policy rc denied before distro
+  local empty='{"mysql_users": [], "mysql_databases": []}'
+  local app_password=$'a\'b"c\\d$e%f g'
+  # Parts of the test passwords that their raw and JSON-escaped forms share.
+  local secrets=("a'b" '$e%f g' 'rep0rt-pass' "pa ss'%\$")
+  local rotated='{"mysql_test_app_password": "n3w\"pa ss'"'"'%$\\x"}'
+  start mysql
+
+  echo "== mysql: invalid lists and settings are refused before any change"
+  refused mysql unknown-key "mysql: mysql_users entry x has unknown keys (priv); its keys are name, password, host and privileges" \
+    "$dir/converge.yml" -e '{"mysql_users": [{"name": "x", "password": "p", "priv": "x.*:ALL"}]}'
+  refused mysql no-privileges "mysql: mysql_users entry orphan has no privileges, and mysql_databases lists no database orphan; set privileges" \
+    "$dir/converge.yml" -e '{"mysql_users": [{"name": "orphan", "password": "p"}]}'
+  refused mysql root-user "mysql: mysql_users entry root is one of the server's own accounts (root, mysql.sys, mysql.session, mysql.infoschema, debian-sys-maint), which the role leaves as they are; root logs in through the socket only" \
+    "$dir/converge.yml" -e '{"mysql_users": [{"name": "root", "password": "p", "privileges": ["*.*:ALL"]}]}'
+  refused mysql session-user "mysql: mysql_users entry mysql.session is one of the server's own accounts" \
+    "$dir/converge.yml" -e '{"mysql_users": [{"name": "mysql.session", "password": "p", "privileges": []}]}'
+  refused mysql database-key "mysql: mysql_databases entry d has unknown keys (charset); its keys are name, encoding and collation" \
+    "$dir/converge.yml" -e '{"mysql_test_extra_databases": [{"name": "d", "charset": "utf8mb4"}]}'
+  refused mysql collation "mysql: mysql_databases entry d has encoding latin1 and collation utf8mb4_unicode_ci; the collation must belong to the encoding" \
+    "$dir/converge.yml" -e '{"mysql_test_extra_databases": [{"name": "d", "encoding": "latin1"}]}'
+  refused mysql password-typo "mysql: mysql_users entry x has unknown keys (pasword); its keys are name, password, host and privileges" \
+    "$dir/converge.yml" -v -e '{"mysql_users": [{"name": "x", "password": "p", "pasword": "s3cr3t-typo", "privileges": []}]}'
+  no_secret "$out/mysql-password-typo.log" s3cr3t-typo
+  for key in bind-address bind_address mysqlx-bind-address port socket; do
+    refused mysql "settings-$key" "mysql: mysql_settings sets $key; bind-address, mysqlx-bind-address, port and socket belong to the role (mysql_bind_address sets the address)" \
+      "$dir/converge.yml" -e "{\"mysql_settings\": {\"$key\": \"0.0.0.0\"}}"
+  done
+  hx mysql sh -c 'test ! -e /usr/sbin/mysqld && test ! -e /etc/apt/sources.list.d/mysql.sources' \
+    || fail "mysql: a refused run installed something"
+
+  echo "== mysql: the distro's MySQL of another series is refused"
+  if [ "$ubuntu" = 24.04 ]; then
+    hx mysql apt-get update -q >/dev/null
+    hx mysql env DEBIAN_FRONTEND=noninteractive apt-get install -y -q mysql-server >/dev/null
+    distro="$(hx mysql dpkg-query -W -f='${Version}' mysql-server)"
+    echo "   distro mysql-server on $ubuntu: $distro"
+    refused mysql distro-series "mysql: installed mysql-server $distro is series 8.0, mysql_version is 8.4; a series change is a separate, deliberate step" \
+      "$dir/converge.yml" -e "$empty"
+    hx mysql sh -c 'test ! -e /etc/apt/sources.list.d/mysql.sources' || fail "mysql: the refused run added the repository"
+    hx mysql env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q 'mysql-*' >/dev/null
+    hx mysql env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -q --purge >/dev/null
+    hx mysql rm -rf /var/lib/mysql /etc/mysql
+  else
+    echo "   the distro's MySQL on $ubuntu is already the pinned series; nothing to refuse"
+  fi
+
+  echo "== mysql: a run whose repository refresh failed is not followed by another series"
+  # The first run adds the source and the pin, then its refresh fails: the
+  # package lists stay without the vendor's packages.
+  # The key comes from the same host as the packages, so apt alone is cut off.
+  hx mysql sh -c 'echo "Acquire::https::Proxy::repo.mysql.com \"http://127.0.0.1:9\";" > /etc/apt/apt.conf.d/99-block-mysql'
+  if play mysql "$dir/converge.yml" -e "$empty" >"$out/mysql-blocked.log" 2>&1; then
+    fail "mysql: the run with repo.mysql.com unreachable did not fail"
+  fi
+  hx mysql rm -f /etc/apt/apt.conf.d/99-block-mysql
+  hx mysql test -e /etc/apt/sources.list.d/mysql.sources || fail "mysql: the blocked run did not add the source"
+  hx mysql sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}" mysql-community-server 2>/dev/null | grep -q "^.i"' \
+    || fail "mysql: the blocked run installed mysql-community-server"
+  converge mysql stale-lists "$dir/converge.yml" -e "$empty"
+  version="$(hx mysql dpkg-query -W -f='${Version}' mysql-community-server)"
+  case "$version" in
+    8.4.*-1ubuntu"$ubuntu") echo "   installed the vendor's $version" ;;
+    *) fail "mysql: after a failed refresh the role installed $version, not the vendor's" ;;
+  esac
+  # The vendor's versions win by origin; every other version of the MySQL
+  # packages (the distro's 8.0 on 24.04, its 8.4 on 26.04) is never installed.
+  policy="$(hx mysql apt-cache policy mysql-community-server mysql-common mysql-client)"
+  awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
+         if ((v ~ /^8\.4\.[0-9]+-1ubuntu2[46]\.04$/ && p != 990) || (v !~ /^8\.4\.[0-9]+-1ubuntu2[46]\.04$/ && p != -1)) { print v, p; bad = 1 } }
+       END { exit bad }' <<<"$policy" || fail "mysql: the pin gives the wrong priorities: $policy"
+
+  echo "== mysql: converge (the first run with --diff -v) and idempotence"
+  converge mysql install "$dir/converge.yml" --diff -v
+  play mysql "$dir/verify.yml"
+  sql mysql 'SELECT 1' >/dev/null || fail "mysql: root cannot log in over the socket"
+  bound="$(hx mysql ss -Hltn | awk '$4 ~ /:(3306|33060)$/ {print $4}' | sort -u | paste -sd' ' -)"
+  [ "$bound" = "127.0.0.1:3306 127.0.0.1:33060" ] || fail "mysql: the server listens on '$bound', not 127.0.0.1:3306 and :33060 only"
+  [ "$(sql mysql "SELECT plugin FROM mysql.user WHERE user = 'root'")" = auth_socket ] \
+    || fail "mysql: root does not use auth_socket: $(sql mysql "SELECT user, host, plugin FROM mysql.user")"
+
+  echo "== mysql: the default grant covers the user's own database only, not one that _ matches"
+  sql mysql 'CREATE DATABASE appXproduction'
+  rc=0
+  denied="$(hx mysql mysql -u app_production "--password=$app_password" -e 'CREATE TABLE appXproduction.t (id INT)' 2>&1)" || rc=$?
+  { [ "$rc" != 0 ] && grep -q 'denied' <<<"$denied"; } || fail "mysql: app_production can use appXproduction (rc $rc): $denied"
+  hx mysql mysql -u app_production "--password=$app_password" -e 'CREATE TABLE IF NOT EXISTS app_production.own (id INT)' \
+    || fail "mysql: app_production cannot use its own database"
+
+  echo "== mysql: an unknown setting fails before the restart, the server keeps running"
+  refused mysql unknown-setting "failed to validate" "$dir/converge.yml" -e '{"mysql_settings": {"max_conections": 200}}'
+  hx mysql sh -c 'test -s /etc/mysql/mysql.conf.d/zz-noixdev.cnf && ! grep -q max_conections /etc/mysql/mysql.conf.d/zz-noixdev.cnf' \
+    || fail "mysql: the unknown setting reached the config"
+  [ "$(hx mysql systemctl is-active mysql || true)" = active ] || fail "mysql: the server stopped after the unknown setting"
+
+  echo "== mysql: a new password in the vars replaces the old one (with --diff -v)"
+  converge mysql rotate "$dir/converge.yml" --diff -v -e "$rotated"
+  play mysql "$dir/verify.yml" -e "$rotated" -e '{"mysql_test_old_password": "a'"'"'b\"c\\d$e%f g"}'
+
+  echo "== mysql: the --diff -v logs have no password"
+  for log in install install-idempotence rotate rotate-idempotence; do
+    no_secret "$out/mysql-$log.log" "${secrets[@]}"
+  done
+
+  echo "== mysql: grants added by hand are revoked, on other targets and on the listed one"
+  # report lists app_production.*:SELECT; the role grants it on the escaped
+  # target, so the hand grants go on both spellings.
+  sql mysql "GRANT SELECT ON mysql.* TO 'report'@'localhost'"
+  for target in '`app_production`.*' '`app\_production`.*'; do
+    sql mysql "GRANT INSERT ON $target TO 'report'@'localhost'"
+    sql mysql "GRANT SELECT ON $target TO 'report'@'localhost' WITH GRANT OPTION"
+  done
+  grants="$(sql mysql "SHOW GRANTS FOR 'report'@'localhost'")"
+  { grep -qF '`mysql`.*' <<<"$grants" && grep -qF 'WITH GRANT OPTION' <<<"$grants"; } \
+    || fail "mysql: the hand grants did not apply: $grants"
+  converge mysql hand-grant "$dir/converge.yml" -e "$rotated"
+  grants="$(sql mysql "SHOW GRANTS FOR 'report'@'localhost'")"
+  { [ "$(wc -l <<<"$grants" | tr -d ' ')" = 2 ] && grep -q '^GRANT USAGE ON \*\.\* TO `report`@`localhost`' <<<"$grants" \
+      && [ "$(sed -n 2p <<<"$grants")" = 'GRANT SELECT ON `app\_production`.* TO `report`@`localhost`' ]; } \
+    || fail "mysql: report's grants are not exactly the listed one: $grants"
+
+  echo "== mysql: a user that leaves the list stays"
+  converge mysql no-report "$dir/converge.yml" -e "$rotated" -e mysql_test_report=false
+  [ "$(sql mysql "SELECT COUNT(*) FROM mysql.user WHERE User = 'report' AND Host = 'localhost'")" = 1 ] \
+    || fail "mysql: report is gone after it left the list"
+
+  echo "== mysql: a database that exists keeps its charset"
+  sql mysql 'CREATE DATABASE legacy CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci'
+  converge mysql legacy "$dir/converge.yml" -e "$rotated" -e '{"mysql_test_extra_databases": [{"name": "legacy"}]}'
+  # SHOW CREATE leaves the collation out when it is the charset's default.
+  sql mysql 'SHOW CREATE DATABASE legacy' | grep -qF 'CHARACTER SET utf8mb3 ' \
+    || fail "mysql: legacy lost its charset: $(sql mysql 'SHOW CREATE DATABASE legacy')"
+
+  echo "== mysql: another series is refused"
+  version="$(hx mysql dpkg-query -W -f='${Version}' mysql-community-server)"
+  echo "   mysql-community-server on $ubuntu: $version"
+  refused mysql other-series "mysql: installed mysql-community-server $version is series 8.4, mysql_version is 8.0; a series change is a separate, deliberate step" \
+    "$dir/converge.yml" -e "$rotated" -e mysql_version=8.0
+  hx mysql grep -qF 'mysql-8.4-lts' /etc/apt/sources.list.d/mysql.sources || fail "mysql: the refused run changed the repository"
+  [ "$(hx mysql dpkg-query -W -f='${Version}' mysql-community-server)" = "$version" ] || fail "mysql: mysql-community-server changed after a refused run"
+
+  echo "== mysql: MariaDB is refused on a host with MySQL, before any change"
+  before="$(hx mysql dpkg -l | md5sum)"
+  refused mysql mariadb-role "mariadb: MySQL is installed (mysql-community-server); MariaDB and MySQL cannot share a host" \
+    "$here/mariadb/converge.yml" -e '{"mariadb_users": [], "mariadb_databases": []}'
+  [ "$(hx mysql dpkg -l | md5sum)" = "$before" ] || fail "mysql: the refused mariadb run changed the packages"
+  hx mysql sh -c 'test ! -e /etc/apt/sources.list.d/mariadb.sources' || fail "mysql: the refused mariadb run added its repository"
+  [ "$(hx mysql systemctl is-active mysql || true)" = active ] || fail "mysql: the server stopped after the refused mariadb run"
+}
+
 
 docker build -q --build-arg "UBUNTU=$ubuntu" -t "noixdev-infra-host:$ubuntu" "$tests/host" >/dev/null
 

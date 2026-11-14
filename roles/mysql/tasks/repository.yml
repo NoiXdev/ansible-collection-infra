@@ -1,0 +1,98 @@
+---
+# debconf-utils: the debconf module reads the preseeded answers with it.
+- name: Install what the repository needs
+  ansible.builtin.apt:
+    name: [ca-certificates, gnupg, python3-debian, debconf-utils]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the MySQL apt key
+  ansible.builtin.get_url:
+    url: "{{ mysql_apt_key_url }}"
+    dest: /etc/apt/keyrings/mysql.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the key fingerprints
+  ansible.builtin.command:
+    cmd: gpg --batch --show-keys --with-colons /etc/apt/keyrings/mysql.asc
+  register: mysql_apt_key
+  changed_when: false
+
+- name: Reject an unexpected key
+  when: mysql_apt_key.stdout is not search('^fpr:+' ~ mysql_apt_key_fingerprint | upper ~ ':', multiline=True)
+  block:
+    - name: Remove the key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/mysql.asc
+        state: absent
+
+    - name: Stop
+      ansible.builtin.fail:
+        msg: >-
+          {{ mysql_apt_key_url }} does not carry the key
+          {{ mysql_apt_key_fingerprint }}; the key file was removed.
+
+- name: Add the MySQL apt repository
+  ansible.builtin.deb822_repository:
+    name: mysql
+    types: [deb]
+    uris: "{{ mysql_apt_url }}"
+    suites: ["{{ mysql_apt_suite }}"]
+    components: ["{{ mysql_apt_component }}"]
+    signed_by: /etc/apt/keyrings/mysql.asc
+  register: mysql_apt_repository
+
+# apt takes the first stanza that matches a version:
+# - the distro's versions are never installed (the distro ships 8.0 on 24.04
+#   and an 8.4 of its own on 26.04; the vendor's wins by origin, not by
+#   version number);
+# - the series wins; the vendor's versions look like 8.4.13-1ubuntu24.04
+#   (no epoch), the regex takes one with or without;
+# - any other version is never installed.
+# Without the vendor's package lists there is no candidate, and the install
+# fails instead of falling back to another series.
+- name: Pin the series
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/mysql
+    content: |
+      Package: {{ mysql_apt_packages }}
+      Pin: release o=Ubuntu
+      Pin-Priority: -1
+
+      Package: {{ mysql_apt_packages }}
+      Pin: version /^([0-9]+:)?{{ mysql_version | regex_escape }}\./
+      Pin-Priority: 990
+
+      Package: {{ mysql_apt_packages }}
+      Pin: version *
+      Pin-Priority: -1
+    owner: root
+    group: root
+    mode: "0644"
+
+# A refresh that failed in an earlier run leaves the source in place but its
+# packages out of the lists; the next run refreshes then too.
+- name: Read where mysql-community-server can come from
+  ansible.builtin.command:
+    cmd: apt-cache policy mysql-community-server
+  register: mysql_apt_policy
+  changed_when: false
+  check_mode: false
+
+- name: Refresh the package lists for the repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: >-
+    mysql_apt_repository is changed
+    or (mysql_apt_url | regex_replace('/+$', '')) not in mysql_apt_policy.stdout

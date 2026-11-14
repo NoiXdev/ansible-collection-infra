@@ -1,0 +1,24 @@
+---
+# One database and two users. The knobs below change the lists between runs;
+# -e mysql_users=[...] (or mysql_databases, mysql_settings) replaces a
+# whole list for the invalid cases.
+- name: Converge the mysql role
+  hosts: testhost
+  vars:
+    # Characters that break config files and SQL quoting: ' " \ $ % space
+    mysql_test_app_password: "a'b\"c\\d$e%f g"
+    mysql_test_report: true
+    mysql_test_extra_databases: []
+    mysql_test_app:
+      name: app_production
+      password: "{{ mysql_test_app_password }}"
+    mysql_test_report_user:
+      name: report
+      password: rep0rt-pass
+      privileges: ["app_production.*:SELECT"]
+    mysql_databases: "{{ [{'name': 'app_production'}] + mysql_test_extra_databases }}"
+    mysql_users: >-
+      {{ [mysql_test_app]
+         + ([mysql_test_report_user] if mysql_test_report | bool else []) }}
+  roles:
+    - noixdev.infra.mysql

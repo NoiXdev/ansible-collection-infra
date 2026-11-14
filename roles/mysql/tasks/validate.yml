@@ -1,0 +1,142 @@
+---
+# Every message names the entry (its name, or its position when it has none).
+# The user loops use the list without passwords.
+- name: Check the settings
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^[A-Za-z0-9_-]+$')
+      - item.value is not mapping
+      - item.value is string or item.value is number or item.value is boolean
+      - "'\\n' not in (item.value | string)"
+    fail_msg: "mysql: mysql_settings has '{{ item.key }}'; a setting is a name of ^[A-Za-z0-9_-]+$ with a one-line value"
+    quiet: true
+  loop: "{{ mysql_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Refuse the settings the role owns
+  ansible.builtin.assert:
+    that: >-
+      item.key | lower | replace('_', '-') | regex_replace('^loose-', '')
+      not in mysql_role_settings
+    fail_msg: >-
+      mysql: mysql_settings sets {{ item.key }}; bind-address, mysqlx-bind-address, port and
+      socket belong to the role (mysql_bind_address sets the address)
+    quiet: true
+  loop: "{{ mysql_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Check the database entries
+  ansible.builtin.assert:
+    that:
+      - mysql_unknown | length == 0
+      - item.name is defined and item.name is string
+      - item.name is match('^[A-Za-z0-9_]+$') and item.name | length <= 64
+      - mysql_database_names | select('eq', item.name) | list | length == 1
+      - mysql_encoding is match('^[A-Za-z0-9_]+$')
+      - mysql_collation is match('^[A-Za-z0-9_]+$')
+      - mysql_collation is match('^' ~ mysql_encoding ~ '_')
+    fail_msg: >-
+      {%- if mysql_unknown | length > 0 -%}
+      mysql: mysql_databases entry {{ mysql_entry }} has unknown keys ({{ mysql_unknown | join(', ') }});
+      its keys are name, encoding and collation
+      {%- elif item.name is not defined or item.name is not string
+            or item.name is not match('^[A-Za-z0-9_]+$') or item.name | length > 64 -%}
+      mysql: mysql_databases entry {{ mysql_entry }} has an invalid name;
+      it must match ^[A-Za-z0-9_]+$ and be at most 64 characters long
+      {%- elif mysql_database_names | select('eq', item.name) | list | length > 1 -%}
+      mysql: mysql_databases has more than one entry named {{ item.name }}
+      {%- else -%}
+      mysql: mysql_databases entry {{ mysql_entry }} has encoding {{ mysql_encoding }} and
+      collation {{ mysql_collation }}; the collation must belong to the encoding
+      ({{ mysql_encoding }}_...)
+      {%- endif -%}
+    quiet: true
+  vars:
+    mysql_entry: "{{ item.name | default('#' ~ (mysql_index + 1)) }}"
+    mysql_unknown: "{{ item.keys() | difference(mysql_database_keys) | sort }}"
+    mysql_encoding: "{{ item.encoding | default('utf8mb4') | string }}"
+    mysql_collation: "{{ item.collation | default('utf8mb4_unicode_ci') | string }}"
+  loop: "{{ mysql_databases }}"
+  loop_control:
+    index_var: mysql_index
+    label: "{{ item.name | default('#' ~ (mysql_index + 1)) }}"
+
+- name: Check the user entries
+  ansible.builtin.assert:
+    that:
+      - mysql_unknown | length == 0
+      - item.name is defined and item.name is string
+      - item.name is match('^[A-Za-z0-9_.-]+$') and item.name | length <= 80
+      - item.name not in mysql_server_accounts
+      - mysql_users_password_set[mysql_index] == 'set'
+      - mysql_host is string and mysql_host is match('^[A-Za-z0-9_.%:-]+$') and mysql_host | length <= 255
+      - mysql_same_user | length == 1
+    fail_msg: >-
+      {%- if mysql_unknown | length > 0 -%}
+      mysql: mysql_users entry {{ mysql_entry }} has unknown keys ({{ mysql_unknown | join(', ') }});
+      its keys are name, password, host and privileges
+      {%- elif item.name is not defined or item.name is not string
+            or item.name is not match('^[A-Za-z0-9_.-]+$') or item.name | length > 80 -%}
+      mysql: mysql_users entry {{ mysql_entry }} has an invalid name;
+      it must match ^[A-Za-z0-9_.-]+$ and be at most 80 characters long
+      {%- elif item.name in mysql_server_accounts -%}
+      mysql: mysql_users entry {{ item.name }} is one of the server's own accounts
+      ({{ mysql_server_accounts | join(', ') }}), which the role leaves as they are;
+      root logs in through the socket only
+      {%- elif mysql_users_password_set[mysql_index] != 'set' -%}
+      mysql: mysql_users entry {{ mysql_entry }} has no password
+      {%- elif mysql_same_user | length > 1 -%}
+      mysql: mysql_users has more than one entry for {{ item.name }}@{{ mysql_host }}
+      {%- else -%}
+      mysql: mysql_users entry {{ mysql_entry }} has an invalid host;
+      it must match ^[A-Za-z0-9_.%:-]+$
+      {%- endif -%}
+    quiet: true
+  vars:
+    mysql_entry: "{{ item.name | default('#' ~ (mysql_index + 1)) }}"
+    mysql_unknown: "{{ mysql_users_key_names[mysql_index] | difference(mysql_user_keys) | sort }}"
+    mysql_host: "{{ item.host | default('localhost') }}"
+    mysql_same_user: >-
+      {{ mysql_users_public | selectattr('name', 'defined') | selectattr('name', 'eq', item.name | default(''))
+         | map(attribute='host', default='localhost') | select('eq', mysql_host) | list }}
+  loop: "{{ mysql_users_public }}"
+  loop_control:
+    index_var: mysql_index
+    label: "{{ item.name | default('#' ~ (mysql_index + 1)) }}"
+
+# The default comes from the list, not the server, so the result does not
+# depend on which entry was created first.
+- name: Check that every user has privileges
+  ansible.builtin.assert:
+    that: item.privileges is defined or item.name in mysql_database_names
+    fail_msg: >-
+      mysql: mysql_users entry {{ item.name }} has no privileges, and
+      mysql_databases lists no database {{ item.name }}; set privileges
+    quiet: true
+  loop: "{{ mysql_users_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the privileges
+  ansible.builtin.assert:
+    that:
+      - mysql_privileges is sequence and mysql_privileges is not string and mysql_privileges is not mapping
+      - mysql_privileges | reject('string') | list | length == 0
+      - mysql_privileges | reject('match', '^[^./:\\\\]+[.][^./:\\\\]+:[^/:]+$') | list | length == 0
+      - mysql_targets | length == mysql_targets | unique | length
+    fail_msg: >-
+      mysql: mysql_users entry {{ item.name }} has invalid privileges; they are a
+      list of "<db>.<table>:<privs>" such as "app_production.*:SELECT,INSERT",
+      each <db>.<table> once, with names as they are (no backslash escapes)
+    quiet: true
+  vars:
+    mysql_privileges: "{{ item.privileges }}"
+    mysql_targets: >-
+      {{ mysql_privileges | select('string') | map('regex_replace', ':.*$', '') | list
+         if mysql_privileges is sequence and mysql_privileges is not string and mysql_privileges is not mapping
+         else [] }}
+  loop: "{{ mysql_users_public | selectattr('privileges', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"

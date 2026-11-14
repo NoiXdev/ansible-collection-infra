@@ -1,0 +1,55 @@
+---
+# Present only: an existing database keeps its charset, and nothing that
+# left a list is dropped.
+- name: Create the databases
+  ansible.mysql.mysql_db:
+    name: "{{ item.name }}"
+    encoding: "{{ item.encoding | default('utf8mb4') }}"
+    collation: "{{ item.collation | default('utf8mb4_unicode_ci') }}"
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mysql_socket }}"
+  loop: "{{ mysql_databases }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# The password is stored for caching_sha2_password, the server's default (8.4
+# does not load mysql_native_password, which the module would pick for a plain
+# password). The module compares passwords by hash, which needs a fixed salt;
+# the role derives one per account.
+# The listed password and exactly the listed privileges, on every run:
+# a changed password reaches the server, and grants added by hand are
+# revoked. A user that left the list stays.
+# In a database-level grant (<db>.*) _ and % are wildcards: app_production.*
+# would also cover appXproduction. The role escapes them there, so a listed
+# name means that database only; SHOW GRANTS returns the same escaped form.
+- name: Create the users
+  ansible.mysql.mysql_user:
+    name: "{{ item.name }}"
+    host: "{{ item.host | default('localhost') }}"
+    plugin: caching_sha2_password
+    plugin_auth_string: "{{ item.password }}"
+    salt: "{{ (item.name ~ '@' ~ (item.host | default('localhost'))) | hash('sha256') | truncate(20, true, '') }}"
+    update_password: always
+    priv: >-
+      {%- set ns = namespace(targets=[]) -%}
+      {%- for entry in mysql_privileges -%}
+      {%- set target = entry | regex_replace(':[^:]*$', '') -%}
+      {%- set db = target | regex_replace('[.][^.]*$', '') -%}
+      {%- set table = target | regex_replace('^.*[.]', '') -%}
+      {%- if table == '*' and db != '*' -%}
+      {%- set db = db | replace('_', '\\_') | replace('%', '\\%') -%}
+      {%- endif -%}
+      {%- set ns.targets = ns.targets + [db ~ '.' ~ table ~ ':' ~ (entry | regex_replace('^[^:]*:', ''))] -%}
+      {%- endfor -%}
+      {{ ns.targets | join('/') if ns.targets | length > 0 else '*.*:USAGE' }}
+    append_privs: false
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mysql_socket }}"
+  vars:
+    mysql_privileges: "{{ item.privileges | default([item.name ~ '.*:ALL']) }}"
+  loop: "{{ mysql_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true

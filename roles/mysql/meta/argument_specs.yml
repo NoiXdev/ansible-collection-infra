@@ -1,0 +1,76 @@
+---
+argument_specs:
+  main:
+    short_description: MySQL Community Server from MySQL's apt repository, with its databases and users
+    description:
+      - Installs mysql-community-server of one major.minor series from MySQL's apt repository (amd64 only), pinned to that series.
+      - >-
+        A MySQL server of another series that is installed already (the distro's mysql-server-8.0,
+        for example) is refused before any change; a series change is a separate, deliberate step.
+        A host with MariaDB (mariadb-server) is refused as well.
+      - >-
+        The server listens on mysql_bind_address:3306, and its X protocol on :33060. root has no
+        password and logs in through the unix socket only (auth_socket); the role manages the
+        databases and users through it.
+      - >-
+        Present only: databases and users that leave a list stay, and a database that exists
+        already keeps its charset. The role never drops a database or a user.
+      - >-
+        The list entries are checked by the role, not here, so that every message names the
+        entry; an unknown key in an entry (priv instead of privileges, for example) is refused.
+    options:
+      mysql_version:
+        type: str
+        description: major.minor series to install, for example "8.4".
+      mysql_apt_url:
+        type: str
+        description: The repository URL.
+      mysql_apt_component:
+        type: str
+        description: Component of the series in the repository, mysql-<mysql_version>-lts by default.
+      mysql_apt_suite:
+        type: str
+        description: Suite of the repository; the host's release codename by default.
+      mysql_apt_key_url:
+        type: str
+        description: Where the repository key is downloaded from.
+      mysql_apt_key_fingerprint:
+        type: str
+        description: Fingerprint the key must carry; any other key is removed and the run fails.
+      mysql_bind_address:
+        type: str
+        description: The address the server listens on.
+      mysql_settings:
+        type: dict
+        description:
+          - More server settings, written to the server's config under [mysqld] as key = value.
+          - bind-address, mysqlx-bind-address, port and socket (also with underscores or a loose- prefix) are refused.
+      mysql_databases:
+        type: list
+        elements: dict
+        description:
+          - Databases, created when missing. Each entry takes exactly these keys.
+          - name (required), at most 64 characters of ^[A-Za-z0-9_]+$.
+          - encoding, utf8mb4 by default.
+          - collation, utf8mb4_unicode_ci by default; it must belong to the encoding.
+      mysql_users:
+        type: list
+        elements: dict
+        description:
+          - >-
+            Users. On every run the role sets each user's password and exactly its privileges:
+            grants added by hand are revoked. Each entry takes exactly these keys.
+          - >-
+            name (required), at most 80 characters of ^[A-Za-z0-9_.-]+$. The server's own
+            accounts (root, mysql.sys, mysql.session, mysql.infoschema, debian-sys-maint) are refused.
+          - password (required, not empty).
+          - host, localhost by default.
+          - >-
+            privileges, a list of "<db>.<table>:<privs>" such as "app_production.*:SELECT,INSERT",
+            each <db>.<table> once. It defaults to ["<name>.*:ALL"] when mysql_databases lists a
+            database of the user's name, and is required otherwise. An empty list leaves the user
+            with USAGE only.
+          - >-
+            Names are literal. In a database-level target (<db>.*) the server reads _ and % as
+            wildcards, so the role escapes them: app_production.* covers app_production only,
+            not appXproduction. Wildcard targets and backslashes are not supported.
