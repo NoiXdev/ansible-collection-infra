@@ -1,0 +1,11 @@
+---
+argument_specs:
+  main:
+    short_description: Check for Docker before a role changes anything (internal; included by the roles that run on Docker)
+    description:
+      - Runs `docker version` and `docker compose version` and fails the run,
+        before the calling role changes anything, when the Docker CLI or the
+        compose plugin is missing or the daemon does not answer. It changes
+        nothing on the host and does not install Docker; that is the `docker`
+        role's job, or Docker's own packages.
+    options: {}

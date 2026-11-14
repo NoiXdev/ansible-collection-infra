@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `portainer`, `traefik`, `dashy`, `pulsix_manager`, `pulsix_worker`, `dns`, `harbor`, `listmonk`,
+  `anubis` and `mailcow` check for Docker first, before they change anything: the `docker` CLI,
+  the compose plugin (`docker compose version`) and a daemon that answers (`docker version`).
+  Without them the run fails with "Docker is not installed or not running on <host>; run
+  noixdev.infra.docker (or install Docker with the compose plugin) before <role>" and the reason,
+  instead of a module error later in the role. The roles still do not depend on the `docker`
+  role: Docker comes from the playbook (the `docker` role, or Docker's own packages as on a
+  mailcow host). The check is the new internal role `docker_check`; it changes nothing.
+
 ## 0.5.0 — 2026-11-14
 
 - `error_pages_export`: new internal role, used by `cloudpanel` and `mailcow`, that exports the noix

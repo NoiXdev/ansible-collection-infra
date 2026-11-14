@@ -1,4 +1,10 @@
 ---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
 - name: Check the manager settings
   ansible.builtin.assert:
     that:

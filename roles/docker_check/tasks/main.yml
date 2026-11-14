@@ -1,0 +1,48 @@
+---
+# Read-only: checks that the Docker CLI, the compose plugin and the daemon
+# are there before the calling role changes anything. The roles that run on
+# Docker include this role first instead of depending on the docker role:
+# Docker may come from elsewhere (Docker's own packages, a Docker-in-Docker
+# host), and a dependency would run the docker role again for every role.
+
+- name: Read the Docker version
+  ansible.builtin.command:
+    argv: [docker, version, --format, "{{ '{{.Server.Version}}' }}"]
+  register: docker_check_engine
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read the Docker Compose version
+  ansible.builtin.command:
+    argv: [docker, compose, version, --short]
+  register: docker_check_compose
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: docker_check_engine.rc == 0
+
+# The command module reports a missing executable with an empty stderr and
+# the error in msg; `docker version` exits 1 and says why on stderr when the
+# CLI runs but the daemon does not answer.
+- name: Check that Docker runs
+  ansible.builtin.assert:
+    that:
+      - docker_check_engine.rc == 0
+      - docker_check_compose.rc | default(1) == 0
+    fail_msg: >-
+      Docker is not installed or not running on {{ inventory_hostname }}; run
+      noixdev.infra.docker (or install Docker with the compose plugin) before
+      {{ docker_check_caller }}.
+      {{ docker_check_detail }}
+    quiet: true
+  vars:
+    docker_check_caller: "{{ ansible_parent_role_names | default([]) | first | default('this role') }}"
+    docker_check_cli_missing: "{{ docker_check_engine.rc != 0 and docker_check_engine.stderr | default('') | trim == '' }}"
+    docker_check_detail: >-
+      {{ ('The docker CLI was not found or could not be run: ' ~ docker_check_engine.msg | default('') | trim)
+         if docker_check_cli_missing | bool
+         else ('The Docker daemon did not answer: ' ~ docker_check_engine.stderr | trim)
+         if docker_check_engine.rc != 0
+         else ('The compose plugin is missing (docker compose version failed): '
+               ~ (docker_check_compose.stderr | default('') or docker_check_compose.stdout | default('')) | trim) }}

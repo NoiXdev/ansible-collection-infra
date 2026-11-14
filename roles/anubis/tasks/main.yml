@@ -1,4 +1,10 @@
 ---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
 # Required in both modes: without it pass-challenge redirects anywhere after
 # a solved challenge (an open redirect).
 - name: Check that anubis_redirect_domains is set

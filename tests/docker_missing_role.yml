@@ -1,0 +1,29 @@
+---
+# One role of docker_missing.yml, in one case: it must fail in its Docker
+# check with the case's detail.
+- name: Run a role without Docker, {{ docker_missing.1 }}
+  environment: "{{ docker_missing.0.environment }}"
+  block:
+    - name: Run {{ docker_missing.1 }}
+      ansible.builtin.include_role:
+        name: noixdev.infra.{{ docker_missing.1 }}
+
+    - name: Fail because the role ran without Docker, {{ docker_missing.1 }}
+      ansible.builtin.fail:
+        msg: noixdev.infra.{{ docker_missing.1 }} did not stop in its Docker check.
+  rescue:
+    - name: Check that the role stopped in its Docker check, {{ docker_missing.1 }}
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_task.name == 'Check that Docker runs'
+          - docker_missing_expected in ansible_failed_result.msg
+          - docker_missing.0.detail in ansible_failed_result.msg
+        fail_msg: >-
+          noixdev.infra.{{ docker_missing.1 }} ({{ docker_missing.0.detail }}) failed in
+          "{{ ansible_failed_task.name }}" with: {{ ansible_failed_result.msg }}
+        quiet: true
+      vars:
+        docker_missing_expected: >-
+          Docker is not installed or not running on {{ inventory_hostname }}; run
+          noixdev.infra.docker (or install Docker with the compose plugin) before
+          noixdev.infra.{{ docker_missing.1 }}.

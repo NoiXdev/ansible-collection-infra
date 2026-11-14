@@ -56,6 +56,12 @@ grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/idempotence.log" \
 echo "== verify"
 play "$here/verify.yml"
 
+echo "== roles without Docker must fail in their Docker check"
+play "$here/docker_missing.yml" >"$out/docker-missing.log" 2>&1 \
+  || { cat "$out/docker-missing.log" >&2; echo "a role did not stop in its Docker check" >&2; exit 1; }
+docker exec "$host" test ! -e /opt/no-docker \
+  || { echo "a role touched the host before checking for Docker" >&2; exit 1; }
+
 echo "== remote worker without token must fail"
 if play "$here/worker_without_token.yml" >"$out/no-token.log" 2>&1; then
   echo "pulsix_worker started a worker that has neither identity nor token" >&2

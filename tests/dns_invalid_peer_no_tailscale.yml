@@ -1,9 +1,23 @@
 ---
 # A record that follows a tailnet peer needs the tailscale CLI on the DNS host.
+# The PATH has the docker CLI only (the role checks for Docker first), not the
+# tailscale stub next to it in /usr/local/bin.
 - name: DNS record for a peer without the tailscale CLI
   hosts: all
   environment:
-    PATH: /nonexistent
+    PATH: /opt/docker-cli-only
+  pre_tasks:
+    - name: Create a PATH with the docker CLI only
+      ansible.builtin.file:
+        path: /opt/docker-cli-only
+        state: directory
+        mode: "0755"
+
+    - name: Link the docker CLI into it
+      ansible.builtin.file:
+        src: /usr/local/bin/docker
+        dest: /opt/docker-cli-only/docker
+        state: link
   roles:
     - role: noixdev.infra.dns
       vars:

@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Internal role, included by the roles that run on Docker - checks for the Docker CLI, the compose plugin and a running daemon
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+    - name: Debian
+      versions: [bookworm, trixie]
+dependencies: []

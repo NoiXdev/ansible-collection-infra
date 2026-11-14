@@ -1,0 +1,76 @@
+---
+# Every role that runs on Docker must stop in its Docker check, before it
+# changes anything, when the docker CLI, the daemon or the compose plugin is
+# missing. Each case hides one of them through the environment of the role's
+# tasks; run.sh then checks that nothing below /opt/no-docker was created.
+# Every role is run without the CLI; the other two cases need one role only,
+# the check is the same role everywhere.
+- name: Roles without Docker
+  hosts: all
+  vars:
+    no_docker: /opt/no-docker
+    docker_missing_cases:
+      - detail: The docker CLI was not found
+        environment:
+          PATH: /usr/sbin:/usr/bin:/sbin:/bin
+        roles: [portainer, traefik, dashy, pulsix_manager, pulsix_worker, dns, harbor, listmonk, anubis, mailcow]
+      - detail: The Docker daemon did not answer
+        environment:
+          DOCKER_HOST: unix:///run/no-docker.sock
+        roles: [portainer]
+      - detail: The compose plugin is missing
+        environment:
+          PATH: /opt/docker-no-compose:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        roles: [portainer]
+    # The roles' required settings and their directories, all below no_docker.
+    portainer_dir: "{{ no_docker }}/portainer"
+    traefik_dir: "{{ no_docker }}/traefik"
+    dashy_dir: "{{ no_docker }}/dashy"
+    dashy_host: dashy.test
+    dashy_config:
+      sections: [{name: Tools, items: [{title: Test, url: "http://test.test"}]}]
+    pulsix_manager_dir: "{{ no_docker }}/pulsix"
+    pulsix_manager_db_password: test-db-password-test-db-password
+    pulsix_manager_master_key: "{{ '0' * 64 }}"
+    pulsix_manager_public_url: https://pulsix.test
+    pulsix_worker_dir: "{{ no_docker }}/pulsix-worker"
+    pulsix_worker_manager_addr: 127.0.0.1:8444
+    pulsix_worker_instances: [{name: edge-1}]
+    dns_dir: "{{ no_docker }}/dns"
+    dns_allow: [127.0.0.0/8]
+    harbor_dir: "{{ no_docker }}/harbor"
+    harbor_log_dir: "{{ no_docker }}/harbor-log"
+    harbor_hostname: harbor.test
+    harbor_admin_password: test-admin-password
+    harbor_db_password: test-db-password
+    listmonk_dir: "{{ no_docker }}/listmonk/listmonk-app"
+    listmonk_db_password: test-db-password
+    anubis_dir: "{{ no_docker }}/anubis"
+    anubis_redirect_domains: [app.test]
+    mailcow_dir: "{{ no_docker }}/mailcow-dockerized"
+    mailcow_backup_dir: "{{ no_docker }}/mailcow-backup"
+  tasks:
+    - name: Create the docker CLI without the compose plugin
+      ansible.builtin.file:
+        path: /opt/docker-no-compose
+        state: directory
+        mode: "0755"
+
+    - name: Install the docker CLI without the compose plugin
+      ansible.builtin.copy:
+        dest: /opt/docker-no-compose/docker
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          if [ "$1" = compose ]; then
+            echo "docker: unknown command: docker compose" >&2
+            exit 1
+          fi
+          exec /usr/local/bin/docker "$@"
+
+    - name: Run the roles without Docker
+      ansible.builtin.include_tasks: docker_missing_role.yml
+      loop: "{{ docker_missing_cases | subelements('roles') }}"
+      loop_control:
+        loop_var: docker_missing
+        label: "{{ docker_missing.1 }}: {{ docker_missing.0.detail }}"

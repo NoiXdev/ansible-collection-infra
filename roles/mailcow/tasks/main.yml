@@ -6,6 +6,12 @@
 # last backup (a first backup when none is recorded). Sets mailcow_updated,
 # mailcow_roundcube_updated and mailcow_last_backup.
 
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
 # Facts of an earlier run of the role in the same play must not carry over.
 - name: Reset the state of the run
   ansible.builtin.set_fact:
