@@ -87,13 +87,18 @@
       - paperless_admin_password | length > 0
     fail_msg: >-
       Paperless is not installed in {{ paperless_dir }}; a fresh install needs
-      paperless_admin_user and paperless_admin_password.
+      paperless_admin_user and paperless_admin_password (an import with
+      paperless_import_dir brings the users of the export instead).
     quiet: true
   when: paperless_state == 'install'
 
 - name: Install Paperless
   ansible.builtin.include_tasks: install.yml
   when: paperless_state == 'install'
+
+- name: Import the export into the fresh installation
+  ansible.builtin.include_tasks: import.yml
+  when: paperless_state == 'import'
 
 - name: Reconfigure Paperless
   ansible.builtin.include_tasks: reconfigure.yml

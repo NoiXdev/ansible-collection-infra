@@ -90,3 +90,32 @@
       vars:
         verify_csrf_field: >-
           {{ verify_login_form.content | regex_search('name="csrfmiddlewaretoken" value="[^"]+"') }}
+
+    # After an import (verify_import_dir and verify_version given): the
+    # record names the version, the source and the manifest it imported.
+    - name: Read the import record
+      ansible.builtin.slurp:
+        src: "{{ paperless_dir }}/imported.yml"
+      register: verify_record_read
+      when: verify_import_dir is defined
+
+    - name: Stat the imported manifest
+      ansible.builtin.stat:
+        path: "{{ verify_import_dir }}/manifest.json"
+        checksum_algorithm: sha256
+      register: verify_manifest
+      when: verify_import_dir is defined
+
+    - name: Check the import record
+      ansible.builtin.assert:
+        that:
+          - verify_record.keys() | sort == ['manifest_sha256', 'source', 'time', 'version']
+          - verify_record.version == verify_version
+          - verify_record.source == verify_import_dir
+          - verify_record.manifest_sha256 == verify_manifest.stat.checksum
+          - verify_record.time | string | length > 0
+        fail_msg: "{{ verify_record | to_json }}"
+        quiet: true
+      vars:
+        verify_record: "{{ verify_record_read.content | b64decode | from_yaml }}"
+      when: verify_import_dir is defined

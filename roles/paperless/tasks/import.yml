@@ -1,0 +1,113 @@
+---
+# The one-time import into a fresh installation (paperless_state import):
+# the directories and files as on install, the stack without Samba (no scan
+# arrives during the import), Paperless healthy (its migrations made the
+# empty database), document_importer on the export, Samba, then the record
+# paperless_import_record. The marker paperless_install_marker, naming the
+# export as its source, lives from before the first data directory until the
+# record exists. A failed import stops the stack, deletes nothing and keeps
+# the marker, so every later run refuses (state.yml) until the partly
+# imported installation is removed as the message says.
+
+- name: Create the Paperless directory
+  ansible.builtin.file:
+    path: "{{ paperless_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the marker of an import in progress
+  ansible.builtin.copy:
+    dest: "{{ paperless_install_marker }}"
+    content: |
+      version: {{ paperless_version }}
+      time: {{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}
+      source: {{ paperless_import_source | to_json }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Import into a fresh installation
+  block:
+    - name: Create the directories and write the files
+      ansible.builtin.include_tasks: files.yml
+
+    - name: Start Paperless without Samba
+      community.docker.docker_compose_v2:
+        project_src: "{{ paperless_dir }}"
+        services: "{{ paperless_services | difference(['samba']) }}"
+        state: present
+        pull: missing
+
+    - name: Check that Paperless is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Paperless is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Paperless is not healthy within {{ paperless_health_timeout }}
+          seconds ({{ paperless_health_lines | join('; ') }}); see docker
+          compose logs in {{ paperless_dir }}
+      when: not paperless_healthy
+
+    # The image's document_importer runs manage.py as the paperless user. A
+    # passphrase comes through the environment, so it stays out of the
+    # compose file and the docker command line; expand_argument_vars false
+    # keeps the command module from expanding the script's $ itself.
+    - name: Import the export
+      ansible.builtin.command:
+        argv: >-
+          {{ ['docker', 'compose', 'exec', '-T']
+             + (['--env=PAPERLESS_IMPORT_PASSPHRASE', 'webserver', 'sh', '-c',
+                 'exec document_importer "$1" --no-progress-bar --passphrase "$PAPERLESS_IMPORT_PASSPHRASE"',
+                 'sh', paperless_import_container_dir]
+                if paperless_import_passphrase | length > 0
+                else ['webserver', 'document_importer', paperless_import_container_dir, '--no-progress-bar']) }}
+        chdir: "{{ paperless_dir }}"
+        expand_argument_vars: false
+      environment:
+        PAPERLESS_IMPORT_PASSPHRASE: "{{ paperless_import_passphrase }}"
+      changed_when: true
+
+    - name: Start Samba
+      community.docker.docker_compose_v2:
+        project_src: "{{ paperless_dir }}"
+        state: present
+      when: paperless_samba | bool
+
+    - name: Write the import record
+      ansible.builtin.copy:
+        dest: "{{ paperless_import_record }}"
+        content: >-
+          {{ {'version': paperless_import_version,
+              'source': paperless_import_source,
+              'manifest_sha256': paperless_import_manifest_sha256,
+              'time': now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ')} | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Remove the marker of an import in progress
+      ansible.builtin.file:
+        path: "{{ paperless_install_marker }}"
+        state: absent
+
+  rescue:
+    - name: Note why the import failed
+      ansible.builtin.set_fact:
+        paperless_import_failure: "{{ paperless_failure | trim }}"
+
+    # Stopped, not removed: the database and the files stay as they are.
+    - name: Stop Paperless after the failed import
+      community.docker.docker_compose_v2:
+        project_src: "{{ paperless_dir }}"
+        state: stopped
+      failed_when: false
+
+    - name: Fail with what to remove
+      ansible.builtin.fail:
+        msg: >-
+          The import of {{ paperless_import_source }} into Paperless
+          {{ paperless_version }} in {{ paperless_dir }} failed
+          ({{ paperless_import_failure }}). {{ paperless_import_hint }}

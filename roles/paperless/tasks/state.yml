@@ -1,5 +1,7 @@
 ---
 # Reads the host and sets paperless_state:
+#   import       paperless_import_dir set, no import record, and no compose
+#                file nor any of paperless_data_subdirs
 #   install      no compose file and none of paperless_data_subdirs
 #   reconfigure  a file the role writes (compose file, smb.conf, Samba
 #                password) differs from the one on disk
@@ -8,14 +10,38 @@
 # paperless_compose_before (the compose file on disk, which
 # paperless_installed_version reads), paperless_files_changed (the paths of
 # the files that differ) and paperless_down (the expected services that are
-# not running). Changes nothing; refuses an install that did not complete
-# and data without a compose file.
+# not running). With an import record, paperless_import_dir is ignored.
+# Changes nothing; refuses an install or import that did not complete, data
+# without a compose file, and an import into an installation (no record), of
+# an export outside paperless_export_dir, without a manifest, of another
+# Paperless version, or made with a passphrase that is not given.
 
-- name: Look for the marker of an install in progress
-  ansible.builtin.stat:
-    path: "{{ paperless_install_marker }}"
-    get_checksum: false
-  register: paperless_install_marker_stat
+- name: Read the marker of an install or import in progress
+  ansible.builtin.slurp:
+    src: "{{ paperless_install_marker }}"
+  register: paperless_install_marker_read
+  failed_when: false
+
+- name: Note what the marker is from
+  ansible.builtin.set_fact:
+    paperless_incomplete_source: >-
+      {{ (paperless_incomplete.source | default('') if paperless_incomplete is mapping else '') | string }}
+  when: paperless_install_marker_read.content is defined
+  vars:
+    paperless_incomplete: "{{ paperless_install_marker_read.content | b64decode | from_yaml }}"
+
+# An import's marker names its source.
+- name: Refuse an import that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_install_marker }} exists: an import of
+      {{ paperless_incomplete_source }} into Paperless in {{ paperless_dir }}
+      did not complete, so the installation is not empty (the database may
+      be half filled) and the import needs a fresh installation. The role
+      changes nothing. {{ paperless_import_hint }}
+  when:
+    - paperless_install_marker_read.content is defined
+    - paperless_incomplete_source | length > 0
 
 - name: Refuse an install that did not complete
   ansible.builtin.fail:
@@ -24,7 +50,7 @@
       {{ paperless_dir }} did not complete, so the first admin may be
       missing and the database half made. The role changes nothing.
       {{ paperless_install_hint }}
-  when: paperless_install_marker_stat.stat.exists
+  when: paperless_install_marker_read.content is defined
 
 - name: Read the files the role writes
   ansible.builtin.slurp:
@@ -77,6 +103,113 @@
     - not paperless_installed
     - paperless_data_found | length > 0
 
+- name: Look for the import record
+  ansible.builtin.stat:
+    path: "{{ paperless_import_record }}"
+    get_checksum: false
+  register: paperless_import_record_stat
+  when: paperless_import_dir | default('', true) | length > 0
+
+# An import record means the import is done: paperless_import_dir is ignored
+# from then on, also after later updates.
+- name: Note whether to import
+  ansible.builtin.set_fact:
+    paperless_import_wanted: >-
+      {{ paperless_import_dir | default('', true) | length > 0
+         and not (paperless_import_record_stat.stat.exists | default(false)) }}
+
+# The importer itself only warns on another version and on a database that
+# is not empty, so the role refuses both before it changes anything.
+- name: Check the export to import
+  when: paperless_import_wanted | bool
+  block:
+    - name: Check that the export is below the export directory
+      ansible.builtin.assert:
+        that:
+          - paperless_import_rel | length > 0
+          - paperless_import_rel.split('/') | select('in', ['', '.', '..']) | list | length == 0
+        fail_msg: >-
+          paperless_import_dir {{ paperless_import_dir }} is outside the
+          export directory {{ paperless_export_dir }}; it must be a directory
+          below it, which Paperless sees below
+          {{ paperless_container_dirs.export }}. The role changes nothing.
+        quiet: true
+
+    - name: Refuse an import into an installation
+      ansible.builtin.fail:
+        msg: >-
+          Paperless in {{ paperless_dir }} is not empty; the import needs a
+          fresh installation. There is a compose file
+          {{ paperless_compose_file }} but no record
+          {{ paperless_import_record }} of an import, so an import would
+          mix the export into the documents there. The role changes nothing.
+      when: paperless_installed
+
+    - name: Look at the export
+      ansible.builtin.stat:
+        path: "{{ paperless_import_source }}/{{ item }}"
+        checksum_algorithm: sha256
+        get_checksum: "{{ item == 'manifest.json' }}"
+      loop: ["", manifest.json]
+      register: paperless_export_stat
+
+    - name: Check that the export has a manifest
+      ansible.builtin.assert:
+        that:
+          - paperless_export_stat.results[0].stat.isdir | default(false)
+          - paperless_export_stat.results[1].stat.isreg | default(false)
+        fail_msg: >-
+          paperless_import_dir {{ paperless_import_source }} must be a
+          directory with a manifest.json, as document_exporter writes it. The
+          role changes nothing.
+        quiet: true
+
+    # metadata.json, or version.json in older exports; the importer reads
+    # them in that order.
+    - name: Read the version of the export
+      ansible.builtin.slurp:
+        src: "{{ paperless_import_source }}/{{ item }}"
+      loop: [metadata.json, version.json]
+      register: paperless_export_meta
+      failed_when: false
+
+    - name: Note the version and the manifest of the export
+      ansible.builtin.set_fact:
+        paperless_import_version: "{{ (paperless_export_meta_data.version | default('')) | string }}"
+        # The exporter's key for the parameters of a passphrase.
+        paperless_import_encrypted: "{{ '__crypto__' in paperless_export_meta_data }}"
+        paperless_import_manifest_sha256: "{{ paperless_export_stat.results[1].stat.checksum }}"
+      vars:
+        paperless_export_meta_found: "{{ paperless_export_meta.results | selectattr('content', 'defined') | list }}"
+        paperless_export_meta_parsed: >-
+          {{ paperless_export_meta_found[0].content | b64decode | from_json if paperless_export_meta_found else {} }}
+        paperless_export_meta_data: "{{ paperless_export_meta_parsed if paperless_export_meta_parsed is mapping else {} }}"
+
+    - name: Check the version of the export
+      ansible.builtin.assert:
+        that: paperless_import_version == paperless_version
+        fail_msg: >-
+          The export in {{ paperless_import_source }} was made by Paperless
+          {{ paperless_found }}, but paperless_version is
+          {{ paperless_version }}; Paperless imports only an export of its own
+          version. Bring the old installation to {{ paperless_version }} and
+          export again. The role changes nothing.
+        quiet: true
+      vars:
+        paperless_found: >-
+          {{ paperless_import_version if paperless_import_version | length > 0
+             else 'of an unknown version (no version in metadata.json or version.json)' }}
+
+    # Without it the importer fails after the database was made.
+    - name: Check the passphrase of the export
+      ansible.builtin.assert:
+        that: not paperless_import_encrypted or paperless_import_passphrase | length > 0
+        fail_msg: >-
+          The export in {{ paperless_import_source }} was made with a
+          passphrase (its metadata.json holds __crypto__), but
+          paperless_import_passphrase is empty. The role changes nothing.
+        quiet: true
+
 - name: Read the services that run
   ansible.builtin.command:
     argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
@@ -90,6 +223,7 @@
     paperless_down: >-
       {{ paperless_services | difference(paperless_ps.stdout_lines | default([])) }}
     paperless_state: >-
-      {{ 'install' if not paperless_installed
+      {{ 'import' if paperless_import_wanted | bool
+         else 'install' if not paperless_installed
          else 'reconfigure' if paperless_files_changed | length > 0
          else 'noop' }}

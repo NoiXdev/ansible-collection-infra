@@ -63,8 +63,11 @@ paperless_samba_user: scanner
 # The oldest protocol the share offers; SMB1 (NT1) is never offered.
 paperless_samba_min_protocol: SMB2
 
-# An export of the same Paperless version to import into an empty
-# installation, and the passphrase it was exported with.
+# An export of the same Paperless version to import once into an empty
+# installation (a directory below paperless_data_dir/export, which Paperless
+# sees as /usr/src/paperless/export), and the passphrase it was exported
+# with. After the import, a record in paperless_dir keeps it from running
+# again; the variable is then ignored.
 paperless_import_dir: ""
 paperless_import_passphrase: ""
 

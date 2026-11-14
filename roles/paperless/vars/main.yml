@@ -29,6 +29,14 @@ paperless_install_marker: "{{ paperless_dir }}/install-incomplete"
 # Written after an import, so a run with the same paperless_import_dir is not
 # a second import.
 paperless_import_record: "{{ paperless_dir }}/imported.yml"
+# The export to import: paperless_import_dir without a trailing /, its path
+# below paperless_export_dir (empty when it is not below it) and where the
+# Paperless container sees it.
+paperless_import_source: "{{ paperless_import_dir | string | trim | regex_replace('/+$', '') }}"
+paperless_import_rel: >-
+  {{ paperless_import_source[(paperless_export_dir | length) + 1:]
+     if paperless_import_source.startswith(paperless_export_dir ~ '/') else '' }}
+paperless_import_container_dir: "{{ paperless_container_dirs.export }}/{{ paperless_import_rel }}"
 
 # The Paperless version of the compose file on disk (the tag of the
 # webserver image), empty when there is none. paperless_compose_before is set
@@ -89,11 +97,14 @@ paperless_files:
     content: "{{ paperless_samba_password | default('') if paperless_samba | bool else none }}"
     mode: "0600"
 
-# In a rescue: the failed task and the first line of its error (the last line
-# of stderr for a command that only says it failed).
+# In a rescue: the failed task and the first line of its error. For a
+# command that only says it failed, the last line of stderr that names an
+# error (CommandError: ..., the end of a traceback), else its last line.
 paperless_failure: >-
+  {%- set stderr = (ansible_failed_result.stderr | default('') | trim).splitlines() -%}
+  {%- set errors = stderr | select('search', 'Error:') | list -%}
   {{ ansible_failed_task.name }}:
-  {{ ((ansible_failed_result.stderr | default('') | trim).splitlines() or ['']) | last
+  {{ (errors or stderr or ['']) | last | trim
      if ansible_failed_result.msg | default('') is search('non-zero return code')
      else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
 
@@ -105,3 +116,15 @@ paperless_install_hint: >-
   {{ paperless_dir }} (if {{ paperless_compose_file }} exists), remove
   {{ paperless_data_dir }} (only its contents when it is a mountpoint) and
   {{ paperless_dir }}, then run the role again.
+
+# After a failed import: the database and the files may be half filled, so
+# everything the import made goes; the export stays for the next attempt.
+paperless_import_hint: >-
+  It left a partly imported installation, which the role does not take for a
+  finished one. To import again, run docker compose down in
+  {{ paperless_dir }}, remove {{ paperless_compose_file }},
+  {{ paperless_install_marker }} and the subdirectories
+  {{ paperless_data_subdirs[:-1] | join(', ') }} and
+  {{ paperless_data_subdirs[-1] }} of {{ paperless_data_dir }} (only these:
+  keep {{ paperless_export_dir }}, which holds the export), then run the role
+  again.

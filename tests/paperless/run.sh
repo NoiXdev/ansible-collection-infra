@@ -6,8 +6,14 @@
 # through Traefik, no published HTTP port, Samba on 127.0.0.1 only, a $
 # reaching the container verbatim), a scan written over the Samba share that Paperless consumes, SMB1
 # refused, a reconfigure of the share, and a run without changes that fails on
-# a stopped container. Every successful converge is repeated and must change
-# nothing.
+# a stopped container. Then the import of that host's export: refused into
+# the host itself (not empty); on a fresh host refused for an export of
+# another version, without a manifest, without its passphrase and for a path
+# outside the export directory, a half-failed import (a truncated manifest)
+# refused until it is removed as the message says, then imported once
+# (documents, title and admin of the source, the record), and after another
+# removal an export made with a passphrase imported with it. Every
+# successful converge is repeated and must change nothing.
 # The single-quoted scripts expand inside the container, not here.
 # shellcheck disable=SC2016
 set -euo pipefail
@@ -35,6 +41,13 @@ images=(
   "$(value_of "$traefik_defaults" traefik_socket_proxy_image)"
 )
 admin_password="$(value_of "$here/vars.yml" paperless_admin_password)"
+# The export directory on the host and the export the import tests use.
+export_dir="$dir/data/export"
+import="$export_dir/t1"
+# The second export is made with a passphrase that the command module and a
+# shell would expand if it were not passed verbatim.
+encrypted="$export_dir/t2"
+passphrase="pass \$HOME 'q' \`id\`"
 samba_password="$(value_of "$here/vars.yml" paperless_samba_password)"
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
@@ -202,5 +215,110 @@ expect_in_log stopped "not running"
 expect_unchanged stopped
 [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet samba")" ] || fail "the run started samba"
 hx sh -c "cd $dir && docker compose start samba" >/dev/null 2>&1
+
+echo "== an import into an installed Paperless must be refused"
+# The source of the import tests: this host's export, with its one document.
+source_title="$(api /api/documents/ | python3 -c 'import json, sys; print(json.load(sys.stdin)["results"][0]["title"])')"
+hx install -d -o 1000 -g 1000 "$import"
+hx sh -c "cd $dir && docker compose exec -T webserver document_exporter /usr/src/paperless/export/t1 --no-progress-bar" \
+  >"$out/export.log" 2>&1 || { cat "$out/export.log" >&2; fail "the export failed"; }
+hx test -s "$import/manifest.json" || fail "the export has no manifest.json"
+hx install -d -o 1000 -g 1000 "$encrypted"
+docker exec -w "$dir" "$host" docker compose exec -T webserver document_exporter /usr/src/paperless/export/t2 \
+  --no-progress-bar --passphrase "$passphrase" >"$out/export-t2.log" 2>&1 || { cat "$out/export-t2.log" >&2; fail "the export with a passphrase failed"; }
+hx grep -q __crypto__ "$encrypted/metadata.json" || fail "the export with a passphrase is not encrypted"
+rm -rf "$out/export-t1" "$out/export-t2"
+docker cp "$host:$import" "$out/export-t1"
+docker cp "$host:$encrypted" "$out/export-t2"
+compose_before="$(hx sha256sum "$dir/compose.yaml")"
+play_fails import-installed "$here/converge.yml" -e "paperless_import_dir=$import"
+expect_in_log import-installed "not empty; the import needs a fresh installation"
+expect_unchanged import-installed
+[ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused import changed the compose file"
+[ "$(doc_count)" = 1 ] || fail "the refused import changed the documents: $(doc_count)"
+hx test ! -e "$dir/imported.yml" || fail "the refused import wrote a record"
+
+echo "== an import of another version, from outside the export directory or without its passphrase must be refused before any change"
+new_host
+hx mkdir -p "$export_dir"
+docker cp "$out/export-t1" "$host:$import"
+docker cp "$out/export-t2" "$host:$encrypted"
+# Everything under $dir (the export only) and the containers.
+snapshot() { hx sh -c "find $dir -exec stat -c '%n %a %u %g %s %Y' {} + | sort; docker ps -aq"; }
+before="$(snapshot)"
+role_fails import-outside -e paperless_import_dir=/tmp/x
+expect_in_log import-outside "outside the export directory"
+role_fails import-dotdot -e "paperless_import_dir=$export_dir/../export/t1"
+expect_in_log import-dotdot "outside the export directory"
+[ "$(snapshot)" = "$before" ] || fail "a refused import changed the host"
+hx python3 -c 'import json, sys; p = sys.argv[1]; d = json.load(open(p)); d["version"] = "3.3.4"; json.dump(d, open(p, "w"))' "$import/metadata.json"
+before="$(snapshot)"
+role_fails import-version -e "paperless_import_dir=$import"
+expect_in_log import-version "3.3.4"
+expect_in_log import-version "$version"
+[ "$(snapshot)" = "$before" ] || fail "the refused import of another version changed the host"
+docker cp "$out/export-t1/metadata.json" "$host:$import/metadata.json"
+before="$(snapshot)"
+role_fails import-no-passphrase -e "paperless_import_dir=$encrypted"
+expect_in_log import-no-passphrase "was made with a passphrase"
+[ "$(snapshot)" = "$before" ] || fail "the refused import without a passphrase changed the host"
+hx rm "$import/manifest.json"
+before="$(snapshot)"
+role_fails import-no-manifest -e "paperless_import_dir=$import"
+expect_in_log import-no-manifest "manifest.json"
+[ "$(snapshot)" = "$before" ] || fail "the refused import without a manifest changed the host"
+docker cp "$out/export-t1/manifest.json" "$host:$import/manifest.json"
+
+echo "== a half-failed import must be refused until it is removed"
+load_images
+# A manifest cut short: the importer fails after the stack started and the
+# database was made.
+hx sh -c "head -c 300 $import/manifest.json >$import/m && mv $import/m $import/manifest.json"
+import_vars=(-e "paperless_import_dir=$import" -e paperless_admin_user= -e paperless_admin_password=)
+# Removes the installation as the import's message says (and the record);
+# the exports stay.
+reset_import() {
+  hx sh -c "cd $dir && docker compose down" >/dev/null 2>&1
+  hx rm -rf "$dir/compose.yaml" "$dir/install-incomplete" "$dir/imported.yml" "$dir/data/media" "$dir/data/data" \
+    "$dir/data/consume" "$dir/data/postgres" "$dir/data/redis"
+}
+play_fails import-failed "$here/converge.yml" "${import_vars[@]}"
+expect_in_log import-failed "The import of $import into Paperless $version in $dir failed (Import the export:"
+expect_in_log import-failed "Failed to parse manifest file"
+expect_in_log import-failed "docker compose down in $dir"
+expect_in_log import-failed "remove $dir/compose.yaml"
+expect_in_log import-failed "the subdirectories media, data, consume, postgres and redis of $dir/data"
+expect_in_log import-failed "keep $export_dir"
+[ -z "$(hx sh -c "cd $dir && docker compose ps --quiet")" ] || fail "the failed import left containers running"
+containers_before="$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)"
+[ -n "$containers_before" ] || fail "the failed import removed its containers"
+play_fails import-incomplete "$here/converge.yml" "${import_vars[@]}"
+expect_in_log import-incomplete "not empty"
+expect_in_log import-incomplete "keep $export_dir"
+expect_unchanged import-incomplete
+hx sh -c "find $dir/data/postgres -name PG_VERSION | grep -q ." || fail "the refused run removed the database"
+[ "$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)" = "$containers_before" ] \
+  || fail "the refused run created or removed containers"
+hx test ! -e "$dir/imported.yml" || fail "the failed import wrote a record"
+# As the message says, with the manifest made whole again; the export stays.
+reset_import
+docker cp "$out/export-t1/manifest.json" "$host:$import/manifest.json"
+
+echo "== import"
+converge "${import_vars[@]}"
+grep -q "import.yml" "$out/converge.log" || fail "the converge was not an import"
+expect_idempotent "${import_vars[@]}"
+play "$here/verify.yml" -e "verify_import_dir=$import" -e "verify_version=$version"
+[ "$(doc_count)" = 1 ] || fail "the import brought $(doc_count) documents, not 1"
+title="$(api /api/documents/ | python3 -c 'import json, sys; print(json.load(sys.stdin)["results"][0]["title"])')"
+[ "$title" = "$source_title" ] || fail "the imported document is titled $title, not $source_title"
+
+echo "== an export made with a passphrase must be imported with it"
+reset_import
+converge -e "paperless_import_dir=$encrypted" -e paperless_admin_user= -e paperless_admin_password= \
+  -e "{\"paperless_import_passphrase\": \"$passphrase\"}"
+expect_idempotent -e "paperless_import_dir=$encrypted" -e paperless_admin_user= -e paperless_admin_password=
+[ "$(doc_count)" = 1 ] || fail "the import with a passphrase brought $(doc_count) documents, not 1"
+if hx grep -qF "$passphrase" "$dir/compose.yaml"; then fail "the passphrase is in the compose file"; fi
 
 echo "== all paperless tests passed"

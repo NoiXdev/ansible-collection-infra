@@ -114,8 +114,9 @@ argument_specs:
       paperless_import_dir:
         type: str
         description: >-
-          Export of the same Paperless version to import into an empty
-          installation; empty imports nothing.
+          Export of the same Paperless version to import once into an empty
+          installation, a directory below paperless_data_dir/export; empty
+          imports nothing. Ignored once the import is recorded.
       paperless_import_passphrase:
         type: str
         no_log: true
