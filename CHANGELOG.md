@@ -42,6 +42,27 @@
   text, Landscape and news; add the file names of banners from earlier setups to the list).
   `motd_enabled: false` removes only the managed file; after changing `motd_filename`, list the
   old name in `motd_remove_snippets`.
+- `paperless`: new role that runs Paperless-ngx v3 (pinned, major 3 only) with PostgreSQL, a Valkey
+  broker, Tika and Gotenberg (`paperless_tika`) and a Samba scanner share (`paperless_samba`) as one
+  compose project, behind Traefik with no published HTTP port. It needs Docker Engine 25 or later
+  (the webserver's health check uses `start_interval`). `paperless_hostname`, `paperless_secret_key`
+  and `paperless_db_password` are required, the first admin only for a fresh install. The data lives
+  in `paperless_data_dir`, which can be a `base_mounts` volume (`paperless_data_dir_mountpoint`
+  fails every run unless it is a mountpoint). Only an install or an import creates the data
+  subdirectories and the containers bind them without creating them, so a volume that is not
+  mounted keeps the containers from starting, and a run that finds the compose file without the
+  subdirectories fails in every state. More `PAPERLESS_*` settings go through `paperless_env`; the
+  ones the role sets itself are refused. The share offers SMB2 or newer only
+  (`paperless_samba_min_protocol`, never `NT1`), and `paperless_samba_bind` is required, with no
+  `0.0.0.0` default, because Docker bypasses the host firewall. An export of an old installation is
+  imported once with `paperless_import_dir` (below `paperless_data_dir/export`, made by the exact
+  pinned version, into an empty installation; later runs ignore it through `imported.yml`). Before
+  an update the role takes a backup in `backups/`: `paperless.dump`, `data/` and `media/` as hard
+  links; the newest `paperless_dumps_keep` are kept. A failed update is rolled back, writes
+  `update-failed` and leaves `<backup>-failed`, which is never pruned; Samba starts only once the
+  new version is healthy. Refused before any change: a downgrade, a PostgreSQL major other than the
+  database's, more than one PostgreSQL cluster, an import into an existing installation or of
+  another version, and a leftover `install-incomplete` marker. See the role's guide in the docs.
 
 ## 0.5.0 — 2026-11-14
 
