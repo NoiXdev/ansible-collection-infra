@@ -2,11 +2,13 @@
 # The pin is newer than the installed version. The new image first (a failed
 # pull changes nothing); then the webserver and Samba stopped, the backup
 # (snapshot.yml: dump, data, media), the files written with the new version,
-# the stack started (Paperless migrates its schema on start) and checked, and
-# the backups pruned to the newest paperless_dumps_keep. A failure before the
-# backup is complete removes the partial backup, starts the stack as it was
-# and fails. After it, restore.yml rolls back to the backup, the marker
-# paperless_marker_file names the failed version, and the run fails.
+# the stack without Samba started (Paperless migrates its schema on start)
+# and checked, Samba started, and the backups pruned to the newest
+# paperless_dumps_keep. A failure before the backup is complete removes the
+# partial backup, starts the stack as it was and fails. After it,
+# restore.yml rolls back to the backup (Samba starts with the restored
+# stack), the marker paperless_marker_file names the failed version, and the
+# run fails.
 
 - name: Update Paperless
   vars:
@@ -56,9 +58,12 @@
       loop_control:
         label: "{{ item.path }}"
 
-    - name: Start Paperless {{ paperless_version }}
+    # Without Samba: a scan the new version consumed before a rollback
+    # would end up in the failed attempt's media, not in Paperless.
+    - name: Start the new Paperless without Samba
       community.docker.docker_compose_v2:
         project_src: "{{ paperless_dir }}"
+        services: "{{ paperless_services | difference(['samba']) }}"
         state: present
         pull: missing
         remove_orphans: true
@@ -72,6 +77,13 @@
           Paperless {{ paperless_version }} is not healthy within
           {{ paperless_health_timeout }} seconds ({{ paperless_health_lines | join('; ') }})
       when: not paperless_healthy
+
+    - name: Start Samba
+      community.docker.docker_compose_v2:
+        project_src: "{{ paperless_dir }}"
+        state: present
+        pull: missing
+      when: paperless_samba | bool
 
   rescue:
     - name: Note what failed

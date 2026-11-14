@@ -4,7 +4,8 @@
 # paperless_files_read; the ones that did not exist removed), the database
 # recreated empty and loaded from the dump, data/ and media/ moved aside to
 # <backup>-failed and the snapshot copied back (media as hard links again),
-# then the previous stack started and checked with health.yml. The previous
+# then the previous stack (Samba with it) started and checked with
+# health.yml. The previous
 # files come first, so the database is restored in the previous database
 # container. Never fails by itself: paperless_healthy says whether Paperless
 # is healthy again, paperless_restore_error what failed.
@@ -30,13 +31,12 @@
       # They hold the secret key and the passwords.
       no_log: true
 
+    # Paths only: the results also hold the new files, the secrets among them.
     - name: Remove the files the previous version did not have
       ansible.builtin.file:
-        path: "{{ item.item.path }}"
+        path: "{{ item }}"
         state: absent
-      loop: "{{ paperless_files_read.results | rejectattr('content', 'defined') | list }}"
-      loop_control:
-        label: "{{ item.item.path }}"
+      loop: "{{ paperless_files_read.results | rejectattr('content', 'defined') | map(attribute='item.path') | list }}"
 
     - name: Start the previous database
       community.docker.docker_compose_v2:

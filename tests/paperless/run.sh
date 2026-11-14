@@ -389,16 +389,30 @@ test_update() {
   expect_idempotent
   play "$here/verify.yml"
 
-  echo "== a downgrade and another PostgreSQL major must be refused before any change"
+  echo "== a downgrade, another PostgreSQL major and a second cluster must be refused before any change"
   compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  containers_before="$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)"
+  unchanged() {
+    expect_unchanged "$1"
+    [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run $1 changed the compose file"
+    [ "$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)" = "$containers_before" ] \
+      || fail "the refused run $1 created or removed containers"
+  }
   play_fails downgrade "$here/converge.yml" -e "paperless_version=$old_version"
   expect_in_log downgrade "paperless_version $old_version is lower than the installed version $version"
-  expect_unchanged downgrade
+  unchanged downgrade
   play_fails postgres-major "$here/converge.yml" -e paperless_postgres_image=docker.io/library/postgres:17
   expect_in_log postgres-major "PostgreSQL 17"
   expect_in_log postgres-major "PostgreSQL 18"
-  expect_unchanged postgres-major
-  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "a refused run changed the compose file"
+  unchanged postgres-major
+  # An old cluster next to the current one, as a copy-mode pg_upgrade leaves it.
+  hx sh -c "mkdir -p $dir/data/postgres/17/docker && echo 17 >$dir/data/postgres/17/docker/PG_VERSION"
+  play_fails postgres-clusters "$here/converge.yml"
+  expect_in_log postgres-clusters "more than one PostgreSQL cluster"
+  expect_in_log postgres-clusters "$dir/data/postgres/17/docker/PG_VERSION (PostgreSQL 17)"
+  expect_in_log postgres-clusters "$dir/data/postgres/18/docker/PG_VERSION (PostgreSQL 18)"
+  unchanged postgres-clusters
+  hx rm -r "$dir/data/postgres/17"
   [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the refusals: $(webserver)"
 }
 
@@ -413,6 +427,9 @@ test_failed_update() {
   hx docker tag busybox:1.37 "test.invalid/paperless-ngx:$version"
   play_fails update-failed "$here/converge.yml" -e paperless_image=test.invalid/paperless-ngx -e paperless_health_timeout=30
   expect_in_log update-failed "update from $old_version to $version in $dir failed, rolled back to $old_version"
+  # The health of the new version, in the message: Samba was still stopped.
+  expect_in_log update-failed "samba exited"
+  [ "$(hx sh -c "cd $dir && docker compose ps --format '{{.State}}' samba")" = running ] || fail "Samba does not run after the rollback"
   [ "$(webserver)" = "${old_images[0]} running healthy" ] || fail "the webserver after the rollback: $(webserver)"
   [ "$(doc_count)" = 1 ] || fail "the rollback left $(doc_count) documents, not 1"
   [ "$(original_sum)" = "$sample_sum" ] || fail "the original of the document changed in the rollback"
