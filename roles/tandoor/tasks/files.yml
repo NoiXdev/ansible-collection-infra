@@ -1,0 +1,31 @@
+---
+# The data directory with its subdirectories and the compose file, for the
+# install (inside its block, so a failure here is the install's).
+
+- name: Create the data directory
+  ansible.builtin.file:
+    path: "{{ tandoor_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# Tandoor runs as root and PostgreSQL chowns its data on start.
+- name: Create the data subdirectories
+  ansible.builtin.file:
+    path: "{{ tandoor_data_dir }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ tandoor_data_subdirs }}"
+
+- name: Write the compose file
+  ansible.builtin.copy:
+    dest: "{{ tandoor_compose_file }}"
+    content: "{{ tandoor_compose }}"
+    owner: root
+    group: root
+    mode: "0600"
+  # It holds the secret key and the passwords.
+  no_log: true

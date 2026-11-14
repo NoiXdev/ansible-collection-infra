@@ -1,0 +1,42 @@
+---
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  vars:
+    # false runs the tandoor role alone (the refusals need no Traefik).
+    converge_traefik: true
+    converge_mailpit_image: axllent/mailpit:v1.33.1
+  tasks:
+    - name: Run the traefik role
+      ansible.builtin.include_role:
+        name: noixdev.infra.traefik
+      when: converge_traefik | bool
+
+    # The SMTP catcher on the Traefik network, where Tandoor reaches it as
+    # mailpit; its API on 127.0.0.1:8025 of the test host for verify.yml.
+    - name: Look for Mailpit
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, name=^mailpit$]
+      register: converge_mailpit
+      changed_when: false
+      when: converge_traefik | bool
+
+    - name: Start Mailpit
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name=mailpit
+          - "--network={{ traefik_network | default('proxy') }}"
+          - --restart=unless-stopped
+          - --publish=127.0.0.1:8025:8025
+          - "{{ converge_mailpit_image }}"
+      changed_when: true
+      when:
+        - converge_traefik | bool
+        - converge_mailpit.stdout | length == 0
+
+    - name: Run the tandoor role
+      ansible.builtin.include_role:
+        name: noixdev.infra.tandoor

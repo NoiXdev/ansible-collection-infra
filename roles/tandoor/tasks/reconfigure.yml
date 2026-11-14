@@ -1,0 +1,32 @@
+---
+# Same installation, other settings: the compose file is written, the stack
+# brought to it, and Tandoor checked.
+
+- name: Write the compose file
+  ansible.builtin.copy:
+    dest: "{{ tandoor_compose_file }}"
+    content: "{{ tandoor_compose }}"
+    owner: root
+    group: root
+    mode: "0600"
+  # It holds the secret key and the passwords.
+  no_log: true
+
+- name: Start Tandoor with the new configuration
+  community.docker.docker_compose_v2:
+    project_src: "{{ tandoor_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+
+- name: Check that Tandoor is healthy
+  ansible.builtin.include_tasks: health.yml
+
+- name: Fail when Tandoor is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      Tandoor in {{ tandoor_dir }} is not healthy within
+      {{ tandoor_health_timeout }} seconds after the reconfigure
+      ({{ tandoor_health_lines | join('; ') }}); see docker compose logs in
+      {{ tandoor_dir }}.
+  when: not tandoor_healthy

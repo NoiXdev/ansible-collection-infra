@@ -1,0 +1,90 @@
+---
+# Tandoor Recipes release (tag of vabene1111/recipes, X.Y.Z without a v);
+# the major must be 2.
+tandoor_version: 2.7.2
+tandoor_image: vabene1111/recipes
+
+# Directory of the compose project (compose.yaml, markers). Its basename is
+# the compose project name.
+tandoor_dir: /opt/tandoor
+# The data: the PostgreSQL data and, without S3, the media files, one
+# subdirectory each. It can be a mountpoint of its own (a block volume);
+# tandoor_data_dir_mountpoint: true then fails every run unless it is one.
+tandoor_data_dir: "{{ tandoor_dir }}/data"
+tandoor_data_dir_mountpoint: false
+
+# The web UI, only through Traefik: tandoor_hostname is required.
+# tandoor_url is the origin the browser sees (CSRF_TRUSTED_ORIGINS).
+tandoor_hostname: ""
+tandoor_url: https://{{ tandoor_hostname }}
+# Traefik: external network and entrypoints of the routes; empty entrypoints
+# use Traefik's default ones. Two routers on tandoor_hostname:
+#   <project>      the pages, with tandoor_traefik_middlewares, at
+#                  tandoor_traefik_priority
+#   <project>-api  the paths Tandoor's own UI and apps call without a page:
+#                  /api/ (the REST API), /_allauth/ (login, signup, session
+#                  and app tokens) and, with local media, /media/ (images),
+#                  with tandoor_traefik_api_middlewares, at
+#                  tandoor_traefik_priority + 1
+# They answer 401 or 403 without a session, so a challenge middleware that
+# replaces those answers (Anubis) belongs on the pages only. The priority
+# keeps both above catch-all routers such as the traefik role's error pages
+# routes (priority 1 and 2).
+tandoor_traefik_network: proxy
+tandoor_traefik_entrypoints: []
+tandoor_traefik_priority: 100
+tandoor_traefik_middlewares: []
+tandoor_traefik_api_middlewares: []
+# Proxies in front of Tandoor that add to X-Forwarded-For (Traefik: 1). The
+# image's own nginx adds one more, which the role counts itself; Tandoor's
+# login, signup and password reset rate limits read the client address from
+# it.
+tandoor_trusted_proxy_count: 1
+
+# tandoor_secret_key (at least 32 characters) and tandoor_db_password are
+# required and have no default; keep them in a vault.
+
+# The first admin, created on a fresh install only (all three required
+# there), with a space of its own; the admin's first login runs Tandoor's
+# space setup. Users join through Tandoor's invite links: open registration
+# is always off.
+tandoor_admin_user: ""
+tandoor_admin_password: ""
+tandoor_admin_email: ""
+
+# PostgreSQL 18 or newer: older images keep the database on a volume of their
+# own, outside tandoor_data_dir, and are refused.
+tandoor_postgres_image: docker.io/library/postgres:18
+
+# SMTP for invites and password resets; off while host is empty. tls is
+# STARTTLS, ssl implicit TLS (not both); from is required with a host. Keep
+# the password in a vault.
+tandoor_email:
+  host: ""
+  port: 587
+  user: ""
+  password: ""
+  tls: true
+  ssl: false
+  from: ""
+
+# Media in an S3 bucket instead of tandoor_data_dir, on when access_key is
+# set.
+tandoor_s3:
+  access_key: ""
+  secret_key: ""
+  bucket: ""
+  endpoint: ""
+  region: ""
+  querystring_auth: true
+  custom_domain: ""
+
+# More settings for the Tandoor container (TZ, GUNICORN_WORKERS, ...). The
+# settings the role sets itself are refused; true and false become 1 and 0.
+tandoor_env: {}
+
+# Dumps and media copies taken before every update; the newest
+# tandoor_dumps_keep are kept.
+tandoor_dumps_keep: 3
+# Seconds to wait for Tandoor and the database to become healthy.
+tandoor_health_timeout: 300

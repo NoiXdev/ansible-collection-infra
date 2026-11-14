@@ -1,0 +1,141 @@
+---
+# A fresh install: the directories (the data subdirectories only here), the
+# compose file, the stack, then the first admin and its space once Tandoor is
+# healthy. The marker tandoor_install_marker lives from before the first data
+# directory until the space exists, so a run after a failed install refuses
+# (state.yml) instead of taking the half-made installation for a finished
+# one. A failed install stops the stack and deletes nothing.
+
+- name: Create the Tandoor directory
+  ansible.builtin.file:
+    path: "{{ tandoor_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the marker of an install in progress
+  ansible.builtin.copy:
+    dest: "{{ tandoor_install_marker }}"
+    content: |
+      version: {{ tandoor_version }}
+      time: {{ now(utc=true).isoformat() }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install Tandoor
+  block:
+    - name: Create the directories and write the compose file
+      ansible.builtin.include_tasks: files.yml
+
+    - name: Start Tandoor
+      community.docker.docker_compose_v2:
+        project_src: "{{ tandoor_dir }}"
+        state: present
+        pull: missing
+
+    - name: Check that Tandoor is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Tandoor is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Tandoor is not healthy within {{ tandoor_health_timeout }} seconds
+          ({{ tandoor_health_lines | join('; ') }}); see docker compose logs in
+          {{ tandoor_dir }}
+      when: not tandoor_healthy
+
+    # With the image's virtualenv, as its boot script runs manage.py. The
+    # password goes through stdin into the environment of manage.py (the x
+    # keeps trailing newlines), so it is in neither the compose file, a
+    # command line nor the run's output: a task environment would show in the
+    # -vvv output, and no_log hides the arguments. The next task fails with
+    # the error.
+    - name: Create the first admin
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - exec
+          - -T
+          - web
+          - sh
+          - -c
+          - >-
+            DJANGO_SUPERUSER_PASSWORD="$(cat; echo x)";
+            DJANGO_SUPERUSER_PASSWORD="${DJANGO_SUPERUSER_PASSWORD%x}";
+            export DJANGO_SUPERUSER_PASSWORD;
+            exec /opt/recipes/venv/bin/python manage.py createsuperuser --noinput --username="$1" --email="$2"
+          - sh
+          - "{{ tandoor_admin_user }}"
+          - "{{ tandoor_admin_email }}"
+        chdir: "{{ tandoor_dir }}"
+        stdin: "{{ tandoor_admin_password }}"
+        stdin_add_newline: false
+        expand_argument_vars: false
+      register: tandoor_hidden
+      changed_when: true
+      failed_when: false
+      no_log: true
+
+    - name: Fail when the first admin was not created
+      ansible.builtin.fail:
+        msg: "{{ tandoor_hidden_error }}"
+      when: tandoor_hidden.rc != 0
+
+    # Tandoor's API and UI need a space for every user; createsuperuser makes
+    # none. The same helper Tandoor's own first-user page and signup use: the
+    # space is the admin's, not yet set up, so the admin's first login runs
+    # Tandoor's space setup. The user name comes through stdin.
+    - name: Create the first admin's space
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - exec
+          - -T
+          - web
+          - /opt/recipes/venv/bin/python
+          - manage.py
+          - shell
+          - -c
+          - |
+            import sys
+            from django.contrib.auth.models import User
+            from django_scopes import scopes_disabled
+            from cookbook.helper.permission_helper import create_space_for_user
+            from cookbook.models import UserSpace
+            with scopes_disabled():
+                user = User.objects.get(username=sys.stdin.read())
+                if not UserSpace.objects.filter(user=user).exists():
+                    create_space_for_user(user)
+        chdir: "{{ tandoor_dir }}"
+        stdin: "{{ tandoor_admin_user }}"
+        stdin_add_newline: false
+      changed_when: true
+
+    - name: Remove the marker of an install in progress
+      ansible.builtin.file:
+        path: "{{ tandoor_install_marker }}"
+        state: absent
+
+  rescue:
+    - name: Note why the install failed
+      ansible.builtin.set_fact:
+        tandoor_install_failure: "{{ tandoor_failure | trim }}"
+
+    # Stopped, not removed: what is left is for the hint's removal, and a
+    # running Tandoor would take recipes into the installation it says to
+    # remove.
+    - name: Stop Tandoor after the failed install
+      community.docker.docker_compose_v2:
+        project_src: "{{ tandoor_dir }}"
+        state: stopped
+      failed_when: false
+
+    - name: Fail with what to remove
+      ansible.builtin.fail:
+        msg: >-
+          The install of Tandoor {{ tandoor_version }} in {{ tandoor_dir }}
+          failed ({{ tandoor_install_failure }}). {{ tandoor_install_hint }}

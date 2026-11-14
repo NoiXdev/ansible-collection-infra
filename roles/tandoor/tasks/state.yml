@@ -1,0 +1,80 @@
+---
+# Reads the host and sets tandoor_state:
+#   install      no compose file and none of tandoor_data_subdirs
+#   reconfigure  the compose file the role writes differs from the one on
+#                disk
+#   noop         everything as the role writes it
+# Also sets tandoor_installed (a compose file exists), tandoor_compose_before
+# (the compose file on disk, which tandoor_installed_version reads),
+# tandoor_data_found (the data subdirectories that exist) and tandoor_down
+# (the expected services that are not running). Changes nothing; refuses an
+# install that did not complete (its marker) and left-over data without a
+# compose file.
+
+- name: Read the compose file
+  ansible.builtin.slurp:
+    src: "{{ tandoor_compose_file }}"
+  register: tandoor_compose_read
+  failed_when: false
+  # It holds the secret key and the passwords.
+  no_log: true
+
+- name: Look for the data subdirectories
+  ansible.builtin.stat:
+    path: "{{ tandoor_data_dir }}/{{ item }}"
+    get_checksum: false
+  loop: "{{ tandoor_data_subdirs }}"
+  register: tandoor_subdirs_stat
+
+- name: Note what is on the host
+  ansible.builtin.set_fact:
+    tandoor_compose_before: "{{ tandoor_compose_read.content | default('') | b64decode }}"
+    tandoor_installed: "{{ tandoor_compose_read.content is defined }}"
+    tandoor_data_found: >-
+      {{ tandoor_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
+  no_log: true
+
+- name: Look for the marker of an install in progress
+  ansible.builtin.stat:
+    path: "{{ tandoor_install_marker }}"
+    get_checksum: false
+  register: tandoor_install_marker_stat
+
+- name: Refuse an install that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ tandoor_install_marker }} exists: an install of Tandoor in
+      {{ tandoor_dir }} did not complete, so the first admin or its space may
+      be missing and the database half made. The role changes nothing.
+      {{ tandoor_install_hint }}
+  when: tandoor_install_marker_stat.stat.exists
+
+- name: Refuse data without a compose file
+  ansible.builtin.fail:
+    msg: >-
+      Tandoor data is in {{ tandoor_data_dir }}
+      ({{ tandoor_data_found | join(', ') }}), but there is no compose file
+      {{ tandoor_compose_file }}. The role does not install over left-over
+      data and changes nothing; move it away, or put back the compose file
+      that uses it.
+  when:
+    - not tandoor_installed
+    - tandoor_data_found | length > 0
+
+- name: Read the services that run
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
+    chdir: "{{ tandoor_dir }}"
+  register: tandoor_ps
+  changed_when: false
+  when: tandoor_installed
+
+- name: Decide what to do
+  ansible.builtin.set_fact:
+    tandoor_down: >-
+      {{ tandoor_services | difference(tandoor_ps.stdout_lines | default([])) }}
+    tandoor_state: >-
+      {{ 'install' if not tandoor_installed
+         else 'reconfigure' if tandoor_compose_before != tandoor_compose
+         else 'noop' }}
+  no_log: true

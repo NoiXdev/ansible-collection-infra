@@ -1,0 +1,154 @@
+---
+argument_specs:
+  main:
+    short_description: Tandoor Recipes with PostgreSQL in Docker Compose, behind Traefik
+    # The required settings are not required here: the role's own checks
+    # name them when they are missing.
+    options:
+      tandoor_version:
+        type: str
+        description: Tandoor image tag (X.Y.Z, no v); the major must be 2.
+      tandoor_image:
+        type: str
+        description: Tandoor image without its tag.
+      tandoor_dir:
+        type: path
+        description: >-
+          Directory of the compose project (compose.yaml, markers). Its
+          basename is the compose project name.
+      tandoor_data_dir:
+        type: path
+        description: >-
+          Directory of the data (PostgreSQL data and, without S3, the media
+          files); can be a mountpoint of its own.
+      tandoor_data_dir_mountpoint:
+        type: bool
+        description: Fail every run unless tandoor_data_dir is a mountpoint.
+      tandoor_hostname:
+        type: str
+        description: Host name of both Traefik routers (required); Django's ALLOWED_HOSTS.
+      tandoor_url:
+        type: str
+        description: Origin the browser reaches Tandoor at (CSRF_TRUSTED_ORIGINS), without a path.
+      tandoor_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      tandoor_traefik_entrypoints:
+        type: list
+        elements: str
+        description: Traefik entrypoints of both routers; empty uses Traefik's default ones.
+      tandoor_traefik_priority:
+        type: int
+        description: >-
+          Priority of the pages router; the API router gets this plus 1. Keep
+          it above catch-all routers.
+      tandoor_traefik_middlewares:
+        type: list
+        elements: str
+        description: >-
+          Traefik middlewares (name@provider) of the pages router: every path
+          on tandoor_hostname except those of the API router.
+      tandoor_traefik_api_middlewares:
+        type: list
+        elements: str
+        description: >-
+          Traefik middlewares (name@provider) of the API router: /api/ (the
+          REST API), /_allauth/ (login, signup, session and app tokens) and,
+          with local media, /media/. These paths answer 401 or 403 without a
+          session, so a challenge middleware that replaces such answers
+          (Anubis) belongs on the pages router only.
+      tandoor_trusted_proxy_count:
+        type: int
+        description: >-
+          Proxies in front of Tandoor that add to X-Forwarded-For (Traefik:
+          1); the role adds the image's own nginx. The login, signup and
+          password reset rate limits read the client address from it.
+      tandoor_secret_key:
+        type: str
+        no_log: true
+        description: Django secret key of Tandoor (required, at least 32 characters). Keep it in a vault.
+      tandoor_db_password:
+        type: str
+        no_log: true
+        description: Password of the PostgreSQL user (required). Keep it in a vault.
+      tandoor_admin_user:
+        type: str
+        description: Name of the first admin; required for a fresh install, unused otherwise.
+      tandoor_admin_password:
+        type: str
+        no_log: true
+        description: >-
+          Password of the first admin; required for a fresh install, unused
+          otherwise. Keep it in a vault.
+      tandoor_admin_email:
+        type: str
+        description: E-mail address of the first admin; required for a fresh install, unused otherwise.
+      tandoor_postgres_image:
+        type: str
+        description: >-
+          PostgreSQL image with its tag, major 18 or newer (older images keep
+          the database on a volume of their own, outside tandoor_data_dir).
+      tandoor_email:
+        type: dict
+        description: SMTP for invites and password resets; off while host is empty.
+        options:
+          host:
+            type: str
+            description: SMTP server; empty turns mail off.
+          port:
+            type: int
+            description: SMTP port.
+          user:
+            type: str
+            description: SMTP user; empty sends without login.
+          password:
+            type: str
+            no_log: true
+            description: SMTP password. Keep it in a vault.
+          tls:
+            type: bool
+            description: STARTTLS; not together with ssl.
+          ssl:
+            type: bool
+            description: Implicit TLS; not together with tls.
+          from:
+            type: str
+            description: Sender address (required with a host).
+      tandoor_s3:
+        type: dict
+        description: Media in an S3 bucket instead of tandoor_data_dir; on when access_key is set.
+        options:
+          access_key:
+            type: str
+            no_log: true
+            description: Access key; empty keeps the media local.
+          secret_key:
+            type: str
+            no_log: true
+            description: Secret key. Keep it in a vault.
+          bucket:
+            type: str
+            description: Bucket name.
+          endpoint:
+            type: str
+            description: Endpoint URL of an S3-compatible service; empty for AWS.
+          region:
+            type: str
+            description: Region of the bucket.
+          querystring_auth:
+            type: bool
+            description: Signed media URLs.
+          custom_domain:
+            type: str
+            description: Domain the media are served from instead of the endpoint.
+      tandoor_env:
+        type: dict
+        description: >-
+          More settings for the Tandoor container (environment variables); the
+          settings the role sets itself are refused.
+      tandoor_dumps_keep:
+        type: int
+        description: Number of dumps and media copies kept before updates.
+      tandoor_health_timeout:
+        type: int
+        description: Seconds to wait for Tandoor and the database to become healthy.

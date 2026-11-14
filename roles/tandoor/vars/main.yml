@@ -1,0 +1,109 @@
+---
+# The compose project name: compose's default for the directory.
+tandoor_project: "{{ tandoor_dir | basename }}"
+# Mode 0600: it holds the secret key and the passwords.
+tandoor_compose_file: "{{ tandoor_dir }}/compose.yaml"
+
+# tandoor_email and tandoor_s3 with the defaults of the keys they leave out.
+tandoor_mail: >-
+  {{ {'host': '', 'port': 587, 'user': '', 'password': '', 'tls': true, 'ssl': false, 'from': ''}
+     | combine(tandoor_email if tandoor_email is mapping else {}) }}
+tandoor_s3_settings: >-
+  {{ {'access_key': '', 'secret_key': '', 'bucket': '', 'endpoint': '', 'region': '',
+      'querystring_auth': true, 'custom_domain': ''}
+     | combine(tandoor_s3 if tandoor_s3 is mapping else {}) }}
+# Media in S3 instead of tandoor_data_dir/mediafiles.
+tandoor_s3_enabled: "{{ tandoor_s3_settings.access_key | string | length > 0 }}"
+
+# The subdirectories of tandoor_data_dir whose absence means the data is
+# missing (an unmounted volume): only install creates them, and the
+# containers bind them with create_host_path false.
+tandoor_data_subdirs: "{{ ['postgres'] + ([] if tandoor_s3_enabled | bool else ['mediafiles']) }}"
+# Database dumps and media copies before an update; on the filesystem of the
+# media, so that the copy can be made of hard links.
+tandoor_backup_dir: "{{ tandoor_data_dir }}/backups"
+# Written after a failed update; that version is not tried again while it
+# exists.
+tandoor_marker_file: "{{ tandoor_dir }}/update-failed"
+# Written before an install creates anything in tandoor_data_dir and removed
+# once the first admin and its space exist; while it exists every run
+# refuses.
+tandoor_install_marker: "{{ tandoor_dir }}/install-incomplete"
+
+# The Tandoor version of the compose file on disk (the tag of the web image),
+# empty when there is none. tandoor_compose_before is set by state.yml.
+tandoor_installed_version: >-
+  {%- set compose = tandoor_compose_before | default('', true) | from_yaml if tandoor_compose_before | default('', true) else {} -%}
+  {%- set image = (((compose if compose is mapping else {}).services | default({})).web | default({})).image | default('') | string -%}
+  {{ image.rpartition(':')[2] if ':' in image.rpartition('/')[2] else '' }}
+
+# The PostgreSQL major of tandoor_postgres_image: the leading digits of its
+# tag (postgres:18, postgres:18.1-alpine), empty without them.
+tandoor_postgres_major: >-
+  {%- set name = (tandoor_postgres_image | string).split('@')[0].rpartition('/')[2] -%}
+  {{ (name.rpartition(':')[2] if ':' in name else '') | regex_search('^[0-9]+') | default('', true) }}
+
+# Container paths of the Tandoor image.
+tandoor_container_dirs:
+  media: /opt/recipes/mediafiles
+  static: /opt/recipes/staticfiles
+
+# The settings the role sets itself; tandoor_env must not hold them, nor any
+# key with one of tandoor_env_owned_prefixes. DATABASE_URL and
+# SECRET_KEY_FILE would override the database and the secret key.
+tandoor_env_owned:
+  - SECRET_KEY
+  - SECRET_KEY_FILE
+  - DB_ENGINE
+  - DATABASE_URL
+  - ALLOWED_HOSTS
+  - CSRF_TRUSTED_ORIGINS
+  - ENABLE_SIGNUP
+  - DEFAULT_FROM_EMAIL
+  - MEDIA_ROOT
+  - STATIC_ROOT
+  - TANDOOR_PORT
+  - ALLAUTH_TRUSTED_PROXY_COUNT
+tandoor_env_owned_prefixes: [POSTGRES_, EMAIL_, S3_]
+
+# The compose services the configuration runs.
+tandoor_services: [db, web]
+
+# The compose file as the role writes it; compared with the one on disk.
+tandoor_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
+
+# The paths of the API router (the pages router takes everything else on
+# tandoor_hostname): the REST API, allauth's API (the UI's login and session,
+# the apps' tokens) and, with local media, the media files.
+tandoor_api_paths: "{{ ['/api/', '/_allauth/'] + ([] if tandoor_s3_enabled | bool else ['/media/']) }}"
+
+# In a rescue: the failed task and the first line of its error. For a
+# command that only says it failed, the last line of stderr that names an
+# error (CommandError: ..., the end of a traceback), else its last line.
+tandoor_failure: >-
+  {%- set stderr = (ansible_failed_result.stderr | default('') | trim).splitlines() -%}
+  {%- set errors = stderr | select('search', 'Error:') | list -%}
+  {{ ansible_failed_task.name }}:
+  {{ (errors or stderr or ['']) | last | trim
+     if ansible_failed_result.msg | default('') is search('non-zero return code')
+     else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
+
+# The error of a command whose task hides its arguments (no_log, failed_when
+# false, registered as tandoor_hidden): the last line of stderr that names an
+# error, else its last line, else the exit code. The next task fails with it.
+tandoor_hidden_error: >-
+  {%- set stderr = (tandoor_hidden.stderr | default('') | trim).splitlines() -%}
+  {{ ((stderr | select('search', 'Error:') | list) or stderr
+      or ['exit code ' ~ tandoor_hidden.rc | default('?') | string]) | last | trim }}
+
+# After a failed install: nothing in it should be worth keeping (no admin or
+# no space yet), so what it made is removed and the next run installs afresh.
+tandoor_install_hint: >-
+  It left a partial installation, which the role does not take for a
+  finished one. To install again, first check that nothing in it is worth
+  keeping (for example recipes in Tandoor), then run docker compose down in
+  {{ tandoor_dir }} (if {{ tandoor_compose_file }} exists), remove
+  {{ tandoor_compose_file }}, {{ tandoor_install_marker }} and the
+  {{ 'subdirectories' if tandoor_data_subdirs | length > 1 else 'subdirectory' }}
+  {{ tandoor_data_subdirs | join(' and ') }} of
+  {{ tandoor_data_dir }}, then run the role again.

@@ -1,0 +1,163 @@
+---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
+- name: Check that tandoor_secret_key is set
+  ansible.builtin.assert:
+    that: tandoor_secret_key | default('') | string | length >= 32
+    fail_msg: tandoor_secret_key is required and must have at least 32 characters.
+    quiet: true
+
+- name: Check that tandoor_db_password is set
+  ansible.builtin.assert:
+    that: tandoor_db_password | default('') | string | length > 0
+    fail_msg: tandoor_db_password is required.
+    quiet: true
+
+# The names end up in compose, Traefik rules and docker filters unquoted.
+- name: Check the tandoor settings
+  ansible.builtin.assert:
+    that:
+      - tandoor_version is match('^2\.\d+\.\d+$')
+      - tandoor_image | length > 0
+      - tandoor_postgres_major | length > 0
+      - tandoor_dir is match('^/')
+      - tandoor_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - tandoor_data_dir is match('^/')
+      - tandoor_hostname is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+      - tandoor_url is match('^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$')
+      - tandoor_traefik_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - tandoor_traefik_entrypoints | reject('match', '^[A-Za-z0-9][A-Za-z0-9_-]*$') | list | length == 0
+      - (tandoor_traefik_middlewares + tandoor_traefik_api_middlewares) | reject('match', '^[A-Za-z0-9][A-Za-z0-9_.@-]*$') | list | length == 0
+      - tandoor_traefik_priority | int >= 1
+      - tandoor_trusted_proxy_count | int >= 0
+      - tandoor_dumps_keep | int >= 1
+      - tandoor_health_timeout | int > 0
+    fail_msg: >-
+      tandoor_version must look like 2.X.Y (major 2, no v); tandoor_dir and
+      tandoor_data_dir must be absolute paths, the basename of tandoor_dir
+      (the compose project) only lowercase letters, digits, - and _;
+      tandoor_hostname (required) a host name; tandoor_url an http(s) origin
+      without a path; tandoor_traefik_network a network name,
+      tandoor_traefik_entrypoints entrypoint names and
+      tandoor_traefik_middlewares and tandoor_traefik_api_middlewares
+      middleware names (name@provider); tandoor_image must be set,
+      tandoor_postgres_image with a tag that starts with the PostgreSQL major
+      (postgres:18, postgres:18.1-alpine); tandoor_traefik_priority,
+      tandoor_dumps_keep and tandoor_health_timeout must be positive,
+      tandoor_trusted_proxy_count not negative.
+    quiet: true
+
+# From 18 on the image keeps its cluster below /var/lib/postgresql (in
+# 18/docker), which compose.yaml binds to tandoor_data_dir/postgres. Older
+# images declare the volume /var/lib/postgresql/data, which Docker mounts as
+# an anonymous volume over the bind: the database would live outside
+# tandoor_data_dir, and docker compose down -v would take the recipes with
+# it.
+- name: Check the PostgreSQL major
+  ansible.builtin.assert:
+    that: tandoor_postgres_major | int >= 18
+    fail_msg: >-
+      tandoor_postgres_image {{ tandoor_postgres_image }} is PostgreSQL
+      {{ tandoor_postgres_major }}; the role needs PostgreSQL 18 or newer.
+      Older images keep the database on a volume of their own
+      (/var/lib/postgresql/data) instead of below /var/lib/postgresql, which
+      the role binds to {{ tandoor_data_dir }}/postgres, so it would live
+      outside tandoor_data_dir. The role changes nothing.
+    quiet: true
+
+- name: Check tandoor_email
+  ansible.builtin.assert:
+    that:
+      - tandoor_email is mapping
+      - tandoor_email.keys() | difference(['host', 'port', 'user', 'password', 'tls', 'ssl', 'from']) | length == 0
+      - tandoor_mail.host | string is match('^([A-Za-z0-9][A-Za-z0-9.-]*)?$')
+      - tandoor_mail.port | int >= 1 and tandoor_mail.port | int <= 65535
+      - not (tandoor_mail.tls | bool and tandoor_mail.ssl | bool)
+      - tandoor_mail.host | length == 0 or tandoor_mail['from'] | string is match('^[^@\s]+@[^@\s]+$')
+      - (tandoor_mail.user ~ tandoor_mail.password ~ tandoor_mail['from']) is not search('[\r\n]')
+    fail_msg: >-
+      tandoor_email takes host, port, user, password, tls, ssl and from;
+      host must be a host name (empty turns mail off), port a port number;
+      tls and ssl cannot both be on (tls is STARTTLS, ssl implicit TLS); with a host,
+      from (the sender address) is required; no value may hold a line break.
+    quiet: true
+
+- name: Check tandoor_env
+  ansible.builtin.assert:
+    that:
+      - tandoor_env is mapping
+      - tandoor_env.keys() | reject('match', '^[A-Z][A-Z0-9_]*$') | list | length == 0
+      - tandoor_env.values() | select('mapping') | list | length == 0
+      - tandoor_env.values() | reject('string') | select('iterable') | list | length == 0
+      - tandoor_owned | length == 0
+    fail_msg: >-
+      tandoor_env keys must be environment variable names (uppercase letters,
+      digits and _) with plain values, and the role sets these itself:
+      {{ tandoor_owned | join(', ') if tandoor_owned else 'none' }} (and every
+      {{ tandoor_env_owned_prefixes | join('*, ') }}* key). Use the role's
+      variables instead (tandoor_secret_key, tandoor_db_password,
+      tandoor_hostname, tandoor_url, tandoor_email, tandoor_s3, ...); open
+      registration is always off.
+    quiet: true
+  vars:
+    tandoor_owned: >-
+      {{ (tandoor_env if tandoor_env is mapping else {}).keys()
+         | select('in', tandoor_env_owned)
+         | union((tandoor_env if tandoor_env is mapping else {}).keys()
+                 | select('match', '^(' ~ tandoor_env_owned_prefixes | join('|') ~ ')'))
+         | sort }}
+
+- name: Read the installation
+  ansible.builtin.include_tasks: state.yml
+
+- name: Check the first admin for the install
+  ansible.builtin.assert:
+    that:
+      - tandoor_admin_user | default('') | string is match('^[A-Za-z0-9.@+_-]+$')
+      - tandoor_admin_password | default('') | string | length > 0
+      - tandoor_admin_email | default('') | string is match('^[^@\s]+@[^@\s]+$')
+    fail_msg: >-
+      Tandoor is not installed in {{ tandoor_dir }}; a fresh install needs
+      tandoor_admin_user (letters, digits and . @ + - _),
+      tandoor_admin_password and tandoor_admin_email (an e-mail address).
+    quiet: true
+  when: tandoor_state == 'install'
+
+- name: Install Tandoor
+  ansible.builtin.include_tasks: install.yml
+  when: tandoor_state == 'install'
+
+- name: Reconfigure Tandoor
+  ansible.builtin.include_tasks: reconfigure.yml
+  when: tandoor_state == 'reconfigure'
+
+# Read-only: a run without changes starts and restarts nothing, but stays red
+# while a container is down.
+- name: Check that Tandoor runs
+  when: tandoor_state == 'noop'
+  block:
+    - name: Fail when a container is not running
+      ansible.builtin.fail:
+        msg: >-
+          Tandoor in {{ tandoor_dir }} is down: the services
+          {{ tandoor_down | join(', ') }} are not running. The role starts
+          nothing on a run without changes; start them with docker compose up
+          -d in {{ tandoor_dir }}.
+      when: tandoor_down | length > 0
+
+    - name: Check that Tandoor is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Tandoor is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Tandoor in {{ tandoor_dir }} is unhealthy: the web and the database
+          containers are not both healthy within {{ tandoor_health_timeout }}
+          seconds ({{ tandoor_health_lines | join('; ') }}). The role restarts
+          nothing on a run without changes; see docker compose logs in
+          {{ tandoor_dir }}.
+      when: not tandoor_healthy

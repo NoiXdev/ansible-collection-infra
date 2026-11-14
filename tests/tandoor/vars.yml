@@ -1,0 +1,38 @@
+---
+# Test-only values; nothing here is a real secret. The database and admin
+# passwords hold a $ that compose and a shell must not expand (the database
+# password also quotes, which YAML and compose must keep), and tandoor_env a $
+# that compose must not interpolate.
+traefik_dir: /opt/traefik
+# One plain-HTTP entrypoint: no TLS, so no ACME e-mail.
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+    as_default: true
+# A middleware that denies every client (192.0.2.1 is a documentation
+# address), for the router split scenario.
+traefik_dynamic_files:
+  deny.yml:
+    http:
+      middlewares:
+        deny:
+          ipAllowList:
+            sourceRange: [192.0.2.1/32]
+
+tandoor_hostname: tandoor.test
+tandoor_url: http://tandoor.test
+tandoor_secret_key: test-secret-key-000000000000000000000000000
+tandoor_db_password: test-db-pa$s'w"ord-0
+tandoor_admin_user: admin
+tandoor_admin_password: Test-admin-pa$sword-0
+tandoor_admin_email: admin@example.test
+# Mailpit on the Traefik network catches the mail (converge.yml).
+tandoor_email:
+  host: mailpit
+  port: 1025
+  tls: false
+  from: recipes@example.test
+tandoor_env:
+  TZ: Etc/UTC
+  NOIX_TEST: a$b

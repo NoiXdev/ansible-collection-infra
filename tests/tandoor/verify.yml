@@ -1,0 +1,311 @@
+---
+# Checks a fresh install through Traefik: containers, environment and mounts;
+# the browser login (CSRF) and an API token; the admin's space and a recipe;
+# no open registration, but an invite that lets a new user sign up; and a
+# password reset mail in Mailpit. Tandoor rate-limits logins (3 a minute),
+# signups (2) and password resets (1) per client address, so this playbook
+# logs in once and runs once per installation.
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  vars:
+    tandoor_dir: /opt/tandoor
+    verify_base: http://127.0.0.1
+    verify_origin: http://tandoor.test
+    verify_host:
+      Host: tandoor.test
+    verify_mailpit: http://127.0.0.1:8025
+    # The mails in Mailpit to the admin (verify_mail is registered below).
+    verify_reset_mails: >-
+      {%- set found = [] -%}
+      {%- for m in (verify_mail.json | default({})).messages | default([]) -%}
+      {%-   if tandoor_admin_email in m.To | map(attribute='Address') | list -%}
+      {%-     set _ = found.append(m) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ found }}
+  tasks:
+    - name: Find the containers of the compose project
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, label=com.docker.compose.project=tandoor]
+      register: verify_ids
+      changed_when: false
+
+    - name: Inspect the containers
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'inspect'] + verify_ids.stdout_lines }}"
+      register: verify_inspect
+      changed_when: false
+
+    - name: Stat the compose file
+      ansible.builtin.stat:
+        path: "{{ tandoor_dir }}/compose.yaml"
+      register: verify_compose
+
+    - name: Check the containers, their ports, environment and mounts, and the compose file
+      ansible.builtin.assert:
+        that:
+          - containers | sort == ['db', 'web']
+          - containers.values() | map(attribute='State.Running') | select | list | length == 2
+          - web.State.Health.Status == 'healthy'
+          - db.State.Health.Status == 'healthy'
+          # No published port: Tandoor is reached through Traefik only.
+          - containers.values() | map(attribute='HostConfig.PortBindings') | select | list | length == 0
+          - "'NOIX_TEST=a$b' in web.Config.Env"
+          - "'TZ=Etc/UTC' in web.Config.Env"
+          - "'ENABLE_SIGNUP=0' in web.Config.Env"
+          - "'ALLOWED_HOSTS=tandoor.test' in web.Config.Env"
+          - "'CSRF_TRUSTED_ORIGINS=http://tandoor.test' in web.Config.Env"
+          # Traefik and the image's own nginx each add to X-Forwarded-For.
+          - "'ALLAUTH_TRUSTED_PROXY_COUNT=2' in web.Config.Env"
+          - "'EMAIL_HOST=mailpit' in web.Config.Env"
+          - "'EMAIL_PORT=1025' in web.Config.Env"
+          - "'EMAIL_USE_TLS=0' in web.Config.Env"
+          - "'EMAIL_USE_SSL=0' in web.Config.Env"
+          - "'DEFAULT_FROM_EMAIL=recipes@example.test' in web.Config.Env"
+          - ('SECRET_KEY=' ~ tandoor_secret_key) in web.Config.Env
+          - ('POSTGRES_PASSWORD=' ~ tandoor_db_password) in web.Config.Env
+          - ('POSTGRES_PASSWORD=' ~ tandoor_db_password) in db.Config.Env
+          - web.Config.Env | select('match', 'DJANGO_SUPERUSER_') | list | length == 0
+          # The database on the data directory, not on an anonymous volume.
+          - db.Mounts | length == 1
+          - db.Mounts[0].Type == 'bind'
+          - db.Mounts[0].Source == tandoor_dir ~ '/data/postgres'
+          - db.Mounts[0].Destination == '/var/lib/postgresql'
+          - (web.Mounts | selectattr('Destination', 'equalto', '/opt/recipes/mediafiles') | first).Source == tandoor_dir ~ '/data/mediafiles'
+          - (web.Mounts | selectattr('Destination', 'equalto', '/opt/recipes/staticfiles') | first).Type == 'volume'
+          - verify_compose.stat.mode == '0600'
+        fail_msg: "{{ verify_inspect.stdout }}"
+        quiet: true
+      vars:
+        containers: >-
+          {%- set found = {} -%}
+          {%- for c in verify_inspect.stdout | from_json -%}
+          {%-   set _ = found.update({c.Config.Labels['com.docker.compose.service']: c}) -%}
+          {%- endfor -%}
+          {{ found }}
+        web: "{{ containers.web }}"
+        db: "{{ containers.db }}"
+
+    # The single-page app's login: the page sets the CSRF cookie, the login
+    # goes to allauth's browser API with the token, as Tandoor's UI sends it.
+    - name: Open the login page through Traefik
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/account/login/"
+        headers: "{{ verify_host }}"
+      register: verify_page
+
+    # The CSRF check is on: a login from another origin is refused before
+    # the view (no login attempt counted).
+    - name: Refuse a login from another origin
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/_allauth/browser/v1/auth/login"
+        method: POST
+        headers: >-
+          {{ verify_host | combine({'Cookie': 'csrftoken=' ~ verify_page.cookies.csrftoken,
+                                    'X-CSRFToken': verify_page.cookies.csrftoken,
+                                    'Origin': 'http://evil.test'}) }}
+        body_format: json
+        body:
+          username: "{{ tandoor_admin_user }}"
+          password: "{{ tandoor_admin_password }}"
+        return_content: true
+        status_code: [403]
+      register: verify_evil
+      failed_when: verify_evil.status != 403 or 'CSRF' not in verify_evil.content
+
+    - name: Log in through Traefik
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/_allauth/browser/v1/auth/login"
+        method: POST
+        headers: >-
+          {{ verify_host | combine({'Cookie': 'csrftoken=' ~ verify_page.cookies.csrftoken,
+                                    'X-CSRFToken': verify_page.cookies.csrftoken,
+                                    'Origin': verify_origin}) }}
+        body_format: json
+        body:
+          username: "{{ tandoor_admin_user }}"
+          password: "{{ tandoor_admin_password }}"
+        status_code: [200]
+      register: verify_login
+
+    # Django rotates the CSRF token on login.
+    - name: Note the session of the admin
+      ansible.builtin.set_fact:
+        verify_session: >-
+          {{ verify_host | combine({'Cookie': 'csrftoken=' ~ verify_csrf ~ '; sessionid=' ~ verify_login.cookies.sessionid,
+                                    'X-CSRFToken': verify_csrf, 'Origin': verify_origin}) }}
+      vars:
+        verify_csrf: "{{ verify_login.cookies.csrftoken | default(verify_page.cookies.csrftoken) }}"
+
+    # An API token as Tandoor 2.x hands them to apps (tda_..., Bearer).
+    - name: Create an API token for the admin
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/access-token/"
+        method: POST
+        headers: "{{ verify_session }}"
+        body_format: json
+        body:
+          scope: read write
+          expires: "2099-12-31T00:00:00Z"
+        status_code: [201]
+      register: verify_token_created
+
+    - name: Note the API headers
+      ansible.builtin.set_fact:
+        verify_api: "{{ verify_host | combine({'Authorization': 'Bearer ' ~ verify_token_created.json.token}) }}"
+
+    # The role made it on install; without it the API answers 500.
+    - name: Read the admin's space
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/space/current/"
+        headers: "{{ verify_api }}"
+        status_code: [200]
+
+    - name: Create a recipe with the token
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/recipe/"
+        method: POST
+        headers: "{{ verify_api }}"
+        body_format: json
+        body:
+          name: Noix test soup
+          steps: []
+        status_code: [201]
+
+    - name: Read the server settings
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/server-settings/current/"
+        headers: "{{ verify_host }}"
+      register: verify_server
+
+    - name: Check that the UI offers no registration
+      ansible.builtin.assert:
+        that: not (verify_server.json.enable_signup | bool)
+        fail_msg: "{{ verify_server.json | to_json }}"
+        quiet: true
+
+    - name: Open the signup page without an invite
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/account/signup/"
+        headers: "{{ verify_host }}"
+      register: verify_signup_page
+
+    - name: Refuse a signup without an invite
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/_allauth/browser/v1/auth/signup"
+        method: POST
+        headers: >-
+          {{ verify_host | combine({'Cookie': 'csrftoken=' ~ verify_signup_page.cookies.csrftoken,
+                                    'X-CSRFToken': verify_signup_page.cookies.csrftoken,
+                                    'Origin': verify_origin}) }}
+        body_format: json
+        body:
+          username: intruder
+          email: intruder@example.test
+        status_code: [403]
+
+    - name: Read the groups
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/group/"
+        headers: "{{ verify_api }}"
+      register: verify_groups
+
+    - name: Create an invite through the API
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/invite-link/"
+        method: POST
+        headers: "{{ verify_api }}"
+        body_format: json
+        body:
+          group: "{{ verify_group_list | selectattr('name', 'equalto', 'user') | first }}"
+          valid_until: "2099-12-31"
+        status_code: [201]
+      register: verify_invite
+      vars:
+        verify_group_list: "{{ verify_groups.json.results | default(verify_groups.json) }}"
+
+    # The invite link puts its token into a new session and sends the browser
+    # to the signup page, where the signup is open for that session only.
+    - name: Follow the invite link
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/invite/{{ verify_invite.json.uuid }}"
+        headers: "{{ verify_host }}"
+        follow_redirects: none
+        status_code: [302]
+      register: verify_invite_link
+
+    # A response that is not followed has no cookies of its own in the
+    # result, only its Set-Cookie header.
+    - name: Note the session of the invite
+      ansible.builtin.set_fact:
+        verify_invited_session: "{{ verify_invite_link.set_cookie | regex_search('sessionid=([^;]+)', '\\1') | first }}"
+
+    - name: Open the signup page with the invite
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/account/signup/"
+        headers: "{{ verify_host | combine({'Cookie': 'sessionid=' ~ verify_invited_session}) }}"
+      register: verify_invited_page
+
+    - name: Sign up with the invite
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/_allauth/browser/v1/auth/signup"
+        method: POST
+        headers: >-
+          {{ verify_host | combine({'Cookie': 'sessionid=' ~ verify_invited_session
+                                              ~ '; csrftoken=' ~ verify_invited_page.cookies.csrftoken,
+                                    'X-CSRFToken': verify_invited_page.cookies.csrftoken,
+                                    'Origin': verify_origin}) }}
+        body_format: json
+        body:
+          username: invitee
+          email: invitee@example.test
+        status_code: [200]
+
+    - name: Read the members of the admin's space
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/api/user-space/"
+        headers: "{{ verify_api }}"
+      register: verify_members
+
+    - name: Check that the invited user joined the admin's space
+      ansible.builtin.assert:
+        that: "'invitee' in verify_member_list | map(attribute='user') | map(attribute='username')"
+        fail_msg: "{{ verify_members.json | to_json }}"
+        quiet: true
+      vars:
+        verify_member_list: "{{ verify_members.json.results | default(verify_members.json) }}"
+
+    - name: Open the password reset page
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/account/password-reset"
+        headers: "{{ verify_host }}"
+      register: verify_reset_page
+
+    - name: Request a password reset for the admin
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/_allauth/browser/v1/auth/password/request"
+        method: POST
+        headers: >-
+          {{ verify_host | combine({'Cookie': 'csrftoken=' ~ verify_reset_page.cookies.csrftoken,
+                                    'X-CSRFToken': verify_reset_page.cookies.csrftoken,
+                                    'Origin': verify_origin}) }}
+        body_format: json
+        body:
+          email: "{{ tandoor_admin_email }}"
+        status_code: [200]
+
+    - name: Wait for the reset mail in Mailpit
+      ansible.builtin.uri:
+        url: "{{ verify_mailpit }}/api/v1/messages"
+      register: verify_mail
+      until: verify_reset_mails | length > 0
+      retries: 30
+      delay: 2
+
+    - name: Check the sender of the reset mail
+      ansible.builtin.assert:
+        that: verify_reset_mails[0].From.Address == 'recipes@example.test'
+        fail_msg: "{{ verify_mail.json | to_json }}"
+        quiet: true

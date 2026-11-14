@@ -1,0 +1,126 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+{#- A bind mount that compose must not create: a missing data directory (an
+    unmounted volume) stops the container instead of starting it empty. -#}
+{%- macro bind(source, target) %}
+      - type: bind
+        source: {{ q(source) }}
+        target: {{ q(target) }}
+        bind:
+          create_host_path: false
+{%- endmacro %}
+{%- set env = {
+  'SECRET_KEY': tandoor_secret_key,
+  'DB_ENGINE': 'django.db.backends.postgresql',
+  'POSTGRES_HOST': 'db',
+  'POSTGRES_PORT': 5432,
+  'POSTGRES_DB': 'tandoor',
+  'POSTGRES_USER': 'tandoor',
+  'POSTGRES_PASSWORD': tandoor_db_password,
+  'ALLOWED_HOSTS': tandoor_hostname,
+  'CSRF_TRUSTED_ORIGINS': tandoor_url | regex_replace('/+$', ''),
+  'ENABLE_SIGNUP': 0,
+  'ALLAUTH_TRUSTED_PROXY_COUNT': tandoor_trusted_proxy_count | int + 1,
+  'MEDIA_ROOT': tandoor_container_dirs.media,
+  'STATIC_ROOT': tandoor_container_dirs.static,
+  'TANDOOR_PORT': 80,
+} -%}
+{%- if tandoor_mail.host | length > 0 -%}
+{%-   set _ = env.update({
+        'EMAIL_HOST': tandoor_mail.host,
+        'EMAIL_PORT': tandoor_mail.port | int,
+        'EMAIL_HOST_USER': tandoor_mail.user,
+        'EMAIL_HOST_PASSWORD': tandoor_mail.password,
+        'EMAIL_USE_TLS': 1 if tandoor_mail.tls | bool else 0,
+        'EMAIL_USE_SSL': 1 if tandoor_mail.ssl | bool else 0,
+        'DEFAULT_FROM_EMAIL': tandoor_mail['from'],
+      }) -%}
+{%- endif -%}
+{%- set router = tandoor_project -%}
+{%- set api_router = tandoor_project ~ '-api' -%}
+{%- set host_rule = 'Host(`' ~ tandoor_hostname ~ '`)' -%}
+# Managed by the noixdev.infra.tandoor role; changes are overwritten.
+services:
+  db:
+    image: {{ q(tandoor_postgres_image) }}
+    environment:
+      POSTGRES_DB: tandoor
+      POSTGRES_USER: tandoor
+      POSTGRES_PASSWORD: {{ q(tandoor_db_password) }}
+    healthcheck:
+      test: [CMD, pg_isready, -U, tandoor, -d, tandoor]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    # PostgreSQL 18 and newer keep the cluster below /var/lib/postgresql.
+    volumes:
+{{ bind(tandoor_data_dir ~ '/postgres', '/var/lib/postgresql') }}
+    restart: unless-stopped
+
+  web:
+    image: {{ q(tandoor_image ~ ':' ~ tandoor_version) }}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+{% for key, value in env | dictsort %}
+      {{ key }}: {{ q(value) }}
+{% endfor %}
+{% for key, value in tandoor_env | dictsort %}
+      {{ key }}: {{ q((1 if value else 0) if value is boolean else value) }}
+{% endfor %}
+    volumes:
+{% if not tandoor_s3_enabled | bool %}
+{{ bind(tandoor_data_dir ~ '/mediafiles', tandoor_container_dirs.media) }}
+{% endif %}
+      # Collected from the image on every start; not data.
+      - staticfiles:{{ tandoor_container_dirs.static }}
+    # The image's nginx answers at once with 502 until Django is up, so the
+    # check asks Django (a page without login) under the host name it
+    # allows.
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, --header, {{ q('Host: ' ~ tandoor_hostname) }}, "http://127.0.0.1/api/server-settings/current/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+      start_interval: 5s
+    networks: [default, traefik]
+    # No published port: Traefik reaches Tandoor over its network.
+    labels:
+      - traefik.enable=true
+      - {{ q('traefik.docker.network=' ~ tandoor_traefik_network) }}
+      # The pages.
+      - {{ q('traefik.http.routers.' ~ router ~ '.rule=' ~ host_rule) }}
+{% if tandoor_traefik_entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.entrypoints=' ~ tandoor_traefik_entrypoints | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.priority=' ~ tandoor_traefik_priority) }}
+{% if tandoor_traefik_middlewares | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.middlewares=' ~ tandoor_traefik_middlewares | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.service=' ~ tandoor_project) }}
+      # The API, allauth and local media: answer 401 or 403 without a
+      # session, so they take middlewares of their own.
+      - {{ q('traefik.http.routers.' ~ api_router ~ '.rule=' ~ host_rule ~ ' && ('
+             ~ (tandoor_api_paths | map('regex_replace', '^(.*)$', 'PathPrefix(`\\1`)') | join(' || ')) ~ ')') }}
+{% if tandoor_traefik_entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ api_router ~ '.entrypoints=' ~ tandoor_traefik_entrypoints | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ api_router ~ '.priority=' ~ (tandoor_traefik_priority | int + 1)) }}
+{% if tandoor_traefik_api_middlewares | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ api_router ~ '.middlewares=' ~ tandoor_traefik_api_middlewares | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ api_router ~ '.service=' ~ tandoor_project) }}
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - {{ q('traefik.http.services.' ~ tandoor_project ~ '.loadbalancer.server.port=80') }}
+    restart: unless-stopped
+
+volumes:
+  staticfiles:
+
+networks:
+  traefik:
+    name: {{ q(tandoor_traefik_network) }}
+    external: true
