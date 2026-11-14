@@ -1,0 +1,24 @@
+---
+# Set to false to remove the managed banner (the stock snippets stay as they are).
+motd_enabled: true
+
+# File name in /etc/update-motd.d/; the number puts it first.
+motd_filename: 05-noix-managed
+
+motd_title: managed by noix
+
+# Free lines under the title. Printed verbatim: nothing in them is expanded.
+motd_lines: []
+
+# Host name, OS, uptime, load, memory, root disk, and running containers when
+# Docker is installed and its daemon answers.
+motd_sysinfo: true
+
+# Snippets in /etc/update-motd.d/ that this role removes: Ubuntu's own and
+# banners that earlier setups managed.
+motd_remove_snippets:
+  - 10-help-text
+  - 50-landscape-sysinfo
+  - 50-motd-news
+  - 05-3b-managed
+  - 05-noidee-managed

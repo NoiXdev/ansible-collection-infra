@@ -1,0 +1,31 @@
+#!/bin/sh
+# {{ ansible_managed }}
+# Managed by noixdev.infra (role motd). Title and lines are data, printed as is.
+# shellcheck disable=SC2016  # single quotes are the point: the lines are never expanded
+
+printf '%s\n' '{{ motd_title | replace("'", "'\\''") }}'
+{% for line in motd_lines %}
+printf '%s\n' '{{ line | replace("'", "'\\''") }}'
+{% endfor %}
+{% if motd_sysinfo | bool %}
+
+printf '\n'
+printf 'Host:       %s\n' "$(hostname)"
+if [ -r /etc/os-release ]; then
+  # shellcheck disable=SC1091
+  printf 'OS:         %s\n' "$(. /etc/os-release && printf '%s' "$PRETTY_NAME")"
+fi
+printf 'Uptime:     %s\n' "$(uptime -p 2>/dev/null)"
+printf 'Load:       %s\n' "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+printf 'Memory:     %s\n' "$(free -h 2>/dev/null | awk '/^Mem:/ {print $3 " used of " $2}')"
+printf 'Disk /:     %s\n' "$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " used of " $2 " (" $5 ")"}')"
+if command -v docker >/dev/null 2>&1; then
+  if containers="$(timeout 5 docker ps --format '{{ '{{' }}.Names{{ '}}' }}' 2>/dev/null)"; then
+    printf 'Containers: %s running' "$(printf '%s' "$containers" | grep -c .)"
+    if [ -n "$containers" ]; then
+      printf ' (%s)' "$(printf '%s' "$containers" | paste -sd, -)"
+    fi
+    printf '\n'
+  fi
+fi
+{% endif %}

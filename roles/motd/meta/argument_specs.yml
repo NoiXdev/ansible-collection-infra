@@ -1,0 +1,30 @@
+---
+argument_specs:
+  main:
+    short_description: Login banner in /etc/update-motd.d with a title, free lines and system information
+    description:
+      - >-
+        Removes the listed stock snippets and writes one managed snippet that prints a title, your own lines
+        and, optionally, host name, OS, uptime, load, memory, root disk and running containers.
+      - The lines are data. They are printed as they are and never evaluated by a shell.
+    options:
+      motd_enabled:
+        type: bool
+        description: When false the managed snippet is removed and the stock snippets are left alone.
+      motd_filename:
+        type: str
+        description: File name of the managed snippet in /etc/update-motd.d/.
+      motd_title:
+        type: str
+        description: First line of the banner.
+      motd_lines:
+        type: list
+        elements: str
+        description: Lines printed under the title, verbatim.
+      motd_sysinfo:
+        type: bool
+        description: Print host name, OS, uptime, load, memory, root disk and, when Docker answers, the running containers.
+      motd_remove_snippets:
+        type: list
+        elements: str
+        description: Names of snippets in /etc/update-motd.d/ to remove.

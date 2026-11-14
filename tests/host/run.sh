@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host roles (base, docker, fail2ban, crowdsec, tailscale, oh_my_zsh) on a systemd Ubuntu container:
+# Host roles (base, docker, fail2ban, crowdsec, tailscale, oh_my_zsh, motd) on a systemd Ubuntu container:
 # converge twice (the second run must change nothing), then verify.
 set -euo pipefail
 
@@ -53,6 +53,9 @@ play() {
 
 # oh_my_zsh: a local file of the user's own that the role must source and never write.
 docker exec "$host" sh -c 'mkdir -p /srv/deploy && echo "export NOIX_LOCAL=1" >/srv/deploy/.zshrc.local'
+
+# motd: stock and older managed snippets that the role must remove.
+docker exec "$host" sh -c 'mkdir -p /etc/update-motd.d && for f in 05-3b-managed 50-motd-news; do printf "#!/bin/sh\necho old-%s\n" "$f" >"/etc/update-motd.d/$f"; chmod 0755 "/etc/update-motd.d/$f"; done'
 
 echo "== converge (ubuntu $ubuntu)"
 play "$here/converge.yml"

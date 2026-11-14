@@ -1,0 +1,22 @@
+---
+- name: Remove the snippets that the banner replaces
+  ansible.builtin.file:
+    path: "/etc/update-motd.d/{{ item }}"
+    state: absent
+  loop: "{{ motd_remove_snippets }}"
+  when: motd_enabled | bool
+
+- name: Write the banner
+  ansible.builtin.template:
+    src: motd.sh.j2
+    dest: "/etc/update-motd.d/{{ motd_filename }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: motd_enabled | bool
+
+- name: Remove the banner
+  ansible.builtin.file:
+    path: "/etc/update-motd.d/{{ motd_filename }}"
+    state: absent
+  when: not motd_enabled | bool

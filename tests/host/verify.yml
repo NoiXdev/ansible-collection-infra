@@ -475,3 +475,103 @@
           systemctl stop "user@$uid.service" "user-runtime-dir@$uid.service" 2>/dev/null || true
           ! findmnt -n "/run/user/$uid"
       changed_when: false
+
+- name: Verify motd
+  hosts: testhost
+  gather_facts: true
+  tasks:
+    - name: Check the snippets
+      ansible.builtin.stat:
+        path: "/etc/update-motd.d/{{ item }}"
+      loop: [05-3b-managed, 50-motd-news, 05-noix-managed]
+      register: motd_files
+
+    - name: Expect the old snippets gone and the managed one executable
+      ansible.builtin.assert:
+        that:
+          - not motd_files.results[0].stat.exists
+          - not motd_files.results[1].stat.exists
+          - motd_files.results[2].stat.exists
+          - motd_files.results[2].stat.mode == '0755'
+          - motd_files.results[2].stat.pw_name == 'root'
+
+    - name: Print the banner
+      ansible.builtin.command:
+        cmd: run-parts /etc/update-motd.d
+      register: motd_out
+      changed_when: false
+
+    - name: Expect the title, the lines verbatim and the sysinfo
+      ansible.builtin.assert:
+        that:
+          - motd_out.stdout is search('managed by noix')
+          - "motd_out.stdout is search('Ops: example.test')"
+          # The second line byte for byte: nothing was expanded or executed.
+          - "'literal $HOME `id` \"q\" ' ~ \"'a'\" in motd_out.stdout_lines"
+          - motd_out.stdout is search(ansible_facts['hostname'])
+          - motd_out.stdout is search('(?i)load')
+          - motd_out.stdout is search('(?i)mem')
+          - motd_out.stdout is search('Disk /:')
+          - motd_out.stdout is search('(?i)containers')
+          - motd_out.stdout is not search('old-')
+          - motd_out.stderr == ''
+
+    # Docker is installed by this suite; hide it for the host that has none.
+    - name: Print the banner without docker
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -eo pipefail
+          mv /usr/bin/docker /usr/bin/docker.hidden
+          trap 'mv /usr/bin/docker.hidden /usr/bin/docker' EXIT
+          ! command -v docker
+          run-parts /etc/update-motd.d
+      register: motd_nodocker
+      changed_when: false
+
+    - name: Expect the banner and no error and no containers line
+      ansible.builtin.assert:
+        that:
+          - motd_nodocker.stdout is search('managed by noix')
+          - motd_nodocker.stdout is search('(?i)load')
+          - motd_nodocker.stdout is not search('(?i)containers')
+          - motd_nodocker.stderr == ''
+
+    - name: Stop the docker daemon
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop: [docker.socket, docker.service]
+
+    - name: Print the banner with the daemon down
+      ansible.builtin.command:
+        cmd: run-parts /etc/update-motd.d
+      register: motd_down
+      changed_when: false
+
+    - name: Start the docker daemon again
+      ansible.builtin.systemd_service:
+        name: docker.service
+        state: started
+
+    - name: Expect no error and no containers line
+      ansible.builtin.assert:
+        that:
+          - motd_down.stdout is search('managed by noix')
+          - motd_down.stdout is not search('(?i)containers')
+          - motd_down.stderr == ''
+
+    - name: Turn the banner off
+      ansible.builtin.include_role:
+        name: noixdev.infra.motd
+      vars:
+        motd_enabled: false
+
+    - name: Check the managed snippet
+      ansible.builtin.stat:
+        path: /etc/update-motd.d/05-noix-managed
+      register: motd_off
+
+    - name: Expect it removed
+      ansible.builtin.assert:
+        that: not motd_off.stat.exists

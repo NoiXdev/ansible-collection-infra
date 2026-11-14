@@ -26,6 +26,10 @@
         opts: defaults,nofail,noatime
     # Two users: root (home /root) and one whose home is not under /home.
     oh_my_zsh_users: [root, deploy]
+    # Characters a shell would interpret must come out as they went in.
+    motd_lines:
+      - "Ops: example.test"
+      - "literal $HOME `id` \"q\" 'a'"
   pre_tasks:
     # Only once: the oh_my_zsh role changes the shell, so a second run of this
     # task would undo it and the idempotence check would see that.
@@ -53,6 +57,7 @@
     - noixdev.infra.fail2ban
     - noixdev.infra.crowdsec
     - noixdev.infra.oh_my_zsh
+    - noixdev.infra.motd
   post_tasks:
     - name: Expect no foreign-configuration warning on a clean host
       ansible.builtin.assert:
