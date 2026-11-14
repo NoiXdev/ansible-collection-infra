@@ -19,7 +19,10 @@ printf 'Uptime:     %s\n' "$(uptime -p 2>/dev/null)"
 printf 'Load:       %s\n' "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
 printf 'Memory:     %s\n' "$(free -h 2>/dev/null | awk '/^Mem:/ {print $3 " used of " $2}')"
 printf 'Disk /:     %s\n' "$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " used of " $2 " (" $5 ")"}')"
-if command -v docker >/dev/null 2>&1; then
+# Under systemd only while docker.service runs: with the daemon stopped and
+# docker.socket listening, a docker call would start it again at every login.
+if command -v docker >/dev/null 2>&1 \
+  && { [ ! -d /run/systemd/system ] || systemctl is-active --quiet docker.service 2>/dev/null; }; then
   if containers="$(timeout 5 docker ps --format '{{ '{{' }}.Names{{ '}}' }}' 2>/dev/null)"; then
     printf 'Containers: %s running' "$(printf '%s' "$containers" | grep -c .)"
     if [ -n "$containers" ]; then

@@ -23,7 +23,9 @@ argument_specs:
         description: Lines printed under the title, verbatim.
       motd_sysinfo:
         type: bool
-        description: Print host name, OS, uptime, load, memory, root disk and, when Docker answers, the running containers.
+        description: >-
+          Print host name, OS, uptime, load, memory, root disk and, when docker.service is active and Docker answers,
+          the running containers.
       motd_remove_snippets:
         type: list
         elements: str

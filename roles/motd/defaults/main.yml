@@ -2,7 +2,8 @@
 # Set to false to remove the managed banner (the stock snippets stay as they are).
 motd_enabled: true
 
-# File name in /etc/update-motd.d/; the number puts it first.
+# File name in /etc/update-motd.d/; the number puts it near the top (after
+# Ubuntu's 00-header).
 motd_filename: 05-noix-managed
 
 motd_title: managed by noix

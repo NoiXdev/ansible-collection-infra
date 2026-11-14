@@ -739,6 +739,40 @@
           - motd_nodocker.stdout is not search('(?i)containers')
           - motd_nodocker.stderr == ''
 
+    # A daemon stopped on purpose, its socket still listening: a docker call
+    # would start it again through the socket, at every login.
+    - name: Stop only docker.service
+      ansible.builtin.systemd_service:
+        name: docker.service
+        state: stopped
+
+    - name: Print the banner with only the socket up
+      ansible.builtin.command:
+        cmd: run-parts /etc/update-motd.d
+      register: motd_socket
+      changed_when: false
+
+    - name: Read the state of docker.service
+      ansible.builtin.command:
+        cmd: systemctl is-active docker.service # noqa: command-instead-of-module
+      register: motd_socket_service
+      changed_when: false
+      failed_when: false
+
+    - name: Start docker.service again
+      ansible.builtin.systemd_service:
+        name: docker.service
+        state: started
+
+    - name: Expect the daemon still stopped and no containers line
+      ansible.builtin.assert:
+        that:
+          - motd_socket_service.stdout == 'inactive'
+          - motd_socket.stdout is search('managed by noix')
+          - motd_socket.stdout is not search('(?i)containers')
+          - motd_socket.stderr == ''
+        fail_msg: "docker.service {{ motd_socket_service.stdout }}; {{ motd_socket.stdout_lines }} {{ motd_socket.stderr }}"
+
     - name: Stop the docker daemon
       ansible.builtin.systemd_service:
         name: "{{ item }}"
