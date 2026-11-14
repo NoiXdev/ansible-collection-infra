@@ -1,0 +1,209 @@
+---
+# base_mounts: format a device that has no filesystem at all, then mount it
+# persistently. Every check comes first, before the first task that changes
+# anything, so a run that fails leaves the host as it was.
+
+# argument_specs checks role parameters only and fills in no defaults for
+# play or inventory variables, so the entry defaults are applied here.
+- name: Apply the base_mounts defaults
+  ansible.builtin.set_fact:
+    base_mounts_entries: >-
+      {%- set out = [] -%}
+      {%- for m in base_mounts -%}
+      {%- set e = {'fstype': 'ext4', 'opts': 'defaults,nofail'} | combine(m) -%}
+      {%- set _ = out.append(e | combine({'path_given': e.path, 'path': e.path | regex_replace('/+', '/') | regex_replace('(.)/$', '\\1')})) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Check the base_mounts entries
+  ansible.builtin.assert:
+    that:
+      - item.src is match('/dev/')
+      - item.path is match('/') and item.path | regex_replace('/+$', '') != ''
+      - not base_mounts_bad_chars
+      - base_mounts_entries | selectattr('path', 'equalto', item.path) | list | length == 1
+      - base_mounts_entries | selectattr('src', 'equalto', item.src) | list | length == 1
+    fail_msg: >-
+      {{ ('base_mounts: src ' ~ item.src ~ ' is not a device path under /dev/') if item.src is not match('/dev/')
+         else ('base_mounts: path ' ~ item.path ~ ' is not an absolute mountpoint other than /')
+           if (item.path is not match('/') or item.path | regex_replace('/+$', '') == '')
+         else ('base_mounts: path ' ~ item.path ~ ' must not contain whitespace or a backslash')
+           if base_mounts_bad_chars
+         else ('base_mounts: path ' ~ item.path ~ ' appears more than once')
+           if base_mounts_entries | selectattr('path', 'equalto', item.path) | list | length > 1
+         else ('base_mounts: src ' ~ item.src ~ ' appears more than once') }}
+    quiet: true
+  vars:
+    # Whitespace or a backslash: fstab and findmnt escape them, so the path
+    # would never compare equal. Without regex escapes, which differ between
+    # YAML, Jinja and Python.
+    base_mounts_bad_chars: "{{ item.path.split() | join('') != item.path or ('%c' | format(92)) in item.path }}"
+  loop: "{{ base_mounts_entries }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Look for the block devices
+  ansible.builtin.stat:
+    path: "{{ item.src }}"
+    follow: true
+    get_checksum: false
+  loop: "{{ base_mounts_entries }}"
+  loop_control:
+    label: "{{ item.src }}"
+  register: base_mounts_stat
+
+- name: Check that the block devices exist
+  ansible.builtin.assert:
+    that: item.stat.exists and item.stat.isblk
+    fail_msg: "base_mounts: no block device {{ item.item.src }}"
+    quiet: true
+  loop: "{{ base_mounts_stat.results }}"
+  loop_control:
+    label: "{{ item.item.src }}"
+
+# One read-only pass per device: the resolved device (a /dev/disk/by-id/ path
+# is a symlink), what blkid finds on it, and the mountpoint. blkid exits 2 both
+# for "no signature" and for a device it could not read, so a device counts as
+# blank only when blkid said nothing on stderr and its first and last MiB read
+# as zeros; a read error fails closed.
+- name: Read the block devices and mountpoints
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      src={{ item.src | quote }}
+      path={{ item.path | quote }}
+      err="$(mktemp)"
+      printf 'REAL=%s\n' "$(readlink -f -- "$src")"
+      blkid -p -o export -- "$src" 2>"$err"
+      rc=$?
+      printf 'BLKID_RC=%s\n' "$rc"
+      [ -s "$err" ] && printf 'BLKID_ERR=%s\n' "$(tr '\n' ' ' <"$err")"
+      rm -f "$err"
+      if [ "$rc" = 2 ]; then
+        size="$(blockdev --getsize64 "$src")" && mib=$((size / 1048576)) && [ "$mib" -ge 1 ] &&
+          cmp -s -n 1048576 "$src" /dev/zero &&
+          dd if="$src" bs=1M skip=$((mib - 1)) count=1 status=none | cmp -s -n 1048576 - /dev/zero &&
+          echo 'BLANK=1'
+      fi
+      printf 'REAL_PATH=%s\n' "$(realpath -m -- "$path")"
+      if [ -e "$path" ] && [ ! -d "$path" ]; then
+        echo 'PATH_NOT_DIR=1'
+      elif [ -d "$path" ] && [ -n "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+        echo 'PATH_NOT_EMPTY=1'
+      fi
+    executable: /bin/bash
+  loop: "{{ base_mounts_entries }}"
+  loop_control:
+    label: "{{ item.src }}"
+  register: base_mounts_probe
+  changed_when: false
+  check_mode: false
+
+# fstab sources as the device they name: a /dev path resolved, UUID= kept
+# as it is and compared with the device's UUID below.
+- name: Read fstab and the current mounts
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      # findmnt exits 1 when fstab has no entries at all.
+      { findmnt --fstab -rn -o SOURCE,TARGET || [ "$?" = 1 ]; } | while read -r source target; do
+        # A line for a device that is gone keeps its name.
+        case "$source" in /dev/*) source="$(readlink -f -- "$source" || printf '%s' "$source")" ;; esac
+        printf 'fstab %s %s\n' "$source" "$target"
+      done
+      findmnt -rn -o SOURCE,TARGET | sed 's/^/mount /'
+    executable: /bin/bash
+  register: base_mounts_tables
+  changed_when: false
+  check_mode: false
+
+- name: Check the block devices against their filesystem, fstab and the current mounts
+  ansible.builtin.assert:
+    that: base_mounts_problems | length == 0
+    fail_msg: "{{ base_mounts_problems }}"
+    quiet: true
+  loop: "{{ base_mounts_probe.results }}"
+  loop_control:
+    label: "{{ item.item.src }}"
+  vars:
+    entry: "{{ item.item }}"
+    probe: "{{ dict(item.stdout_lines | select('search', '=') | map('split', '=', 1)) }}"
+    real: "{{ probe.REAL }}"
+    path: "{{ entry.path | regex_replace('/+$', '') }}"
+    fstab: "{{ base_mounts_tables.stdout_lines | select('match', 'fstab ') | map('split') | list }}"
+    mounts: "{{ base_mounts_tables.stdout_lines | select('match', 'mount ') | map('split') | list }}"
+    sources: >-
+      {{ [real] + (['UUID=' ~ probe.UUID] if probe.UUID is defined else [])
+         + (['LABEL=' ~ probe.LABEL] if probe.LABEL is defined else []) }}
+    same_device: >-
+      {{ base_mounts_probe.results | rejectattr('item.src', 'equalto', entry.src)
+         | selectattr('stdout_lines', 'contains', 'REAL=' ~ real) | map(attribute='item.src') | list }}
+    fstab_other: "{{ fstab | selectattr(1, 'in', sources) | rejectattr(2, 'equalto', path) | list }}"
+    mounted_other: "{{ mounts | selectattr(1, 'equalto', real) | rejectattr(2, 'equalto', path) | list }}"
+    path_mounted: "{{ mounts | selectattr(2, 'equalto', path) | list }}"
+    msg_unreadable: >-
+      base_mounts: blkid could not read {{ entry.src }} (exit {{ probe.BLKID_RC }}) {{ probe.BLKID_ERR | default('') }};
+      nothing is formatted or mounted while a device cannot be read.
+    msg_not_blank: >-
+      base_mounts: {{ entry.src }} has no filesystem but is not blank (its first or last MiB holds data);
+      wipe it yourself if it may be formatted.
+    msg_same_device: "base_mounts: {{ entry.src }} and {{ same_device | first }} are the same device ({{ real }})."
+    msg_path_link: >-
+      base_mounts: path {{ path }} resolves to {{ probe.REAL_PATH }}; give the real path,
+      mount would follow the symlink.
+    msg_not_dir: "base_mounts: {{ path }} exists and is not a directory."
+    msg_partition: >-
+      base_mounts: {{ entry.src }} has a partition table ({{ probe.PTTYPE }}) and no filesystem;
+      base_mounts takes whole devices with a filesystem or with nothing on them.
+    msg_fstype: >-
+      base_mounts: {{ entry.src }} has {{ probe.TYPE }}, expected {{ entry.fstype }};
+      a device is never reformatted.
+    msg_fstab: >-
+      base_mounts: /etc/fstab mounts {{ entry.src }} at {{ fstab_other[0][2] }} (as {{ fstab_other[0][1] }});
+      remove that line (and unmount it) first, for example Hetzner's own automount.
+    msg_mounted: "base_mounts: {{ entry.src }} is mounted at {{ mounted_other[0][2] }}; unmount it first."
+    msg_path_mounted: >-
+      base_mounts: {{ path }} is already the mountpoint of {{ path_mounted[0][1] }};
+      mounting {{ entry.src }} there would hide it.
+    msg_not_empty: >-
+      base_mounts: {{ path }} is not empty; mounting {{ entry.src }} there would hide what is in it.
+    base_mounts_problems: >-
+      {{ ([msg_unreadable] if probe.BLKID_RC not in ['0', '2'] or (probe.BLKID_RC == '2' and probe.BLKID_ERR is defined) else [])
+         + ([msg_not_blank] if probe.BLKID_RC == '2' and probe.BLKID_ERR is not defined and probe.BLANK is not defined else [])
+         + ([msg_same_device] if same_device | length > 0 else [])
+         + ([msg_path_link] if probe.REAL_PATH != path else [])
+         + ([msg_not_dir] if probe.PATH_NOT_DIR is defined else [])
+         + ([msg_partition] if probe.TYPE is not defined and probe.PTTYPE is defined else [])
+         + ([msg_fstype] if probe.TYPE is defined and probe.TYPE != entry.fstype else [])
+         + ([msg_fstab] if fstab_other | length > 0 else [])
+         + ([msg_mounted] if mounted_other | length > 0 else [])
+         + ([msg_path_mounted] if path_mounted | length > 0 and path_mounted[0][1] != real else [])
+         + ([msg_not_empty] if path_mounted | length == 0 and probe.PATH_NOT_EMPTY is defined else []) }}
+
+# --- Changes start here ---
+
+- name: Install xfsprogs for the xfs volumes
+  ansible.builtin.apt:
+    name: xfsprogs
+    state: present
+  when: base_mounts_entries | selectattr('fstype', 'equalto', 'xfs') | list | length > 0
+
+- name: Format the empty block devices
+  community.general.filesystem:
+    dev: "{{ item.item.src }}"
+    fstype: "{{ item.item.fstype }}"
+  loop: "{{ base_mounts_probe.results }}"
+  loop_control:
+    label: "{{ item.item.src }}"
+  when: (item.stdout_lines | select('equalto', 'BLKID_RC=2') | list | length) > 0
+
+- name: Mount the block volumes and record them in fstab
+  ansible.posix.mount:
+    src: "{{ item.src }}"
+    path: "{{ item.path }}"
+    fstype: "{{ item.fstype }}"
+    opts: "{{ item.opts }}"
+    state: mounted
+  loop: "{{ base_mounts_entries }}"
+  loop_control:
+    label: "{{ item.path }}"

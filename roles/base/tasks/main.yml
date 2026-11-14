@@ -71,6 +71,10 @@
   ansible.builtin.include_tasks: swap.yml
   when: base_swap_size_mb > 0
 
+- name: Mount the block volumes
+  ansible.builtin.include_tasks: mounts.yml
+  when: base_mounts | length > 0
+
 - name: Harden sshd
   ansible.builtin.include_tasks: sshd.yml
   when: base_sshd_hardening or base_sshd_listen_addresses | length > 0

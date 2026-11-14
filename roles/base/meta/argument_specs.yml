@@ -117,3 +117,33 @@ argument_specs:
           interface the gateway is reached through. For example a home LAN
           behind a private network gateway on a host that also has a public
           interface.
+      base_mounts:
+        type: list
+        elements: dict
+        default: []
+        description: >-
+          Block devices mounted persistently through fstab, for example a
+          Hetzner volume. A device without any filesystem is formatted with
+          fstype once; a device is never reformatted. Every check (device
+          present, filesystem, fstab and current mounts, mountpoint empty)
+          runs before anything changes.
+        options:
+          src:
+            type: str
+            required: true
+            description: Block device, e.g. /dev/disk/by-id/scsi-0HC_Volume_<id>.
+          path:
+            type: str
+            required: true
+            description: Absolute mountpoint, not /.
+          fstype:
+            type: str
+            choices: [ext4, xfs]
+            default: ext4
+            description: Filesystem the device has, or gets when it has none.
+          opts:
+            type: str
+            default: defaults,nofail
+            description: >-
+              fstab mount options. nofail keeps a missing volume from
+              blocking the boot.

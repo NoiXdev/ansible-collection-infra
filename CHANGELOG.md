@@ -10,6 +10,16 @@
   instead of a module error later in the role. The roles still do not depend on the `docker`
   role: Docker comes from the playbook (the `docker` role, or Docker's own packages as on a
   mailcow host). The check is the new internal role `docker_check`; it changes nothing.
+- `base`: new `base_mounts` list that mounts block devices persistently through fstab, for
+  example a Hetzner volume (`/dev/disk/by-id/scsi-0HC_Volume_<id>`): `src`, `path`, `fstype`
+  (`ext4`, the default, or `xfs`) and `opts` (default `defaults,nofail`). A device without any
+  filesystem whose first and last MiB read as zeros is formatted once; a device is never
+  reformatted. Before anything changes the role fails on a missing or unreadable device, a
+  different filesystem, a partition table, a device without a filesystem that is not blank,
+  the device in fstab (by path, link, `UUID=` or `LABEL=`) or mounted at another path
+  (Hetzner's own automount, for example), a path that is another device's mountpoint, not
+  empty, a file or behind a symlink, a path with whitespace or a backslash, and repeated
+  entries or devices. The host test suites use loop devices for it.
 
 ## 0.5.0 — 2026-11-14
 

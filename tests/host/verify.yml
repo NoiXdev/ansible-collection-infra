@@ -33,6 +33,33 @@
           - host_state.results[6].stdout_lines == ['1', '1']
         fail_msg: "{{ host_state.results | map(attribute='stdout') | list }}"
 
+- name: Verify the block volumes
+  hosts: testhost
+  gather_facts: false
+  tasks:
+    - name: Read the mounts, fstab and xfsprogs
+      ansible.builtin.command:
+        cmd: "{{ item }}"
+      loop:
+        - findmnt -n -o SOURCE,FSTYPE /srv/data-ext4
+        - findmnt -n -o SOURCE,FSTYPE /srv/data-xfs
+        - cat /etc/fstab
+        - dpkg-query -W -f=${Status} xfsprogs
+      register: mounts_state
+      changed_when: false
+      failed_when: false
+
+    - name: Check them
+      ansible.builtin.assert:
+        that:
+          - mounts_state.results[0].stdout.split() == [test_mount_dev_ext4, 'ext4']
+          - mounts_state.results[1].stdout.split() == [test_mount_dev_xfs, 'xfs']
+          # nofail is an fstab option, so the line is checked, not the live mount.
+          - (test_mount_dev_ext4 ~ ' /srv/data-ext4 ext4 defaults,nofail 0 0') in mounts_state.results[2].stdout_lines
+          - (test_mount_dev_xfs ~ ' /srv/data-xfs xfs defaults,nofail,noatime 0 0') in mounts_state.results[2].stdout_lines
+          - mounts_state.results[3].stdout == 'install ok installed'
+        fail_msg: "{{ mounts_state.results | map(attribute='stdout') | list }}"
+
 - name: Verify the sshd hardening
   hosts: testhost
   gather_facts: false

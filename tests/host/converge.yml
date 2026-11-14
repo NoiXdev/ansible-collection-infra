@@ -15,6 +15,15 @@
     crowdsec_allowlist: [203.0.113.0/24]
     # Not the default, so the port override is exercised end to end.
     crowdsec_lapi_port: 8081
+    # Loop devices from tests/host/run.sh stand in for block volumes.
+    base_mounts:
+      - src: "{{ test_mount_dev_ext4 }}"
+        path: /srv/data-ext4
+      - src: "{{ test_mount_dev_xfs }}"
+        # The trailing slash is normalised away.
+        path: /srv/data-xfs/
+        fstype: xfs
+        opts: defaults,nofail,noatime
   pre_tasks:
     - name: Check whether the foreign configuration is already planted
       ansible.builtin.stat:

@@ -53,3 +53,10 @@ base_nonlocal_bind: false
 # Static routes added at boot: [{to: CIDR, via: gateway}]. The interface is
 # the one the gateway is reached through.
 base_static_routes: []
+# Block devices to mount persistently, e.g. a Hetzner volume:
+#   - src: /dev/disk/by-id/scsi-0HC_Volume_<id>
+#     path: /srv/data
+#     fstype: ext4            # ext4 (default) or xfs
+#     opts: defaults,nofail   # the default
+# A device without any filesystem is formatted once; nothing is reformatted.
+base_mounts: []

@@ -1,0 +1,12 @@
+---
+# The base_mounts tasks of the base role alone. tests/host/run.sh passes
+# base_mounts with -e: the cases that must fail before they change anything,
+# and a --check run of the converge's entries that must change nothing.
+- name: Run base_mounts alone
+  hosts: testhost
+  gather_facts: false
+  tasks:
+    - name: Run the base_mounts tasks of the base role
+      ansible.builtin.include_role:
+        name: noixdev.infra.base
+        tasks_from: mounts
