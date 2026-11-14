@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-14
 
 - `error_pages_export`: new internal role, used by `cloudpanel` and `mailcow`, that exports the noix
   error pages to static files. `cloudpanel` behaves as before: same files, same export script.
