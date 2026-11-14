@@ -96,7 +96,8 @@
       maxmemory_policy: "{{ item.maxmemory_policy | default('noeviction') }}"
       persistence: "{{ item.persistence | default('rdb') }}"
       dir: "/var/lib/redis/{{ item.name }}"
-      logfile: "/var/log/redis/{{ item.name }}.log"
+      # redis-server-*.log: the package's logrotate rule rotates them.
+      logfile: "/var/log/redis/redis-server-{{ item.name }}.log"
   loop: "{{ redis_instances }}"
   loop_control:
     label: "{{ item.name }}"

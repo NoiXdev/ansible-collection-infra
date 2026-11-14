@@ -2,8 +2,11 @@
 # Every message names the entry. The loops use the list without passwords.
 - name: Check the instance names
   ansible.builtin.assert:
-    that: item.name is match('^[a-z0-9_-]+$')
-    fail_msg: "redis: redis_instances entry '{{ item.name }}' has an invalid name; it must match ^[a-z0-9_-]+$"
+    # redis-<name> is a group name, and those are at most 32 characters.
+    that:
+      - item.name is match('^[a-z0-9_-]+$')
+      - item.name | length <= 26
+    fail_msg: "redis: redis_instances entry '{{ item.name }}' has an invalid name; it must match ^[a-z0-9_-]+$ and be at most 26 characters long"
     quiet: true
   loop: "{{ redis_instances_public }}"
   loop_control:
@@ -47,6 +50,15 @@
     quiet: true
   vars: *redis_listener
   loop: "{{ redis_instances_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the ports
+  ansible.builtin.assert:
+    that: item.port | int >= 1 and item.port | int <= 65535
+    fail_msg: "redis: redis_instances entry {{ item.name }} has port {{ item.port }}; use a port from 1 to 65535"
+    quiet: true
+  loop: "{{ redis_instances_public | selectattr('port', 'defined') | rejectattr('port', 'none') }}"
   loop_control:
     label: "{{ item.name }}"
 

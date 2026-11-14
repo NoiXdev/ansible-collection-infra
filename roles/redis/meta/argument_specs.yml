@@ -64,10 +64,10 @@ argument_specs:
           name:
             type: str
             required: true
-            description: Instance name (^[a-z0-9_-]+$); the unit is redis-server@<name>.
+            description: Instance name (^[a-z0-9_-]+$, at most 26 characters); the unit is redis-server@<name>.
           port:
             type: int
-            description: TCP port on redis_bind_address.
+            description: TCP port on redis_bind_address (1 to 65535).
           unixsocket:
             type: bool
             description: >-

@@ -41,9 +41,11 @@
 - name: Add the packages.redis.io repository
   ansible.builtin.include_tasks: repository.yml
 
+# The package's logrotate rule (/var/log/redis/redis-server*.log) needs
+# logrotate, which the package does not depend on.
 - name: Install Redis
   ansible.builtin.apt:
-    name: redis-server
+    name: [redis-server, logrotate]
     state: present
     update_cache: true
     cache_valid_time: 3600

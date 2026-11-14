@@ -125,8 +125,14 @@ suite_nodejs() {
 # pid ROLE UNIT: the main PID of a unit (0 when it does not run).
 pid() { hx "$1" systemctl show -p MainPID --value "$2"; }
 
+# default_active NAME: the package's redis-server still runs after a refusal.
+default_active() {
+  [ "$(hx redis systemctl is-active redis-server || true)" = active ] \
+    || fail "redis/$1: the default instance stopped after the refused run"
+}
+
 suite_redis() {
-  local dir="$here/redis" version prod staging bound
+  local dir="$here/redis" version prod staging bound rotate
   start redis
 
   echo "== redis: the default instance, converge and idempotence"
@@ -137,6 +143,17 @@ suite_redis() {
   bound="$(hx redis ss -Hltn 'sport = :6379' | awk '{print $4}' | sort -u | paste -sd' ' -)"
   [ "$bound" = "127.0.0.1:6379" ] || fail "redis: the default instance listens on '$bound', not 127.0.0.1:6379 only"
 
+  echo "== redis: lists no instance can run on are refused, the default instance keeps running"
+  refused redis long-name "redis: redis_instances entry 'abcdefghijklmnopqrstuvwxyz0' has an invalid name; it must match ^[a-z0-9_-]+$ and be at most 26 characters long" \
+    "$dir/converge.yml" -e '{"redis_instances": [{"name": "abcdefghijklmnopqrstuvwxyz0", "unixsocket": true}]}'
+  default_active long-name
+  refused redis port-high "redis: redis_instances entry h has port 70000; use a port from 1 to 65535" \
+    "$dir/converge.yml" -e '{"redis_instances": [{"name": "h", "port": 70000}]}'
+  default_active port-high
+  refused redis port-zero "redis: redis_instances entry i has port 0; use a port from 1 to 65535" \
+    "$dir/converge.yml" -e '{"redis_instances": [{"name": "i", "port": 0}]}'
+  default_active port-zero
+
   echo "== redis: two instances (the first run with --diff -v), idempotence"
   converge redis instances "$dir/instances.yml" --diff -v
   for secret in 's-pass' 'o d$%'; do
@@ -144,6 +161,15 @@ suite_redis() {
       || fail "redis: a converge log with --diff -v contains a password ($secret)"
   done
   play redis "$dir/verify.yml"
+
+  echo "== redis: the instances log where the package's logrotate rule rotates"
+  hx redis grep -qF '/var/log/redis/redis-server*.log' /etc/logrotate.d/redis-server \
+    || fail "redis: the package's logrotate rule does not cover /var/log/redis/redis-server*.log"
+  rotate="$(hx redis logrotate -d /etc/logrotate.d/redis-server 2>&1)"
+  for name in production staging; do
+    hx redis test -s "/var/log/redis/redis-server-$name.log" || fail "redis: $name does not write /var/log/redis/redis-server-$name.log"
+    grep -qF "/var/log/redis/redis-server-$name.log" <<<"$rotate" || fail "redis: logrotate does not consider $name's log"
+  done
 
   echo "== redis: a changed maxmemory restarts staging only"
   prod="$(pid redis redis-server@production)"
