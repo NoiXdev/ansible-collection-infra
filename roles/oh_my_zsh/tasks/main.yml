@@ -1,0 +1,97 @@
+---
+- name: Check the version
+  ansible.builtin.assert:
+    that: oh_my_zsh_version is string and oh_my_zsh_version is match('^[0-9a-f]{40}$')
+    fail_msg: "oh_my_zsh_version must be a full 40-character commit SHA, not '{{ oh_my_zsh_version }}'."
+    quiet: true
+
+- name: Look up the users
+  ansible.builtin.command:
+    cmd: getent passwd {{ item | quote }}
+  loop: "{{ oh_my_zsh_users }}"
+  register: oh_my_zsh_passwd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check that every user exists
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: "oh_my_zsh_users: the user '{{ item.item }}' does not exist on this host; create it first."
+    quiet: true
+  loop: "{{ oh_my_zsh_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Install zsh and git
+  ansible.builtin.apt:
+    name: "{{ oh_my_zsh_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Check Oh My Zsh out at the pinned commit
+  ansible.builtin.git:
+    repo: "{{ oh_my_zsh_repo }}"
+    dest: "{{ oh_my_zsh_dir }}"
+    version: "{{ oh_my_zsh_version }}"
+    update: true
+    force: false
+  environment:
+    GIT_CONFIG_GLOBAL: /dev/null
+
+- name: Make the checkout root's alone and read-only for everyone else
+  ansible.builtin.file:
+    path: "{{ oh_my_zsh_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "go-w"
+    recurse: true
+
+- name: Install the noix theme
+  ansible.builtin.copy:
+    src: noix.zsh-theme
+    dest: "{{ oh_my_zsh_dir }}/custom/themes/noix.zsh-theme"
+    owner: root
+    group: root
+    mode: "0644"
+  when: oh_my_zsh_theme == 'noix' and oh_my_zsh_theme_content | length == 0
+
+- name: Install the theme given in oh_my_zsh_theme_content
+  ansible.builtin.copy:
+    content: "{{ oh_my_zsh_theme_content }}\n"
+    dest: "{{ oh_my_zsh_dir }}/custom/themes/{{ oh_my_zsh_theme }}.zsh-theme"
+    owner: root
+    group: root
+    mode: "0644"
+  when: oh_my_zsh_theme_content | length > 0
+
+- name: Create the cache directory in each home
+  ansible.builtin.file:
+    path: "{{ item.stdout.split(':')[5] }}/.cache/oh-my-zsh"
+    state: directory
+    owner: "{{ item.item }}"
+    group: "{{ item.stdout.split(':')[3] }}"
+    mode: "0755"
+  loop: "{{ oh_my_zsh_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Write ~/.zshrc
+  ansible.builtin.template:
+    src: zshrc.j2
+    dest: "{{ item.stdout.split(':')[5] }}/.zshrc"
+    owner: "{{ item.item }}"
+    group: "{{ item.stdout.split(':')[3] }}"
+    mode: "0644"
+  loop: "{{ oh_my_zsh_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Set the login shell to zsh
+  ansible.builtin.user:
+    name: "{{ item }}"
+    shell: "{{ oh_my_zsh_shell }}"
+  loop: "{{ oh_my_zsh_users }}"
+  when: oh_my_zsh_login_shell

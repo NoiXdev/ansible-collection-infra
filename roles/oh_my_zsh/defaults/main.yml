@@ -1,0 +1,21 @@
+---
+# Oh My Zsh is pinned to a commit and never updates itself: change the SHA to
+# move every host to the same new version.
+oh_my_zsh_version: 6010fb6260f359e71d99ba25f05f9215809b3ed2
+oh_my_zsh_repo: https://github.com/ohmyzsh/ohmyzsh.git
+
+# One checkout shared by all users; owned by root, so nobody else can change it.
+oh_my_zsh_dir: /usr/local/share/oh-my-zsh
+
+# Users that get a ~/.zshrc (their real home is read from the passwd database).
+oh_my_zsh_users: [root]
+
+# "noix" ships with the role; any other name is a built-in Oh My Zsh theme
+# unless oh_my_zsh_theme_content provides it.
+oh_my_zsh_theme: noix
+oh_my_zsh_theme_content: ""
+
+oh_my_zsh_plugins: [git]
+
+# Set the login shell of oh_my_zsh_users to zsh.
+oh_my_zsh_login_shell: true

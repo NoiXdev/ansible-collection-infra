@@ -277,3 +277,188 @@
         - name: Expect the allowlist check, nothing else
           ansible.builtin.assert:
             that: "'not an IP address or CIDR' in ansible_failed_result | to_json"
+
+- name: Verify oh_my_zsh
+  hosts: testhost
+  gather_facts: false
+  vars:
+    omz_dir: /usr/local/share/oh-my-zsh
+    omz_pin: 6010fb6260f359e71d99ba25f05f9215809b3ed2
+    omz_older: 05c2cb0b2b1bdf0138a35006805f573051b0a4bb
+  tasks:
+    - name: Read the state
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: "{{ item }}"
+      loop:
+        - git -C {{ omz_dir }} rev-parse HEAD
+        - stat -c '%U' {{ omz_dir }}
+        - find {{ omz_dir }} ! -type l \( ! -user root -o -perm /022 \) -print
+        - cat /root/.zshrc
+        - cat /srv/deploy/.zshrc
+        - getent passwd root deploy
+        - su - deploy -c 'zsh -i -c "echo \$NOIX_LOCAL"'
+        - ls -d /srv/deploy/.cache/oh-my-zsh /root/.cache/oh-my-zsh
+        - find {{ omz_dir }} -name '.zcompdump*' -o -name '.zsh-update'
+        - cat /srv/deploy/.zshrc.local
+        - stat -c '%U' /srv/deploy/.zshrc
+      register: omz_state
+      changed_when: false
+      failed_when: false
+
+    - name: Check it
+      ansible.builtin.assert:
+        that:
+          - omz_state.results[0].stdout == omz_pin
+          - omz_state.results[1].stdout == 'root'
+          # Nothing in the shared checkout is writable by group or other.
+          - omz_state.results[2].stdout == ''
+          - omz_state.results[3].stdout is search('Managed by noixdev.infra')
+          - omz_state.results[3].stdout is search('ZSH_THEME="noix"')
+          - omz_state.results[3].stdout is search('plugins=\(git\)')
+          - omz_state.results[3].stdout is search('\.zshrc\.local')
+          - omz_state.results[4].stdout is search('Managed by noixdev.infra')
+          - omz_state.results[4].stdout is search('ZSH_THEME="noix"')
+          - omz_state.results[4].stdout is search('plugins=\(git\)')
+          - omz_state.results[4].stdout is search('\.zshrc\.local')
+          - omz_state.results[5].stdout_lines | length == 2
+          - omz_state.results[5].stdout_lines[0] is search(':/root:(/usr)?/bin/zsh$')
+          - omz_state.results[5].stdout_lines[1] is search(':/srv/deploy:(/usr)?/bin/zsh$')
+          - omz_state.results[6].rc == 0
+          - omz_state.results[6].stdout == '1'
+          - omz_state.results[6].stderr == ''
+          # The cache is in each home; the checkout stays clean.
+          - omz_state.results[7].rc == 0
+          - omz_state.results[8].stdout == ''
+          - omz_state.results[9].stdout == 'export NOIX_LOCAL=1'
+          - omz_state.results[10].stdout == 'deploy'
+        fail_msg: "{{ omz_state.results | map(attribute='stdout') | list }} {{ omz_state.results | map(attribute='stderr') | list }}"
+
+    - name: Refuse an unknown user before cloning
+      block:
+        - name: Include the oh_my_zsh role for a user that does not exist
+          ansible.builtin.include_role:
+            name: noixdev.infra.oh_my_zsh
+          vars:
+            oh_my_zsh_users: [nosuchuser]
+            oh_my_zsh_dir: /usr/local/share/oh-my-zsh-refused
+        - name: Not reached
+          ansible.builtin.fail:
+            msg: oh_my_zsh accepted a user that does not exist
+      rescue:
+        - name: Expect the message that names the user
+          ansible.builtin.assert:
+            that: "'nosuchuser' in ansible_failed_result | to_json"
+
+    - name: Check that nothing was cloned
+      ansible.builtin.stat:
+        path: /usr/local/share/oh-my-zsh-refused
+      register: omz_refused
+
+    - name: Expect no checkout
+      ansible.builtin.assert:
+        that: not omz_refused.stat.exists
+
+    - name: Move to an older commit
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_version: "{{ omz_older }}"
+        oh_my_zsh_users: [root, deploy]
+
+    - name: Read HEAD
+      ansible.builtin.command: git -C {{ omz_dir }} rev-parse HEAD # noqa: command-instead-of-module
+      register: omz_head_old
+      changed_when: false
+
+    - name: Move back to the default pin
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [root, deploy]
+
+    - name: Read HEAD again
+      ansible.builtin.command: git -C {{ omz_dir }} rev-parse HEAD # noqa: command-instead-of-module
+      register: omz_head_new
+      changed_when: false
+
+    - name: Expect no stale pin
+      ansible.builtin.assert:
+        that:
+          - omz_head_old.stdout == omz_older
+          - omz_head_new.stdout == omz_pin
+
+    - name: Use a theme of one's own for deploy
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [deploy]
+        oh_my_zsh_theme: mine
+        oh_my_zsh_theme_content: 'PROMPT="mine> "'
+
+    - name: Read the theme
+      ansible.builtin.command:
+        argv: [su, -, deploy, -c, "zsh -i -c 'print -P $PROMPT'"]
+      register: omz_mine
+      changed_when: false
+
+    - name: Check the theme
+      ansible.builtin.stat:
+        path: "{{ omz_dir }}/custom/themes/mine.zsh-theme"
+      register: omz_mine_file
+
+    - name: Expect the theme in the prompt
+      ansible.builtin.assert:
+        that:
+          - omz_mine_file.stat.exists
+          - omz_mine.stdout == 'mine> '
+          - omz_mine.stderr == ''
+
+    - name: Use a theme that ships with oh-my-zsh
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [deploy]
+        oh_my_zsh_theme: robbyrussell
+
+    - name: Start a shell with it
+      ansible.builtin.command:
+        argv: [su, -, deploy, -c, "zsh -i -c 'print -P $PROMPT'"]
+      register: omz_builtin
+      changed_when: false
+
+    - name: Expect it to load without a message
+      ansible.builtin.assert:
+        that:
+          - omz_builtin.stdout is search('➜')
+          - omz_builtin.stderr == ''
+
+    - name: Go back to the default theme
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [root, deploy]
+
+    - name: Start a shell with the default theme
+      ansible.builtin.command:
+        argv: [su, -, deploy, -c, "zsh -i -c 'print -P $PROMPT'"]
+      register: omz_noix
+      changed_when: false
+
+    - name: Expect the noix prompt
+      ansible.builtin.assert:
+        that:
+          - omz_noix.stdout is search('deploy@')
+          - omz_noix.stderr == ''
+
+    # su starts a login session; its /run/user/<uid> tmpfs would show up in the
+    # base_mounts checks that compare the mount table before and after.
+    - name: End the sessions that su started
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -eo pipefail
+          uid="$(id -u deploy)"
+          systemctl stop "user@$uid.service" "user-runtime-dir@$uid.service" 2>/dev/null || true
+          ! findmnt -n "/run/user/$uid"
+      changed_when: false

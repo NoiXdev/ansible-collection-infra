@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Oh My Zsh pinned to a commit, with a noix theme, for a list of users
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+    - name: Debian
+      versions: [bookworm, trixie]
+dependencies: []

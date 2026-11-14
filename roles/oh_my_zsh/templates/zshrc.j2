@@ -1,0 +1,14 @@
+# Managed by noixdev.infra (oh_my_zsh role). Changes here are overwritten.
+# Put your own settings into ~/.zshrc.local; the role never touches that file.
+export ZSH="{{ oh_my_zsh_dir }}"
+# The shared checkout is read-only for users: cache and completion dump live in the home.
+export ZSH_CACHE_DIR="$HOME/.cache/oh-my-zsh"
+export ZSH_COMPDUMP="$ZSH_CACHE_DIR/.zcompdump"
+ZSH_THEME="{{ oh_my_zsh_theme }}"
+plugins=({{ oh_my_zsh_plugins | join(' ') }})
+# The version is pinned by the role; Oh My Zsh must not update itself.
+zstyle ':omz:update' mode disabled
+DISABLE_AUTO_UPDATE="true"
+source "$ZSH/oh-my-zsh.sh"
+
+[[ -r "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"

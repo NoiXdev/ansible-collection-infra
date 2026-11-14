@@ -1,0 +1,37 @@
+---
+argument_specs:
+  main:
+    short_description: Oh My Zsh pinned to a commit, one shared checkout, a ~/.zshrc per user
+    description:
+      - Installs zsh and git, checks Oh My Zsh out at a commit into a root-owned directory and writes a managed ~/.zshrc for each listed user.
+      - Each user's home comes from the passwd database. The cache lives in ~/.cache/oh-my-zsh, never in the shared checkout.
+      - The managed ~/.zshrc sources ~/.zshrc.local if it exists; the role never writes that file.
+    options:
+      oh_my_zsh_version:
+        type: str
+        description: Full 40-character commit SHA of Oh My Zsh. No branch or tag names; there is no auto-update.
+      oh_my_zsh_repo:
+        type: str
+        description: Git URL of the Oh My Zsh repository.
+      oh_my_zsh_dir:
+        type: path
+        description: Directory of the shared checkout, owned by root.
+      oh_my_zsh_users:
+        type: list
+        elements: str
+        description: Users that get a managed ~/.zshrc. Each must exist; the run stops before changing anything otherwise.
+      oh_my_zsh_theme:
+        type: str
+        description: Theme name. "noix" ships with the role; any other name is an Oh My Zsh theme (or the one given in oh_my_zsh_theme_content).
+      oh_my_zsh_theme_content:
+        type: str
+        description: >-
+          Content of a theme of your own. When not empty it is written as
+          custom/themes/<oh_my_zsh_theme>.zsh-theme in the checkout.
+      oh_my_zsh_plugins:
+        type: list
+        elements: str
+        description: Oh My Zsh plugins to load.
+      oh_my_zsh_login_shell:
+        type: bool
+        description: Set the login shell of the listed users to zsh.

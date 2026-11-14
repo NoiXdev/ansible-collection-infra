@@ -24,7 +24,25 @@
         path: /srv/data-xfs/
         fstype: xfs
         opts: defaults,nofail,noatime
+    # Two users: root (home /root) and one whose home is not under /home.
+    oh_my_zsh_users: [root, deploy]
   pre_tasks:
+    # Only once: the oh_my_zsh role changes the shell, so a second run of this
+    # task would undo it and the idempotence check would see that.
+    - name: Look for the user whose home is not under /home
+      ansible.builtin.command: getent passwd deploy
+      register: converge_deploy
+      changed_when: false
+      failed_when: false
+
+    - name: Create a user whose home is not under /home
+      ansible.builtin.user:
+        name: deploy
+        home: /srv/deploy
+        shell: /bin/bash
+        create_home: true
+      when: converge_deploy.rc != 0
+
     - name: Check whether the foreign configuration is already planted
       ansible.builtin.stat:
         path: /etc/fail2ban/jail.d/other.conf
@@ -34,6 +52,7 @@
     - noixdev.infra.docker
     - noixdev.infra.fail2ban
     - noixdev.infra.crowdsec
+    - noixdev.infra.oh_my_zsh
   post_tasks:
     - name: Expect no foreign-configuration warning on a clean host
       ansible.builtin.assert:

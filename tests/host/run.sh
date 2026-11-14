@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host roles (base, docker, fail2ban, crowdsec, tailscale) on a systemd Ubuntu container:
+# Host roles (base, docker, fail2ban, crowdsec, tailscale, oh_my_zsh) on a systemd Ubuntu container:
 # converge twice (the second run must change nothing), then verify.
 set -euo pipefail
 
@@ -50,6 +50,9 @@ play() {
   ansible-playbook -i "$tests/inventory.yml" -e "test_host=$host" \
     -e "test_mount_dev_ext4=$dev_ext4" -e "test_mount_dev_xfs=$dev_xfs" "$@"
 }
+
+# oh_my_zsh: a local file of the user's own that the role must source and never write.
+docker exec "$host" sh -c 'mkdir -p /srv/deploy && echo "export NOIX_LOCAL=1" >/srv/deploy/.zshrc.local'
 
 echo "== converge (ubuntu $ubuntu)"
 play "$here/converge.yml"
