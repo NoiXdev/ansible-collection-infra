@@ -1,0 +1,68 @@
+---
+argument_specs:
+  main:
+    short_description: MariaDB from mariadb.org, with its databases and users
+    description:
+      - Installs mariadb-server of one major.minor series from mariadb.org's repository, pinned to that series.
+      - >-
+        A mariadb-server of another series that is installed already (the distro's, for example)
+        is refused before any change; a series change is a separate, deliberate step. A host with
+        MySQL (mysql-server or mysql-community-server) is refused as well.
+      - >-
+        The server listens on mariadb_bind_address:3306. root has no password and logs in
+        through the unix socket only; the role manages the databases and users through it.
+      - >-
+        Present only: databases and users that leave a list stay, and a database that exists
+        already keeps its charset. The role never drops a database or a user.
+      - >-
+        The list entries are checked by the role, not here, so that every message names the
+        entry; an unknown key in an entry (priv instead of privileges, for example) is refused.
+    options:
+      mariadb_version:
+        type: str
+        description: major.minor series to install, for example "11.8".
+      mariadb_apt_url:
+        type: str
+        description: The repository URL of the series.
+      mariadb_apt_suite:
+        type: str
+        description: Suite of the repository; the host's release codename by default.
+      mariadb_apt_key_url:
+        type: str
+        description: Where the repository key is downloaded from.
+      mariadb_apt_key_fingerprint:
+        type: str
+        description: Fingerprint the key must carry; any other key is removed and the run fails.
+      mariadb_bind_address:
+        type: str
+        description: The address the server listens on.
+      mariadb_settings:
+        type: dict
+        description:
+          - More server settings, written to the server's config under [mysqld] as key = value.
+          - bind-address, port and socket (also with underscores or a loose- prefix) are refused.
+      mariadb_databases:
+        type: list
+        elements: dict
+        description:
+          - Databases, created when missing. Each entry takes exactly these keys.
+          - name (required), at most 64 characters of ^[A-Za-z0-9_]+$.
+          - encoding, utf8mb4 by default.
+          - collation, utf8mb4_unicode_ci by default.
+      mariadb_users:
+        type: list
+        elements: dict
+        description:
+          - >-
+            Users. On every run the role sets each user's password and exactly its privileges:
+            grants added by hand are revoked. Each entry takes exactly these keys.
+          - >-
+            name (required), at most 80 characters of ^[A-Za-z0-9_.-]+$. The server's own
+            accounts (root, mysql, mariadb.sys) are refused.
+          - password (required, not empty).
+          - host, localhost by default.
+          - >-
+            privileges, a list of "<db>.<table>:<privs>" such as "app_production.*:SELECT,INSERT",
+            each <db>.<table> once. It defaults to ["<name>.*:ALL"] when mariadb_databases lists a
+            database of the user's name, and is required otherwise. An empty list leaves the user
+            with USAGE only.

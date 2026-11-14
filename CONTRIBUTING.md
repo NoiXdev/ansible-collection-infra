@@ -10,7 +10,7 @@ and Docker (the end-to-end tests start privileged containers).
 
 ```bash
 pip install ansible-core ansible-lint
-ansible-galaxy collection install community.docker community.general ansible.posix
+ansible-galaxy collection install community.docker community.general ansible.posix ansible.mysql
 ```
 
 Run the checks before you push. The Docker test suites run on your machine only, not

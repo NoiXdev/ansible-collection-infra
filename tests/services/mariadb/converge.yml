@@ -1,0 +1,24 @@
+---
+# One database and two users. The knobs below change the lists between runs;
+# -e mariadb_users=[...] (or mariadb_databases, mariadb_settings) replaces a
+# whole list for the invalid cases.
+- name: Converge the mariadb role
+  hosts: testhost
+  vars:
+    # Characters that break config files and SQL quoting: ' " \ $ % space
+    mariadb_test_app_password: "a'b\"c\\d$e%f g"
+    mariadb_test_report: true
+    mariadb_test_extra_databases: []
+    mariadb_test_app:
+      name: app_production
+      password: "{{ mariadb_test_app_password }}"
+    mariadb_test_report_user:
+      name: report
+      password: rep0rt-pass
+      privileges: ["app_production.*:SELECT"]
+    mariadb_databases: "{{ [{'name': 'app_production'}] + mariadb_test_extra_databases }}"
+    mariadb_users: >-
+      {{ [mariadb_test_app]
+         + ([mariadb_test_report_user] if mariadb_test_report | bool else []) }}
+  roles:
+    - noixdev.infra.mariadb

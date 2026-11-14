@@ -17,6 +17,7 @@ dependencies:
   community.docker: ">=4.0.0"
   ansible.posix: ">=1.5.0"
   community.general: ">=8.0.0"
+  ansible.mysql: ">=4.2.1"
 repository: https://github.com/NoiXdev/ansible-collection-infra
 issues: https://github.com/NoiXdev/ansible-collection-infra/issues
 build_ignore:

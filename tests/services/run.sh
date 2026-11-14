@@ -213,6 +213,97 @@ suite_redis() {
   [ "$(hx redis dpkg-query -W -f='${Version}' redis-server)" = "$version" ] || fail "redis: redis-server changed after a refused run"
 }
 
+# no_secret LOG SECRET...: LOG exists and contains none of the SECRETs. A
+# missing log fails instead of passing.
+no_secret() {
+  local log="$1" secret rc; shift
+  [ -s "$log" ] || fail "the log $log is missing or empty"
+  for secret in "$@"; do
+    rc=0
+    grep -qF -- "$secret" "$log" || rc=$?
+    [ "$rc" = 1 ] || fail "$(basename "$log") contains a password ($secret), or grep failed (exit $rc)"
+  done
+}
+
+# sql ROLE STATEMENT: run a statement as root over the socket, without
+# column names.
+sql() { hx "$1" mariadb -N -e "$2"; }
+
+suite_mariadb() {
+  local dir="$here/mariadb" version bound log grants
+  # Parts of the test passwords that their raw and JSON-escaped forms share.
+  local secrets=("a'b" '$e%f g' 'rep0rt-pass' "pa ss'%\$")
+  local rotated='{"mariadb_test_app_password": "n3w\"pa ss'"'"'%$\\x"}'
+  start mariadb
+
+  echo "== mariadb: invalid lists and settings are refused before any change"
+  refused mariadb unknown-key "mariadb: mariadb_users entry x has unknown keys (priv); its keys are name, password, host and privileges" \
+    "$dir/converge.yml" -e '{"mariadb_users": [{"name": "x", "password": "p", "priv": "x.*:ALL"}]}'
+  refused mariadb no-privileges "mariadb: mariadb_users entry orphan has no privileges, and mariadb_databases lists no database orphan; set privileges" \
+    "$dir/converge.yml" -e '{"mariadb_users": [{"name": "orphan", "password": "p"}]}'
+  refused mariadb root-user "mariadb: mariadb_users entry root is one of the server's own accounts (root, mysql, mariadb.sys), which the role leaves as they are; root logs in through the socket only" \
+    "$dir/converge.yml" -e '{"mariadb_users": [{"name": "root", "password": "p", "privileges": ["*.*:ALL"]}]}'
+  refused mariadb database-key "mariadb: mariadb_databases entry d has unknown keys (charset); its keys are name, encoding and collation" \
+    "$dir/converge.yml" -e '{"mariadb_test_extra_databases": [{"name": "d", "charset": "utf8mb4"}]}'
+  refused mariadb collation "mariadb: mariadb_databases entry d has encoding latin1 and collation utf8mb4_unicode_ci; the collation must belong to the encoding" \
+    "$dir/converge.yml" -e '{"mariadb_test_extra_databases": [{"name": "d", "encoding": "latin1"}]}'
+  for key in bind-address bind_address port socket; do
+    refused mariadb "settings-$key" "mariadb: mariadb_settings sets $key; bind-address, port and socket belong to the role (mariadb_bind_address sets the address)" \
+      "$dir/converge.yml" -e "{\"mariadb_settings\": {\"$key\": \"0.0.0.0\"}}"
+  done
+  hx mariadb sh -c 'test ! -e /usr/sbin/mariadbd && test ! -e /etc/apt/sources.list.d/mariadb.sources' \
+    || fail "mariadb: a refused run installed something"
+
+  echo "== mariadb: converge (the first run with --diff -v) and idempotence"
+  converge mariadb install "$dir/converge.yml" --diff -v
+  play mariadb "$dir/verify.yml"
+  sql mariadb 'SELECT 1' >/dev/null || fail "mariadb: root cannot log in over the socket"
+  bound="$(hx mariadb ss -Hltn 'sport = :3306' | awk '{print $4}' | sort -u | paste -sd' ' -)"
+  [ "$bound" = "127.0.0.1:3306" ] || fail "mariadb: the server listens on '$bound', not 127.0.0.1:3306 only"
+
+  echo "== mariadb: an unknown setting fails before the restart, the server keeps running"
+  refused mariadb unknown-setting "failed to validate" "$dir/converge.yml" -e '{"mariadb_settings": {"max_conections": 200}}'
+  hx mariadb sh -c 'test -s /etc/mysql/mariadb.conf.d/90-noixdev.cnf && ! grep -q max_conections /etc/mysql/mariadb.conf.d/90-noixdev.cnf' \
+    || fail "mariadb: the unknown setting reached the config"
+  [ "$(hx mariadb systemctl is-active mariadb || true)" = active ] || fail "mariadb: the server stopped after the unknown setting"
+
+  echo "== mariadb: a new password in the vars replaces the old one (with --diff -v)"
+  converge mariadb rotate "$dir/converge.yml" --diff -v -e "$rotated"
+  play mariadb "$dir/verify.yml" -e "$rotated" -e '{"mariadb_test_old_password": "a'"'"'b\"c\\d$e%f g"}'
+
+  echo "== mariadb: the --diff -v logs have no password"
+  for log in install install-idempotence rotate rotate-idempotence; do
+    no_secret "$out/mariadb-$log.log" "${secrets[@]}"
+  done
+
+  echo "== mariadb: a grant added by hand is revoked"
+  sql mariadb "GRANT SELECT ON mysql.* TO 'report'@'localhost'"
+  sql mariadb "SHOW GRANTS FOR 'report'@'localhost'" | grep -qF '`mysql`.*' || fail "mariadb: the hand grant did not apply"
+  converge mariadb hand-grant "$dir/converge.yml" -e "$rotated"
+  grants="$(sql mariadb "SHOW GRANTS FOR 'report'@'localhost'")"
+  ! grep -qF '`mysql`' <<<"$grants" || fail "mariadb: the hand grant on mysql.* is still there: $grants"
+  grep -qF 'GRANT SELECT ON `app_production`.*' <<<"$grants" || fail "mariadb: report lost its listed grant: $grants"
+
+  echo "== mariadb: a user that leaves the list stays"
+  converge mariadb no-report "$dir/converge.yml" -e "$rotated" -e mariadb_test_report=false
+  [ "$(sql mariadb "SELECT COUNT(*) FROM mysql.user WHERE User = 'report' AND Host = 'localhost'")" = 1 ] \
+    || fail "mariadb: report is gone after it left the list"
+
+  echo "== mariadb: a database that exists keeps its charset"
+  sql mariadb 'CREATE DATABASE legacy CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci'
+  converge mariadb legacy "$dir/converge.yml" -e "$rotated" -e '{"mariadb_test_extra_databases": [{"name": "legacy"}]}'
+  sql mariadb 'SHOW CREATE DATABASE legacy' | grep -qF 'CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci' \
+    || fail "mariadb: legacy lost its charset: $(sql mariadb 'SHOW CREATE DATABASE legacy')"
+
+  echo "== mariadb: another series is refused"
+  version="$(hx mariadb dpkg-query -W -f='${Version}' mariadb-server)"
+  echo "   mariadb-server on $ubuntu: $version"
+  refused mariadb other-series "mariadb: installed mariadb-server $version is series 11.8, mariadb_version is 11.4; a series change is a separate, deliberate step" \
+    "$dir/converge.yml" -e "$rotated" -e mariadb_version=11.4
+  hx mariadb grep -qF '/11.8/' /etc/apt/sources.list.d/mariadb.sources || fail "mariadb: the refused run changed the repository"
+  [ "$(hx mariadb dpkg-query -W -f='${Version}' mariadb-server)" = "$version" ] || fail "mariadb: mariadb-server changed after a refused run"
+}
+
 docker build -q --build-arg "UBUNTU=$ubuntu" -t "noixdev-infra-host:$ubuntu" "$tests/host" >/dev/null
 
 for role in $services; do

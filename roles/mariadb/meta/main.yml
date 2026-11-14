@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: MariaDB from mariadb.org, with its databases and users
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+dependencies: []

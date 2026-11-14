@@ -1,0 +1,35 @@
+---
+# Present only: an existing database keeps its charset, and nothing that
+# left a list is dropped.
+- name: Create the databases
+  ansible.mysql.mysql_db:
+    name: "{{ item.name }}"
+    encoding: "{{ item.encoding | default('utf8mb4') }}"
+    collation: "{{ item.collation | default('utf8mb4_unicode_ci') }}"
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket }}"
+  loop: "{{ mariadb_databases }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# The listed password and exactly the listed privileges, on every run:
+# a changed password reaches the server, and grants added by hand are
+# revoked. A user that left the list stays.
+- name: Create the users
+  ansible.mysql.mysql_user:
+    name: "{{ item.name }}"
+    host: "{{ item.host | default('localhost') }}"
+    password: "{{ item.password }}"
+    update_password: always
+    priv: "{{ mariadb_privileges | join('/') if mariadb_privileges | length > 0 else '*.*:USAGE' }}"
+    append_privs: false
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket }}"
+  vars:
+    mariadb_privileges: "{{ item.privileges | default([item.name ~ '.*:ALL']) }}"
+  loop: "{{ mariadb_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true

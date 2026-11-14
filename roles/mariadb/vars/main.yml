@@ -1,0 +1,28 @@
+---
+# The server's socket; root logs in through it. The package's default, and
+# a key mariadb_settings may not change.
+mariadb_socket: /run/mysqld/mysqld.sock
+
+# Keys of mariadb_settings that belong to the role, in the server's spelling
+# (it reads _ as -, and loose- only turns errors into warnings).
+mariadb_role_settings: [bind-address, port, socket]
+
+# The server's own accounts: root and mysql log in through the socket, and
+# mariadb.sys owns the system views. A listed one would get a password.
+mariadb_server_accounts: [root, mysql, mariadb.sys]
+
+mariadb_database_keys: [name, encoding, collation]
+mariadb_user_keys: [name, password, host, privileges]
+mariadb_database_names: "{{ mariadb_databases | map(attribute='name', default='') | list }}"
+
+# The user list without the passwords, for every loop that does not set
+# one: a loop prints its items with -v.
+mariadb_users_public: >-
+  {{ mariadb_users | map('dict2items')
+     | map('rejectattr', 'key', 'eq', 'password') | map('list')
+     | map('items2dict') | list }}
+# Per entry, in list order: "set" when it has a password, "" when not
+# (nothing of the password itself).
+mariadb_users_password_set: >-
+  {{ mariadb_users | map(attribute='password', default='') | map('default', '', true)
+     | map('string') | map('regex_replace', '(?s)^.+$', 'set') | list }}

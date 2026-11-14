@@ -1,0 +1,90 @@
+---
+- name: Check the series and the address
+  ansible.builtin.assert:
+    that:
+      - mariadb_version is string and mariadb_version is match('^[0-9]+[.][0-9]+$')
+      - mariadb_bind_address is string and mariadb_bind_address is match('^[A-Za-z0-9.:,_-]+$')
+    fail_msg: >-
+      mariadb: mariadb_version must be a major.minor series such as "11.8", and
+      mariadb_bind_address an address.
+    quiet: true
+
+- name: Check the settings, databases and users
+  ansible.builtin.include_tasks: validate.yml
+
+# ii, or hi when held: the second letter is the installed state.
+- name: Read the installed MySQL servers
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Package}\n' mysql-server mysql-community-server
+  register: mariadb_mysql_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Refuse a host with MySQL
+  ansible.builtin.fail:
+    msg: "mariadb: MySQL is installed ({{ mariadb_mysql_packages | join(', ') }}); MariaDB and MySQL cannot share a host"
+  vars:
+    mariadb_mysql_packages: >-
+      {{ mariadb_mysql_installed.stdout_lines | select('match', '^.i')
+         | map('split', '|') | map('last') | list }}
+  when: mariadb_mysql_packages | length > 0
+
+- name: Read the installed mariadb-server
+  ansible.builtin.command:
+    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Version}' mariadb-server
+  register: mariadb_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# ii|1:11.8.9+maria~ubu2604 or hi|1:10.11.14-0ubuntu0.24.04.1 (held): the
+# epoch is not part of the series.
+- name: Refuse another series
+  ansible.builtin.fail:
+    msg: >-
+      mariadb: installed mariadb-server {{ mariadb_installed_version }} is series
+      {{ mariadb_installed_series }}, mariadb_version is {{ mariadb_version }};
+      a series change is a separate, deliberate step
+  vars:
+    mariadb_installed_version: "{{ mariadb_installed.stdout.split('|')[1] }}"
+    mariadb_installed_series: "{{ mariadb_installed_version | regex_replace('^([0-9]+:)?([0-9]+\\.[0-9]+)\\..*$', '\\2') }}"
+  when:
+    - mariadb_installed.rc == 0
+    - mariadb_installed.stdout is match('^.i')
+    - mariadb_installed_series != mariadb_version
+
+- name: Add the mariadb.org repository
+  ansible.builtin.include_tasks: repository.yml
+
+# python3-pymysql is what the mysql_db and mysql_user modules connect with.
+- name: Install MariaDB
+  ansible.builtin.apt:
+    name: [mariadb-server, python3-pymysql]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Configure the server
+  ansible.builtin.template:
+    src: 90-noixdev.cnf.j2
+    dest: /etc/mysql/mariadb.conf.d/90-noixdev.cnf
+    owner: root
+    group: root
+    mode: "0644"
+    # An unknown setting would stop the server at the restart; the server
+    # checks the names first.
+    validate: mariadbd --defaults-file=%s --user=mysql --help --verbose
+  notify: Restart mariadb
+
+- name: Apply the config
+  ansible.builtin.meta: flush_handlers
+
+- name: Start MariaDB
+  ansible.builtin.systemd_service:
+    name: mariadb
+    state: started
+    enabled: true
+
+- name: Create the databases and users
+  ansible.builtin.include_tasks: databases.yml

@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Read after the package's 50-server.cnf, so these values win.
+[mysqld]
+bind-address = {{ mariadb_bind_address }}
+{% for key, value in mariadb_settings | dictsort %}
+{{ key }} = {{ ('ON' if value else 'OFF') if value is boolean else value }}
+{% endfor %}

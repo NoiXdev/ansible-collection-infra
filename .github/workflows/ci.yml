@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install ansible-core ansible-lint
-      - run: ansible-galaxy collection install community.docker community.general ansible.posix
+      - run: ansible-galaxy collection install community.docker community.general ansible.posix ansible.mysql
       - run: ansible-lint
 
   shellcheck:

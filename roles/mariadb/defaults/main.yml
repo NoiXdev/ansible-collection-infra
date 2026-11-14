@@ -1,0 +1,39 @@
+---
+# major.minor series from mariadb.org's repository (11.8 is the current LTS).
+# A different series installed already (the distro's 10.11 on 24.04, for
+# example) is refused, never replaced.
+mariadb_version: "11.8"
+
+mariadb_apt_url: "https://deb.mariadb.org/{{ mariadb_version }}/ubuntu"
+mariadb_apt_suite: "{{ ansible_facts['distribution_release'] }}"
+mariadb_apt_key_url: https://mariadb.org/mariadb_release_signing_key.pgp
+mariadb_apt_key_fingerprint: 177F4010FE56CA3336300305F1656F24C74CD1D8
+
+# The server listens on this address only (port 3306). root has no password
+# and logs in through the unix socket only.
+mariadb_bind_address: "127.0.0.1"
+
+# More server settings, written under [mysqld]:
+#   innodb_buffer_pool_size: 1G
+#   max_connections: 200
+# bind-address, port and socket belong to the role and are refused here.
+mariadb_settings: {}
+
+# Databases, created when missing. One that exists already keeps its charset.
+#   - name: app_production
+#     encoding: utf8mb4             # the default
+#     collation: utf8mb4_unicode_ci # the default
+mariadb_databases: []
+
+# Users. On every run the role sets each listed user's password and exactly
+# its listed privileges ("<db>.<table>:<privs>"; grants added by hand are
+# revoked). privileges defaults to ["<name>.*:ALL"] when mariadb_databases
+# lists a database of the user's name, and is required otherwise.
+#   - name: app_production
+#     password: "{{ vault_mariadb_app_production }}"
+#   - name: report
+#     password: "{{ vault_mariadb_report }}"
+#     host: localhost               # the default
+#     privileges: ["app_production.*:SELECT"]
+# Databases and users that leave a list stay as they are.
+mariadb_users: []

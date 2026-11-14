@@ -1,0 +1,142 @@
+---
+# Every message names the entry (its name, or its position when it has none).
+# The user loops use the list without passwords.
+- name: Check the settings
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^[A-Za-z0-9_-]+$')
+      - item.value is not mapping
+      - item.value is string or item.value is number or item.value is boolean
+      - "'\\n' not in (item.value | string)"
+    fail_msg: "mariadb: mariadb_settings has '{{ item.key }}'; a setting is a name of ^[A-Za-z0-9_-]+$ with a one-line value"
+    quiet: true
+  loop: "{{ mariadb_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Refuse the settings the role owns
+  ansible.builtin.assert:
+    that: >-
+      item.key | lower | replace('_', '-') | regex_replace('^loose-', '')
+      not in mariadb_role_settings
+    fail_msg: >-
+      mariadb: mariadb_settings sets {{ item.key }}; bind-address, port and socket
+      belong to the role (mariadb_bind_address sets the address)
+    quiet: true
+  loop: "{{ mariadb_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Check the database entries
+  ansible.builtin.assert:
+    that:
+      - mariadb_unknown | length == 0
+      - item.name is defined and item.name is string
+      - item.name is match('^[A-Za-z0-9_]+$') and item.name | length <= 64
+      - mariadb_database_names | select('eq', item.name) | list | length == 1
+      - mariadb_encoding is match('^[A-Za-z0-9_]+$')
+      - mariadb_collation is match('^[A-Za-z0-9_]+$')
+      - mariadb_collation is match('^' ~ mariadb_encoding ~ '_') or mariadb_collation is match('^uca[0-9]+_')
+    fail_msg: >-
+      {%- if mariadb_unknown | length > 0 -%}
+      mariadb: mariadb_databases entry {{ mariadb_entry }} has unknown keys ({{ mariadb_unknown | join(', ') }});
+      its keys are name, encoding and collation
+      {%- elif item.name is not defined or item.name is not string
+            or item.name is not match('^[A-Za-z0-9_]+$') or item.name | length > 64 -%}
+      mariadb: mariadb_databases entry {{ mariadb_entry }} has an invalid name;
+      it must match ^[A-Za-z0-9_]+$ and be at most 64 characters long
+      {%- elif mariadb_database_names | select('eq', item.name) | list | length > 1 -%}
+      mariadb: mariadb_databases has more than one entry named {{ item.name }}
+      {%- else -%}
+      mariadb: mariadb_databases entry {{ mariadb_entry }} has encoding {{ mariadb_encoding }} and
+      collation {{ mariadb_collation }}; the collation must belong to the encoding
+      ({{ mariadb_encoding }}_..., or uca1400_... for utf8mb4)
+      {%- endif -%}
+    quiet: true
+  vars:
+    mariadb_entry: "{{ item.name | default('#' ~ (mariadb_index + 1)) }}"
+    mariadb_unknown: "{{ item.keys() | difference(mariadb_database_keys) | sort }}"
+    mariadb_encoding: "{{ item.encoding | default('utf8mb4') | string }}"
+    mariadb_collation: "{{ item.collation | default('utf8mb4_unicode_ci') | string }}"
+  loop: "{{ mariadb_databases }}"
+  loop_control:
+    index_var: mariadb_index
+    label: "{{ item.name | default('#' ~ (mariadb_index + 1)) }}"
+
+- name: Check the user entries
+  ansible.builtin.assert:
+    that:
+      - mariadb_unknown | length == 0
+      - item.name is defined and item.name is string
+      - item.name is match('^[A-Za-z0-9_.-]+$') and item.name | length <= 80
+      - item.name not in mariadb_server_accounts
+      - mariadb_users_password_set[mariadb_index] == 'set'
+      - mariadb_host is string and mariadb_host is match('^[A-Za-z0-9_.%:-]+$') and mariadb_host | length <= 255
+      - mariadb_same_user | length == 1
+    fail_msg: >-
+      {%- if mariadb_unknown | length > 0 -%}
+      mariadb: mariadb_users entry {{ mariadb_entry }} has unknown keys ({{ mariadb_unknown | join(', ') }});
+      its keys are name, password, host and privileges
+      {%- elif item.name is not defined or item.name is not string
+            or item.name is not match('^[A-Za-z0-9_.-]+$') or item.name | length > 80 -%}
+      mariadb: mariadb_users entry {{ mariadb_entry }} has an invalid name;
+      it must match ^[A-Za-z0-9_.-]+$ and be at most 80 characters long
+      {%- elif item.name in mariadb_server_accounts -%}
+      mariadb: mariadb_users entry {{ item.name }} is one of the server's own accounts
+      ({{ mariadb_server_accounts | join(', ') }}), which the role leaves as they are;
+      root logs in through the socket only
+      {%- elif mariadb_users_password_set[mariadb_index] != 'set' -%}
+      mariadb: mariadb_users entry {{ mariadb_entry }} has no password
+      {%- elif mariadb_same_user | length > 1 -%}
+      mariadb: mariadb_users has more than one entry for {{ item.name }}@{{ mariadb_host }}
+      {%- else -%}
+      mariadb: mariadb_users entry {{ mariadb_entry }} has an invalid host;
+      it must match ^[A-Za-z0-9_.%:-]+$
+      {%- endif -%}
+    quiet: true
+  vars:
+    mariadb_entry: "{{ item.name | default('#' ~ (mariadb_index + 1)) }}"
+    mariadb_unknown: "{{ item.keys() | difference(mariadb_user_keys) | sort }}"
+    mariadb_host: "{{ item.host | default('localhost') }}"
+    mariadb_same_user: >-
+      {{ mariadb_users_public | selectattr('name', 'defined') | selectattr('name', 'eq', item.name | default(''))
+         | map(attribute='host', default='localhost') | select('eq', mariadb_host) | list }}
+  loop: "{{ mariadb_users_public }}"
+  loop_control:
+    index_var: mariadb_index
+    label: "{{ item.name | default('#' ~ (mariadb_index + 1)) }}"
+
+# The default comes from the list, not the server, so the result does not
+# depend on which entry was created first.
+- name: Check that every user has privileges
+  ansible.builtin.assert:
+    that: item.privileges is defined or item.name in mariadb_database_names
+    fail_msg: >-
+      mariadb: mariadb_users entry {{ item.name }} has no privileges, and
+      mariadb_databases lists no database {{ item.name }}; set privileges
+    quiet: true
+  loop: "{{ mariadb_users_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the privileges
+  ansible.builtin.assert:
+    that:
+      - mariadb_privileges is sequence and mariadb_privileges is not string and mariadb_privileges is not mapping
+      - mariadb_privileges | reject('string') | list | length == 0
+      - mariadb_privileges | reject('match', '^[^./:]+[.][^./:]+:[^/:]+$') | list | length == 0
+      - mariadb_targets | length == mariadb_targets | unique | length
+    fail_msg: >-
+      mariadb: mariadb_users entry {{ item.name }} has invalid privileges; they are a
+      list of "<db>.<table>:<privs>" such as "app_production.*:SELECT,INSERT",
+      each <db>.<table> once
+    quiet: true
+  vars:
+    mariadb_privileges: "{{ item.privileges }}"
+    mariadb_targets: >-
+      {{ mariadb_privileges | select('string') | map('regex_replace', ':.*$', '') | list
+         if mariadb_privileges is sequence and mariadb_privileges is not string and mariadb_privileges is not mapping
+         else [] }}
+  loop: "{{ mariadb_users_public | selectattr('privileges', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
