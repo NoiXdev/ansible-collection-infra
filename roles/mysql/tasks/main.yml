@@ -26,6 +26,15 @@
     msg: "mysql: MariaDB is installed (mariadb-server); MariaDB and MySQL cannot share a host"
   when: mysql_mariadb_installed.stdout_lines | select('match', '^.i') | list | length > 0
 
+# The repository carries amd64 packages only.
+- name: Check the architecture
+  ansible.builtin.assert:
+    that: ansible_facts['architecture'] == 'x86_64'
+    fail_msg: >-
+      mysql: this host is {{ ansible_facts['architecture'] }}; MySQL's apt
+      repository has amd64 packages only
+    quiet: true
+
 # The vendor's server is mysql-community-server (mysql-server is its meta
 # package); the distro's is mysql-server-8.0 or mysql-server-8.4.
 - name: Read the installed MySQL servers

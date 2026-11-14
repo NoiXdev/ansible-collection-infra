@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Test-only stand-in for systemctl (tests/services/run.sh installs it, never the role): in an
+# emulated amd64 container whose systemd cannot start services it runs mysqld directly.
+real=/usr/bin/systemctl
+cmd=""; unit=""
+for a in "$@"; do case "$a" in -*) ;; *) if [ -z "$cmd" ]; then cmd="$a"; else unit="$a"; fi ;; esac; done
+unit="${unit%.service}"
+if [ "$unit" != mysql ]; then exec $real "$@"; fi
+running() { mysqladmin --no-defaults -uroot -S /run/mysqld/mysqld.sock ping >/dev/null 2>&1 || pgrep -x mysqld >/dev/null; }
+startit() {
+  mkdir -p /run/mysqld /var/log/mysql; chown mysql:mysql /run/mysqld /var/log/mysql
+  mysqld --user=mysql --daemonize >/var/log/mysql/shim-start.out 2>&1 || { cat /var/log/mysql/shim-start.out >&2; return 1; }
+  for _ in $(seq 120); do mysqladmin ping >/dev/null 2>&1 && return 0; sleep 1; done; return 1
+}
+stopit() { pkill -x mysqld; for _ in $(seq 60); do pgrep -x mysqld >/dev/null || return 0; sleep 1; done; }
+case "$cmd" in
+  show)
+    if running; then a=active; s=running; else a=inactive; s=dead; fi
+    printf 'Id=mysql.service\nNames=mysql.service\nLoadState=loaded\nActiveState=%s\nSubState=%s\nUnitFileState=enabled\nFragmentPath=/usr/lib/systemd/system/mysql.service\nMainPID=0\n' "$a" "$s" ;;
+  is-active) if running; then echo active; else echo inactive; exit 3; fi ;;
+  is-enabled) echo enabled ;;
+  start) running || startit ;;
+  restart) stopit; startit ;;
+  stop) stopit ;;
+  enable|daemon-reload|disable) ;;
+  *) exec $real "$@" ;;
+esac

@@ -54,6 +54,23 @@ start() {
     [ "$tries" -lt 120 ] || fail "$1: the container $name did not boot within 120 seconds"
     sleep 1
   done
+  [ "$1" = mysql ] && systemd_fallback "$name"
+  return 0
+}
+
+# systemd_fallback NAME: systemd in an emulated amd64 container (Docker Desktop
+# on Apple silicon) boots to degraded but cannot start any service. A probe
+# unit tells; when it fails, a stand-in systemctl that runs mysqld directly is
+# installed, and the run log says so. On a real amd64 host the probe passes and
+# the real systemd and mysql.service run unchanged.
+systemd_fallback() {
+  local name="$1"
+  if docker exec "$name" sh -c 'printf "[Service]\nType=oneshot\nExecStart=/bin/true\n" > /etc/systemd/system/noixdev-probe.service \
+      && systemctl daemon-reload && systemctl start noixdev-probe.service; rc=$?; rm -f /etc/systemd/system/noixdev-probe.service; exit $rc' >/dev/null 2>&1; then
+    return 0
+  fi
+  docker cp "$here/systemctl-shim" "$name:/usr/local/bin/systemctl"
+  echo "== WARNING: emulated amd64: mysql.service not exercised, systemctl shim in use"
 }
 
 # hx ROLE CMD...: run a command in the role's container.
@@ -368,6 +385,25 @@ suite_mariadb() {
   [ "$(hx mariadb systemctl is-active mariadb || true)" = active ] || fail "mariadb: the server stopped after the refused mysql run"
 }
 
+# mysql_architecture: the role refuses a host that is not x86_64 (MySQL's apt
+# repository has amd64 packages only), before any change. Needs a container of
+# the machine's own architecture, so it is skipped on an amd64 machine.
+mysql_architecture() {
+  start mysqlnative
+  local arch; arch="$(hx mysqlnative uname -m)"
+  if [ "$arch" = x86_64 ]; then
+    echo "== mysql: the architecture refusal needs a host that is not amd64; skipped"
+    return 0
+  fi
+  echo "== mysql: a host that is not amd64 is refused before any change"
+  refused mysqlnative architecture "mysql: this host is $arch; MySQL's apt repository has amd64 packages only" \
+    "$here/mysql/converge.yml" -e '{"mysql_users": [], "mysql_databases": []}'
+  hx mysqlnative sh -c 'test ! -e /etc/apt/sources.list.d/mysql.sources && test ! -e /etc/apt/keyrings/mysql.asc && test ! -e /etc/apt/preferences.d/mysql' \
+    || fail "mysql: the refused run on $arch left repository files"
+  hx mysqlnative sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}\n" mysql-community-server mysql-client mysql-common 2>/dev/null | grep -q "^.i"' \
+    || fail "mysql: the refused run on $arch installed a package"
+}
+
 suite_mysql() {
   local dir="$here/mysql" version bound log grants policy rc denied before distro
   local empty='{"mysql_users": [], "mysql_databases": []}'
@@ -375,6 +411,7 @@ suite_mysql() {
   # Parts of the test passwords that their raw and JSON-escaped forms share.
   local secrets=("a'b" '$e%f g' 'rep0rt-pass' "pa ss'%\$")
   local rotated='{"mysql_test_app_password": "n3w\"pa ss'"'"'%$\\x"}'
+  mysql_architecture
   start mysql
 
   echo "== mysql: invalid lists and settings are refused before any change"
