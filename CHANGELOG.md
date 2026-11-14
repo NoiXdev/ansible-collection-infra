@@ -57,8 +57,8 @@
   `0.0.0.0` default, because Docker bypasses the host firewall. An export of an old installation is
   imported once with `paperless_import_dir` (below `paperless_data_dir/export`, made by the exact
   pinned version, into an empty installation; later runs ignore it through `imported.yml`). Before
-  an update the role takes a backup in `backups/`: `paperless.dump`, `data/` and `media/` as hard
-  links; the newest `paperless_dumps_keep` are kept. A failed update is rolled back, writes
+  an update the role takes a backup in `backups/`: `paperless.dump`, a copy of `data/` and `media/` as
+  hard links; the newest `paperless_dumps_keep` are kept. A failed update is rolled back, writes
   `update-failed` and leaves `<backup>-failed`, which is never pruned; Samba starts only once the
   new version is healthy. Refused before any change: a downgrade, a PostgreSQL major other than the
   database's, more than one PostgreSQL cluster, an import into an existing installation or of

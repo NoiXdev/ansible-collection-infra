@@ -121,13 +121,17 @@ paperless_failure: >-
      else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
 
 # After a failed install: nothing in it is worth keeping (no admin, no
-# documents yet), so it is removed and the next run installs afresh.
+# documents yet), so what it made is removed and the next run installs afresh;
+# the export directory stays, it may hold an export staged for an import.
 paperless_install_hint: >-
   It left a partial installation, which the role does not take for a
   finished one. To install again, run docker compose down in
   {{ paperless_dir }} (if {{ paperless_compose_file }} exists), remove
-  {{ paperless_data_dir }} (only its contents when it is a mountpoint) and
-  {{ paperless_dir }}, then run the role again.
+  {{ paperless_compose_file }}, {{ paperless_install_marker }} and the
+  subdirectories {{ paperless_data_subdirs[:-1] | join(', ') }} and
+  {{ paperless_data_subdirs[-1] }} of {{ paperless_data_dir }} (only these:
+  keep {{ paperless_export_dir }}, which may hold an export), then run the
+  role again.
 
 # After a failed import: the database and the files may be half filled, so
 # everything the import made goes; the export stays for the next attempt.

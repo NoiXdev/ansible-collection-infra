@@ -207,6 +207,13 @@ test_install() {
   play_fails install-failed "$here/converge.yml" -e paperless_version=3.99.0
   expect_in_log install-failed "The install of Paperless 3.99.0 in $dir failed (Start Paperless:"
   expect_in_log install-failed "docker compose down in $dir"
+  expect_in_log install-failed "remove $dir/compose.yaml"
+  expect_in_log install-failed "the subdirectories media, data, consume, postgres and redis of $dir/data"
+  expect_in_log install-failed "keep $export_dir"
+  # An export staged under the data directory must survive the hint.
+  if grep -qF -- "remove $dir/data," "$out/install-failed.log" || grep -qF -- "remove $dir/data (" "$out/install-failed.log"; then
+    fail "the install hint says to remove the data directory as a whole"
+  fi
   hx test -e "$dir/install-incomplete" || fail "the failed install left no marker"
   compose_before="$(hx sha256sum "$dir/compose.yaml")"
   containers_before="$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)"
