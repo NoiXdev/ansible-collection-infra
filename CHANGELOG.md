@@ -32,7 +32,7 @@
   `05-noix-managed`): `motd_title`, `motd_lines` (printed verbatim, never executed) and, with
   `motd_sysinfo`, host name, OS, uptime, load, memory, root disk and the running containers when
   Docker answers. `motd_remove_snippets` lists the snippets the role removes (Ubuntu's help text,
-  Landscape and news, and two banner names from earlier setups). `motd_enabled: false` removes only
+  Landscape and news; add the file names of banners from earlier setups to the list). `motd_enabled: false` removes only
   the managed file; after changing `motd_filename`, list the old name in `motd_remove_snippets`.
 
 ## 0.5.0 — 2026-11-14

@@ -483,7 +483,7 @@
     - name: Check the snippets
       ansible.builtin.stat:
         path: "/etc/update-motd.d/{{ item }}"
-      loop: [05-3b-managed, 50-motd-news, 05-noix-managed]
+      loop: [05-old-banner, 50-motd-news, 05-noix-managed]
       register: motd_files
 
     - name: Expect the old snippets gone and the managed one executable

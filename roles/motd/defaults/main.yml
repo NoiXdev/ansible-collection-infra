@@ -14,11 +14,9 @@ motd_lines: []
 # Docker is installed and its daemon answers.
 motd_sysinfo: true
 
-# Snippets in /etc/update-motd.d/ that this role removes: Ubuntu's own and
-# banners that earlier setups managed.
+# Snippets in /etc/update-motd.d/ that this role removes: Ubuntu's own. Add the
+# file names of banners that earlier setups managed.
 motd_remove_snippets:
   - 10-help-text
   - 50-landscape-sysinfo
   - 50-motd-news
-  - 05-3b-managed
-  - 05-noidee-managed

@@ -55,7 +55,7 @@ play() {
 docker exec "$host" sh -c 'mkdir -p /srv/deploy && echo "export NOIX_LOCAL=1" >/srv/deploy/.zshrc.local'
 
 # motd: stock and older managed snippets that the role must remove.
-docker exec "$host" sh -c 'mkdir -p /etc/update-motd.d && for f in 05-3b-managed 50-motd-news; do printf "#!/bin/sh\necho old-%s\n" "$f" >"/etc/update-motd.d/$f"; chmod 0755 "/etc/update-motd.d/$f"; done'
+docker exec "$host" sh -c 'mkdir -p /etc/update-motd.d && for f in 05-old-banner 50-motd-news; do printf "#!/bin/sh\necho old-%s\n" "$f" >"/etc/update-motd.d/$f"; chmod 0755 "/etc/update-motd.d/$f"; done'
 
 echo "== converge (ubuntu $ubuntu)"
 play "$here/converge.yml"

@@ -27,6 +27,7 @@
     # Two users: root (home /root) and one whose home is not under /home.
     oh_my_zsh_users: [root, deploy]
     # Characters a shell would interpret must come out as they went in.
+    motd_remove_snippets: [10-help-text, 50-landscape-sysinfo, 50-motd-news, 05-old-banner]
     motd_lines:
       - "Ops: example.test"
       - "literal $HOME `id` \"q\" 'a'"
