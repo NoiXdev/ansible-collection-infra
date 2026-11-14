@@ -120,12 +120,24 @@ paperless_failure: >-
      if ansible_failed_result.msg | default('') is search('non-zero return code')
      else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
 
-# After a failed install: nothing in it is worth keeping (no admin, no
-# documents yet), so what it made is removed and the next run installs afresh;
-# the export directory stays, it may hold an export staged for an import.
+# The error of a command whose task hides its arguments (no_log, failed_when
+# false, registered as paperless_hidden): the last line of stderr that names
+# an error, else its last line, else the exit code. The next task fails with
+# it.
+paperless_hidden_error: >-
+  {%- set stderr = (paperless_hidden.stderr | default('') | trim).splitlines() -%}
+  {{ ((stderr | select('search', 'Error:') | list) or stderr
+      or ['exit code ' ~ paperless_hidden.rc | default('?') | string]) | last | trim }}
+
+# After a failed install: nothing in it should be worth keeping (no admin,
+# no documents yet), so what it made is removed and the next run installs
+# afresh; the export directory stays, it may hold an export staged for an
+# import.
 paperless_install_hint: >-
   It left a partial installation, which the role does not take for a
-  finished one. To install again, run docker compose down in
+  finished one. To install again, first check that nothing in it is worth
+  keeping (for example the documents in Paperless), then run docker compose
+  down in
   {{ paperless_dir }} (if {{ paperless_compose_file }} exists), remove
   {{ paperless_compose_file }}, {{ paperless_install_marker }} and the
   subdirectories {{ paperless_data_subdirs[:-1] | join(', ') }} and
@@ -137,7 +149,9 @@ paperless_install_hint: >-
 # everything the import made goes; the export stays for the next attempt.
 paperless_import_hint: >-
   It left a partly imported installation, which the role does not take for a
-  finished one. To import again, run docker compose down in
+  finished one. To import again, first check that nothing in it is worth
+  keeping (for example the documents in Paperless), then run docker compose
+  down in
   {{ paperless_dir }}, remove {{ paperless_compose_file }},
   {{ paperless_install_marker }} and the subdirectories
   {{ paperless_data_subdirs[:-1] | join(', ') }} and

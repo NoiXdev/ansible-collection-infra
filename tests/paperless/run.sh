@@ -1,30 +1,40 @@
 #!/usr/bin/env bash
 # End-to-end test of the paperless role on throwaway Docker-in-Docker hosts
 # (a fresh one per scenario): the refusals of invalid settings before any
-# change; a failed install (a pull that fails) that every later run refuses
-# until it is removed; a fresh install behind Traefik (API and login form
+# change (a PostgreSQL image older than 18 among them); a failed install (a
+# webserver that never becomes healthy) that stops the stack, Samba included,
+# and that every later run refuses until it is removed; a fresh install
+# behind Traefik (API and login form
 # through Traefik, no published HTTP port, Samba on 127.0.0.1 only, a $
 # reaching the container verbatim), a scan written over the Samba share that
 # Paperless consumes, SMB1 refused, a reconfigure of the share, and a run
 # without changes that fails on a stopped container. Then the import of that
 # host's export: refused into the host itself (not empty); on a fresh host
 # refused for an export of another version, without a manifest, without its
-# passphrase and for a path outside the export directory, a half-failed
-# import (a truncated manifest) refused until it is removed as the message
-# says, then imported once (documents, title and admin of the source, the
-# record), and after another removal an export made with a passphrase
-# imported with it. Then an update from an older release with a document: a
-# backup (dump, data, media) taken and the oldest pruned, the document
-# unchanged, a downgrade and another PostgreSQL major refused; and an update
-# to an image that exits at once: rolled back with the document, the marker
-# that blocks the failed version, and the update once the marker is removed.
+# passphrase and for a path outside the export directory, an export that
+# Paperless' user cannot read refused, a half-failed import (a truncated
+# manifest) refused until it is removed as the message says, then imported
+# once (documents, title and admin of the source, the record), a marker left
+# beside the record refused with a message to remove only the marker, and
+# after another removal an export made with a passphrase imported with it,
+# with port 445 taken: the import recorded, only Samba failed. Then an
+# update from an older release with a document, with port 445 taken: the
+# update kept (no rollback, no marker), only Samba failed; a backup (dump,
+# data, media) taken and the oldest pruned, the document unchanged, a
+# downgrade and another PostgreSQL major refused; and an update to an image
+# that exits at once: rolled back with the document, the marker that blocks
+# the failed version, and the update once the marker is removed. The install,
+# the import with a passphrase and the failed update run at -vvv, and their
+# output must not hold a test secret.
 # Then the data: left-over data without a compose file refused, and an
 # installation whose data directories are gone (an unmounted volume) refused
 # in every state without creating anything; with
 # paperless_data_dir_mountpoint a data directory that is not a mountpoint
 # refused, and an install onto one (a tmpfs) without Samba and Tika.
 # Every successful converge is repeated and must change nothing.
-# NOIXDEV_INFRA_PAPERLESS_TESTS selects scenarios (see the end of the file).
+# NOIXDEV_INFRA_PAPERLESS_TESTS selects scenarios (see the end of the file);
+# NOIXDEV_INFRA_PAPERLESS_TEST_HOST and NOIXDEV_INFRA_PAPERLESS_TEST_OUT (the
+# directory of the logs and image tarballs) let two runs go side by side.
 # The single-quoted scripts expand inside the container, not here.
 # shellcheck disable=SC2016
 set -euo pipefail
@@ -33,7 +43,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 tests="$(dirname "$here")"
 root="$(dirname "$tests")"
 host="${NOIXDEV_INFRA_PAPERLESS_TEST_HOST:-noixdev-infra-paperless-test}"
-out="$tests/output/paperless"
+out="${NOIXDEV_INFRA_PAPERLESS_TEST_OUT:-$tests/output/paperless}"
 dir=/opt/paperless
 defaults="$root/roles/paperless/defaults/main.yml"
 traefik_defaults="$root/roles/traefik/defaults/main.yml"
@@ -68,6 +78,14 @@ old_images=("$(value_of "$defaults" paperless_image):$old_version" busybox:1.37)
 backups="$dir/data/backups"
 marker="$dir/update-failed"
 sample_sum="$(shasum -a 256 <"$here/sample.pdf" | cut -d' ' -f1)"
+# The test secrets, which no run's output may hold.
+secrets=(
+  "$(value_of "$here/vars.yml" paperless_secret_key)"
+  "$(value_of "$here/vars.yml" paperless_db_password)"
+  "$admin_password"
+  "$samba_password"
+  "$passphrase"
+)
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -97,6 +115,21 @@ role_fails() {
 }
 expect_in_log() {
   grep -qF -- "$2" "$out/$1.log" || { cat "$out/$1.log" >&2; fail "$1.log lacks: $2"; }
+}
+# Fails when the log is missing or empty (it would prove nothing) or holds a
+# test secret, as it is or up to its first quote or backslash (a quoted or
+# escaped copy): expect_no_secrets <name>.
+expect_no_secrets() {
+  local log="$out/$1.log" secret part
+  [ -s "$log" ] || fail "$1.log is missing or empty, so it cannot show that no secret is in it"
+  for secret in "${secrets[@]}"; do
+    [ "${#secret}" -ge 8 ] || fail "a test secret is shorter than 8 characters: check vars.yml"
+    for part in "$secret" "${secret%%[\'\"\\\`]*}"; do
+      if [ "${#part}" -ge 8 ] && grep -qF -- "$part" "$log"; then
+        fail "$1.log holds a test secret (${part:0:4}...): $(grep -nF -- "$part" "$log" | head -n 3 | cut -c1-200)"
+      fi
+    done
+  done
 }
 expect_unchanged() {
   grep -Eq 'changed=0 ' "$out/$1.log" || { cat "$out/$1.log" >&2; fail "converge $1 changed something"; }
@@ -160,6 +193,17 @@ smb() {
   shift 2
   hx smbclient //127.0.0.1/consume -U "scanner%$samba_password" -m "$protocol" "$@" -c "$command"
 }
+# Takes 127.0.0.1:445 on the host, so the Samba container cannot publish its
+# port and fails to start; free_smb_port gives it back.
+take_smb_port() {
+  docker exec -d "$host" python3 -c 'import socket, time; s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 445)); s.listen(); open("/run/smb-port-taken", "w").close(); time.sleep(3600)'
+  for _ in $(seq 20); do hx test -e /run/smb-port-taken && return 0; sleep 0.5; done
+  fail "cannot take port 445 on the test host"
+}
+free_smb_port() {
+  hx pkill -f smb-port-taken || true
+  hx rm -f /run/smb-port-taken
+}
 # Writes sample.pdf over the share and waits until it is the one document.
 consume_sample() {
   # Through stdin: docker cp cannot write into the host's /tmp, a tmpfs.
@@ -194,6 +238,12 @@ test_settings() {
   expect_in_log v-prefix paperless_version
   role_fails postgres-tag -e paperless_postgres_image=docker.io/library/postgres:latest
   expect_in_log postgres-tag paperless_postgres_image
+  # Before 18 the image's volume is /var/lib/postgresql/data, which would put
+  # the database on an anonymous volume beside paperless_data_dir.
+  role_fails postgres-17 -e paperless_postgres_image=docker.io/library/postgres:17
+  expect_in_log postgres-17 "PostgreSQL 18 or newer"
+  expect_in_log postgres-17 "docker.io/library/postgres:17 is PostgreSQL 17"
+  expect_unchanged postgres-17
   role_fails no-admin -e paperless_admin_user= -e paperless_admin_password=
   expect_in_log no-admin paperless_admin_user
   hx test ! -e "$dir" || fail "paperless touched the host before refusing its settings"
@@ -203,9 +253,13 @@ test_install() {
   echo "== a failed install must be refused until it is removed"
   new_host
   load_images
-  # A release that does not exist: the pull fails after the compose file is written.
-  play_fails install-failed "$here/converge.yml" -e paperless_version=3.99.0
-  expect_in_log install-failed "The install of Paperless 3.99.0 in $dir failed (Start Paperless:"
+  load_set busybox:1.37
+  # A webserver that exits at once: the stack, Samba included, runs, but
+  # Paperless never becomes healthy.
+  hx docker tag busybox:1.37 "test.invalid/paperless-ngx:$version"
+  play_fails install-failed "$here/converge.yml" -e paperless_image=test.invalid/paperless-ngx -e paperless_health_timeout=20
+  expect_in_log install-failed "The install of Paperless $version in $dir failed (Fail when Paperless is not healthy:"
+  expect_in_log install-failed "check that nothing in it is worth keeping"
   expect_in_log install-failed "docker compose down in $dir"
   expect_in_log install-failed "remove $dir/compose.yaml"
   expect_in_log install-failed "the subdirectories media, data, consume, postgres and redis of $dir/data"
@@ -215,6 +269,9 @@ test_install() {
     fail "the install hint says to remove the data directory as a whole"
   fi
   hx test -e "$dir/install-incomplete" || fail "the failed install left no marker"
+  # Samba would accept scans that the hint's removal then deletes.
+  [ -z "$(hx docker ps -q --filter label=com.docker.compose.project=paperless)" ] \
+    || fail "the failed install left containers running: $(hx docker ps --format '{{.Names}}' --filter label=com.docker.compose.project=paperless)"
   compose_before="$(hx sha256sum "$dir/compose.yaml")"
   containers_before="$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)"
   play_fails install-incomplete "$here/converge.yml"
@@ -229,8 +286,9 @@ test_install() {
   hx rm -rf "$dir"
 
   echo "== install"
-  converge
+  converge -vvv
   hx test ! -e "$dir/install-incomplete" || fail "the install kept its marker"
+  expect_no_secrets converge
   expect_idempotent
   play "$here/verify.yml"
 
@@ -322,8 +380,18 @@ test_import() {
   [ "$(snapshot)" = "$before" ] || fail "the refused import without a manifest changed the host"
   docker cp "$out/export-t1/manifest.json" "$host:$import/manifest.json"
 
-  echo "== a half-failed import must be refused until it is removed"
   load_images
+  echo "== an export that Paperless' user cannot read must be refused before any change"
+  # Copied as root (docker cp), as an export copied by hand often is.
+  hx chmod 0600 "$import/manifest.json"
+  before="$(snapshot)"
+  role_fails import-unreadable -e "paperless_import_dir=$import"
+  expect_in_log import-unreadable "cannot read: $import/manifest.json"
+  expect_in_log import-unreadable "chown -R 1000:1000 $import"
+  [ "$(snapshot)" = "$before" ] || fail "the refused import of an unreadable export changed the host"
+  hx chmod 0644 "$import/manifest.json"
+
+  echo "== a half-failed import must be refused until it is removed"
   # A manifest cut short: the importer fails after the stack started and the
   # database was made.
   hx sh -c "head -c 300 $import/manifest.json >$import/m && mv $import/m $import/manifest.json"
@@ -336,12 +404,13 @@ test_import() {
       "$dir/data/consume" "$dir/data/postgres" "$dir/data/redis"
   }
   play_fails import-failed "$here/converge.yml" "${import_vars[@]}"
-  expect_in_log import-failed "The import of $import into Paperless $version in $dir failed (Import the export:"
+  expect_in_log import-failed "The import of $import into Paperless $version in $dir failed (Fail when the import failed:"
   expect_in_log import-failed "Failed to parse manifest file"
   expect_in_log import-failed "docker compose down in $dir"
   expect_in_log import-failed "remove $dir/compose.yaml"
   expect_in_log import-failed "the subdirectories media, data, consume, postgres and redis of $dir/data"
   expect_in_log import-failed "keep $export_dir"
+  expect_in_log import-failed "check that nothing in it is worth keeping"
   [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet")" ] || fail "the failed import left containers running"
   containers_before="$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)"
   [ -n "$containers_before" ] || fail "the failed import removed its containers"
@@ -366,10 +435,31 @@ test_import() {
   title="$(api /api/documents/ | python3 -c 'import json, sys; print(json.load(sys.stdin)["results"][0]["title"])')"
   [ "$title" = "$source_title" ] || fail "the imported document is titled $title, not $source_title"
 
-  echo "== an export made with a passphrase must be imported with it"
+  echo "== a marker left beside the import record must be refused, naming only the marker"
+  # As a run that stopped between the record and the marker's removal leaves it.
+  hx sh -c "printf 'version: %s\nsource: \"%s\"\n' '$version' '$import' >$dir/install-incomplete"
+  play_fails import-done "$here/converge.yml" "${import_vars[@]}"
+  expect_in_log import-done "$dir/imported.yml records that the import of $import completed"
+  expect_in_log import-done "remove only the marker (rm $dir/install-incomplete)"
+  if grep -qF -- "the subdirectories media" "$out/import-done.log"; then
+    fail "the refusal of a recorded import says to remove the data"
+  fi
+  expect_unchanged import-done
+  [ "$(doc_count)" = 1 ] || fail "the refused run changed the documents: $(doc_count)"
+  hx rm "$dir/install-incomplete"
+
+  echo "== an export made with a passphrase must be imported with it; a Samba that cannot start must not undo it"
   reset_import
-  converge -e "paperless_import_dir=$encrypted" -e paperless_admin_user= -e paperless_admin_password= \
-    -e "{\"paperless_import_passphrase\": \"$passphrase\"}"
+  take_smb_port
+  play_fails import-samba "$here/converge.yml" -vvv -e "paperless_import_dir=$encrypted" -e paperless_admin_user= \
+    -e paperless_admin_password= -e "{\"paperless_import_passphrase\": \"$passphrase\"}"
+  expect_in_log import-samba "is complete, but Samba did not start"
+  expect_no_secrets import-samba
+  hx test -e "$dir/imported.yml" || fail "the import with a failed Samba wrote no record"
+  hx test ! -e "$dir/install-incomplete" || fail "the import with a failed Samba kept its marker"
+  [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the failed Samba: $(webserver)"
+  free_smb_port
+  hx sh -c "cd $dir && docker compose up -d" >/dev/null 2>&1
   expect_idempotent -e "paperless_import_dir=$encrypted" -e paperless_admin_user= -e paperless_admin_password=
   [ "$(doc_count)" = 1 ] || fail "the import with a passphrase brought $(doc_count) documents, not 1"
   if hx grep -qF "$passphrase" "$dir/compose.yaml"; then fail "the passphrase is in the compose file"; fi
@@ -386,9 +476,18 @@ test_update() {
   [ "$(original_sum)" = "$sample_sum" ] || fail "the original of the document differs from sample.pdf"
   # Older backups; with the new one there are four, and three are kept.
   hx mkdir -p "$backups/20200101T000000Z-3.3.0" "$backups/20200101T000001Z-3.3.0" "$backups/20200101T000002Z-3.3.0"
-  converge
-  grep -q "update.yml" "$out/converge.log" || fail "the new version was not an update"
+  # With port 445 taken Samba cannot start after the update; that must not
+  # roll back the healthy new version.
+  hx sh -c "cd $dir && docker compose stop samba" >/dev/null 2>&1
+  take_smb_port
+  play_fails update-samba "$here/converge.yml"
+  grep -q "update.yml" "$out/update-samba.log" || fail "the new version was not an update"
+  expect_in_log update-samba "is updated and healthy, but Samba did not start"
+  if grep -qF -- "rolled back" "$out/update-samba.log"; then fail "a Samba that did not start rolled the update back"; fi
+  hx test ! -e "$marker" || fail "a Samba that did not start wrote the marker: $(hx cat "$marker")"
   [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the update: $(webserver)"
+  free_smb_port
+  hx sh -c "cd $dir && docker compose up -d" >/dev/null 2>&1
   backup="$(hx sh -c "ls -d $backups/*-$old_version")"
   [ "$(printf '%s\n' "$backup" | wc -l | tr -d ' ')" = 1 ] || fail "not one backup of $old_version: $backup"
   hx test -s "$backup/paperless.dump" || fail "the backup $backup has no dump"
@@ -413,9 +512,9 @@ test_update() {
   play_fails downgrade "$here/converge.yml" -e "paperless_version=$old_version"
   expect_in_log downgrade "paperless_version $old_version is lower than the installed version $version"
   unchanged downgrade
-  play_fails postgres-major "$here/converge.yml" -e paperless_postgres_image=docker.io/library/postgres:17
-  expect_in_log postgres-major "PostgreSQL 17"
-  expect_in_log postgres-major "PostgreSQL 18"
+  play_fails postgres-major "$here/converge.yml" -e paperless_postgres_image=docker.io/library/postgres:19
+  expect_in_log postgres-major "is PostgreSQL 19, but the database"
+  expect_in_log postgres-major "is PostgreSQL 18"
   unchanged postgres-major
   # An old cluster next to the current one, as a copy-mode pg_upgrade leaves it.
   hx sh -c "mkdir -p $dir/data/postgres/17/docker && echo 17 >$dir/data/postgres/17/docker/PG_VERSION"
@@ -437,8 +536,9 @@ test_failed_update() {
   consume_sample
   # The new release of a test image is busybox, which exits at once.
   hx docker tag busybox:1.37 "test.invalid/paperless-ngx:$version"
-  play_fails update-failed "$here/converge.yml" -e paperless_image=test.invalid/paperless-ngx -e paperless_health_timeout=30
+  play_fails update-failed "$here/converge.yml" -vvv -e paperless_image=test.invalid/paperless-ngx -e paperless_health_timeout=30
   expect_in_log update-failed "update from $old_version to $version in $dir failed, rolled back to $old_version"
+  expect_no_secrets update-failed
   # The health of the new version, in the message: Samba was still stopped.
   expect_in_log update-failed "samba exited"
   [ "$(hx sh -c "cd $dir && docker compose ps --format '{{.State}}' samba")" = running ] || fail "Samba does not run after the rollback"

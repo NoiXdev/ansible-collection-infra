@@ -3,7 +3,8 @@
 # files, the stack, then the first admin once Paperless is healthy. The
 # marker paperless_install_marker lives from before the first data directory
 # until the admin exists, so a run after a failed install refuses (state.yml)
-# instead of taking the half-made installation for a finished one.
+# instead of taking the half-made installation for a finished one. A failed
+# install stops the stack (Samba with it) and deletes nothing.
 
 - name: Create the Paperless directory
   ansible.builtin.file:
@@ -45,9 +46,12 @@
           compose logs in {{ paperless_dir }}
       when: not paperless_healthy
 
-    # As the paperless user, as the image's own wrappers run manage.py; the
-    # password comes from the environment, so it stays out of the compose file
-    # and the command line. The e-mail is Paperless' own default for its admin.
+    # As the paperless user, as the image's own wrappers run manage.py. The
+    # password goes through stdin into the environment of manage.py (the x
+    # keeps trailing newlines), so it is in neither the compose file, a
+    # command line nor the run's output: a task environment would show in the
+    # -vvv output, and no_log hides the arguments. The next task fails with
+    # the error. The e-mail is Paperless' own default for its admin.
     - name: Create the first admin
       ansible.builtin.command:
         argv:
@@ -56,20 +60,30 @@
           - exec
           - -T
           - --user=paperless
-          - --env=DJANGO_SUPERUSER_PASSWORD
           - webserver
-          - python3
-          - manage.py
-          - createsuperuser
-          - --noinput
-          - --username={{ paperless_admin_user }}
-          - --email=root@localhost
+          - sh
+          - -c
+          - >-
+            DJANGO_SUPERUSER_PASSWORD="$(cat; echo x)";
+            DJANGO_SUPERUSER_PASSWORD="${DJANGO_SUPERUSER_PASSWORD%x}";
+            export DJANGO_SUPERUSER_PASSWORD;
+            exec python3 manage.py createsuperuser --noinput --username="$1" --email=root@localhost
+          - sh
+          - "{{ paperless_admin_user }}"
         chdir: "{{ paperless_dir }}"
+        stdin: "{{ paperless_admin_password }}"
+        stdin_add_newline: false
         # A $ in the admin name stays as it is.
         expand_argument_vars: false
-      environment:
-        DJANGO_SUPERUSER_PASSWORD: "{{ paperless_admin_password }}"
+      register: paperless_hidden
       changed_when: true
+      failed_when: false
+      no_log: true
+
+    - name: Fail when the first admin was not created
+      ansible.builtin.fail:
+        msg: "{{ paperless_hidden_error }}"
+      when: paperless_hidden.rc != 0
 
     - name: Remove the marker of an install in progress
       ansible.builtin.file:
@@ -77,9 +91,22 @@
         state: absent
 
   rescue:
+    - name: Note why the install failed
+      ansible.builtin.set_fact:
+        paperless_install_failure: "{{ paperless_failure | trim }}"
+
+    # Stopped, not removed, as after a failed import: a running Samba would
+    # take scans that Paperless consumes into the installation the message
+    # says to remove.
+    - name: Stop Paperless after the failed install
+      community.docker.docker_compose_v2:
+        project_src: "{{ paperless_dir }}"
+        state: stopped
+      failed_when: false
+
     - name: Fail with what to remove
       ansible.builtin.fail:
         msg: >-
           The install of Paperless {{ paperless_version }} in
-          {{ paperless_dir }} failed ({{ paperless_failure | trim }}).
+          {{ paperless_dir }} failed ({{ paperless_install_failure }}).
           {{ paperless_install_hint }}

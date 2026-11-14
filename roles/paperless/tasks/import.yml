@@ -2,12 +2,14 @@
 # The one-time import into a fresh installation (paperless_state import):
 # the directories and files as on install, the stack without Samba (no scan
 # arrives during the import), Paperless healthy (its migrations made the
-# empty database), document_importer on the export, Samba, then the record
-# paperless_import_record. The marker paperless_install_marker, naming the
-# export as its source, lives from before the first data directory until the
-# record exists. A failed import stops the stack, deletes nothing and keeps
-# the marker, so every later run refuses (state.yml) until the partly
-# imported installation is removed as the message says.
+# empty database), document_importer on the export, the record
+# paperless_import_record, then Samba. The marker paperless_install_marker,
+# naming the export as its source, lives from before the first data
+# directory until the record exists. A failed import stops the stack,
+# deletes nothing and keeps the marker, so every later run refuses
+# (state.yml) until the partly imported installation is removed as the
+# message says. A Samba that does not start after the record fails the run
+# but leaves the import done.
 
 - name: Create the Paperless directory
   ansible.builtin.file:
@@ -52,29 +54,34 @@
       when: not paperless_healthy
 
     # The image's document_importer runs manage.py as the paperless user. A
-    # passphrase comes through the environment, so it stays out of the
-    # compose file and the docker command line; expand_argument_vars false
-    # keeps the command module from expanding the script's $ itself.
+    # passphrase goes through stdin (the x keeps trailing newlines), so it is
+    # in neither the compose file, the docker command line nor the run's
+    # output: a task environment would show in the -vvv output, and no_log
+    # hides the arguments. The next task fails with the error.
+    # expand_argument_vars false keeps the command module from expanding the
+    # script's $ itself.
     - name: Import the export
       ansible.builtin.command:
         argv: >-
-          {{ ['docker', 'compose', 'exec', '-T']
-             + (['--env=PAPERLESS_IMPORT_PASSPHRASE', 'webserver', 'sh', '-c',
-                 'exec document_importer "$1" --no-progress-bar --passphrase "$PAPERLESS_IMPORT_PASSPHRASE"',
+          {{ ['docker', 'compose', 'exec', '-T', 'webserver']
+             + (['sh', '-c',
+                 'p="$(cat; echo x)"; exec document_importer "$1" --no-progress-bar --passphrase "${p%x}"',
                  'sh', paperless_import_container_dir]
                 if paperless_import_passphrase | length > 0
-                else ['webserver', 'document_importer', paperless_import_container_dir, '--no-progress-bar']) }}
+                else ['document_importer', paperless_import_container_dir, '--no-progress-bar']) }}
         chdir: "{{ paperless_dir }}"
+        stdin: "{{ paperless_import_passphrase if paperless_import_passphrase | length > 0 else omit }}"
+        stdin_add_newline: false
         expand_argument_vars: false
-      environment:
-        PAPERLESS_IMPORT_PASSPHRASE: "{{ paperless_import_passphrase }}"
+      register: paperless_hidden
       changed_when: true
+      failed_when: false
+      no_log: true
 
-    - name: Start Samba
-      community.docker.docker_compose_v2:
-        project_src: "{{ paperless_dir }}"
-        state: present
-      when: paperless_samba | bool
+    - name: Fail when the import failed
+      ansible.builtin.fail:
+        msg: "{{ paperless_hidden_error }}"
+      when: paperless_hidden.rc != 0
 
     - name: Write the import record
       ansible.builtin.copy:
@@ -111,3 +118,23 @@
           The import of {{ paperless_import_source }} into Paperless
           {{ paperless_version }} in {{ paperless_dir }} failed
           ({{ paperless_import_failure }}). {{ paperless_import_hint }}
+
+# After the record and the marker's removal: the import is done whether or
+# not Samba starts.
+- name: Start Samba after the import
+  when: paperless_samba | bool
+  block:
+    - name: Start Samba
+      community.docker.docker_compose_v2:
+        project_src: "{{ paperless_dir }}"
+        state: present
+  rescue:
+    - name: Fail when Samba did not start
+      ansible.builtin.fail:
+        msg: >-
+          The import of {{ paperless_import_source }} into Paperless
+          {{ paperless_version }} in {{ paperless_dir }} is complete, but Samba
+          did not start ({{ paperless_failure | trim }}). The role does not undo
+          the import ({{ paperless_import_record }} records it). Fix the cause
+          (is port 445 taken on {{ paperless_samba_bind }}?), then start Samba
+          with docker compose up -d in {{ paperless_dir }}.

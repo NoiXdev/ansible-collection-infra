@@ -43,6 +43,8 @@ paperless_gid: 1000
 # zone, filename format, ...). The settings the role sets itself are refused.
 paperless_env: {}
 
+# PostgreSQL 18 or newer: older images keep the database on a volume of their
+# own, outside paperless_data_dir, and are refused.
 paperless_postgres_image: docker.io/library/postgres:18
 paperless_redis_image: docker.io/valkey/valkey:9-alpine
 paperless_tika_image: docker.io/apache/tika:3.3.1.0

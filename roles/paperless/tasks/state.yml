@@ -15,13 +15,15 @@
 # not running). With an import record, paperless_import_dir is ignored.
 # Changes nothing; refuses, before anything else, a paperless_data_dir that is
 # not a mountpoint (with paperless_data_dir_mountpoint) and a compose file
-# without all of paperless_data_subdirs (an unmounted volume); then an
-# install or import that did not complete, left-over data without a compose
+# without all of paperless_data_subdirs (an unmounted volume); then a marker
+# beside the record of a completed import, an install or import that did
+# not complete, left-over data without a compose
 # file, a compose file without a Paperless version, a
 # downgrade, a PostgreSQL major other than the database's, and an import
 # into an installation (no record), of an export outside
-# paperless_export_dir, without a manifest, of another Paperless version, or
-# made with a passphrase that is not given.
+# paperless_export_dir, without a manifest, of another Paperless version,
+# made with a passphrase that is not given, or that paperless_uid cannot
+# read.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -116,6 +118,29 @@
   vars:
     paperless_incomplete: "{{ paperless_install_marker_read.content | b64decode | from_yaml }}"
 
+- name: Look for the record of a completed import
+  ansible.builtin.stat:
+    path: "{{ paperless_import_record }}"
+    get_checksum: false
+  register: paperless_import_record_done
+  when: paperless_incomplete_source | default('') | length > 0
+
+# The run that imported stopped between the record and the marker's removal:
+# the installation is complete and may be in use, so only the marker goes.
+- name: Refuse a marker beside the record of a completed import
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_install_marker }} exists, but {{ paperless_import_record }}
+      records that the import of {{ paperless_incomplete_source }} completed:
+      the run that imported it stopped before it removed the marker. The role
+      changes nothing. Check Paperless (its documents), then remove only the
+      marker (rm {{ paperless_install_marker }}), not the data, and run the
+      role again.
+  when:
+    - paperless_install_marker_read.content is defined
+    - paperless_incomplete_source | length > 0
+    - paperless_import_record_done.stat.exists | default(false)
+
 # An import's marker names its source.
 - name: Refuse an import that did not complete
   ansible.builtin.fail:
@@ -174,7 +199,7 @@
       when: paperless_version is version(paperless_installed_version, '<')
 
 # The PostgreSQL image keeps its cluster in a directory per major below the
-# mount (18/docker from PostgreSQL 18 on, data before): another major starts
+# mount (18/docker; main.yml refuses images older than 18): another major starts
 # an empty cluster or none at all, so the one cluster's PG_VERSION must name
 # the major of paperless_postgres_image. More than one cluster (an old one
 # left by pg_upgrade) is refused: which one is current cannot be told, and a
@@ -336,6 +361,64 @@
           The export in {{ paperless_import_source }} was made with a
           passphrase (its metadata.json holds __crypto__), but
           paperless_import_passphrase is empty. The role changes nothing.
+        quiet: true
+
+    # document_importer runs as paperless_uid:paperless_gid and fails on what
+    # it cannot read only after the database was made. Read from the modes
+    # (owner, group, other; ACLs aside): the directories down to the export
+    # need x, the export's directories r and x, its files r.
+    # paperless_export_dir itself is the user's (files.yml).
+    - name: Look for what Paperless cannot read in the export
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import os, sys
+            export, rel, uid, gid = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+            def allowed(path, need):
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    return False
+                if uid == 0:
+                    return True
+                shift = 6 if st.st_uid == uid else 3 if st.st_gid == gid else 0
+                return ((st.st_mode >> shift) & need) == need
+            path = export
+            for part in rel.split('/')[:-1]:
+                path = os.path.join(path, part)
+                if not allowed(path, 1):
+                    print(path)
+            for root, dirs, files in os.walk(os.path.join(export, rel)):
+                if not allowed(root, 5):
+                    print(root)
+                for name in dirs:
+                    if os.path.islink(os.path.join(root, name)) and not allowed(os.path.join(root, name), 5):
+                        print(os.path.join(root, name))
+                for name in files:
+                    if not allowed(os.path.join(root, name), 4):
+                        print(os.path.join(root, name))
+          - "{{ paperless_export_dir }}"
+          - "{{ paperless_import_rel }}"
+          - "{{ paperless_uid }}"
+          - "{{ paperless_gid }}"
+      register: paperless_unreadable
+      changed_when: false
+
+    - name: Check that Paperless can read the export
+      ansible.builtin.assert:
+        that: paperless_unreadable.stdout_lines | length == 0
+        fail_msg: >-
+          paperless_import_dir {{ paperless_import_source }} holds what
+          Paperless, which imports as paperless_uid:paperless_gid
+          ({{ paperless_uid }}:{{ paperless_gid }}), cannot read:
+          {{ paperless_unreadable.stdout_lines[:5] | join(', ') }}{{
+          (' and ' ~ (paperless_unreadable.stdout_lines | length - 5) ~ ' more')
+          if paperless_unreadable.stdout_lines | length > 5 else '' }}. Make
+          the export readable by that user, for example with chown -R
+          {{ paperless_uid }}:{{ paperless_gid }} {{ paperless_import_source }}.
+          The role changes nothing.
         quiet: true
 
 - name: Read the services that run

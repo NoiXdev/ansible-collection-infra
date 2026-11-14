@@ -75,7 +75,9 @@ argument_specs:
           the role sets itself are refused.
       paperless_postgres_image:
         type: str
-        description: PostgreSQL image with its tag.
+        description: >-
+          PostgreSQL image with its tag, major 18 or newer (older images keep
+          the database on a volume of their own, outside paperless_data_dir).
       paperless_redis_image:
         type: str
         description: Redis-compatible broker image (Valkey) with its tag.

@@ -67,7 +67,8 @@
         status_code: [200]
 
     # Paperless' login rate limit reads the client address from
-    # X-Forwarded-For, which Traefik adds; untrusted, the form answers 403.
+    # X-Forwarded-For, which Traefik adds; the trusted proxy count sets the
+    # client address the rate limit uses.
     - name: Open the login form through Traefik
       ansible.builtin.uri:
         url: "{{ verify_base }}/accounts/login/"

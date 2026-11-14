@@ -25,7 +25,7 @@ tests/all.sh mailcow listmonk    # only the named suites
 
 `tests/all.sh` runs `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
 `host` (`tests/host/run.sh` on Ubuntu 24.04 and 26.04, set `HOST_UBUNTU` for fewer),
-`harbor`, `listmonk`, `anubis`, `mailcow` and `cloudpanel` (`tests/<suite>/run.sh`). It stops at
+`harbor`, `listmonk`, `paperless`, `anubis`, `mailcow` and `cloudpanel` (`tests/<suite>/run.sh`). It stops at
 the first failing suite unless you pass `--keep-going`, and ends with a summary of each
 suite's result and runtime; the output of each suite is also in
 `tests/output/all/<suite>.log`. `--summary FILE` writes a machine-readable summary, one line
@@ -34,7 +34,8 @@ runs natively, and on another architecture (an arm64 Mac) the Harbor images insi
 run as `linux/amd64` under emulation, which is slow. Docker Desktop on Apple silicon needs
 Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tests/attest.sh`
 check this first. The `mailcow` suite needs network
-access and about 5 GB of images, `cloudpanel` runs CloudPanel's real installer.
+access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
+(`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `cloudpanel` runs CloudPanel's real installer.
 
 Each test converges the roles, converges again (the second run must change nothing),
 and then verifies the result. `KEEP=1` leaves the test container running for

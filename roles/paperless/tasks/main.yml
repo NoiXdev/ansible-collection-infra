@@ -65,6 +65,24 @@
       negative.
     quiet: true
 
+# From 18 on the image keeps its cluster below /var/lib/postgresql (in
+# 18/docker), which compose.yaml binds to paperless_data_dir/postgres. Older
+# images declare the volume /var/lib/postgresql/data, which Docker mounts as
+# an anonymous volume over the bind: the database would live outside
+# paperless_data_dir, the PostgreSQL checks in state.yml would find no
+# cluster, and docker compose down would leave the documents without it.
+- name: Check the PostgreSQL major
+  ansible.builtin.assert:
+    that: paperless_postgres_major | int >= 18
+    fail_msg: >-
+      paperless_postgres_image {{ paperless_postgres_image }} is PostgreSQL
+      {{ paperless_postgres_major }}; the role needs PostgreSQL 18 or newer.
+      Older images keep the database on a volume of their own
+      (/var/lib/postgresql/data) instead of below /var/lib/postgresql, which
+      the role binds to {{ paperless_data_dir }}/postgres, so it would live
+      outside paperless_data_dir. The role changes nothing.
+    quiet: true
+
 - name: Check paperless_env
   ansible.builtin.assert:
     that:

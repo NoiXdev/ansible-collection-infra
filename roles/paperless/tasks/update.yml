@@ -3,12 +3,13 @@
 # pull changes nothing); then the webserver and Samba stopped, the backup
 # (snapshot.yml: dump, data, media), the files written with the new version,
 # the stack without Samba started (Paperless migrates its schema on start)
-# and checked, Samba started, and the backups pruned to the newest
-# paperless_dumps_keep. A failure before the backup is complete removes the
-# partial backup, starts the stack as it was and fails. After it,
-# restore.yml rolls back to the backup (Samba starts with the restored
-# stack), the marker paperless_marker_file names the failed version, and the
-# run fails.
+# and checked, the backups pruned to the newest paperless_dumps_keep, and
+# Samba started. A failure before the backup is complete removes the partial
+# backup, starts the stack as it was and fails. After it, restore.yml rolls
+# back to the backup (Samba starts with the restored stack), the marker
+# paperless_marker_file names the failed version, and the run fails. A Samba
+# that does not start after a healthy update fails the run without a
+# rollback and without the marker.
 
 - name: Update Paperless
   vars:
@@ -77,13 +78,6 @@
           Paperless {{ paperless_version }} is not healthy within
           {{ paperless_health_timeout }} seconds ({{ paperless_health_lines | join('; ') }})
       when: not paperless_healthy
-
-    - name: Start Samba
-      community.docker.docker_compose_v2:
-        project_src: "{{ paperless_dir }}"
-        state: present
-        pull: missing
-      when: paperless_samba | bool
 
   rescue:
     - name: Note what failed
@@ -186,3 +180,24 @@
     path: "{{ item }}"
     state: absent
   loop: "{{ (paperless_backups.files | map(attribute='path') | sort)[: -(paperless_dumps_keep | int)] }}"
+
+# After the update: a Samba that does not start (port 445 taken, for
+# example) fails the run, but the new version is healthy, so nothing is
+# rolled back and no marker is written.
+- name: Start Samba after the update
+  when: paperless_samba | bool
+  block:
+    - name: Start Samba
+      community.docker.docker_compose_v2:
+        project_src: "{{ paperless_dir }}"
+        state: present
+        pull: missing
+  rescue:
+    - name: Fail when Samba did not start
+      ansible.builtin.fail:
+        msg: >-
+          Paperless {{ paperless_version }} in {{ paperless_dir }} is updated
+          and healthy, but Samba did not start ({{ paperless_failure | trim }}).
+          The role does not roll back for that and writes no marker. Fix the
+          cause (is port 445 taken on {{ paperless_samba_bind }}?), then start
+          Samba with docker compose up -d in {{ paperless_dir }}.
