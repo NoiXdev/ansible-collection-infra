@@ -73,6 +73,24 @@ grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/idempotence.log" \
 echo "== verify"
 play "$here/verify.yml"
 
+# oh_my_zsh: deploy owns its home and can put a link there as ~/.zshrc. Root
+# must neither write through it nor read it: the target stays as it is and
+# its content shows up nowhere, not even in --diff output.
+echo "== oh_my_zsh does not follow a link as ~/.zshrc"
+docker exec "$host" sh -c 'printf "keep-zshrc-target\n" >/opt/zshrc-target && chown root:root /opt/zshrc-target && chmod 0600 /opt/zshrc-target'
+docker exec -u deploy "$host" ln -sfn /opt/zshrc-target /srv/deploy/.zshrc
+play "$here/oh_my_zsh.yml" --diff >"$out/zshrc-link.log" 2>&1 \
+  || { cat "$out/zshrc-link.log" >&2; echo "oh_my_zsh failed with a link as ~/.zshrc" >&2; exit 1; }
+! grep -qF keep-zshrc-target "$out/zshrc-link.log" \
+  || { echo "oh_my_zsh showed the content behind the link in its --diff output" >&2; exit 1; }
+[ "$(docker exec "$host" stat -c '%U:%G %a' /opt/zshrc-target)" = "root:root 600" ] \
+  && [ "$(docker exec "$host" cat /opt/zshrc-target)" = keep-zshrc-target ] \
+  || { echo "oh_my_zsh changed the target of the link" >&2; exit 1; }
+docker exec "$host" sh -c 'test -f /srv/deploy/.zshrc && test ! -L /srv/deploy/.zshrc \
+  && head -n 1 /srv/deploy/.zshrc | grep -qF "Managed by noixdev.infra" \
+  && [ "$(stat -c %U /srv/deploy/.zshrc)" = deploy ]' \
+  || { echo "/srv/deploy/.zshrc is not the managed file of deploy" >&2; exit 1; }
+
 # mounts_fail NAME MESSAGE BASE_MOUNTS_JSON: the run must fail with MESSAGE
 # and leave fstab, the mounts and /srv as they were.
 hx() { docker exec "$host" "$@"; }

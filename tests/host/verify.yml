@@ -427,6 +427,39 @@
       ansible.builtin.assert:
         that: omz_nohome.results | selectattr('stat.exists') | list | length == 0
 
+    # The home of a user can be a link to a directory (the link itself sits
+    # in a root-owned directory).
+    - name: Add a user whose home is a link to a directory
+      ansible.builtin.user:
+        name: linkhome
+        home: /srv/linkhome
+        create_home: false
+
+    - name: Make the real home and the link
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -eo pipefail
+          install -d -o linkhome -g linkhome -m 0755 /srv/linkhome-real
+          ln -sfn /srv/linkhome-real /srv/linkhome
+      changed_when: true
+
+    - name: Run the role for the user whose home is a link
+      ansible.builtin.include_role:
+        name: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [linkhome]
+
+    - name: Read ~/.zshrc of that user
+      ansible.builtin.command:
+        argv: [stat, -c, '%U %F', /srv/linkhome-real/.zshrc]
+      register: omz_linkhome
+      changed_when: false
+
+    - name: Expect the managed file in the real home
+      ansible.builtin.assert:
+        that: omz_linkhome.stdout == 'linkhome regular file'
+
     - name: Refuse a theme name that is a path
       block:
         - name: Include the oh_my_zsh role with the theme ../x

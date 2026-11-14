@@ -1,0 +1,10 @@
+---
+# The oh_my_zsh role alone, as the converge runs it. tests/host/run.sh runs
+# it with --diff after planting a link as ~/.zshrc of deploy.
+- name: Run oh_my_zsh alone
+  hosts: testhost
+  gather_facts: false
+  roles:
+    - role: noixdev.infra.oh_my_zsh
+      vars:
+        oh_my_zsh_users: [root, deploy]

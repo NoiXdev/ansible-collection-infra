@@ -26,7 +26,8 @@
   umask) and writes a managed `~/.zshrc` for each user in `oh_my_zsh_users` (default `root`; the
   home comes from the passwd database, the cache goes to `~/.cache/oh-my-zsh`, which Oh My Zsh
   creates as the user, never into the checkout). A `~/.zshrc` that the role did not write is
-  copied once to `~/.zshrc.pre-oh_my_zsh` before the role replaces it. The `noix` theme ships
+  copied once to `~/.zshrc.pre-oh_my_zsh` before the role replaces it; the copy and the managed
+  file are written as the user, so a symlink in the home is never followed. The `noix` theme ships
   with the role; set `oh_my_zsh_theme` to a built-in theme, or add your own with
   `oh_my_zsh_theme_content`. `~/.zshrc.local` is sourced when present and never written. Also
   `oh_my_zsh_plugins` and `oh_my_zsh_login_shell`. Before anything changes the role fails on a

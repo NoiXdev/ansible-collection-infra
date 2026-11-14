@@ -40,6 +40,8 @@
 - name: Look at each home
   ansible.builtin.stat:
     path: "{{ item.stdout.split(':')[5] }}"
+    # A home may be a link to a directory; the link sits in a root-owned one.
+    follow: true
     get_checksum: false
     get_mime: false
     get_attributes: false
@@ -138,20 +140,56 @@
   register: oh_my_zsh_kept
   changed_when: oh_my_zsh_kept.stdout == 'kept'
 
-- name: Write ~/.zshrc
+# The managed ~/.zshrc is the same for every user. It is rendered once into
+# the root-owned checkout (custom/ is ignored by git, and Oh My Zsh sources
+# only *.zsh files there), and each user copies it from there.
+- name: Render the managed ~/.zshrc
   ansible.builtin.template:
     src: zshrc.j2
-    dest: "{{ item.stdout.split(':')[5] }}/.zshrc"
-    owner: "{{ item.item }}"
-    group: "{{ item.stdout.split(':')[3] }}"
+    dest: "{{ oh_my_zsh_dir }}/custom/zshrc.noixdev"
+    owner: root
+    group: root
     mode: "0644"
+
+# As the user, like the backup: root writing into the home would follow a
+# link that the user put there as ~/.zshrc (and --diff would show what it
+# points at). mv replaces a link itself, never its target.
+- name: Write ~/.zshrc
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ item.item }}"
+      - --
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        rc="$1/.zshrc"
+        if [ -f "$rc" ] && [ ! -L "$rc" ] && [ -O "$rc" ] \
+          && [ "$(stat -c %a "$rc")" = 644 ] && cmp -s "$2" "$rc"; then
+          exit 0
+        fi
+        tmp="$(mktemp "$rc.XXXXXX")"
+        trap 'rm -f "$tmp"' EXIT
+        cat "$2" >"$tmp"
+        chmod 0644 "$tmp"
+        mv -f "$tmp" "$rc"
+        echo written
+      - sh
+      - "{{ item.stdout.split(':')[5] }}"
+      - "{{ oh_my_zsh_dir }}/custom/zshrc.noixdev"
   loop: "{{ oh_my_zsh_passwd.results }}"
   loop_control:
     label: "{{ item.item }}"
+  register: oh_my_zsh_written
+  changed_when: oh_my_zsh_written.stdout == 'written'
 
 - name: Set the login shell to zsh
   ansible.builtin.user:
     name: "{{ item }}"
     shell: "{{ oh_my_zsh_shell }}"
+    # Never create a home here: the homes were checked above.
+    create_home: false
   loop: "{{ oh_my_zsh_users }}"
   when: oh_my_zsh_login_shell | bool
