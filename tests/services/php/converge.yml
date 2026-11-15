@@ -10,6 +10,8 @@
     php_test_staging: true
     php_test_staging_version: "8.4"
     php_test_staging_memory_limit: 192M
+    php_test_staging_user: app_staging
+    php_test_staging_pm: {}
     php_versions:
       - version: "8.3"
         extensions: [intl, mbstring]
@@ -25,7 +27,8 @@
     php_test_staging_pool:
       name: staging
       version: "{{ php_test_staging_version }}"
-      user: app_staging
+      user: "{{ php_test_staging_user }}"
+      pm: "{{ php_test_staging_pm }}"
       # Characters that FPM's config parser treats specially: " ; = $ space
       env:
         APP_ENV: staging
@@ -42,7 +45,7 @@
       ansible.builtin.user:
         name: "{{ item }}"
         shell: /bin/bash
-      loop: [app_prod, app_staging, outsider]
+      loop: [app_prod, app_staging, app_staging2, outsider]
       when: php_test_prepare | bool
 
     - name: Create the web roots

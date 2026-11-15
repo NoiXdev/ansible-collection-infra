@@ -32,9 +32,10 @@ php_pool_groups: >-
      | combine(dict(php_pools_public | selectattr('group', 'defined') | map(attribute='name')
        | zip(php_pools_public | selectattr('group', 'defined') | map(attribute='group')))) }}
 
-# The pools to restart (version or unit changed) and to reload (config, php_ini
-# or packages of their version changed) in this run, by name only. They come
-# from the registered results of tasks/versions.yml and tasks/per_pool.yml.
+# The pools to restart (version, socket owner or group, or unit changed) and to
+# reload (config, php_ini or packages of their version changed) in this run, by
+# name only. They come from the registered results of tasks/versions.yml and
+# tasks/per_pool.yml.
 php_restart_pools: >-
   {{ ((php_pool_names if php_unit is defined and php_unit is changed else [])
       + (php_env_files.results | default([]) | selectattr('changed') | map(attribute='item.name') | list))

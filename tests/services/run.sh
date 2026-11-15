@@ -713,11 +713,13 @@ php_running() {
 }
 
 suite_php() {
-  local dir="$here/php" codename version policy prod staging tries rotate name
+  local dir="$here/php" codename version policy prod staging tries rotate name conf
   local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
-  # Parts of staging's env values that their raw and JSON-escaped forms share,
-  # and the key (no log prints the env at all).
-  local secrets=('; c=$d e' 'APP_ENV')
+  # staging after its upgrade.
+  local upgraded=(-e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3)
+  # A part of staging's NOTE that its raw, JSON-escaped and pool.conf forms
+  # (c=\$d e) share, and the key (no log prints the env at all).
+  local secrets=('$d e' 'APP_ENV')
   start php
 
   if [ "$ubuntu" != 24.04 ]; then
@@ -793,14 +795,14 @@ suite_php() {
   done
 
   echo "== php: staging moves to 8.3 on the same socket, production keeps running"
-  converge php upgrade "$dir/converge.yml" -e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3
-  play php "$dir/verify.yml" -e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3
+  converge php upgrade "$dir/converge.yml" "${upgraded[@]}"
+  play php "$dir/verify.yml" "${upgraded[@]}"
   [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted on staging's upgrade"
   [ "$(pid php php-fpm@staging)" != "$staging" ] || fail "php: staging did not restart on its version change"
   staging="$(pid php php-fpm@staging)"
 
   echo "== php: an extension with a typo fails naming the package, the pools keep running"
-  refused php typo "php8.3-intll" "$dir/converge.yml" -e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3 \
+  refused php typo "php8.3-intll" "$dir/converge.yml" "${upgraded[@]}" \
     -e '{"php_versions": [{"version": "8.3", "extensions": ["intll"]}, {"version": "8.4", "extensions": ["intl", "mbstring"]}]}'
   php_running typo
 
@@ -826,7 +828,29 @@ suite_php() {
     "$dir/converge.yml" -v \
     -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "env": {"LINE": "s3cr3t-line\nnext", "DOLLAR": "$s3cr3t-dollar", "FINE": "s3cr3t-fine"}}]}'
   no_secret "$out/php-env-values.log" s3cr3t-line s3cr3t-dollar s3cr3t-fine
+  # A primary group without a group entry (the user is edited by hand).
+  hx php useradd -M -N -s /usr/sbin/nologin lostgroup
+  hx php sed -i 's/^\(lostgroup:[^:]*:[0-9]*:\)[0-9]*:/\14242:/' /etc/passwd
+  refused php lost-group "php: php_pools entry production runs as lostgroup, whose primary group (gid 4242) has no group entry; set group" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "lostgroup"}]}'
+  hx php userdel lostgroup
   php_running refusals
+
+  echo "== php: a pool config FPM rejects never replaces the running one"
+  # The role's checks let this number through; FPM's test refuses it.
+  conf="$(hx php md5sum /etc/php-fpm/staging/pool.conf)"
+  refused php fpm-rejects "failed to validate" "$dir/converge.yml" -v "${upgraded[@]}" \
+    -e '{"php_test_staging_pm": {"mode": "static", "max_children": 2147483648}}'
+  no_secret "$out/php-fpm-rejects.log" "${secrets[@]}"
+  [ "$(hx php md5sum /etc/php-fpm/staging/pool.conf)" = "$conf" ] || fail "php: the rejected config replaced staging's"
+  php_running fpm-rejects
+  ask staging /srv/staging | grep -qF '"user":"app_staging"' || fail "php: staging does not answer after the rejected config"
+
+  echo "== php: a new socket owner restarts staging, production keeps running"
+  converge php owner "$dir/converge.yml" "${upgraded[@]}" -e php_test_staging_user=app_staging2
+  play php "$dir/verify.yml" "${upgraded[@]}" -e php_test_staging_user=app_staging2
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted on staging's new socket owner"
+  [ "$(pid php php-fpm@staging)" != "$staging" ] || fail "php: staging did not restart on its new socket owner"
 
   echo "== php: a pool that leaves the list stops, its tmp_dir stays"
   converge php no-staging "$dir/converge.yml" -e php_test_staging=false

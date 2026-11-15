@@ -6,6 +6,7 @@
     php_test_staging: true
     php_test_staging_version: "8.4"
     php_test_staging_memory_limit: 192M
+    php_test_staging_user: app_staging
     php_test_request:
       REQUEST_METHOD: GET
       SCRIPT_NAME: /app.php
@@ -63,7 +64,7 @@
       ansible.builtin.assert:
         that:
           - php_test_staging_report.version is match(php_test_staging_version | regex_escape ~ '\.')
-          - php_test_staging_report.user == 'app_staging'
+          - php_test_staging_report.user == php_test_staging_user
           - php_test_staging_report.app_env == 'staging'
           - php_test_staging_report.note == 'a "b"; c=$d e'
           - "'/srv/staging' in php_test_staging_report.open_basedir.split(':')"
@@ -85,7 +86,7 @@
     - name: Check the sockets
       ansible.builtin.assert:
         that: php_verify_sockets.results[0].stdout == '660 app_prod www-data'
-            and (not php_test_staging | bool or php_verify_sockets.results[1].stdout == '660 app_staging www-data')
+            and (not php_test_staging | bool or php_verify_sockets.results[1].stdout == '660 ' ~ php_test_staging_user ~ ' www-data')
         fail_msg: "{{ php_verify_sockets.results | map(attribute='stdout') | list }}"
 
     - name: Answer the ping

@@ -111,6 +111,19 @@
   loop_control:
     label: "{{ item.name }}"
 
+# Without group, a pool runs with its user's primary group, which needs a
+# group entry (for the logs, temp dirs and logrotate).
+- name: Check the primary groups of the pool users
+  ansible.builtin.assert:
+    that: ansible_facts.getent_passwd[item.user][2] in php_gid_names
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} runs as {{ item.user }}, whose primary group (gid
+      {{ ansible_facts.getent_passwd[item.user][2] }}) has no group entry; set group
+    quiet: true
+  loop: "{{ php_pools_public | rejectattr('group', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Check the process manager settings
   ansible.builtin.assert:
     that:

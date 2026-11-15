@@ -1,8 +1,8 @@
 ---
-# One master per pool. A pool whose version or the unit changed restarts; one
-# whose config, php_ini or packages changed reloads (USR2: the master
-# re-executes in its process and keeps the socket). Every such pool's config is
-# tested first.
+# One master per pool. A pool whose version, socket owner or group, or the unit
+# changed restarts (a reload keeps the inherited socket as it is); one whose
+# config, php_ini or packages changed reloads (USR2: the master re-executes in
+# its process and keeps the socket). Every such pool's config is tested first.
 - name: Test the changed php pool configs
   ansible.builtin.command:
     argv: ["php-fpm{{ php_pool_versions[item] }}", -t, -y, "/etc/php-fpm/{{ item }}/php-fpm.conf"]
