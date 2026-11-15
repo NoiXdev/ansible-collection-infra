@@ -201,7 +201,8 @@
               /etc/needrestart/conf.d/50noixdev-php-fpm.conf; do
             if [ -e "$f" ]; then echo "$f $(stat -c '%a %U %G' "$f")"; else echo "$f absent"; fi
           done
-          echo "needrestart_override=$(grep -cxF '$nrconf{override_rc}{qr(^php-fpm@.+\.service$)} = 0;' /etc/needrestart/conf.d/50noixdev-php-fpm.conf 2>/dev/null || true)"
+          override='$nrconf{override_rc}{qr(^php-fpm@.+\.service$)} = 0;'
+          echo "needrestart_override=$(grep -cxF "$override" /etc/needrestart/conf.d/50noixdev-php-fpm.conf 2>/dev/null || true)"
           apt-config dump | grep -E '^(Unattended-Upgrade::Origins-Pattern|DPkg::(Pre|Post)-Invoke)::' || true
         executable: /bin/bash
       register: php_verify_updates
