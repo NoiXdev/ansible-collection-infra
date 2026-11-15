@@ -27,6 +27,13 @@
     quiet: true
   loop: "{{ nginx_real_ip_from }}"
 
+- name: Check the resolvers
+  ansible.builtin.assert:
+    that: item is string and item is match('^([0-9.]+|\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+)(:[0-9]+)?$')
+    fail_msg: "nginx: nginx_resolvers has {{ item }}, which is not an address, [IPv6 address] or host name with an optional :port"
+    quiet: true
+  loop: "{{ nginx_resolvers }}"
+
 - name: Check the rate-limit zones
   ansible.builtin.assert:
     that:

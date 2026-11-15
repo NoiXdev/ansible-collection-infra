@@ -36,6 +36,10 @@ ssl_certificate_key {{ site.tls_files.key }};
 {% if site.tls is mapping %}
 ssl_stapling on;
 ssl_stapling_verify on;
+{% if nginx_resolvers | length > 0 %}
+resolver {{ nginx_resolvers | join(' ') }} valid=300s;
+resolver_timeout 5s;
+{% endif %}
 {% endif %}
 {% endif %}
 {% endmacro %}

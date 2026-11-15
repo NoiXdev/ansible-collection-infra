@@ -88,6 +88,13 @@ argument_specs:
         type: list
         elements: str
         description: Proxies (addresses or CIDRs) whose X-Forwarded-For is trusted.
+      nginx_resolvers:
+        type: list
+        elements: str
+        description: >-
+          DNS resolvers (host or host:port) nginx asks for the OCSP responder of a {cert, key}
+          site; 127.0.0.53 (systemd-resolved) by default. Empty: the responder's addresses from
+          the last config load.
       nginx_rate_limit_zones:
         type: list
         elements: dict

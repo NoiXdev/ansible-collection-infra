@@ -1542,6 +1542,9 @@ suite_nginx() {
          if ((ours && p != 990) || (!ours && p != -1)) { print v, p; bad = 1 } }
        END { exit bad }' <<<"$policy" || fail "nginx: the pin gives the wrong priorities: $policy"
   play nginx "$dir/verify.yml"
+  # OCSP stapling (a {cert, key} site) resolves its responder at run time.
+  answer="$(hx nginx grep -c '^    resolver 127.0.0.53 valid=300s;$' /etc/nginx/sites/prod.conf)"
+  [ "$answer" = 2 ] || fail "nginx: prod's two TLS servers do not both have the resolver ($answer)"
   nginx_links
 
   echo "== nginx: hardening false on static: no security headers, /.env is served"

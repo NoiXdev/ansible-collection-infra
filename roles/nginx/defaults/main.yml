@@ -49,6 +49,12 @@ nginx_rate_limit_zones:
     rate: 10r/s
     burst: 20
 
+# The DNS resolvers nginx asks for the OCSP responder of a {cert, key} site
+# (stapling), as host or host:port; systemd-resolved's stub by default. Empty:
+# nginx uses the responder's addresses from its last config load (and logs
+# "no resolver defined" on each update).
+nginx_resolvers: [127.0.0.53]
+
 # The noix error pages for nginx's own error responses.
 nginx_error_pages: true
 
