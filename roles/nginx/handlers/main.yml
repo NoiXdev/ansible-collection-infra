@@ -1,6 +1,9 @@
 ---
 # apply.yml tested the config. reloaded starts nginx when it is not running.
+# A failed apply whose config that is back in place does not pass its test
+# holds the reload: the running nginx keeps its previous config.
 - name: Reload nginx
   ansible.builtin.systemd_service:
     name: nginx
     state: reloaded
+  when: not (nginx_reload_held | default(false))

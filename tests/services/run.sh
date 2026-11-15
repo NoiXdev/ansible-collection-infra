@@ -1582,6 +1582,26 @@ suite_nginx() {
   grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/nginx-after-rollback.log" \
     || { cat "$out/nginx-after-rollback.log" >&2; fail "nginx: the run after the rollback changed something"; }
 
+  echo "== nginx: on a config broken before the run, the run fails and nginx does not reload"
+  hx nginx sh -c 'echo "this is broken;" > /etc/nginx/conf.d/zz-broken.conf'
+  before="$(hx nginx md5sum /etc/nginx/sites/static.conf)"
+  if play nginx "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_hsts": false}' >"$out/nginx-broken-before.log" 2>&1; then
+    fail "nginx: the run on a broken config did not fail"
+  fi
+  grep -qF "nginx -t fails on them too: the config was broken before this run, so nginx was not reloaded" "$out/nginx-broken-before.log" \
+    || { cat "$out/nginx-broken-before.log" >&2; fail "nginx: the failure does not say the config was broken before"; }
+  grep -qF 'unknown directive "this" in /etc/nginx/conf.d/zz-broken.conf' "$out/nginx-broken-before.log" \
+    || fail "nginx: the failure does not name nginx's error"
+  # Every flush of the reload handler skipped it.
+  awk '/^RUNNING HANDLER \[noixdev.infra.nginx : Reload nginx\]/ { h = 1; n++; next }
+       h && NF { if ($1 != "skipping:") bad = 1; h = 0 }
+       END { exit (n == 0 || bad) }' "$out/nginx-broken-before.log" \
+    || { cat "$out/nginx-broken-before.log" >&2; fail "nginx: the run reloaded nginx on a broken config"; }
+  [ "$(hx nginx md5sum /etc/nginx/sites/static.conf)" = "$before" ] || fail "nginx: static.conf changed after the failed run"
+  hx nginx rm /etc/nginx/conf.d/zz-broken.conf
+  prod_answers broken-before
+  has_headers https://static.example.test/ 'Strict-Transport-Security: max-age=31536000'
+
   echo "== nginx: a site that leaves the list hits the default server, its root stays"
   converge nginx no-static "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static": false}'
   rc="$(ncurl_rc https://static.example.test/)"

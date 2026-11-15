@@ -53,21 +53,33 @@
       vars:
         nginx_apply_changed: "{{ (nginx_apply_written.results + nginx_apply_removed.results) | selectattr('changed') | list }}"
   rescue:
+    - name: Keep the error
+      ansible.builtin.set_fact:
+        nginx_apply_what: >-
+          {{ 'nginx -t rejected the new config' if ansible_failed_result.cmd is defined
+             else '"' ~ ansible_failed_task.name ~ '" failed' }}
+        nginx_apply_detail: "{{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('')) | trim }}"
+
+    # Each step goes on when one file fails; the failures are collected below.
     - name: Put back the nginx config files nginx rejected
       ansible.builtin.command:
         argv: [mv, -f, --, "{{ item.backup_file }}", "{{ item.nginx_apply_file.dest }}"]
       loop: "{{ nginx_apply_written.results | selectattr('changed') | selectattr('backup_file', 'defined') }}"
       loop_control:
         label: "{{ item.nginx_apply_file.dest }}"
+      register: nginx_apply_put_back
       changed_when: true
+      failed_when: false
 
     - name: Remove the new nginx config files nginx rejected
-      ansible.builtin.file:
-        path: "{{ item.nginx_apply_file.dest }}"
-        state: absent
+      ansible.builtin.command:
+        argv: [rm, -f, --, "{{ item.nginx_apply_file.dest }}"]
       loop: "{{ nginx_apply_written.results | selectattr('changed') | rejectattr('backup_file', 'defined') }}"
       loop_control:
         label: "{{ item.nginx_apply_file.dest }}"
+      register: nginx_apply_unwritten
+      changed_when: true
+      failed_when: false
 
     - name: Put back the nginx config files set aside
       ansible.builtin.command:
@@ -75,7 +87,22 @@
       loop: "{{ nginx_apply_removed.results | selectattr('changed') }}"
       loop_control:
         label: "{{ item.item }}"
+      register: nginx_apply_unremoved
       changed_when: true
+      failed_when: false
+
+    # A rejected file that is still in place stops matching the includes.
+    - name: Set aside the rejected files that could not be put back
+      ansible.builtin.command:
+        argv: [mv, -f, --, "{{ item }}", "{{ item }}.noixdev-rejected"]
+        removes: "{{ item }}"
+      loop: "{{ nginx_apply_stuck }}"
+      register: nginx_apply_rejected
+      failed_when: false
+      vars:
+        nginx_apply_stuck: >-
+          {{ (nginx_apply_put_back.results + nginx_apply_unwritten.results) | selectattr('rc', 'ne', 0)
+             | map(attribute='item.nginx_apply_file.dest') | list }}
 
     - name: Test the config that is back in place
       ansible.builtin.command:
@@ -84,18 +111,39 @@
       changed_when: false
       failed_when: false
 
+    # nginx reloads only a config that passed its test; otherwise the running
+    # nginx keeps its previous config in memory.
+    - name: Hold the reload
+      ansible.builtin.set_fact:
+        nginx_reload_held: true
+      when: nginx_apply_retest.rc != 0 or nginx_apply_restore_errors | length > 0
+      vars:
+        nginx_apply_restore_errors: &nginx_apply_restore_errors >-
+          {{ (nginx_apply_put_back.results + nginx_apply_unwritten.results + nginx_apply_unremoved.results)
+             | selectattr('rc', 'ne', 0) | map(attribute='stderr') | map('trim') | list }}
+
     # Reloads notified by an earlier step of this run (or by a file put back)
-    # run now; nginx tested the config that is back in place first.
+    # run now.
     - name: Run the reloads notified before the failure
       ansible.builtin.meta: flush_handlers
 
     - name: Fail naming nginx's error
       ansible.builtin.fail:
         msg: >-
-          nginx: {{ 'nginx -t rejected the new config' if ansible_failed_result.cmd is defined
-          else '"' ~ ansible_failed_task.name ~ '" failed' }}; this run's files are back in place
-          {{- '' if nginx_apply_retest.rc == 0 else ' (and nginx -t fails on them too: the config was broken before)' }}:
-          {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('')) | trim }}
+          nginx: {{ nginx_apply_what }}{{ nginx_apply_state }}: {{ nginx_apply_detail }}
+      vars:
+        nginx_apply_state: >-
+          {{ (", and putting this run's files back failed too (" ~ nginx_apply_restore_errors | join('; ')
+              ~ "); the rejected files still there were set aside as <file>.noixdev-rejected, and nginx"
+              ~ " was not reloaded, so it runs its previous config")
+             if nginx_apply_restore_errors | length > 0
+             else ("; this run's files are back in place, but nginx -t fails on them too: the config was"
+                   ~ " broken before this run, so nginx was not reloaded and runs its previous config"
+                   ~ ('' if nginx_apply_retest.stderr | trim == nginx_apply_detail
+                      else ' (' ~ nginx_apply_retest.stderr | trim ~ ')'))
+             if nginx_apply_retest.rc != 0
+             else "; this run's files are back in place" }}
+        nginx_apply_restore_errors: *nginx_apply_restore_errors
 
 - name: Remove the backups of the nginx config files
   ansible.builtin.file:
