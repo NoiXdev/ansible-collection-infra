@@ -1521,6 +1521,9 @@ nginx_acme() {
   local broken='{"name": "broken", "domains": ["unresolvable.example.test"], "user": "app_static", "root": "/srv/static"}'
   local late='{"name": "late", "domains": ["late.example.test"], "user": "app_static", "root": "/srv/static"}'
 
+  echo "== nginx: the role reads certbot's results: a masked error is a failure, a skipped request is not"
+  play nginx "$dir/acme-results.yml"
+
   echo "== nginx: prod's certificate came with the first run, the second asked for none"
   answer="$(nginx_issued)"
   [ "$answer" = 1 ] || fail "nginx: certbot issued $answer certificates for prod in two runs, not 1"
@@ -1535,6 +1538,8 @@ nginx_acme() {
   master="$(hx nginx systemctl show -p MainPID --value nginx)"
   workers="$(nginx_workers "$master")"
   serial="$(nginx_serial prod.example.test)"
+  # Only this renewal's lines: the log is kept across runs of a container.
+  hx nginx truncate -s 0 /var/log/letsencrypt/letsencrypt.log
   hx nginx certbot renew --force-renewal --no-random-sleep-on-renew >"$out/nginx-renew.log" 2>&1 \
     || { cat "$out/nginx-renew.log" >&2; fail "nginx: certbot renew failed"; }
   # certbot logs the hooks it runs in its log of this run, not on stdout.
@@ -1588,6 +1593,27 @@ nginx_acme() {
     prod_answers "acme-$attempt"
   done
   hx nginx test ! -e /etc/letsencrypt/live/broken || fail "nginx: broken has a certificate"
+
+  echo "== nginx: a TLS block nginx rejects after a failed request: the run names both, the other sites stay"
+  # tlsfail gets its certificate, but its extra (only in its TLS block) fails
+  # nginx -t: its HTTP block is put back.
+  local tlsfail='{"name": "tlsfail", "domains": ["tlsfail.example.test"], "user": "app_static", "root": "/srv/static", "extra": "this is not nginx;"}'
+  if play nginx "$dir/converge.yml" "${fast[@]}" -e "$prod_old" -e "{\"nginx_test_extra_sites\": [$broken, $late, $tlsfail]}" \
+      >"$out/nginx-acme-tlsfail.log" 2>&1; then
+    fail "nginx: the run with tlsfail's broken extra did not fail"
+  fi
+  for want in 'nginx: certbot got no certificate for site broken (unresolvable.example.test: ' \
+      'unknown directive "this" in /etc/nginx/sites/tlsfail.conf'; do
+    grep -qF "$want" "$out/nginx-acme-tlsfail.log" || { cat "$out/nginx-acme-tlsfail.log" >&2; fail "nginx: the failed run does not say: $want"; }
+  done
+  answer="$(hx nginx systemctl show -p MainPID --value nginx)"
+  [ "$answer" = "$master" ] || fail "nginx: the tlsfail run restarted nginx (MainPID $master, now $answer)"
+  answer="$(hx nginx md5sum /etc/nginx/sites/prod.conf /etc/nginx/sites/node.conf /etc/nginx/sites/static.conf)"
+  [ "$answer" = "$before" ] || fail "nginx: the tlsfail run changed the other sites: $answer"
+  hx nginx sh -c '! grep -q "listen 443" /etc/nginx/sites/tlsfail.conf' || fail "nginx: tlsfail kept the TLS block nginx rejected"
+  answer="$(nginx_trusted https://late.example.test/)"
+  [ "$answer" = "200 " ] || fail "nginx: late over HTTPS answered $answer after the tlsfail run"
+  prod_answers acme-tlsfail
 
   echo "== nginx: back to prod's own names: the certificate follows, the extra sites go"
   converge nginx acme-defaults "$dir/converge.yml" "${fast[@]}"

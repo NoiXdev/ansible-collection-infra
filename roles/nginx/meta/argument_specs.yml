@@ -31,8 +31,9 @@ argument_specs:
         /etc/letsencrypt/renewal-hooks/deploy/noixdev-nginx reloads nginx after nginx -t.
       - >-
         A certificate request that fails does not stop the other sites: the run fails at the
-        end naming each site and domain that failed, and those sites keep only their HTTP
-        block until a later run gets the certificate.
+        end naming each site and domain that failed, and those sites keep what they had (the
+        HTTP block of a new site, or the TLS block with the certificate it has) until a later
+        run gets the certificate.
       - >-
         The site entries are checked by the role, not here, so that every message names the
         entry; an unknown key in an entry is refused.

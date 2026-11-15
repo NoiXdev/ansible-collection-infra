@@ -32,8 +32,9 @@
     group: root
     mode: "0755"
 
-# certbot runs it after each renewal (certbot.timer), not after the
-# requests below: the role reloads nginx for those itself.
+# certbot runs it after each renewal (certbot.timer), and after a request
+# below for a name it has a certificate of already; the role reloads nginx
+# after its requests itself.
 - name: Install certbot's deploy hook
   ansible.builtin.template:
     src: acme-deploy-hook.j2
@@ -107,43 +108,33 @@
       {%- endfor -%}
       {{ pending }}
 
+# A TLS block nginx rejects (apply.yml put the HTTP block back and ran the
+# notified reloads) fails the run naming nginx's error, and the requests
+# that failed too.
 - name: Write the TLS blocks of the new certificates
-  ansible.builtin.include_tasks: apply.yml
   when: nginx_acme_issued | length > 0
-  vars:
-    nginx_acme_issued: >-
-      {{ nginx_acme_requests.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 0)
-         | map(attribute='item.name') | list }}
-    nginx_apply_files: >-
-      {%- set files = [] -%}
-      {%- for site in nginx_acme_sites if site.name in nginx_acme_issued -%}
-      {%-   set tls_files = {'cert': nginx_letsencrypt_live ~ '/' ~ site.name ~ '/fullchain.pem',
-                             'key': nginx_letsencrypt_live ~ '/' ~ site.name ~ '/privkey.pem'} -%}
-      {%-   set _ = files.append({'src': 'site.conf.j2', 'dest': nginx_sites_dir ~ '/' ~ site.name ~ '.conf', 'mode': '0644',
-                                  'site': site | combine({'tls_files': tls_files})}) -%}
-      {%- endfor -%}
-      {{ files }}
+  block:
+    - name: Apply the TLS blocks of the new certificates
+      ansible.builtin.include_tasks: apply.yml
+      vars:
+        nginx_apply_files: >-
+          {%- set files = [] -%}
+          {%- for site in nginx_acme_sites if site.name in nginx_acme_issued -%}
+          {%-   set tls_files = {'cert': nginx_letsencrypt_live ~ '/' ~ site.name ~ '/fullchain.pem',
+                                 'key': nginx_letsencrypt_live ~ '/' ~ site.name ~ '/privkey.pem'} -%}
+          {%-   set _ = files.append({'src': 'site.conf.j2', 'dest': nginx_sites_dir ~ '/' ~ site.name ~ '.conf', 'mode': '0644',
+                                      'site': site | combine({'tls_files': tls_files})}) -%}
+          {%- endfor -%}
+          {{ files }}
+  rescue:
+    - name: Fail naming nginx's error and the certificates that failed
+      ansible.builtin.fail:
+        msg: >-
+          {{ (nginx_acme_failed_msg ~ '. The TLS blocks of the new certificates failed too: ')
+             if nginx_acme_failures | length > 0 else '' }}{{ ansible_failed_result.msg
+             | default('nginx: "' ~ ansible_failed_task.name ~ '" failed') }}
 
-# certbot names the domains whose challenge failed (Domain:, Detail:); for
-# another error, its last line.
 - name: Fail naming the certificates that failed
   ansible.builtin.fail:
-    msg: >-
-      nginx: certbot got no certificate for {{ nginx_acme_failures | join('; ') }};
-      {{ 'that site keeps' if nginx_acme_failures | length == 1 else 'those sites keep' }}
-      only its HTTP block, and the next run asks again
+    msg: "{{ nginx_acme_failed_msg }}"
   when: nginx_acme_failures | length > 0
-  vars:
-    nginx_acme_failures: >-
-      {%- set failures = [] -%}
-      {%- for result in nginx_acme_requests.results | selectattr('rc', 'defined') | rejectattr('rc', 'eq', 0) -%}
-      {%-   set output = result.stdout ~ '\n' ~ result.stderr -%}
-      {%-   set domains = output | regex_findall('(?m)^\s*Domain: (\S+)') | unique | list -%}
-      {%-   set details = output | regex_findall('(?m)^\s*Detail: (.*\S)') -%}
-      {%-   set lines = output.splitlines() | map('trim') | select | list -%}
-      {%-   set _ = failures.append('site ' ~ result.item.name ~ ' ('
-                                    ~ (domains or (result.item.domains + result.item.redirect_domains)) | join(', ') ~ ': '
-                                    ~ ((details | join('; ')) if details else (lines | last | default('certbot exited with ' ~ result.rc)))
-                                    ~ ')') -%}
-      {%- endfor -%}
-      {{ failures }}

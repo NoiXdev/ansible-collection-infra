@@ -23,6 +23,7 @@
       - www.prod.example.test
       - old.prod.example.test
       - late.example.test
+      - tlsfail.example.test
     pebble_dir: /etc/noixdev-test-pebble
   tasks:
     - name: Install the tools

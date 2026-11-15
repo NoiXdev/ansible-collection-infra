@@ -1,0 +1,37 @@
+---
+# The role's reading of certbot's request results (vars/main.yml), on
+# made-up results: one issued, one whose challenge failed, one error that
+# failed_when: false masked before certbot gave a return code (no rc; no
+# real run produces one here, so it is made up), and one skipped (check
+# mode). The masked error is a failure; the skipped one is neither.
+- name: Check how the role reads certbot's results
+  hosts: testhost
+  gather_facts: false
+  vars_files:
+    - ../../../roles/nginx/vars/main.yml
+  vars:
+    acme_test_site: {redirect_domains: []}
+    nginx_acme_requests:
+      results:
+        - item: "{{ acme_test_site | combine({'name': 'ok', 'domains': ['ok.example.test']}) }}"
+          rc: 0
+          stdout: ""
+          stderr: ""
+        - item: "{{ acme_test_site | combine({'name': 'bad', 'domains': ['bad.example.test', 'www.bad.example.test']}) }}"
+          rc: 1
+          stdout: ""
+          stderr: "Certbot failed to authenticate some domains\n  Domain: bad.example.test\n  Type:   dns\n  Detail: DNS problem\n\nHint: x\n"
+        - item: "{{ acme_test_site | combine({'name': 'masked', 'domains': ['masked.example.test']}) }}"
+          failed: true
+          msg: an error before certbot ran
+        - item: "{{ acme_test_site | combine({'name': 'skipped', 'domains': ['skipped.example.test']}) }}"
+          skipped: true
+          skip_reason: Conditional result was False
+  tasks:
+    - name: Check the issued sites, the failures and the message
+      ansible.builtin.assert:
+        that:
+          - nginx_acme_issued == ['ok']
+          - "nginx_acme_failures == ['site bad (bad.example.test: DNS problem)', 'site masked (masked.example.test: an error before certbot ran)']"
+          - nginx_acme_failed_msg is search('those sites keep what they had')
+        fail_msg: "issued {{ nginx_acme_issued }}, failures {{ nginx_acme_failures }}, message {{ nginx_acme_failed_msg }}"

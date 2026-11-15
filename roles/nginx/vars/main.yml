@@ -39,6 +39,36 @@ nginx_acme_root: /var/lib/noixdev/acme
 # Run by certbot after each renewal.
 nginx_acme_hook: /etc/letsencrypt/renewal-hooks/deploy/noixdev-nginx
 nginx_acme_sites: "{{ nginx_sites_public | selectattr('tls', 'eq', 'letsencrypt') | list }}"
+# After the requests of tasks/acme.yml (nginx_acme_requests): the sites that
+# got their certificate (rc 0), and one entry per request that did not. A
+# result without rc (an error before certbot returned, which failed_when:
+# false hides) is a failure; a skipped one (check mode) is neither. certbot
+# names the domains whose challenge failed (Domain:, Detail:); for another
+# error, its last line or the module's message.
+nginx_acme_issued: >-
+  {{ nginx_acme_requests.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 0)
+     | map(attribute='item.name') | list }}
+nginx_acme_failures: >-
+  {%- set failures = [] -%}
+  {%- for result in nginx_acme_requests.results
+        if not (result.skipped | default(false)) and result.rc | default(none) != 0 -%}
+  {%-   set output = result.stdout | default('') ~ '\n' ~ result.stderr | default('') -%}
+  {%-   set domains = output | regex_findall('(?m)^\s*Domain: (\S+)') | unique | list -%}
+  {%-   set details = output | regex_findall('(?m)^\s*Detail: (.*\S)') -%}
+  {%-   set lines = output.splitlines() | map('trim') | select | list -%}
+  {%-   set fallback = result.msg | default('certbot exited with ' ~ result.rc | default('no return code')) -%}
+  {%-   set _ = failures.append('site ' ~ result.item.name ~ ' ('
+                                ~ (domains or (result.item.domains + result.item.redirect_domains)) | join(', ') ~ ': '
+                                ~ ((details | join('; ')) if details else (lines | last | default(fallback)))
+                                ~ ')') -%}
+  {%- endfor -%}
+  {{ failures }}
+# A site whose request failed keeps what it had: its HTTP block, or its TLS
+# block with the certificate it has (a new name that failed).
+nginx_acme_failed_msg: >-
+  nginx: certbot got no certificate for {{ nginx_acme_failures | join('; ') }};
+  {{ 'that site keeps what it had' if nginx_acme_failures | length == 1 else 'those sites keep what they had' }}
+  (its HTTP block, or its TLS block with the certificate it has), and the next run asks again
 
 nginx_site_keys:
   - name
