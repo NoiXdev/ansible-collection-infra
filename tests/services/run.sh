@@ -737,6 +737,8 @@ php_planted_links() {
   hx php runuser -u app_staging -- sh -c 'rm -r /srv/staging/tmp/session && ln -s "$1" /srv/staging/tmp/session' sh "$victim"
   refused php link-session "php: php_pools entry staging: /srv/staging/tmp/session is a link or not a directory" \
     "$dir/converge.yml"
+  # A failed loop item is printed whole.
+  no_secret "$out/php-link-session.log" "${secrets[@]}"
   [ "$(hx php "${owners[@]}")" = "$before" ] || fail "php: the run followed the session link: $(hx php "${owners[@]}")"
   hx php runuser -u app_staging -- rm /srv/staging/tmp/session
 
@@ -802,8 +804,9 @@ suite_php() {
   # staging after its upgrade.
   local upgraded=(-e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3)
   # A part of staging's NOTE that its raw, JSON-escaped and pool.conf forms
-  # (c=\$d e) share, and the key (no log prints the env at all).
-  local secrets=('$d e' 'APP_ENV')
+  # (c=\$d e) share, the key (no log prints the env at all), and staging's
+  # ini value user_agent.
+  local secrets=('$d e' 'APP_ENV' 's3cr3t-ini')
   start php
 
   if [ "$ubuntu" != 24.04 ]; then
@@ -877,7 +880,7 @@ suite_php() {
   # A reload re-executes the master in its process.
   [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted instead of a reload"
 
-  echo "== php: the --diff logs have no env value"
+  echo "== php: the --diff logs have no env or ini value"
   for log in install install-idempotence memory memory-idempotence; do
     no_secret "$out/php-$log.log" "${secrets[@]}"
   done
@@ -903,7 +906,8 @@ suite_php() {
   refused php unlisted-version "php: php_pools entry production uses PHP 8.2, which php_versions does not list (8.3, 8.4)" \
     "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.2", "user": "app_prod"}]}'
   refused php role-owned-ini "php: php_pools entry production sets open_basedir in ini; open_basedir, error_log, session.save_path, upload_tmp_dir and sys_temp_dir belong to the role (it sets them from open_basedir and tmp_dir)" \
-    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "ini": {"open_basedir": "/"}}]}'
+    "$dir/converge.yml" -v -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "ini": {"open_basedir": "/s3cr3t-ini"}}]}'
+  no_secret "$out/php-role-owned-ini.log" s3cr3t-ini
   refused php restart-timeout "php: php_fpm_restart_timeout must be a positive number of seconds, not 0" \
     "$dir/converge.yml" -e php_fpm_restart_timeout=0
   refused php duplicate-name "php: php_pools has more than one entry named production" \
@@ -1073,7 +1077,7 @@ suite_php_classic() {
   local dir="$here/php" prod staging conf files
   local classic=(-e php_fpm_per_pool_service=false)
   local memory=(-e php_test_staging_memory_limit=160M)
-  local secrets=('$d e' 'APP_ENV')
+  local secrets=('$d e' 'APP_ENV' 's3cr3t-ini')
   # The role's checks let this number through; FPM's test refuses it.
   local bad_pm=(-e '{"php_test_staging_pm": {"mode": "static", "max_children": 2147483648}}')
 
@@ -1110,7 +1114,7 @@ suite_php_classic() {
   php_classic_running classic-fpm-rejects
   ask staging /srv/staging | grep -qF '"user":"app_staging"' || fail "php: staging does not answer after the rejected config"
 
-  echo "== php: classic mode: the --diff logs have no env value"
+  echo "== php: classic mode: the --diff logs have no env or ini value"
   for log in classic-switch-rejects classic classic-idempotence classic-memory classic-memory-idempotence classic-fpm-rejects; do
     no_secret "$out/php-$log.log" "${secrets[@]}"
   done

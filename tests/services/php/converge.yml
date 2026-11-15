@@ -39,8 +39,10 @@
         NOTE: 'a "b"; c=$d e'
       tmp_dir: "{{ php_test_staging_tmp_dir }}"
       open_basedir: [/srv/staging]
+      # user_agent stands in for a credential in ini (no log prints it).
       ini:
         memory_limit: "{{ php_test_staging_memory_limit }}"
+        user_agent: s3cr3t-ini
     php_test_extra_pool:
       name: extra
       version: "{{ php_test_extra_version }}"

@@ -1,6 +1,7 @@
 ---
-# Every message names the entry. The loops use the pools without their env;
-# the env check alone sees it, under no_log, and names keys only.
+# Every message names the entry. The loops use the pools without their env
+# and ini; the env check alone sees the env, under no_log, the ini checks
+# loop over the names, and all of them name keys only.
 - name: Check the versions
   ansible.builtin.assert:
     that:
@@ -231,30 +232,26 @@
   ansible.builtin.assert:
     that: php_owned | length == 0
     fail_msg: >-
-      php: php_pools entry {{ item.name }} sets {{ php_owned | join(', ') }} in ini;
+      php: php_pools entry {{ item }} sets {{ php_owned | join(', ') }} in ini;
       {{ php_role_ini_keys[:-1] | join(', ') }} and {{ php_role_ini_keys[-1] }} belong to the
       role (it sets them from open_basedir and tmp_dir)
     quiet: true
   vars:
-    php_owned: "{{ item.ini | default({}) | dict2items | map(attribute='key') | select('in', php_role_ini_keys) | list }}"
-  loop: "{{ php_pools_public }}"
-  loop_control:
-    label: "{{ item.name }}"
+    php_owned: "{{ php_pool_ini[item] | dict2items | map(attribute='key') | select('in', php_role_ini_keys) | list }}"
+  loop: "{{ php_pool_names }}"
 
 - name: Check the pool ini
   ansible.builtin.assert:
     that: php_bad_ini | length == 0
     fail_msg: >-
-      php: php_pools entry {{ item.name }} has ini {{ php_bad_ini | join(', ') }} that cannot be
+      php: php_pools entry {{ item }} has ini {{ php_bad_ini | join(', ') }} that cannot be
       written as given: a key must match ^[A-Za-z0-9_.-]+$, and a value be a string, number or
       boolean on one line
     quiet: true
   vars:
-    php_ini_items: "{{ item.ini | default({}) | dict2items }}"
+    php_ini_items: "{{ php_pool_ini[item] | dict2items }}"
     php_bad_ini: *php_bad_ini
-  loop: "{{ php_pools_public }}"
-  loop_control:
-    label: "{{ item.name }}"
+  loop: "{{ php_pool_names }}"
 
 - name: Check the pool paths
   ansible.builtin.assert:

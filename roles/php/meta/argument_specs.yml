@@ -106,9 +106,11 @@ argument_specs:
               its path or as one of the three dirs stops the run, naming it.
           ini:
             type: dict
+            no_log: true
             description: >-
-              php_admin_value settings. open_basedir, error_log, session.save_path, upload_tmp_dir
-              and sys_temp_dir belong to the role and are refused.
+              php_admin_value settings; never printed, as they may hold credentials. open_basedir,
+              error_log, session.save_path, upload_tmp_dir and sys_temp_dir belong to the role and
+              are refused.
           env:
             type: dict
             no_log: true

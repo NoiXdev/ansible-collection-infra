@@ -1,10 +1,12 @@
 ---
-# The pools without their env, for every loop that does not write a pool
-# config: a loop prints its items with -v.
+# The pools without their env and ini, for every loop that does not write a
+# pool config: a loop prints its items with -v (also with a label), and either
+# may hold credentials. The ini checks loop over the names and look the ini up.
 php_pools_public: >-
-  {{ php_pools | map('dict2items') | map('rejectattr', 'key', 'eq', 'env') | map('list')
+  {{ php_pools | map('dict2items') | map('rejectattr', 'key', 'in', ['env', 'ini']) | map('list')
      | map('items2dict') | list }}
 php_pool_names: "{{ php_pools_public | map(attribute='name') | list }}"
+php_pool_ini: "{{ dict(php_pool_names | zip(php_pools | map(attribute='ini', default={}))) }}"
 php_version_names: "{{ php_versions | map(attribute='version') | list }}"
 php_pool_versions: "{{ dict(php_pool_names | zip(php_pools_public | map(attribute='version'))) }}"
 
