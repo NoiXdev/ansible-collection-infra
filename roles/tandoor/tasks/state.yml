@@ -16,7 +16,8 @@
 # the data subdirectories of its media (an unmounted volume); then an install
 # that did not complete (its marker), left-over data without a compose file,
 # a change between local media and S3, a compose file without a Tandoor
-# version, a downgrade, and a PostgreSQL major other than the database's.
+# version, a downgrade, a tandoor_db_password that the database does not
+# take, and a PostgreSQL major other than the database's.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -152,6 +153,68 @@
           down, and changes nothing. Set tandoor_version to
           {{ tandoor_installed_version }} or newer.
       when: tandoor_version is version(tandoor_installed_version, '<')
+
+# PostgreSQL takes POSTGRES_PASSWORD only when it creates the cluster: on an
+# existing one a new tandoor_db_password would reach Tandoor but not the
+# database, and Tandoor could not log in (its health check does not notice).
+# The compose file on disk records the password the role wrote last (with $
+# doubled, as the template writes it); compared in a no_log task, so that
+# neither password is in the output.
+- name: Compare tandoor_db_password with the compose file
+  ansible.builtin.set_fact:
+    tandoor_db_password_changed: >-
+      {{ (((tandoor_compose_on_disk.services | default({})).db | default({})).environment | default({})).POSTGRES_PASSWORD
+         | default('') | string | replace('$$', '$') != tandoor_db_password | string }}
+  no_log: true
+  when: tandoor_installed
+
+# A new password may be the database's already, set by hand as the refusal
+# below says. Asked over the network as Tandoor connects (the local socket
+# and 127.0.0.1 need no password); the password goes through stdin into the
+# environment of psql (the x keeps trailing newlines), and the task is
+# no_log. The next task fails with the error.
+- name: Check that the database takes the new tandoor_db_password
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - db
+      - sh
+      - -c
+      - >-
+        PGPASSWORD="$(cat; echo x)"; PGPASSWORD="${PGPASSWORD%x}"; export PGPASSWORD;
+        PGCONNECT_TIMEOUT=10 exec psql --host=db --username=tandoor --dbname=tandoor
+        --no-psqlrc --tuples-only --command='SELECT 1'
+    chdir: "{{ tandoor_dir }}"
+    stdin: "{{ tandoor_db_password }}"
+    stdin_add_newline: false
+  register: tandoor_hidden
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - tandoor_installed
+    - tandoor_db_password_changed | bool
+
+- name: Refuse a tandoor_db_password the database does not take
+  ansible.builtin.fail:
+    msg: >-
+      tandoor_db_password differs from the password in
+      {{ tandoor_compose_file }}, and the database does not take it
+      ({{ tandoor_hidden_error }}). PostgreSQL takes a password only when it
+      creates the database, so Tandoor could not log in with the new one; the
+      role changes nothing. To change the password, set it in the database
+      first: in {{ tandoor_dir }} run docker compose exec db psql -U tandoor
+      -d postgres and enter \password tandoor (an ALTER USER tandoor PASSWORD
+      that keeps the password off the command line), then run the role again
+      with the new tandoor_db_password. Or set tandoor_db_password back to the
+      old one.
+  when:
+    - tandoor_installed
+    - tandoor_db_password_changed | bool
+    - tandoor_hidden.rc != 0
 
 # The PostgreSQL image keeps its cluster in a directory per major below the
 # mount (18/docker; main.yml refuses images older than 18): another major

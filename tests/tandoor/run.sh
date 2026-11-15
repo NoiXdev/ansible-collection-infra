@@ -28,6 +28,7 @@
 #             docker inspect, /media/ is not on the API router; a new secret
 #             key recreates Tandoor; a run without tandoor_s3 is refused
 #   update    an update from an older release with a recipe and its image: a
+#             new tandoor_db_password with it refused before any change; a
 #             backup (a dump read back in full, a hard-link copy of the
 #             media) taken and the oldest pruned, the recipe and the image
 #             unchanged, verify.yml on the new release; a downgrade, another
@@ -39,6 +40,10 @@
 #             with another version that removes the marker; then a rollback
 #             that fails too (the previous image cannot be started), whose
 #             marker refuses every version
+#   refusals  on an installation, a changed tandoor_db_password refused
+#             before any change, with Tandoor still healthy; then the new
+#             password taken once the database has it (ALTER USER, as the
+#             refusal says)
 #   missing_data
 #             left-over data without a compose file refused; an installation
 #             whose data directories are gone (an unmounted volume) refused in
@@ -87,6 +92,9 @@ s3_images=(
 s3_secret="$(value_of "$here/s3.yml" s3_secret_key)"
 s3_rotated_secret="$(value_of "$here/s3.yml" s3_rotated_secret_key)"
 admin_password="$(value_of "$here/vars.yml" tandoor_admin_password)"
+# The database password the refusals scenario rotates to; a $ that compose and
+# a shell must not expand.
+rotated_db_password='test-db-ro$tated-pass-0'
 # A web image that exits at once, tagged as a Tandoor release of a test image.
 busybox=busybox:1.37.0
 # The update tests: the older release they install first.
@@ -101,6 +109,7 @@ secrets=(
   "$admin_password"
   "$s3_secret"
   "$s3_rotated_secret"
+  "$rotated_db_password"
 )
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
@@ -270,6 +279,17 @@ expect_recipe() {
   sum="$(recipe check "$token" "$recipe_id" </dev/null)" || fail "the recipe or its image is missing $1"
   [ "$sum" = "$image_sum" ] || fail "the image of the recipe changed $1"
 }
+# Sets the password of the database user tandoor, as the refusal of a
+# changed tandoor_db_password says, over the local socket and through stdin:
+# set_db_password <password>.
+set_db_password() {
+  local quote="'"
+  printf "ALTER USER tandoor PASSWORD '%s';\n" "${1//$quote/$quote$quote}" \
+    | docker exec -i "$host" sh -c "cd $dir && docker compose exec -T db psql -q -U tandoor -d postgres -v ON_ERROR_STOP=1" \
+    || fail "cannot set the password of the database user"
+}
+# The id of the database container.
+db_id() { hx sh -c "cd $dir && docker compose ps --quiet db"; }
 # The image, state and health of the web container.
 web() { hx sh -c "cd $dir && docker compose ps --all --format '{{.Image}} {{.State}} {{.Health}}' web"; }
 
@@ -512,6 +532,15 @@ test_update() {
   add_recipe
   # Older backups; with the new one there are four, and three are kept.
   hx mkdir -p "$backups/20200101T000000Z-2.6.0" "$backups/20200101T000001Z-2.6.0" "$backups/20200101T000002Z-2.6.0"
+  # A new password with a new version: refused before the update, which would
+  # fail on it and roll back.
+  note_untouched
+  play_fails update-db-password "$here/converge.yml" -v -e "tandoor_db_password=$rotated_db_password"
+  expect_in_log update-db-password "tandoor_db_password differs from the password in $dir/compose.yaml, and the database does not take it"
+  expect_no_secrets update-db-password
+  expect_untouched update-db-password
+  [ "$(web)" = "${old_images[0]} running healthy" ] || fail "web after the refused update: $(web)"
+  hx test ! -e "$marker" || fail "the refused update wrote the marker"
   converge -v
   expect_no_secrets converge
   grep -q "update.yml" "$out/converge.log" || fail "the new version was not an update"
@@ -619,7 +648,6 @@ test_failed_update() {
   fi
   expect_untouched rollback-blocked
   hx test -e "$marker" || fail "the refused run removed the marker"
-
   echo "== a failed update with media in S3 must roll back the database and keep the images"
   new_host
   load_images
@@ -640,6 +668,31 @@ test_failed_update() {
   hx test ! -e "$backup/mediafiles" || fail "the backup of an S3 installation has mediafiles"
   hx test ! -e "$backup-failed" || fail "the rollback of an S3 installation made $backup-failed"
   hx test ! -e "$dir/data/mediafiles" || fail "the rollback of an S3 installation made $dir/data/mediafiles"
+}
+
+test_refusals() {
+  echo "== a changed database password must be refused before any change"
+  new_host
+  load_images
+  converge
+  wait_healthy
+  note_untouched
+  play_fails db-password "$here/converge.yml" -vvv -e "tandoor_db_password=$rotated_db_password"
+  expect_in_log db-password "tandoor_db_password differs from the password in $dir/compose.yaml, and the database does not take it"
+  expect_in_log db-password "ALTER USER"
+  expect_no_secrets db-password
+  expect_untouched db-password
+  [ "$(web)" = "${images[0]} running healthy" ] || fail "web after the refused run: $(web)"
+
+  echo "== a password changed in the database as the refusal says must be taken"
+  set_db_password "$rotated_db_password"
+  db_before="$(db_id)"
+  converge -v -e "tandoor_db_password=$rotated_db_password"
+  expect_no_secrets converge
+  grep -q "reconfigure.yml" "$out/converge.log" || fail "the new password was not a reconfigure"
+  [ "$(web)" = "${images[0]} running healthy" ] || fail "web after the new password: $(web)"
+  [ "$(db_id)" != "$db_before" ] || fail "the database container still has the old password in its environment"
+  expect_idempotent -e "tandoor_db_password=$rotated_db_password"
 }
 
 test_missing_data() {
@@ -723,10 +776,10 @@ test_mountpoint() {
 
 # All scenarios by default; NOIXDEV_INFRA_TANDOOR_TESTS="settings router"
 # runs only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update missing_data mountpoint}; do
+for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update refusals missing_data mountpoint}; do
   case "$scenario" in
-    settings | install | router | s3 | update | failed_update | missing_data | mountpoint) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, missing_data, mountpoint)" ;;
+    settings | install | router | s3 | update | failed_update | refusals | missing_data | mountpoint) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, refusals, missing_data, mountpoint)" ;;
   esac
 done
 
