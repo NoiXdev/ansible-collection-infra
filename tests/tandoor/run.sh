@@ -3,9 +3,10 @@
 # (a fresh one per scenario), with the traefik role in front and Mailpit as
 # the SMTP catcher:
 #   settings  invalid settings refused before any change (missing secrets,
-#             role-owned keys in tandoor_env, a bad e-mail setting, a version
-#             that is not 2.X.Y, PostgreSQL older than 18, no admin on
-#             install); nothing under /opt/tandoor afterwards
+#             role-owned keys in tandoor_env, a key without a value in it, a
+#             bad e-mail setting, a version that is not 2.X.Y, PostgreSQL
+#             older than 18, no admin on install); nothing under /opt/tandoor
+#             afterwards
 #   install   a failed install (a web image that exits at once) that stops
 #             the stack and that every later run refuses until it is removed
 #             as its message says; then a fresh install (verify.yml: login
@@ -293,6 +294,9 @@ test_settings() {
   expect_in_log owned-env-prefix EMAIL_HOST
   role_fails env-key -e '{"tandoor_env": {"lower": "x"}}'
   expect_in_log env-key tandoor_env
+  # A key left empty in YAML would reach Tandoor as the text None.
+  role_fails env-null -e '{"tandoor_env": {"NOIX_EMPTY": null}}'
+  expect_in_log env-null "tandoor_env has no value for NOIX_EMPTY"
   role_fails tls-ssl -e '{"tandoor_email": {"host": "mailpit", "from": "a@example.test", "tls": true, "ssl": true}}'
   expect_in_log tls-ssl tandoor_email
   expect_in_log tls-ssl "tls and ssl"

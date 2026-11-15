@@ -151,6 +151,19 @@
                  | select('match', '^(' ~ tandoor_env_owned_prefixes | join('|') ~ ')'))
          | sort }}
 
+# A key left empty in YAML (KEY:) is null, which would reach Tandoor as the
+# text None. The message names the keys, not the values.
+- name: Check that tandoor_env has a value for every key
+  ansible.builtin.assert:
+    that: tandoor_env_null | length == 0
+    fail_msg: >-
+      tandoor_env has no value for {{ tandoor_env_null | join(', ') }}
+      (null, as a key left empty in YAML is), which would reach Tandoor as the
+      text None. Set a value, '' for an empty one, or remove the key.
+    quiet: true
+  vars:
+    tandoor_env_null: "{{ tandoor_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
+
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
 
