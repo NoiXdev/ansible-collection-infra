@@ -103,6 +103,38 @@
   config sets none), so a first run that stops early never leaves MySQL on every interface.
   Another series, a server from Ubuntu's archive or MariaDB on the host is
   refused before any change.
+- `tandoor`: new role that runs Tandoor Recipes 2 (`tandoor_version`, pinned, major 2 only) and
+  PostgreSQL 18 or newer as one compose project in `tandoor_dir` (default `/opt/tandoor`), behind
+  Traefik with no published port. It needs Docker. `tandoor_hostname`, `tandoor_secret_key` (at
+  least 32 characters) and `tandoor_db_password` are required, the first admin
+  (`tandoor_admin_user`, `tandoor_admin_password`, `tandoor_admin_email`) only for a fresh install,
+  which creates the admin and the admin's first space itself, so nothing is left to set up on the
+  first login. Open registration is always off; users join through Tandoor's invite links, and
+  `tandoor_email` (SMTP) sends invites and password resets. The data lives in `tandoor_data_dir`,
+  which can be a `base_mounts` volume (`tandoor_data_dir_mountpoint` fails every run unless it is a
+  mountpoint); a run that finds the compose file without its data subdirectories fails in every
+  state. Two Traefik routers share `tandoor_hostname`: the pages (`tandoor_traefik_middlewares`)
+  and the paths the web UI and apps call without a page, `/api/`, `/_allauth/` and, with local
+  media, `/media/` (`tandoor_traefik_api_middlewares`), one priority above. They answer 401 or 403
+  without a session, so a challenge such as Anubis belongs on the pages router only.
+  `tandoor_trusted_proxy_count` (default 1) is the number of proxies in front of Tandoor; the role
+  adds the image's own nginx for `ALLAUTH_TRUSTED_PROXY_COUNT`, without which every visitor shares
+  one login rate limit. Media go to `tandoor_data_dir/mediafiles`, or to an S3 bucket with
+  `tandoor_s3` (the secret key in a `0600` file that the container reads, not in the compose file or
+  `docker inspect`; a new secret key recreates the whole stack, the database included). The media
+  mode is fixed at install: a run that switches between local media and S3 is refused. More
+  settings go through `tandoor_env`; the ones the role sets itself, `DATABASE_URL` and
+  `SECRET_KEY_FILE` among them, are refused. Before an update the role takes a backup in
+  `<tandoor_data_dir>/backups/` (`tandoor.dump`, a hard-link copy of local media and the compose
+  file; the S3 secret file is not in it); the newest `tandoor_dumps_keep` complete backups are kept,
+  while leftover `.partial` and `-failed` directories are not pruned. A failed update is rolled
+  back (`tandoor_rollback_timeout` bounds the wait for the previous version) and writes
+  `update-failed`, which blocks that version; after a rollback that failed too it blocks every
+  version until the backup is restored by hand. A failed install stops the stack and leaves
+  `install-incomplete`, which makes every later run refuse. Refused before any change: a
+  PostgreSQL image older than 18, a downgrade, a PostgreSQL major other than the database's and
+  left-over data without a compose file. The admin password reaches the container through stdin,
+  so it is not in the output even at `-vvv`. See the role's guide in the docs.
 
 ## 0.5.0 — 2026-11-14
 

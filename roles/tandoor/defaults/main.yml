@@ -48,9 +48,9 @@ tandoor_trusted_proxy_count: 1
 # required and have no default; keep them in a vault.
 
 # The first admin, created on a fresh install only (all three required
-# there), with a space of its own; the admin's first login runs Tandoor's
-# space setup. Users join through Tandoor's invite links: open registration
-# is always off.
+# there); the role also creates the admin's first space, so nothing is left
+# to set up on the first login. Users join through Tandoor's invite links:
+# open registration is always off.
 tandoor_admin_user: ""
 tandoor_admin_password: ""
 tandoor_admin_email: ""

@@ -85,9 +85,9 @@
       when: tandoor_hidden.rc != 0
 
     # Tandoor's API and UI need a space for every user; createsuperuser makes
-    # none. The same helper Tandoor's own first-user page and signup use: the
-    # space is the admin's, not yet set up, so the admin's first login runs
-    # Tandoor's space setup. The user name comes through stdin.
+    # none. The same helper Tandoor's own first-user page and signup use, so
+    # nothing is left to set up on the first login. The user name comes
+    # through stdin.
     - name: Create the first admin's space
       ansible.builtin.command:
         argv:
