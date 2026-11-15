@@ -26,7 +26,7 @@ UBUNTU=24.04 tests/services/run.sh  # the service roles, on their own (also UBUN
 
 `tests/all.sh` runs `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
 `host` (`tests/host/run.sh` on Ubuntu 24.04 and 26.04, set `HOST_UBUNTU` for fewer),
-`harbor`, `listmonk`, `paperless`, `anubis`, `mailcow` and `cloudpanel` (`tests/<suite>/run.sh`). It stops at
+`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow` and `cloudpanel` (`tests/<suite>/run.sh`). It stops at
 the first failing suite unless you pass `--keep-going`, and ends with a summary of each
 suite's result and runtime; the output of each suite is also in
 `tests/output/all/<suite>.log`. `--summary FILE` writes a machine-readable summary, one line
@@ -36,7 +36,7 @@ run as `linux/amd64` under emulation, which is slow. Docker Desktop on Apple sil
 Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tests/attest.sh`
 check this first. The `mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
-(`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `cloudpanel` runs CloudPanel's real installer.
+(`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `tandoor` about 2 GB and `n8n` about 3 GB of images, `cloudpanel` runs CloudPanel's real installer.
 `tests/services/run.sh` (nodejs, redis, mariadb, mysql) is not part of `tests/all.sh` or
 the signed test run yet: run it on its own, with `UBUNTU=24.04` and `UBUNTU=26.04`.
 

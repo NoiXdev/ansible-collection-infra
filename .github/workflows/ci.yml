@@ -1,8 +1,8 @@
 name: ci
 
 # Cheap checks only. The Docker test suites (tests/run.sh, tests/host,
-# tests/harbor, tests/listmonk, tests/paperless, tests/anubis, tests/mailcow,
-# tests/cloudpanel) run locally with tests/all.sh before pushing; a release
+# tests/harbor, tests/listmonk, tests/paperless, tests/tandoor, tests/n8n, tests/anubis,
+# tests/mailcow, tests/cloudpanel) run locally with tests/all.sh before pushing; a release
 # needs a signed attestation of that run (tests/attest.sh, checked by
 # release-gate.yml). tests/services runs on its own, not yet through
 # tests/all.sh or the attestation (tests/services/run.sh with UBUNTU=24.04

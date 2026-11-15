@@ -177,6 +177,47 @@
   database first, as the message says) and a compose file that is not YAML (the parser's error,
   which could quote a line with a secret, is not shown). The admin password reaches the container
   through stdin, so it is not in the output even at `-vvv`. See the role's guide in the docs.
+- `n8n`: new role that runs n8n 2 (`n8n_version`, pinned, major 2 and 2.17.0 or newer) and
+  PostgreSQL 18 or newer as one compose project in `n8n_dir` (default `/opt/n8n`), behind Traefik
+  with no published port. It needs Docker. `n8n_hostname`, `n8n_encryption_key`, `n8n_db_password`
+  and the owner (`n8n_owner_email`, `n8n_owner_first_name`, `n8n_owner_last_name`,
+  `n8n_owner_password`) are required on every run. The owner comes from the variables, which are
+  the source of truth: n8n applies them on every start and locks the owner in the UI, and the
+  password is rotated by changing `n8n_owner_password`. The bcrypt hash is computed in the n8n
+  image on the target, with the password and the key on stdin. The installation keeps the
+  encryption key it was made with: its sha256 is written to `encryption-key.sha256` and a different
+  key, or a missing fingerprint file on an existing installation, is refused; back the key up,
+  without it the credentials are lost. `n8n_workers` (default 0) switches between n8n's normal mode
+  and queue mode: Valkey without data on disk and one compose service per worker, which start once
+  the main instance is healthy; switching is a reconfigure and executions that run at that moment
+  are lost, and community nodes installed from the UI are not on the workers
+  (`N8N_REINSTALL_MISSING_PACKAGES` in `n8n_env`). Two Traefik routers share `n8n_hostname`: the UI
+  (the editor, `/rest/` and everything else, `n8n_traefik_middlewares`) and the public endpoints
+  (`/webhook/`, `/webhook-test/`, `/webhook-waiting/`, `/form/`, `/form-test/`, `/form-waiting/`,
+  `/mcp/`, `/mcp-test/` and, with `n8n_traefik_public_api`, `/api/v1/`;
+  `n8n_traefik_webhook_middlewares`), one priority above. The data lives in `n8n_data_dir`
+  (`postgres`, `home`, `files`), which can be a `base_mounts` volume (`n8n_data_dir_mountpoint`
+  fails every run unless it is a mountpoint); a run that finds the compose file without its data
+  subdirectories fails in every state, before any other refusal. More settings go through
+  `n8n_env`; the ones the role sets itself, and every `DB_`, `QUEUE_`, `N8N_INSTANCE_OWNER_` and
+  `N8N_ENDPOINT_` key, are refused, and so is a key without a value; `N8N_PROXY_HOPS` defaults to 1.
+  `N8N_GRACEFUL_SHUTDOWN_TIMEOUT` (30 seconds, set by the role) lets running executions finish on a
+  stop and the containers get 15 seconds more before Docker kills them, so a stop can take about 45
+  seconds and an update in queue mode waits for two health phases. Health is n8n's readiness, which
+  touches the database. An update takes a backup in `<n8n_data_dir>/backups/` (`n8n.dump` read back
+  in full, a copy of the n8n home and the compose file; the newest `n8n_dumps_keep` complete ones
+  are kept, `.partial` and `-failed` directories are never pruned) and rolls back when the new
+  version is not healthy (`n8n_rollback_timeout` bounds the wait for the previous version); the
+  failed version is then recorded in `update-failed` and not tried again, and after a rollback that
+  failed too the marker blocks every version until the backup is restored by hand. A failed install
+  stops the stack and leaves `install-incomplete`, which makes every later run refuse. A changed
+  `n8n_db_password` is checked against the database and refused with the `ALTER USER` step when it
+  does not take it (PostgreSQL takes the password only when it creates the database). Also refused
+  before any change: a PostgreSQL image older than 18, a downgrade, a PostgreSQL major other than
+  the database's and a compose file that is not YAML (the parser's error, which could quote a line
+  with a secret, is not shown). The encryption key, the database password and the owner's password
+  reach containers only through the `0600` compose file or stdin, so they are not in the output
+  even at `-vvv`. See the role's guide in the docs.
 
 ## 0.5.0 — 2026-11-14
 
