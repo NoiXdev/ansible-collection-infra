@@ -35,6 +35,12 @@ argument_specs:
         HTTP block of a new site, or the TLS block with the certificate it has) until a later
         run gets the certificate.
       - >-
+        The noix error pages (nginx_error_pages, on by default): the error_pages_export role
+        exports nginx_error_pages_image once with Docker to nginx_error_pages_dir, and every site
+        answers nginx's own errors of nginx_error_pages_codes with them (error_page to the
+        internal /.noix-error/<code>.html); an app's own error answers pass unchanged. Docker is
+        checked (docker_check) before any change when the error pages or a site's anubis are on.
+      - >-
         The site entries are checked by the role, not here, so that every message names the
         entry; an unknown key in an entry is refused.
     options:
@@ -102,7 +108,16 @@ argument_specs:
             and are listed once; passwords are one-line strings. With allow, those addresses pass
             without a password (satisfy any) and everyone else needs one; without it every
             address needs one. The passwords are handled in no_log tasks only.
-          - anubis (false by default) is not supported yet by this version.
+          - >-
+            anubis (false by default): Anubis (the anubis role in host mode, on
+            127.0.0.1:nginx_anubis_port) checks every request of the site with auth_request
+            before its location runs; a browser without Anubis's cookie gets the challenge page
+            (status 401) at the URL it asked for. Anubis's own /.within.website/ paths and the
+            ACME challenges are never checked; X-Original-Uri and X-Real-Ip ($remote_addr) are
+            set by nginx, never taken from the client. Fails closed (500) while Anubis is down.
+            The run is refused before any change when nothing answers on 127.0.0.1:nginx_anubis_port,
+            and a site cannot have both basic_auth and anubis (the challenge would replace Basic
+            auth's 401).
           - extra, raw config inside the site's server block.
       nginx_http_extra:
         type: str
@@ -131,7 +146,38 @@ argument_specs:
           - name (^[a-z0-9_]+$, unique), rate (10r/s or 60r/m, for example) and burst (a whole number).
       nginx_error_pages:
         type: bool
-        description: The noix error pages for nginx's own error responses.
+        description: >-
+          The noix error pages for nginx's own error responses (true by default; needs Docker for
+          the export). false removes the error_page lines; the exported files stay.
+      nginx_error_pages_image:
+        type: str
+        description: The error pages image, with its tag (noixdev/error-pages:1.0.0 by default).
+      nginx_error_pages_theme:
+        type: str
+        description: The theme of the pages (classic by default).
+      nginx_error_pages_env:
+        type: dict
+        description: >-
+          The export's environment (LANGUAGES, DEFAULT_LANGUAGE, ...). THEME is
+          nginx_error_pages_theme, SHOW_DETAILS is false; MAINTENANCE, MAINTENANCE_UNTIL, LISTEN and
+          CONFIG_FILE are ignored. The sites serve the export's default language.
+      nginx_error_pages_codes:
+        type: list
+        elements: int
+        description: >-
+          The status codes that get a noix page (403, 404, 413, 414, 429, 500, 502, 503 and 504 by
+          default); 4xx and 5xx only, and no 401 while a site has anubis.
+      nginx_error_pages_dir:
+        type: path
+        description: Where the pages are exported (releases/, current); /var/www/noix-error-pages by default.
+      nginx_error_pages_export_script:
+        type: path
+        description: The export script (/usr/local/sbin/noix-error-pages-export by default).
+      nginx_anubis_port:
+        type: int
+        description: >-
+          The port on 127.0.0.1 Anubis answers on for the sites with anubis (the anubis role's
+          anubis_host_port in host mode); 8923 by default.
       nginx_user_includes:
         type: bool
         description: >-

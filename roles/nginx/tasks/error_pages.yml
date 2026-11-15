@@ -1,0 +1,28 @@
+---
+# The noix error pages: the internal error_pages_export role runs the image
+# once in Docker (only when the image, theme, environment or codes changed)
+# and writes static files to nginx_error_pages_dir: releases/<id>/pages/
+# <language>/<code>.html, published through the link current. It sets
+# error_pages_export_languages, whose default language the sites serve.
+# Everything there is root's (the link and its target): the sites'
+# disable_symlinks if_not_owner follows the link.
+- name: Export the error pages
+  ansible.builtin.include_role:
+    name: noixdev.infra.error_pages_export
+  vars:
+    error_pages_export_dir: "{{ nginx_error_pages_dir }}"
+    error_pages_export_image: "{{ nginx_error_pages_image }}"
+    error_pages_export_theme: "{{ nginx_error_pages_theme }}"
+    error_pages_export_env: "{{ nginx_error_pages_export_env }}"
+    error_pages_export_codes: "{{ nginx_error_pages_codes | map('int') | unique | sort }}"
+    error_pages_export_script: "{{ nginx_error_pages_export_script }}"
+
+- name: Note the language of the error pages
+  ansible.builtin.set_fact:
+    nginx_error_pages_lang: "{{ error_pages_export_languages.default }}"
+
+- name: Check the language of the error pages
+  ansible.builtin.assert:
+    that: nginx_error_pages_lang is match('^[A-Za-z-]+$')
+    fail_msg: "nginx: the error pages export names the language '{{ nginx_error_pages_lang }}'"
+    quiet: true

@@ -1,0 +1,19 @@
+---
+# The anubis role in host mode for prod (127.0.0.1:8923). Test-only rules:
+# /api/ passes without a challenge (Anubis checks the request's own path),
+# and so does 203.0.113.0/24 (RFC 5737), an address only a client-sent
+# X-Real-Ip or X-Forwarded-For could claim here.
+- name: Run Anubis in host mode
+  hosts: testhost
+  vars:
+    anubis_mode: host
+    anubis_redirect_domains: [prod.example.test]
+    anubis_policy_allow:
+      - name: test-api
+        action: ALLOW
+        path_regex: ^/api/
+      - name: test-forged-address
+        action: ALLOW
+        remote_addresses: [203.0.113.0/24]
+  roles:
+    - noixdev.infra.anubis

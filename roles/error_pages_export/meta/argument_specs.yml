@@ -1,7 +1,7 @@
 ---
 argument_specs:
   main:
-    short_description: Static export of the noix error pages (internal; used by cloudpanel and mailcow)
+    short_description: Static export of the noix error pages (internal; used by cloudpanel, mailcow and nginx)
     description:
       - Runs the error pages image once, saves every page in every language
         it offers as static files and removes the container again. The files

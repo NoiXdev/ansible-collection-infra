@@ -162,5 +162,17 @@ nginx_groups_recorded: >-
 nginx_groups_kept: "{{ nginx_groups_recorded | intersect(nginx_groups_current) | sort }}"
 nginx_groups_header: "# managed by noixdev.infra (nginx role): the groups www-data joined for the sites."
 
-# IPv6 listeners only where the host has IPv6.
-nginx_ipv6: "{{ ansible_facts.all_ipv6_addresses | default([]) | length > 0 }}"
+# The error pages export's environment: nginx_error_pages_env without the
+# keys the export sets or must not see, with the theme and no details.
+nginx_error_pages_ignored_env: [THEME, SHOW_DETAILS, MAINTENANCE, MAINTENANCE_UNTIL, LISTEN, CONFIG_FILE]
+nginx_error_pages_export_env: >-
+  {{ nginx_error_pages_env | dict2items | rejectattr('key', 'in', nginx_error_pages_ignored_env)
+     | items2dict | combine({'THEME': nginx_error_pages_theme, 'SHOW_DETAILS': 'false'}) }}
+# The sites Anubis checks.
+nginx_anubis_sites: "{{ nginx_sites_public | selectattr('anubis') | list }}"
+nginx_anubis_url: "http://127.0.0.1:{{ nginx_anubis_port }}"
+
+# IPv6 listeners only where the host has IPv6 beyond link-local addresses:
+# Docker's bridge gets one when its first container starts (the error pages
+# export), which would otherwise change the listeners on the next run.
+nginx_ipv6: "{{ ansible_facts.all_ipv6_addresses | default([]) | reject('match', '(?i)^fe[89ab][0-9a-f]:') | list | length > 0 }}"

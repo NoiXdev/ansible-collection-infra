@@ -5,8 +5,9 @@
 # so there a pool of Ubuntu's php-fpm on the same socket stands in). Then the
 # nginx role with three sites: prod takes its certificate from Let's Encrypt,
 # here the Pebble of pebble.yml (run before), node and static the self-signed
-# one. The knobs below change the sites between runs; -e nginx_sites=[...]
-# replaces the whole list for the invalid cases.
+# one. Docker (docker.yml, run before) exports the error pages. The knobs
+# below change the sites between runs; -e nginx_sites=[...] replaces the
+# whole list for the invalid cases.
 - name: Prepare the backends
   hosts: testhost
   vars:
@@ -220,6 +221,9 @@
     nginx_test_auth_allow: [192.0.2.10]
     nginx_test_static_rate_limit: ""
     nginx_test_prod_redirects: [www.prod.example.test]
+    # Anubis in front of prod: off by default (the anubis role in host mode
+    # runs first, from anubis.yml).
+    nginx_test_prod_anubis: false
     # Pebble (pebble.yml), whose listener and roots the trust store has.
     nginx_acme_email: hostmaster@example.test
     nginx_acme_server: https://localhost:14000/dir
@@ -235,6 +239,7 @@
       root: /srv/prod/public
       php_scripts: [setup/install.php]
       tls: letsencrypt
+      anubis: "{{ nginx_test_prod_anubis | bool }}"
       extra: "{{ nginx_test_prod_extra }}"
     nginx_test_prod_site: >-
       {{ nginx_test_prod | combine({'basic_auth': nginx_test_basic_auth} if nginx_test_auth | bool else {}) }}

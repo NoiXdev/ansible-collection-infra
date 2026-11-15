@@ -48,6 +48,37 @@
     - nginx_installed_nginx | length > 0
     - nginx_installed_series != nginx_version
 
+# Read-only, before any change: the error pages are exported with Docker, and
+# Anubis runs in Docker (the anubis role in host mode).
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+  when: nginx_error_pages or nginx_anubis_sites | length > 0
+
+# Any answer will do: the check is that something listens there, as the
+# anubis role in host mode publishes it.
+- name: Ask Anubis
+  ansible.builtin.uri:
+    url: "{{ nginx_anubis_url }}/"
+    timeout: 5
+  register: nginx_anubis_probe
+  failed_when: false
+  check_mode: false
+  when: nginx_anubis_sites | length > 0
+
+- name: Refuse anubis without Anubis on the host
+  ansible.builtin.fail:
+    msg: >-
+      nginx: nginx_sites {{ 'entry' if nginx_anubis_names | length == 1 else 'entries' }}
+      {{ nginx_anubis_names | join(', ') }} {{ 'sets' if nginx_anubis_names | length == 1 else 'set' }}
+      anubis, but Anubis does not answer on {{ nginx_anubis_url }}/; run the anubis role with
+      anubis_mode host (anubis_host_port {{ nginx_anubis_port }}) first
+  vars:
+    nginx_anubis_names: "{{ nginx_anubis_sites | map(attribute='name') | list }}"
+  when:
+    - nginx_anubis_sites | length > 0
+    - nginx_anubis_probe.status | default(-1) | int <= 0
+
 # A task that fails after an earlier one notified the reload: the reload runs
 # first, so nginx does not stay on its old config while the next run, seeing
 # no change, would leave it there.
@@ -65,6 +96,10 @@
 
     - name: Configure nginx
       ansible.builtin.include_tasks: global.yml
+
+    - name: Export the error pages
+      ansible.builtin.include_tasks: error_pages.yml
+      when: nginx_error_pages
 
     - name: Configure the sites
       ansible.builtin.include_tasks: sites.yml

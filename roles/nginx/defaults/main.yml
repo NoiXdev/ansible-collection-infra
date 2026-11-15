@@ -32,6 +32,7 @@ nginx_apt_key_fingerprint: 8540A6F18833A80E9C1653A42FD21310B49F6B46
 #     headers: {}                      # added or replaced; "" removes one
 #     rate_limit: default              # a zone of nginx_rate_limit_zones
 #     client_max_body_size: 64m
+#     anubis: false                    # Anubis checks every request first
 #     extra: ""                        # raw config inside the server block
 nginx_sites: []
 
@@ -54,8 +55,32 @@ nginx_rate_limit_zones:
 # "no resolver defined" on each update).
 nginx_resolvers: [127.0.0.53]
 
-# The noix error pages for nginx's own error responses.
+# The noix error pages for nginx's own error responses (the 4xx and 5xx nginx
+# answers itself, such as a blocked path, a body over client_max_body_size, a
+# rate limit or a pool that does not answer); an app's own answers pass
+# unchanged (no fastcgi_intercept_errors or proxy_intercept_errors). The
+# error_pages_export role runs nginx_error_pages_image once in Docker and
+# writes static files to nginx_error_pages_dir (current/pages/<language>/),
+# again only when the image, theme, environment or codes change. Docker must
+# run on the host (the docker role); without it the run is refused before any
+# change. Every site serves the pages of the export's default language for
+# nginx_error_pages_codes at /.noix-error/<code>.html (internal). false: no
+# error_page lines (the exported files stay).
 nginx_error_pages: true
+nginx_error_pages_image: noixdev/error-pages:1.0.0
+nginx_error_pages_theme: classic
+# The export's environment (LANGUAGES, DEFAULT_LANGUAGE, ...). THEME is
+# nginx_error_pages_theme and SHOW_DETAILS is always false; MAINTENANCE,
+# MAINTENANCE_UNTIL, LISTEN and CONFIG_FILE are ignored.
+nginx_error_pages_env: {}
+nginx_error_pages_codes: [403, 404, 413, 414, 429, 500, 502, 503, 504]
+nginx_error_pages_dir: /var/www/noix-error-pages
+nginx_error_pages_export_script: /usr/local/sbin/noix-error-pages-export
+
+# Anubis for the sites with anubis: true: the anubis role in host mode on this
+# host, published on 127.0.0.1:nginx_anubis_port (its anubis_host_port). A run
+# with such a site is refused before any change while nothing answers there.
+nginx_anubis_port: 8923
 
 # Deploy snippets (per site in ~<user>/.config/nginx/<name>/, and at http
 # level in ~<nginx_include_user>/.config/nginx/global/) are not supported yet

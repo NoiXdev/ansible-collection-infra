@@ -14,11 +14,35 @@
       - nginx_error_pages is boolean
       - nginx_user_includes is boolean
       - nginx_include_user is string
+      - nginx_anubis_port | string is match('^[0-9]+$')
+      - nginx_anubis_port | int >= 1 and nginx_anubis_port | int <= 65535
     fail_msg: >-
       nginx: nginx_version must be a major.minor series such as "1.30", nginx_http_extra a
       string, nginx_acme_email empty or an address, nginx_acme_server an https URL,
-      nginx_error_pages and nginx_user_includes true or false, nginx_include_user a user name
+      nginx_error_pages and nginx_user_includes true or false, nginx_include_user a user name,
+      nginx_anubis_port a port number
     quiet: true
+
+# The paths go into the site configs and the export script as they are.
+- name: Check the error pages settings
+  ansible.builtin.assert:
+    that:
+      - nginx_error_pages_image is string and nginx_error_pages_image | length > 0
+      - nginx_error_pages_theme is string and nginx_error_pages_theme is match('^[A-Za-z0-9_-]+$')
+      - nginx_error_pages_env is mapping
+      - nginx_error_pages_codes is sequence and nginx_error_pages_codes is not string and nginx_error_pages_codes is not mapping
+      - nginx_error_pages_codes | length > 0
+      - nginx_error_pages_codes | map('string') | reject('match', '^[45][0-9][0-9]$') | list | length == 0
+      - nginx_error_pages_dir is string and nginx_error_pages_dir is match('^(/[A-Za-z0-9._@+=,~-]+)+$')
+      - nginx_error_pages_dir | split('/') | select('in', ['.', '..']) | list | length == 0
+      - nginx_error_pages_export_script is string and nginx_error_pages_export_script is match('^(/[A-Za-z0-9._@+=,~-]+)+$')
+    fail_msg: >-
+      nginx: the error pages need an image, a theme name (^[A-Za-z0-9_-]+$), nginx_error_pages_env
+      a mapping, nginx_error_pages_codes a list of 4xx and 5xx status codes, and
+      nginx_error_pages_dir and nginx_error_pages_export_script absolute paths without spaces,
+      quotes or . and .. parts
+    quiet: true
+  when: nginx_error_pages
 
 - name: Check the trusted proxies
   ansible.builtin.assert:
@@ -258,6 +282,24 @@
   loop_control:
     label: "{{ item.name }}"
 
+# The export writes the error pages as root: no site root (its user's to
+# write) holds nginx_error_pages_dir or lies inside it.
+- name: Check that no web root overlaps the error pages
+  ansible.builtin.assert:
+    that:
+      - not (nginx_root ~ '/').startswith(nginx_error_pages_dir ~ '/')
+      - not (nginx_error_pages_dir ~ '/').startswith(nginx_root ~ '/')
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has the root {{ item.root }}, which overlaps
+      nginx_error_pages_dir {{ nginx_error_pages_dir }}; the error pages are root's
+    quiet: true
+  vars:
+    nginx_root: "{{ item.root | regex_replace('/$', '') }}"
+  loop: "{{ nginx_sites_public | selectattr('root', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: nginx_error_pages
+
 - name: Check the TLS settings
   ansible.builtin.assert:
     that: >-
@@ -412,18 +454,32 @@
   loop_control:
     label: "{{ item.name }}"
 
-# Anubis comes with a later version of the role; until then a site that asks
-# for it is refused rather than served without it.
-- name: Check for settings this version does not support yet
+# Anubis answers a request it challenges with a 401 (error_page 401), which
+# would replace Basic auth's 401 (and its WWW-Authenticate) with the
+# challenge page: a browser could never log in.
+- name: Check that no site has Basic auth and Anubis
   ansible.builtin.assert:
-    that: not item.anubis
+    that: not (item.basic_auth_on and item.anubis)
     fail_msg: >-
-      nginx: nginx_sites entry {{ item.name }} sets anubis, which this version of the role does
-      not support yet
+      nginx: nginx_sites entry {{ item.name }} has basic_auth and anubis; Anubis would answer
+      Basic auth's 401 with its challenge, so a site has one of them at most
     quiet: true
   loop: "{{ nginx_sites_public }}"
   loop_control:
     label: "{{ item.name }}"
+
+# The challenge is the 401 nginx gets from Anubis; a noix page for 401 would
+# replace it.
+- name: Check that the error pages leave Anubis's 401 alone
+  ansible.builtin.assert:
+    that: nginx_error_pages_codes | map('int') | select('eq', 401) | list | length == 0
+    fail_msg: >-
+      nginx: nginx_error_pages_codes has 401, and nginx_sites entry {{ nginx_anubis_sites[0].name }}
+      sets anubis, whose challenge is a 401; remove 401 from the codes
+    quiet: true
+  when:
+    - nginx_error_pages
+    - nginx_anubis_sites | length > 0
 
 # The hashes come from password_hash, which needs passlib (or libxcrypt) on the
 # controller; without it the run would fail after earlier changes. The probe

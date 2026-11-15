@@ -1,0 +1,16 @@
+---
+# Docker in the nginx test container (privileged, /var/lib/docker and
+# /var/lib/containerd on volumes of their own): the error pages export and
+# Anubis need it. Run once, before the first converge. The test image has no
+# CA certificates (converge.yml's curl brings them later).
+- name: Install Docker
+  hosts: testhost
+  pre_tasks:
+    - name: Install the CA certificates
+      ansible.builtin.apt:
+        name: ca-certificates
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+  roles:
+    - noixdev.infra.docker

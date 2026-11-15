@@ -1,5 +1,5 @@
 ---
-# Internal role: used by cloudpanel and mailcow through include_role, which
+# Internal role: used by cloudpanel, mailcow and nginx through include_role, which
 # pass these values in. Only the environment has a default.
 #
 # Environment of the export (LANGUAGES, DEFAULT_LANGUAGE, ...), passed to the

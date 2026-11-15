@@ -127,6 +127,114 @@ server {
 
     include {{ nginx_role_dir }}/hardening.conf;
 {% endif %}
+{% if nginx_error_pages %}
+
+    # The noix error pages, for the errors nginx answers itself; the app's
+    # own answers pass unchanged (no fastcgi_intercept_errors or
+    # proxy_intercept_errors). ^~: no regex location (the hardening's
+    # dotfiles) takes the path. The release behind the link current is
+    # root's, as the link is: disable_symlinks if_not_owner follows it, and
+    # $document_root here is the alias, below the link.
+{% for code in nginx_error_pages_codes | map('int') | unique | sort %}
+    error_page {{ code }} /.noix-error/{{ code }}.html;
+{% endfor %}
+    location ^~ /.noix-error/ {
+        internal;
+{% if site.basic_auth_on %}
+        # The page of an error before the login (a rate limit) needs none.
+        auth_basic off;
+        allow all;
+{% endif %}
+{% if site.anubis %}
+        # The page of a 403 (Anubis's DENY) or a 500 (Anubis down) is never
+        # checked again.
+        auth_request off;
+{% endif %}
+        # The redirect to the page keeps the request's headers: without this
+        # a 413 (body too large) fails again here and nginx shows its own.
+        client_max_body_size 0;
+        alias {{ nginx_error_pages_dir }}/current/pages/{{ nginx_error_pages_lang }}/;
+    }
+{% endif %}
+{% if site.anubis %}
+
+    # Anubis (the anubis role in host mode, {{ nginx_anubis_url }}): every
+    # request of this server is checked before its location runs; a browser
+    # without Anubis's cookie gets the challenge page at the URL it asked
+    # for (status 401), which leads back there once solved. What nginx
+    # answers before the check (the hardening's 404s, redirects) is never
+    # checked. Anubis decides the paths its policy ALLOWs too: while it is
+    # down every checked request answers 500 (fails closed). nginx sets
+    # X-Original-Uri, X-Forwarded-Uri and X-Real-Ip itself (X-Real-Ip is
+    # $remote_addr, the address nginx_real_ip_from yields), so a client's
+    # own never reach Anubis.
+    auth_request /.within.website/x/cmd/anubis/api/check;
+    error_page 401 @anubis_challenge;
+
+    # The check. It carries no body; without client_max_body_size 0 nginx
+    # would hold the request's Content-Length against this location (413,
+    # so 500).
+    location = /.within.website/x/cmd/anubis/api/check {
+        internal;
+        client_max_body_size 0;
+        proxy_pass {{ nginx_anubis_url }};
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Original-Uri $request_uri;
+        proxy_set_header X-Forwarded-Uri $request_uri;
+        proxy_set_header X-Real-Ip $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 10s;
+    }
+
+    # Anubis's own paths (its assets, pass-challenge), never checked. No
+    # X-Original-Uri or X-Forwarded-Uri: Anubis judges the path it is asked
+    # for. ^~: no regex location (the hardening's dotfiles) takes the path.
+    location ^~ /.within.website/ {
+        auth_request off;
+        proxy_pass {{ nginx_anubis_url }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Original-Uri "";
+        proxy_set_header X-Forwarded-Uri "";
+        proxy_set_header X-Real-Ip $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 5s;
+    }
+
+    # The challenge: Anubis renders its page for the request as sent (a GET,
+    # without the body); the status stays 401, so no cache keeps the page as
+    # the URL's content.
+    location @anubis_challenge {
+        auth_request off;
+        proxy_method GET;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Original-Uri "";
+        proxy_set_header X-Forwarded-Uri "";
+        proxy_set_header X-Real-Ip $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 5s;
+        proxy_pass {{ nginx_anubis_url }};
+    }
+
+    # ACME challenges (certbot's webroot) are never checked, here as on port
+    # 80.
+    location ^~ /.well-known/acme-challenge/ {
+        auth_request off;
+        root {{ nginx_acme_root }};
+        default_type text/plain;
+        try_files $uri =404;
+    }
+{% endif %}
 {% if site.extra | length > 0 %}
 
     # extra

@@ -33,28 +33,30 @@ export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME
 
 fail() { echo "$*" >&2; exit 1; }
 
-# start ROLE: a fresh systemd container for the role's suite.
+# start ROLE [docker run args]: a fresh systemd container for the role's
+# suite. Anonymous volumes (-v /var/lib/docker) go with the container (rm -v).
 start() {
-  local name="$prefix-$1"
+  local role="$1" name="$prefix-$1"
+  shift
   docker rm -f -v "$name" >/dev/null 2>&1 || true
   local image="noixdev-infra-host:$ubuntu" platform=()
   # MySQL's apt repository carries amd64 packages only: the role's container
   # runs linux/amd64 (emulated on another architecture, with its own image).
-  if [ "$1" = mysql ]; then
+  if [ "$role" = mysql ]; then
     image="$image-amd64"
     platform=(--platform linux/amd64)
     docker build -q "${platform[@]}" --build-arg "UBUNTU=$ubuntu" -t "$image" "$tests/host" >/dev/null
   fi
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-    --tmpfs /run --tmpfs /run/lock ${platform[@]+"${platform[@]}"} --name "$name" "$image" >/dev/null
+    --tmpfs /run --tmpfs /run/lock ${platform[@]+"${platform[@]}"} "$@" --name "$name" "$image" >/dev/null
   started+=("$name")
   local tries=0
   until (docker exec "$name" systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do
     tries=$((tries + 1))
-    [ "$tries" -lt 120 ] || fail "$1: the container $name did not boot within 120 seconds"
+    [ "$tries" -lt 120 ] || fail "$role: the container $name did not boot within 120 seconds"
     sleep 1
   done
-  if [ "$1" = mysql ]; then systemd_fallback "$name"; fi
+  if [ "$role" = mysql ]; then systemd_fallback "$name"; fi
   return 0
 }
 
@@ -1575,11 +1577,15 @@ nginx_auth() {
   [ "$(hx nginx grep -c 'limit_req ' /etc/nginx/sites/static.conf)" = 1 ] || fail "nginx/auth: static.conf has limit_req outside its server block"
   hx nginx grep -qx '    limit_req_zone $binary_remote_addr zone=default:10m rate=10r/s;' /etc/nginx/nginx.conf || fail "nginx/auth: nginx.conf lacks the zone"
   hx nginx sh -c "mkdir -p $acme && echo 'noixdev challenge' > $acme/noixdev-rate"
-  answer="$(hx nginx bash -c 'for i in $(seq 50); do curl -sk -o /dev/null -w "%{http_code}\n" --max-time 20 --resolve static.example.test:443:127.0.0.1 https://static.example.test/ & done; wait')"
+  answer="$(hx nginx bash -c 'for i in $(seq 50); do curl -sk -o /tmp/noixdev-rate.$i -w "%{http_code}\n" --max-time 20 --resolve static.example.test:443:127.0.0.1 https://static.example.test/ & done; wait')"
   echo "   50 parallel requests: $(sort <<<"$answer" | uniq -c | tr -s ' ' | paste -sd, -)"
   grep -qx 429 <<<"$answer" || fail "nginx/auth: 50 parallel requests gave no 429"
   if grep -qx 503 <<<"$answer"; then fail "nginx/auth: a rate limited request answered 503, not 429"; fi
   grep -qx 200 <<<"$answer" || fail "nginx/auth: 50 parallel requests gave no 200"
+  # A limited request gets the noix 429 page.
+  answer="$(hx nginx sh -c 'grep -lF "data-code=\"429\"" /tmp/noixdev-rate.* || true')"
+  [ -n "$answer" ] || fail "nginx/auth: no rate limited request got the noix 429 page"
+  hx nginx sh -c 'rm -f /tmp/noixdev-rate.*'
   answer="$(ncurl http://static.example.test/.well-known/acme-challenge/noixdev-rate | head -n 1 | tr -d '\r')"
   [ "$answer" = 'HTTP/1.1 200 OK' ] || fail "nginx/auth: the challenge on a rate limited site answered $answer"
   hx nginx rm -f "$acme/noixdev-rate"
@@ -1618,10 +1624,11 @@ nginx_auth() {
     "$dir/converge.yml" "${fast[@]}" -e '{"nginx_real_ip_from": ["127.0.0.1", "0.0.0.0/0"]}'
   refused nginx real-ip-v6-zero "nginx: nginx_real_ip_from has ::/0, a range of every address" \
     "$dir/converge.yml" "${fast[@]}" -e '{"nginx_real_ip_from": ["::/0"]}'
-  refused nginx auth-anubis "sets anubis, which this version of the role does not support yet" \
-    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{$site, \"anubis\": true}]}"
-  for log in colon newline-name duplicate newline-password number-password no-users bad-allow unknown-key leading-hash leading-space no-passlib; do
-    no_secret "$out/nginx-auth-$log.log" pw-colon-secret pw-nlname-secret pw-dup-secret pw-nlpass-secret 123456 pw-allow-secret pw-typo-secret pw-hash-secret pw-space-secret pw-nopasslib-secret
+  # Anubis's error_page 401 would turn Basic auth's 401 into its challenge.
+  refused nginx auth-anubis "nginx: nginx_sites entry ba has basic_auth and anubis; Anubis would answer Basic auth's 401 with its challenge, so a site has one of them at most" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"anubis\": true, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": \"pw-anubis-secret\"}]}}]}"
+  for log in colon newline-name duplicate newline-password number-password no-users bad-allow unknown-key leading-hash leading-space no-passlib anubis; do
+    no_secret "$out/nginx-auth-$log.log" pw-colon-secret pw-nlname-secret pw-dup-secret pw-nlpass-secret 123456 pw-allow-secret pw-typo-secret pw-hash-secret pw-space-secret pw-nopasslib-secret pw-anubis-secret
   done
   after="$(nginx_state)"
   [ "$after" = "$before" ] || fail "nginx/auth: a refused run changed the host: $(diff <(echo "$before") <(echo "$after") || true)"
@@ -1803,10 +1810,178 @@ nginx_acme() {
   hx nginx sh -c 'test ! -e /etc/nginx/sites/broken.conf && test ! -e /etc/nginx/sites/late.conf' || fail "nginx: the extra sites are still there"
 }
 
+# nginx_no_docker: error pages (on by default) on a fresh container without
+# Docker (not privileged, no systemd) are refused before any change.
+nginx_no_docker() {
+  local dir="$here/nginx" name="$prefix-nginxnodocker"
+  echo "== nginx: the error pages without Docker are refused before any change"
+  docker rm -f -v "$name" >/dev/null 2>&1 || true
+  docker run -d --name "$name" --entrypoint sleep "noixdev-infra-host:$ubuntu" infinity >/dev/null
+  started+=("$name")
+  refused nginxnodocker no-docker "Docker is not installed or not running on" \
+    "$dir/converge.yml" -e nginx_test_prepare=false -e '{"nginx_sites": []}'
+  hx nginxnodocker sh -c 'test ! -e /etc/apt/sources.list.d/nginx.sources && test ! -e /etc/apt/keyrings/nginx.asc && test ! -e /etc/nginx' \
+    || fail "nginx: the run refused for Docker left files"
+  docker rm -f -v "$name" >/dev/null
+}
+
+# nginx_images: the images of the role defaults (the error pages, Anubis),
+# pulled once here and loaded into the nginx container's Docker.
+nginx_images() {
+  local images=() tar image
+  images+=("$(sed -n 's/^nginx_error_pages_image: *//p' "$root/roles/nginx/defaults/main.yml")")
+  images+=("$(sed -n 's/^anubis_image: *//p' "$root/roles/anubis/defaults/main.yml")")
+  for image in "${images[@]}"; do [ -n "$image" ] || fail "nginx: an image name is missing in the defaults"; done
+  tar="$out/nginx-images-$(printf '%s\n' "${images[@]}" | shasum | cut -c1-12).tar"
+  if [ ! -s "$tar" ]; then
+    for image in "${images[@]}"; do docker pull -q "$image" >/dev/null; done
+    docker save -o "$tar" "${images[@]}"
+  fi
+  docker exec -i "$prefix-nginx" docker load <"$tar" >/dev/null
+}
+
+# php_unit: the unit of prod's pool (the php role's on 24.04, Ubuntu's
+# php-fpm on 26.04; converge.yml).
+php_unit() {
+  if [ "$ubuntu" = 24.04 ]; then
+    echo php-fpm@production
+  else
+    echo "php$(hx nginx sh -c 'ls /etc/php | head -n 1')-fpm"
+  fi
+}
+
+# nginx_error_pages: the noix pages for nginx's own errors (verify.yml has
+# the 404s and the 413), the 502 of a stopped pool, and nginx_error_pages
+# false.
+nginx_error_pages() {
+  local dir="$here/nginx" fast=(-e nginx_test_prepare=false) answer unit
+  echo "== nginx: the error pages come through the export's link"
+  # error_pages_export publishes a release through the link current; root
+  # owns the link and its target, so disable_symlinks if_not_owner follows it.
+  answer="$(hx nginx stat -c '%U %F' /var/www/noix-error-pages/current)"
+  [ "$answer" = "root symbolic link" ] || fail "nginx: /var/www/noix-error-pages/current is '$answer', not root's link"
+
+  echo "== nginx: a stopped pool gives the noix 502 page"
+  unit="$(php_unit)"
+  hx nginx systemctl stop "$unit"
+  answer="$(ncurl https://prod.example.test/ | tr -d '\r')"
+  hx nginx systemctl start "$unit"
+  grep -q '^HTTP/1.1 502 ' <<<"$answer" || fail "nginx: prod with $unit stopped answered: $answer"
+  grep -qF 'data-code="502"' <<<"$answer" || fail "nginx: prod's 502 is not the noix page: $answer"
+  prod_answers pool-back
+
+  echo "== nginx: nginx_error_pages false drops the error_page lines"
+  converge nginx no-error-pages "$dir/converge.yml" "${fast[@]}" -e '{"nginx_error_pages": false}'
+  answer="$(hx nginx sh -c 'grep -l "error_page\|noix-error" /etc/nginx/sites/*.conf || true')"
+  [ -z "$answer" ] || fail "nginx: error pages off, these sites still have them: $answer"
+  answer="$(ncurl https://prod.example.test/.env)"
+  grep -q '^HTTP/1.1 404 ' <<<"$answer" || fail "nginx: error pages off, prod's /.env answered: $answer"
+  if grep -qF 'data-code=' <<<"$answer"; then fail "nginx: error pages off, prod's 404 is still the noix page"; fi
+  converge nginx error-pages-back "$dir/converge.yml" "${fast[@]}"
+  answer="$(ncurl https://prod.example.test/.env)"
+  grep -qF 'data-code="404"' <<<"$answer" || fail "nginx: error pages back on, prod's 404 is not the noix page: $answer"
+}
+
+# nsolve COMMAND URL [solve.py args]: the anubis suite's browser stand-in
+# (tests/anubis/solve.py) in the nginx container, the URL's host on
+# 127.0.0.1.
+nsolve() {
+  local command="$1" url="$2" host
+  shift 2
+  host="${url#*://}"
+  host="${host%%/*}"
+  docker exec -i "$prefix-nginx" python3 - "$command" "$url" --resolve "$host=127.0.0.1" "$@" <"$tests/anubis/solve.py"
+}
+
+# nexpect WANT URL [solve.py args]: the probe's "<status> <kind>" is WANT.
+nexpect() {
+  local want="$1" got
+  shift
+  got="$(nsolve probe "$@")"
+  [ "$got" = "$want" ] || fail "nginx/anubis: probe $*: got '$got', expected '$want'"
+}
+
+# anubis_healthy: Anubis in the nginx container is healthy within 60 seconds.
+anubis_healthy() {
+  local tries=0
+  until [ "$(hx nginx docker inspect -f '{{.State.Health.Status}}' noixdev-anubis 2>/dev/null || true)" = healthy ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 60 ] || fail "nginx/anubis: Anubis is not healthy"
+    sleep 1
+  done
+}
+
+# nginx_anubis: prod behind Anubis (the anubis role in host mode), node not.
+nginx_anubis() {
+  local dir="$here/nginx" fast=(-e nginx_test_prepare=false) on=(-e nginx_test_prod_anubis=true)
+  local front='"script":"index.php"' jar=/tmp/noixdev-anubis-jar.json acme=/var/lib/noixdev/acme/.well-known/acme-challenge
+  local answer before after header
+  echo "== nginx: anubis on a site without Anubis on the host is refused before any change"
+  before="$(nginx_state)"
+  refused nginx anubis-missing "nginx: nginx_sites entry prod sets anubis, but Anubis does not answer on http://127.0.0.1:8923/; run the anubis role with anubis_mode host (anubis_host_port 8923) first" \
+    "$dir/converge.yml" "${fast[@]}" "${on[@]}"
+  after="$(nginx_state)"
+  [ "$after" = "$before" ] || fail "nginx/anubis: the refused run changed the host: $(diff <(echo "$before") <(echo "$after") || true)"
+
+  echo "== nginx: Anubis in host mode listens on 127.0.0.1 only"
+  play nginx "$dir/anubis.yml" >"$out/nginx-anubis-role.log" 2>&1 || { cat "$out/nginx-anubis-role.log" >&2; fail "nginx/anubis: the anubis role failed"; }
+  anubis_healthy
+  answer="$(hx nginx ss -ltnH 'sport = :8923' | awk '{ print $4 }' | sort -u | paste -sd' ' -)"
+  [ "$answer" = "127.0.0.1:8923" ] || fail "nginx/anubis: 8923 listens on '$answer', not on 127.0.0.1 only"
+
+  echo "== nginx: a browser on prod gets the challenge, and the front controller once solved; node is not checked"
+  converge nginx anubis "$dir/converge.yml" "${fast[@]}" "${on[@]}"
+  nexpect "401 challenge" "https://prod.example.test/page?x=1"
+  nsolve solve "https://prod.example.test/page?x=1" --jar "$jar" --expect "$front"
+  nexpect "200 backend" https://prod.example.test/other --jar "$jar" --expect "$front"
+  nexpect "200 backend" https://node.example.test/app --expect 'node upstream'
+  answer="$( (hx nginx grep -c auth_request /etc/nginx/sites/node.conf /etc/nginx/sites/static.conf || true) | tr '\n' ' ')"
+  [ "$answer" = "/etc/nginx/sites/node.conf:0 /etc/nginx/sites/static.conf:0 " ] || fail "nginx/anubis: another site has auth_request: $answer"
+  # Anubis checks the request's own path (test-api, anubis.yml) and its own
+  # assets pass; its check path is nginx's internal one.
+  nexpect "200 backend" https://prod.example.test/api/x --expect "$front"
+  nexpect "200 other" https://prod.example.test/.within.website/x/xess/xess.min.css
+  nexpect "404 backend" https://prod.example.test/.within.website/x/cmd/anubis/api/check --expect 'data-code="404"'
+
+  echo "== nginx: client-sent X-Original-Uri, X-Real-Ip and X-Forwarded-For change nothing Anubis sees"
+  for header in X-Original-Uri:/api/x X-Forwarded-Uri:/api/x X-Real-Ip:203.0.113.9 X-Forwarded-For:203.0.113.9; do
+    nexpect "401 challenge" https://prod.example.test/secret --header "$header"
+  done
+  # The control: from 203.0.113.9 itself (test-forged-address), Anubis
+  # lets it through: X-Real-Ip is nginx's $remote_addr.
+  hx nginx ip addr replace 203.0.113.9/32 dev lo
+  answer="$(nsolve probe https://prod.example.test/secret --source 203.0.113.9 --expect "$front")"
+  hx nginx ip addr del 203.0.113.9/32 dev lo
+  [ "$answer" = "200 backend" ] || fail "nginx/anubis: a request from 203.0.113.9 answered '$answer', not the front controller"
+
+  echo "== nginx: the ACME challenge on prod is never checked"
+  hx nginx sh -c "mkdir -p $acme && echo 'noixdev challenge' > $acme/noixdev-anubis"
+  nexpect "200 backend" http://prod.example.test/.well-known/acme-challenge/noixdev-anubis --expect 'noixdev challenge'
+  nexpect "200 backend" https://prod.example.test/.well-known/acme-challenge/noixdev-anubis --expect 'noixdev challenge'
+  nexpect "404 backend" https://prod.example.test/.well-known/acme-challenge/missing --expect 'data-code="404"'
+  hx nginx rm -f "$acme/noixdev-anubis"
+
+  echo "== nginx: a stopped Anubis fails closed (the noix 500 page), and passes again once it runs"
+  hx nginx docker stop noixdev-anubis >/dev/null
+  answer="$(nsolve probe https://prod.example.test/other --jar "$jar" --expect 'data-code="500"')"
+  hx nginx docker start noixdev-anubis >/dev/null
+  anubis_healthy
+  [ "$answer" = "500 backend" ] || fail "nginx/anubis: prod with Anubis stopped answered '$answer', not the noix 500 page"
+  nexpect "200 backend" https://prod.example.test/other --jar "$jar" --expect "$front"
+
+  echo "== nginx: anubis off again: no auth_request on prod"
+  converge nginx anubis-off "$dir/converge.yml" "${fast[@]}"
+  answer="$(hx nginx grep -c 'auth_request\|within.website' /etc/nginx/sites/prod.conf || true)"
+  [ "$answer" = 0 ] || fail "nginx/anubis: prod.conf still names Anubis ($answer lines)"
+  nexpect "200 backend" https://prod.example.test/page --expect "$front"
+}
+
 suite_nginx() {
   local dir="$here/nginx" codename series version policy before after rc answer
   local fast=(-e nginx_test_prepare=false)
-  start nginx
+  # Docker runs inside (the error pages export and Anubis): its data on
+  # volumes of the container's own, not on the overlay root.
+  start nginx -v /var/lib/docker -v /var/lib/containerd
   codename="$(hx nginx sh -c '. /etc/os-release && echo "$VERSION_CODENAME"')"
 
   case "$ubuntu" in
@@ -1821,6 +1996,11 @@ suite_nginx() {
   esac
 
   nginx_distro_refused
+  nginx_no_docker
+
+  echo "== nginx: Docker, for the error pages and Anubis"
+  play nginx "$dir/docker.yml" >"$out/nginx-docker.log" 2>&1 || { cat "$out/nginx-docker.log" >&2; fail "nginx: Docker did not install"; }
+  nginx_images
 
   echo "== nginx: Pebble, the ACME server prod's certificate comes from"
   play nginx "$dir/pebble.yml" >"$out/nginx-pebble.log" 2>&1 || { cat "$out/nginx-pebble.log" >&2; fail "nginx: Pebble did not start"; }
@@ -1868,6 +2048,8 @@ suite_nginx() {
   nginx_links
   nginx_acme
   nginx_auth
+  nginx_error_pages
+  nginx_anubis
 
   echo "== nginx: hardening false on static: no security headers, /.env is served"
   converge nginx no-hardening "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_hardening": false}'
@@ -1979,6 +2161,8 @@ suite_nginx() {
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"rl\", \"domains\": [\"rl.example.test\"], $tls_off, \"rate_limit\": \"nosuchzone\"}]}"
   refused nginx unknown-key "nginx: nginx_sites entry x has unknown keys (priv); its keys are" \
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], $tls_off, \"priv\": true}]}"
+  refused nginx root-over-error-pages "nginx: nginx_sites entry x has the root /var/www, which overlaps nginx_error_pages_dir /var/www/noix-error-pages; the error pages are root's" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], \"user\": \"app_prod\", \"root\": \"/var/www\", \"tls\": \"off\"}]}"
   # Deploy snippets are not supported yet (defaults false).
   refused nginx user-includes "nginx: nginx_user_includes is true; deploy snippets are not supported yet by this version of the role" \
     "$dir/converge.yml" "${fast[@]}" -e '{"nginx_user_includes": true}'

@@ -8,6 +8,8 @@
   hosts: testhost
   vars:
     nginx_verify_prod_names: [prod.example.test, www.prod.example.test]
+    # The noix error page for 404 (theme classic, the role's default).
+    nginx_verify_noix_404: ['data-code="404"', ep-theme-classic]
     nginx_verify_headers:
       - "X-Content-Type-Options: nosniff\r"
       - "Referrer-Policy: strict-origin-when-cross-origin\r"
@@ -80,8 +82,11 @@
       - url: https://static.example.test/
         status: 200
         contains: "{{ ['static index'] + nginx_verify_headers }}"
-      # Blocked: every file exists.
-      - {url: "https://prod.example.test/.env", status: 404}
+      # Blocked: every file exists. nginx's own 404 is the noix error page.
+      - url: https://prod.example.test/.env
+        status: 404
+        contains: "{{ nginx_verify_noix_404 }}"
+        absent: [APP_KEY]
       - {url: "https://prod.example.test/.git/config", status: 404}
       - {url: "https://prod.example.test/composer.json", status: 404}
       - {url: "https://prod.example.test/composer.lock", status: 404}
@@ -89,23 +94,31 @@
       - {url: "https://prod.example.test/a.bak", status: 404}
       - {url: "https://prod.example.test/a.swp", status: 404}
       - {url: "https://prod.example.test/a~", status: 404}
+      # The app's own 404 passes through unchanged (no intercept).
+      - url: https://prod.example.test/app-404
+        status: 404
+        contains: ['"script":"index.php"', '"uri":"\/app-404"']
+        absent: [data-code=]
+      # A missing static file and a body over client_max_body_size (64m, by
+      # its Content-Length alone): nginx's own answers, the noix pages.
+      - url: https://static.example.test/missing.html
+        status: 404
+        contains: "{{ nginx_verify_noix_404 }}"
+      - url: https://prod.example.test/upload
+        status: 413
+        args: [-X, POST, -H, "Content-Length: 70000000"]
+        contains: ['data-code="413"', ep-theme-classic]
+      # The pages' own location answers internal redirects only.
+      - url: https://prod.example.test/.noix-error/500.html
+        status: 404
+        contains: "{{ nginx_verify_noix_404 }}"
   tasks:
     - name: Ask the sites
       ansible.builtin.command:
-        argv:
-          - curl
-          - --http1.1
-          - -sS
-          - -k
-          - -D
-          - "-"
-          - --max-time
-          - "10"
-          - --resolve
-          - "{{ nginx_verify_host }}:80:127.0.0.1"
-          - --resolve
-          - "{{ nginx_verify_host }}:443:127.0.0.1"
-          - "{{ item.url }}"
+        argv: >-
+          {{ ['curl', '--http1.1', '-sS', '-k', '-D', '-', '--max-time', '10',
+              '--resolve', nginx_verify_host ~ ':80:127.0.0.1', '--resolve', nginx_verify_host ~ ':443:127.0.0.1']
+             + item.args | default([]) + [item.url] }}
       vars:
         nginx_verify_host: "{{ item.url | urlsplit('hostname') }}"
       loop: "{{ nginx_verify_requests }}"
