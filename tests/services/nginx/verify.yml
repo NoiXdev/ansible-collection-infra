@@ -112,7 +112,10 @@
       ansible.builtin.assert:
         that:
           - nginx_verify_tls.results[0].rc != 0
-          - nginx_verify_tls.results[0].stdout is search('alert protocol version|no protocols available|unsupported protocol')
+          # The server's alert 70 (protocol_version) to a client that offered
+          # TLS 1.1 (security level 0 lets OpenSSL offer it); a client that
+          # refused on its own ("no protocols available") would not pass.
+          - nginx_verify_tls.results[0].stdout is search('alert protocol version.*SSL alert number 70')
           - nginx_verify_tls.results[1].rc == 0
           - "nginx_verify_tls.results[1].stdout is search('Protocol *: TLSv1[.]2')"
         fail_msg: >-
