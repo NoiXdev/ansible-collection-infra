@@ -60,6 +60,16 @@
 #             then a rollback that fails too (the previous image cannot be
 #             started), whose marker refuses every version, an older one
 #             before the downgrade refusal
+#   missing_data
+#             the stack stopped and n8n_data_dir replaced by an empty
+#             directory (an unmounted volume): docker compose start fails,
+#             and a run without changes, a reconfigure, an update and one with
+#             the marker of a failed update are each refused naming postgres,
+#             home and files, creating nothing; with the data back the
+#             installation runs as before
+#   mountpoint
+#             n8n_data_dir_mountpoint on a plain directory (or none) refused,
+#             nothing created; on a tmpfs the install succeeds
 # The failed install runs at -v, the install, the refusals on an
 # installation and the failed update at -vvv, every other converge at -v;
 # their output must not hold a test secret (nor the owner's password hash).
@@ -867,12 +877,80 @@ DOCKERFILE
   hx test -e "$marker" || fail "the refused run removed the marker"
 }
 
+test_missing_data() {
+  echo "== a missing data volume must be refused in every state and nothing created"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "n8n_version=$old_version"
+  hx sh -c "cd $dir && docker compose stop" >/dev/null 2>&1
+  # As an unmounted volume leaves it: its mountpoint, empty.
+  hx mv "$dir/data" "$dir/data.away"
+  hx mkdir "$dir/data"
+  if hx sh -c "cd $dir && docker compose start" >"$out/start-missing.log" 2>&1; then
+    fail "docker compose start succeeded without the data directories"
+  fi
+  [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet")" ] || fail "a container runs without the data directories"
+  note_untouched
+  # missing_refused <name> [extra vars...]
+  missing_refused() {
+    local name="$1"
+    shift
+    play_fails "$name" "$here/converge.yml" "$@"
+    expect_in_log "$name" "$dir/data lacks postgres, home, files"
+    expect_in_log "$name" "is the volume mounted?"
+    expect_untouched "$name"
+    [ -z "$(hx ls -A "$dir/data")" ] || fail "the refused run $name created in $dir/data: $(hx ls -A "$dir/data")"
+    [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet")" ] || fail "the refused run $name started a container"
+  }
+  # A run without changes, a reconfigure (another environment variable), an
+  # update (the newer version) and a run after a failed update (its marker,
+  # which the data check comes before).
+  missing_refused missing-data -e "n8n_version=$old_version"
+  missing_refused missing-data-reconfigure -e "n8n_version=$old_version" -e '{"n8n_env": {"TEST_SETTING": "1"}}'
+  missing_refused missing-data-update
+  printf 'failed_version: %s\nrolled_back_to: null\nbackup: /nonexistent\n' "$version" | hx sh -c "cat >$marker"
+  missing_refused missing-data-marker
+  hx rm "$marker"
+
+  echo "== with the data back the installation must run as before"
+  hx rmdir "$dir/data"
+  hx mv "$dir/data.away" "$dir/data"
+  hx sh -c "cd $dir && docker compose start" >/dev/null 2>&1
+  wait_healthy
+  expect_idempotent -e "n8n_version=$old_version"
+}
+
+test_mountpoint() {
+  echo "== n8n_data_dir_mountpoint must refuse a data directory that is not a mountpoint"
+  new_host
+  mountpoint_vars=(-e '{"n8n_data_dir_mountpoint": true}')
+  role_fails not-mountpoint "${mountpoint_vars[@]}"
+  expect_in_log not-mountpoint "$dir/data is not a mountpoint"
+  expect_in_log not-mountpoint "is the volume mounted?"
+  hx test ! -e "$dir" || fail "the refused run created $dir"
+  hx mkdir -p "$dir/data"
+  role_fails not-mountpoint-dir "${mountpoint_vars[@]}"
+  expect_in_log not-mountpoint-dir "$dir/data is not a mountpoint"
+  [ -z "$(hx ls -A "$dir/data")" ] || fail "the refused run created in $dir/data: $(hx ls -A "$dir/data")"
+  [ "$(hx ls -A "$dir")" = data ] || fail "the refused run created in $dir: $(hx ls -A "$dir")"
+
+  echo "== install onto a mountpoint"
+  hx mount -t tmpfs tmpfs "$dir/data"
+  load_images
+  converge "${mountpoint_vars[@]}"
+  hx mountpoint -q "$dir/data" || fail "$dir/data is no longer a mountpoint"
+  hx sh -c "find $dir/data/postgres -name PG_VERSION | grep -q ." || fail "the database is not on the mountpoint"
+  hx test -d "$dir/data/home" || fail "the n8n home is not on the mountpoint"
+  expect_idempotent "${mountpoint_vars[@]}"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_N8N_TESTS="refusals router" runs
 # only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update queue_update failed_update}; do
+for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update queue_update failed_update missing_data mountpoint}; do
   case "$scenario" in
-    refusals | install | router | queue | update | queue_update | failed_update) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, queue_update, failed_update)" ;;
+    refusals | install | router | queue | update | queue_update | failed_update | missing_data | mountpoint) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, queue_update, failed_update, missing_data, mountpoint)" ;;
   esac
 done
 

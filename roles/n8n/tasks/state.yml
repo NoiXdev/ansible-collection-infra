@@ -10,16 +10,83 @@
 # compose file on disk, which a rollback puts back), n8n_compose_on_disk (it
 # parsed, which n8n_installed_version reads), n8n_marker_read and n8n_marker
 # (the marker of a failed update), n8n_owner_password_hash (the owner's
-# bcrypt hash, which the compose file holds) and n8n_down (the expected
-# services that are not running). Refuses, before any change: first a marker
-# of a failed update (one of a failed rollback refuses every version, one of
-# a rollback that worked the failed version), then a compose file that is
-# not YAML, an install that did not complete (its marker), a compose file
+# bcrypt hash, which the compose file holds), n8n_data_present (the
+# subdirectories of n8n_data_subdirs that exist) and n8n_down (the expected
+# services that are not running). Refuses, before any change: first an
+# n8n_data_dir that is not a mountpoint (with n8n_data_dir_mountpoint) and an
+# installation without its data subdirectories (an unmounted volume); then a
+# marker of a failed update (one of a failed rollback refuses every version,
+# one of a rollback that worked the failed version), then a compose file that
+# is not YAML, an install that did not complete (its marker), a compose file
 # without an n8n version, a downgrade, an encryption key whose sha256 is not
 # the installation's fingerprint (or no fingerprint), an n8n_db_password
 # that the database does not take, and a PostgreSQL major other than the
 # database's. The only change it can make is pulling the pinned n8n image on
 # a host without an n8n container, which the owner's hash is made with.
+
+# A block volume that is not mounted leaves its mountpoint as an empty
+# directory on the root filesystem; an install there would put the data
+# beside the volume.
+- name: Check that the data directory is a mountpoint
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ n8n_data_dir }}"]
+  register: n8n_data_dir_mounted
+  changed_when: false
+  failed_when: false
+  when: n8n_data_dir_mountpoint | bool
+
+- name: Refuse a data directory that is not a mountpoint
+  ansible.builtin.fail:
+    msg: >-
+      n8n_data_dir_mountpoint is on, but {{ n8n_data_dir }} is not a
+      mountpoint: is the volume mounted? The role changes nothing. Mount the
+      volume at {{ n8n_data_dir }}, then run the role again.
+  when:
+    - n8n_data_dir_mountpoint | bool
+    - n8n_data_dir_mounted.rc != 0
+
+- name: Read the compose file
+  ansible.builtin.slurp:
+    src: "{{ n8n_compose_file }}"
+  register: n8n_compose_read
+  failed_when: false
+  # It holds the encryption key and the passwords.
+  no_log: true
+
+- name: Look for the data subdirectories
+  ansible.builtin.stat:
+    path: "{{ n8n_data_dir }}/{{ item }}"
+    get_checksum: false
+  loop: "{{ n8n_data_subdirs }}"
+  register: n8n_subdirs_stat
+
+- name: Note what is on the host
+  ansible.builtin.set_fact:
+    n8n_compose_before: "{{ n8n_compose_read.content | default('') | b64decode }}"
+    n8n_installed: "{{ n8n_compose_read.content is defined }}"
+    n8n_data_present: >-
+      {{ n8n_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
+  no_log: true
+
+# Only install creates the subdirectories, and the containers do not create a
+# missing one, so their absence beside a compose file is data that is not
+# there (an unmounted volume), never a state to repair. Before every other
+# refusal, the marker of a failed update among them: on every path the
+# role would start n8n on an empty volume or fail on it.
+- name: Refuse an installation without its data
+  ansible.builtin.fail:
+    msg: >-
+      n8n is installed in {{ n8n_dir }} ({{ n8n_compose_file }}), but
+      {{ n8n_data_dir }} lacks {{ n8n_data_missing | join(', ') }}: is the
+      volume mounted? The role changes nothing and creates none of them.
+      Mount the volume (or put the data back) at {{ n8n_data_dir }}, then run
+      the role again.
+  vars:
+    # In the order of n8n_data_subdirs, which difference does not keep.
+    n8n_data_missing: "{{ n8n_data_subdirs | reject('in', n8n_data_present) | list }}"
+  when:
+    - n8n_installed
+    - n8n_data_missing | length > 0
 
 # Written by update.yml after a failed update; it names the failed version.
 - name: Read the marker of a failed update
@@ -84,20 +151,6 @@
   when:
     - n8n_marker_read.content is defined
     - (n8n_marker.failed_version | default(n8n_version) | string) == n8n_version | string
-
-- name: Read the compose file
-  ansible.builtin.slurp:
-    src: "{{ n8n_compose_file }}"
-  register: n8n_compose_read
-  failed_when: false
-  # It holds the encryption key and the passwords.
-  no_log: true
-
-- name: Note what is on the host
-  ansible.builtin.set_fact:
-    n8n_compose_before: "{{ n8n_compose_read.content | default('') | b64decode }}"
-    n8n_installed: "{{ n8n_compose_read.content is defined }}"
-  no_log: true
 
 # Once, in a no_log task: an error of the YAML parser can quote a line of the
 # file, which holds the encryption key and the passwords, so a file that is
