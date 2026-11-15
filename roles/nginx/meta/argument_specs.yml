@@ -61,7 +61,10 @@ argument_specs:
             paths in php_scripts (below root) go to PHP, any other .php file returns 404. proxy,
             an http(s) upstream URL, with WebSocket upgrades and X-Forwarded-* headers. Neither
             serves root as static files.
-          - root, the document root (an absolute path); required for php_pool and static sites.
+          - >-
+            root, the document root (an absolute path); required for php_pool and static sites.
+            A link below root is followed only when it has the same owner as its target
+            (disable_symlinks if_not_owner); the path of root itself is not checked.
           - >-
             tls, letsencrypt (the default; nginx_acme_email is then required), off (HTTP only),
             or {cert, key} with the paths of an existing certificate and key. With TLS, port 80

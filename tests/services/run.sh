@@ -1430,6 +1430,25 @@ nginx_state() {
   hx nginx sh -c 'find /etc/nginx /etc/apt/sources.list.d /etc/apt/preferences.d /etc/apt/apt.conf.d -type f -exec md5sum {} + | sort; id -nG www-data'
 }
 
+# nginx_links: a link a site user plants below its root is followed only to
+# a file of the same owner; prod's group-readable files (www-data reads them
+# through app_prod's group) never show under static's name.
+nginx_links() {
+  local answer
+  echo "== nginx: a link to another owner's file is not followed, a link to the user's own file is"
+  hx nginx runuser -u app_static -- ln -sfn /srv/prod/public/.well-known/x.txt /srv/static/foreign.txt
+  hx nginx runuser -u app_static -- ln -sfn /srv/static/index.html /srv/static/own.txt
+  hx nginx ln -sfn /srv/static/index.html /srv/static/root-owned.txt
+  answer="$(ncurl https://static.example.test/foreign.txt)"
+  grep -qE '^HTTP/1.1 (403|404) ' <<<"$answer" || fail "nginx: static served app_prod's file through a link: $answer"
+  if grep -qF well-known <<<"$answer"; then fail "nginx: static showed app_prod's file through a link: $answer"; fi
+  answer="$(ncurl https://static.example.test/root-owned.txt)"
+  grep -qE '^HTTP/1.1 (403|404) ' <<<"$answer" || fail "nginx: static followed a link of another owner (root): $answer"
+  answer="$(ncurl https://static.example.test/own.txt)"
+  grep -qxF 'static index' <<<"$answer" || fail "nginx: static did not follow app_static's link to its own file: $answer"
+  hx nginx rm -f /srv/static/foreign.txt /srv/static/own.txt /srv/static/root-owned.txt
+}
+
 # nginx_distro_refused: Ubuntu's nginx-common in a fresh container is refused
 # before any change.
 nginx_distro_refused() {
@@ -1501,6 +1520,7 @@ suite_nginx() {
          if ((ours && p != 990) || (!ours && p != -1)) { print v, p; bad = 1 } }
        END { exit bad }' <<<"$policy" || fail "nginx: the pin gives the wrong priorities: $policy"
   play nginx "$dir/verify.yml"
+  nginx_links
 
   echo "== nginx: hardening false on static: no security headers, /.env is served"
   converge nginx no-hardening "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_hardening": false}'

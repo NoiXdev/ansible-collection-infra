@@ -78,6 +78,10 @@ server {
     client_max_body_size {{ site.client_max_body_size }};
 {% if site.root is defined %}
     root {{ site.root }};
+    # www-data is in every site's group: a link below root to a file of
+    # another owner (another environment's, say) is not followed. The root's
+    # own path (a deploy's current -> releases/N) is not checked.
+    disable_symlinks if_not_owner from=$document_root;
     index {{ (site.php_front_controller ~ ' ') if site.php_pool is defined else '' }}index.html;
 {% endif %}
 {% if site.rate_limit is defined %}
