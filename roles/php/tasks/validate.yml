@@ -236,10 +236,11 @@
     that:
       - item.open_basedir | default([]) | reject('string') | list | length == 0
       - item.open_basedir | default([]) | reject('match', '^/[^:\r\n\x00]*$') | list | length == 0
-      - item.tmp_dir | default('/') is string and item.tmp_dir | default('/') is match('^/[^:\r\n\x00]*$')
+      - item.tmp_dir | default('/t') is string and item.tmp_dir | default('/t') is match('^(/+[^/:\r\n\x00]+)+/*$')
+      - item.tmp_dir | default('/t') | split('/') | select('in', ['.', '..']) | list | length == 0
     fail_msg: >-
       php: php_pools entry {{ item.name }} has an invalid open_basedir or tmp_dir; each must be
-      an absolute path without a colon
+      an absolute path without a colon, and tmp_dir not / and without . or .. in it
     quiet: true
   loop: "{{ php_pools_public }}"
   loop_control:

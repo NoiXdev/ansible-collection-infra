@@ -96,8 +96,10 @@ argument_specs:
           tmp_dir:
             type: str
             description: >-
-              An absolute path; the role creates session, upload and sys in it (owned by the pool
-              user, mode 0770) and points session.save_path, upload_tmp_dir and sys_temp_dir there.
+              An absolute path (not /, without . or ..); the role creates session, upload and sys
+              in it (owned by the pool user, mode 0770) and points session.save_path,
+              upload_tmp_dir and sys_temp_dir there. It follows no link: a link in tmp_dir, in
+              its path or as one of the three dirs stops the run, naming it.
           ini:
             type: dict
             description: >-

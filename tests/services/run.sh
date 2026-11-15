@@ -723,6 +723,45 @@ fpm_rejected() {
     || { cat "$log" >&2; fail "php/$1: the run did not stop at the test of the new pool configs"; }
 }
 
+# php_planted_links: links staging's user plants in and above its tmp_dir
+# stop the run, naming the link, and nothing outside tmp_dir changes. The
+# target is a root-owned directory: a run that followed the link would hand it
+# to the pool user.
+php_planted_links() {
+  local dir="$here/php" victim=/etc/noixdev-victim before
+  local owners=(stat -c '%n %U:%G %a' /etc "$victim" "$victim/tmp")
+  hx php sh -c 'mkdir -p "$1/tmp" && chown root:root "$1" "$1/tmp" && chmod 0755 "$1" "$1/tmp"' sh "$victim"
+  before="$(hx php "${owners[@]}")"
+
+  echo "== php: a link staging's user plants as tmp_dir/session stops the run, the target stays root's"
+  hx php runuser -u app_staging -- sh -c 'rm -r /srv/staging/tmp/session && ln -s "$1" /srv/staging/tmp/session' sh "$victim"
+  refused php link-session "php: php_pools entry staging: /srv/staging/tmp/session is a link or not a directory" \
+    "$dir/converge.yml"
+  [ "$(hx php "${owners[@]}")" = "$before" ] || fail "php: the run followed the session link: $(hx php "${owners[@]}")"
+  hx php runuser -u app_staging -- rm /srv/staging/tmp/session
+
+  echo "== php: tmp_dir itself as a link stops the run"
+  hx php runuser -u app_staging -- sh -c 'mv /srv/staging/tmp /srv/staging/tmp.real && ln -s "$1" /srv/staging/tmp' sh "$victim"
+  refused php link-tmp-dir "php: php_pools entry staging: /srv/staging/tmp is a link or not a directory" \
+    "$dir/converge.yml"
+  [ "$(hx php "${owners[@]}")" = "$before" ] || fail "php: the run followed the tmp_dir link: $(hx php "${owners[@]}")"
+  hx php runuser -u app_staging -- sh -c 'rm /srv/staging/tmp && mv /srv/staging/tmp.real /srv/staging/tmp'
+
+  echo "== php: a link in the path above tmp_dir stops the run"
+  hx php runuser -u app_staging -- ln -s "$victim" /srv/staging/var
+  refused php link-parent "php: php_pools entry staging: /srv/staging/var is a link or not a directory" \
+    "$dir/converge.yml" -e php_test_staging_tmp_dir=/srv/staging/var/tmp
+  [ "$(hx php "${owners[@]}")" = "$before" ] || fail "php: the run followed the link above tmp_dir: $(hx php "${owners[@]}")"
+  hx php runuser -u app_staging -- rm /srv/staging/var
+  php_running planted-links
+
+  echo "== php: without the links the next run recreates session"
+  converge php after-links "$dir/converge.yml"
+  play php "$dir/verify.yml"
+  hx php sh -c '[ "$(stat -c "%U:%G %a" /srv/staging/tmp/session)" = "app_staging:app_staging 770" ]' \
+    || fail "php: session was not recreated: $(hx php stat -c '%U:%G %a' /srv/staging/tmp/session)"
+}
+
 suite_php() {
   local dir="$here/php" codename version policy prod staging tries rotate name conf
   local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
@@ -792,6 +831,10 @@ suite_php() {
   done
   [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted on staging's kill"
 
+  prod="$(pid php php-fpm@production)"
+  staging="$(pid php php-fpm@staging)"
+  php_planted_links
+
   echo "== php: a changed ini of staging reloads staging only (with --diff -vvv)"
   staging="$(pid php php-fpm@staging)"
   converge php memory "$dir/converge.yml" --diff -vvv -e php_test_staging_memory_limit=160M
@@ -836,6 +879,10 @@ suite_php() {
     "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "pm": {"start_servers": 10, "max_children": 5}}]}'
   refused php spare-servers "php: php_pools entry production has pm.min_spare_servers 4 above pm.max_spare_servers 3" \
     "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "pm": {"min_spare_servers": 4, "max_spare_servers": 3}}]}'
+  refused php tmp-dir-root "php: php_pools entry production has an invalid open_basedir or tmp_dir; each must be an absolute path without a colon, and tmp_dir not / and without . or .. in it" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "tmp_dir": "//"}]}'
+  refused php tmp-dir-dots "php: php_pools entry production has an invalid open_basedir or tmp_dir" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "tmp_dir": "/srv/prod/../../etc"}]}'
   # Each env value is refused without being printed.
   refused php env-values "php: php_pools entry production has env DOLLAR, LINE that FPM cannot pass on as given" \
     "$dir/converge.yml" -v \

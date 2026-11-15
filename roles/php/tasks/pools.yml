@@ -67,16 +67,103 @@
     mode: "0644"
 
 # tmp_dir and its session, upload and sys dirs; they stay when the pool leaves.
+# tmp_dir usually sits in a directory the pool user owns, and the user (or
+# PHP code running as the user) can swap any part of it for a link. Root
+# therefore opens every part of the path without following a link (a link
+# stops the run, naming it) and changes only the directory it holds open;
+# missing parents are created root-owned (0755).
 - name: Create the temp dirs
-  ansible.builtin.file:
-    path: "{{ item.0.tmp_dir | regex_replace('/+$', '') }}{{ ('/' ~ item.1) if item.1 else '' }}"
-    state: directory
-    owner: "{{ item.0.user }}"
-    group: "{{ php_pool_groups[item.0.name] }}"
-    mode: "0770"
-  loop: "{{ php_pools_public | selectattr('tmp_dir', 'defined') | product(['', 'session', 'upload', 'sys']) | list }}"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import os, stat, sys
+        name, path, uid, gid = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        parts = [part for part in path.split('/') if part]
+        fd, done, changed = os.open('/', flags), '', False
+        for i, part in enumerate(parts):
+            done += '/' + part
+            if part in ('.', '..'):
+                sys.exit(f'php: php_pools entry {name} has . or .. in its tmp_dir {path}')
+            try:
+                os.mkdir(part, 0o755 if i < len(parts) - 1 else 0o700, dir_fd=fd)
+                changed = True
+            except FileExistsError:
+                pass
+            try:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except OSError:
+                sys.exit(f'php: php_pools entry {name}: {done} is a link or not a directory; '
+                         'the role follows no link in tmp_dir')
+            os.close(fd)
+            fd = next_fd
+        st = os.fstat(fd)
+        if (st.st_uid, st.st_gid) != (uid, gid):
+            os.fchown(fd, uid, gid)
+            changed = True
+        if stat.S_IMODE(st.st_mode) != 0o770:
+            os.fchmod(fd, 0o770)
+            changed = True
+        print('changed' if changed else 'ok')
+      - "{{ item.name }}"
+      - "{{ item.tmp_dir | regex_replace('/+$', '') }}"
+      - "{{ ansible_facts.getent_passwd[item.user][1] }}"
+      - "{{ ansible_facts.getent_group[php_pool_groups[item.name]][1] }}"
+  loop: "{{ php_pools_public | selectattr('tmp_dir', 'defined') }}"
   loop_control:
-    label: "{{ item.0.name }}: {{ item.1 or 'tmp_dir' }}"
+    label: "{{ item.name }}"
+  register: php_tmp_dir
+  changed_when: "'changed' in php_tmp_dir.stdout_lines"
+
+# As the pool user, with the pool's group: whatever the user has planted
+# there, nothing is done with more than the user's own rights.
+- name: Create the session, upload and sys dirs as the pool user
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ item.user }}"
+      - -g
+      - "{{ php_pool_groups[item.name] }}"
+      - --
+      - sh
+      - -c
+      - |
+        set -eu
+        name="$1" dir="$2" uid="$3" gid="$4" changed=
+        for d in session upload sys; do
+          p="$dir/$d"
+          if [ -L "$p" ] || { [ -e "$p" ] && [ ! -d "$p" ]; }; then
+            echo "php: php_pools entry $name: $p is a link or not a directory; the role follows no link in tmp_dir" >&2
+            exit 1
+          fi
+          if [ ! -d "$p" ]; then
+            mkdir -m 0770 "$p"
+            changed=1
+          fi
+          if [ "$(stat -c %u "$p")" != "$uid" ]; then
+            echo "php: php_pools entry $name: $p belongs to uid $(stat -c %u "$p"), not to the pool user" >&2
+            exit 1
+          fi
+          if [ "$(stat -c %g:%a "$p")" != "$gid:770" ]; then
+            chgrp "$gid" "$p"
+            chmod 0770 "$p"
+            changed=1
+          fi
+        done
+        if [ -n "$changed" ]; then echo changed; fi
+      - sh
+      - "{{ item.name }}"
+      - "{{ item.tmp_dir | regex_replace('/+$', '') }}"
+      - "{{ ansible_facts.getent_passwd[item.user][1] }}"
+      - "{{ ansible_facts.getent_group[php_pool_groups[item.name]][1] }}"
+  loop: "{{ php_pools_public | selectattr('tmp_dir', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: php_tmp_subdirs
+  changed_when: "'changed' in php_tmp_subdirs.stdout_lines"
 
 - name: Remove the packages' www pools
   ansible.builtin.file:

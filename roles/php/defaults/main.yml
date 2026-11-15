@@ -29,7 +29,7 @@ php_ini: {}
 #       min_spare_servers: 1
 #       max_spare_servers: 3
 #     open_basedir: [/srv/prod]     # empty: no restriction
-#     tmp_dir: /srv/prod/tmp        # session, upload and sys dirs inside
+#     tmp_dir: /srv/prod/tmp        # session, upload and sys dirs inside; no links
 #     ini:                          # php_admin_value
 #       memory_limit: 256M
 #     env:                          # environment variables
