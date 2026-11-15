@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- `nginx`: new role that installs nginx of one stable series from nginx.org (`nginx_version`, a
+  quoted `major.minor` such as `"1.30"`; Ubuntu 24.04 and 26.04, any other release is refused
+  before any change) and serves the sites of `nginx_sites`, the complete list: a site that leaves
+  it loses its config, while its web root, logs and certificate stay. An apt pin keeps nginx in the
+  series and Ubuntu's nginx packages out; the nginx.org origin joins unattended-upgrades. An
+  installed nginx of another series, or Ubuntu's, is refused before any change. A site is a PHP
+  site (`php_pool`, fastcgi to `/run/php/<pool>.sock`; only `php_front_controller` and
+  `php_scripts` run, any other `.php` file answers 404), a proxy site (`proxy`, with WebSocket
+  upgrades) or a static site; `www-data` joins each site's group, so web roots must be
+  group-readable. TLS is `letsencrypt` (certbot, `nginx_acme_email`, HTTP-01 through a webroot,
+  renewals reload nginx), `off`, or `{cert, key}` with OCSP stapling through `nginx_resolvers`
+  (`127.0.0.53`, so other hosts than systemd-resolved ones set it). Global hardening: TLS 1.2 and
+  1.3 with Mozilla's intermediate ciphers, `server_tokens off`, and a default server that closes
+  the connection for an unknown host name. Per site: security headers and HSTS, 404 for dotfiles,
+  `composer.json` and dumps (`hardening`), `rate_limit` zones (answer 429), `basic_auth` with an
+  allowlist (`nginx_real_ip_from` for trusted proxies; the controller needs passlib), `headers`
+  and `extra`. Every config change is tested with `nginx -t` before nginx reloads, and a config
+  nginx rejects is put back. The noix error pages (`nginx_error_pages`, on by default, so the host
+  needs Docker unless it sets `false`) answer nginx's own errors only; an app's own error pages
+  pass through. A site with `anubis: true` is checked by the `anubis` role in host mode on
+  `127.0.0.1:nginx_anubis_port` (keep it equal to `anubis_host_port`); a site cannot have both
+  `anubis` and `basic_auth`, and 401 must not be among `nginx_error_pages_codes` while a site has
+  Anubis. Deploy snippets (`user_includes`, `nginx_user_includes`, `nginx_include_user`) are not
+  supported yet and are refused. `nginx_ipv6` ignores link-local addresses.
+- `anubis`: new mode `host` for an nginx on the host itself (the `nginx` role's sites with
+  `anubis: true`): the container publishes `127.0.0.1:anubis_host_port` (8923) only and joins none
+  of the other modes' networks. One mode per host.
 - `php`: new role that installs PHP versions from the ondrej/php PPA (Ubuntu 24.04 only for now; any
   other release is refused before any change) and runs every pool in `php_pools` as a PHP-FPM
   master of its own (`php-fpm@<name>`, socket `/run/php/<name>.sock` without a version in it,
