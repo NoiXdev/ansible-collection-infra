@@ -13,18 +13,35 @@
   loop_control:
     label: "{{ item.name }}"
 
-# The listed password and exactly the listed privileges, on every run:
-# a changed password reaches the server, and grants added by hand are
-# revoked. A user that left the list stays.
-# In a database-level grant (<db>.*) _ and % are wildcards: app_production.*
-# would also cover appXproduction. The role escapes them there, so a listed
-# name means that database only; SHOW GRANTS returns the same escaped form.
-- name: Create the users
+# The listed password, on every run: a changed password reaches the server.
+# Without priv the module leaves the privileges as they are (a new user has
+# none until the next task). The only task that sees the passwords, so the
+# only one without logging.
+- name: Set the passwords
   ansible.mysql.mysql_user:
     name: "{{ item.name }}"
     host: "{{ item.host | default('localhost') }}"
     password: "{{ item.password }}"
     update_password: always
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mariadb_socket }}"
+  loop: "{{ mariadb_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+# Exactly the listed privileges, on every run: grants added by hand are
+# revoked. A user that left the list stays.
+# In a database-level grant (<db>.*) _ and % are wildcards: app_production.*
+# would also cover appXproduction. The role escapes them there, so a listed
+# name means that database only; SHOW GRANTS returns the same escaped form.
+# The items hold no password, so the task logs: a privilege the server does
+# not know fails here with the user's name and the server's message.
+- name: Grant the privileges
+  ansible.mysql.mysql_user:
+    name: "{{ item.name }}"
+    host: "{{ item.host | default('localhost') }}"
     priv: >-
       {%- set ns = namespace(targets=[]) -%}
       {%- for entry in mariadb_privileges -%}
@@ -43,7 +60,6 @@
     login_unix_socket: "{{ mariadb_socket }}"
   vars:
     mariadb_privileges: "{{ item.privileges | default([item.name ~ '.*:ALL']) }}"
-  loop: "{{ mariadb_users }}"
+  loop: "{{ mariadb_users_public }}"
   loop_control:
     label: "{{ item.name }}"
-  no_log: true

@@ -13,17 +13,15 @@
   loop_control:
     label: "{{ item.name }}"
 
-# The password is stored for caching_sha2_password, the server's default (8.4
-# does not load mysql_native_password, which the module would pick for a plain
+# The listed password, on every run: a changed password reaches the server.
+# It is stored for caching_sha2_password, the server's default (8.4 does not
+# load mysql_native_password, which the module would pick for a plain
 # password). The module compares passwords by hash, which needs a fixed salt;
 # the role derives one per account.
-# The listed password and exactly the listed privileges, on every run:
-# a changed password reaches the server, and grants added by hand are
-# revoked. A user that left the list stays.
-# In a database-level grant (<db>.*) _ and % are wildcards: app_production.*
-# would also cover appXproduction. The role escapes them there, so a listed
-# name means that database only; SHOW GRANTS returns the same escaped form.
-- name: Create the users
+# Without priv the module leaves the privileges as they are (a new user has
+# none until the next task). The only task that sees the passwords, so the
+# only one without logging.
+- name: Set the passwords
   ansible.mysql.mysql_user:
     name: "{{ item.name }}"
     host: "{{ item.host | default('localhost') }}"
@@ -31,6 +29,25 @@
     plugin_auth_string: "{{ item.password }}"
     salt: "{{ (item.name ~ '@' ~ (item.host | default('localhost'))) | hash('sha256') | truncate(20, true, '') }}"
     update_password: always
+    state: present
+    login_user: root
+    login_unix_socket: "{{ mysql_socket }}"
+  loop: "{{ mysql_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+# Exactly the listed privileges, on every run: grants added by hand are
+# revoked. A user that left the list stays.
+# In a database-level grant (<db>.*) _ and % are wildcards: app_production.*
+# would also cover appXproduction. The role escapes them there, so a listed
+# name means that database only; SHOW GRANTS returns the same escaped form.
+# The items hold no password, so the task logs: a privilege the server does
+# not know fails here with the user's name and the server's message.
+- name: Grant the privileges
+  ansible.mysql.mysql_user:
+    name: "{{ item.name }}"
+    host: "{{ item.host | default('localhost') }}"
     priv: >-
       {%- set ns = namespace(targets=[]) -%}
       {%- for entry in mysql_privileges -%}
@@ -49,7 +66,6 @@
     login_unix_socket: "{{ mysql_socket }}"
   vars:
     mysql_privileges: "{{ item.privileges | default([item.name ~ '.*:ALL']) }}"
-  loop: "{{ mysql_users }}"
+  loop: "{{ mysql_users_public }}"
   loop_control:
     label: "{{ item.name }}"
-  no_log: true

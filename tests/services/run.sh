@@ -453,6 +453,16 @@ suite_mariadb() {
       && [ "$(sed -n 2p <<<"$grants")" = 'GRANT SELECT ON `app\_production`.* TO `report`@`localhost`' ]; } \
     || fail "mariadb: report's grants are not exactly the listed one: $grants"
 
+  echo "== mariadb: a privilege the server does not know is refused, naming the user and the reason"
+  refused mariadb bad-privilege "invalid priv string: SELEKT" "$dir/converge.yml" -v -e "$rotated" \
+    -e '{"mariadb_test_report_user": {"name": "report", "password": "rep0rt-pass", "privileges": ["app_production.*:SELECT", "report.*:SELEKT"]}}'
+  # The task's own failure line, not only ansible's error summary, names the
+  # user and the reason (a no_log task prints it censored).
+  grep -qE '^failed: \[testhost\] \(item=report\) => .*invalid priv string: SELEKT' "$out/mariadb-bad-privilege.log" \
+    || fail "mariadb: the failure line does not name the user report and the reason"
+  no_secret "$out/mariadb-bad-privilege.log" "${secrets[@]}"
+  [ "$(sql mariadb "SHOW GRANTS FOR 'report'@'localhost'")" = "$grants" ] || fail "mariadb: the refused run changed report's grants"
+
   echo "== mariadb: a user that leaves the list stays"
   converge mariadb no-report "$dir/converge.yml" -e "$rotated" -e mariadb_test_report=false
   [ "$(sql mariadb "SELECT COUNT(*) FROM mysql.user WHERE User = 'report' AND Host = 'localhost'")" = 1 ] \
@@ -629,6 +639,16 @@ suite_mysql() {
   { [ "$(wc -l <<<"$grants" | tr -d ' ')" = 2 ] && grep -q '^GRANT USAGE ON \*\.\* TO `report`@`localhost`' <<<"$grants" \
       && [ "$(sed -n 2p <<<"$grants")" = 'GRANT SELECT ON `app\_production`.* TO `report`@`localhost`' ]; } \
     || fail "mysql: report's grants are not exactly the listed one: $grants"
+
+  echo "== mysql: a privilege the server does not know is refused, naming the user and the reason"
+  refused mysql bad-privilege "invalid priv string: SELEKT" "$dir/converge.yml" -v -e "$rotated" \
+    -e '{"mysql_test_report_user": {"name": "report", "password": "rep0rt-pass", "privileges": ["app_production.*:SELECT", "report.*:SELEKT"]}}'
+  # The task's own failure line, not only ansible's error summary, names the
+  # user and the reason (a no_log task prints it censored).
+  grep -qE '^failed: \[testhost\] \(item=report\) => .*invalid priv string: SELEKT' "$out/mysql-bad-privilege.log" \
+    || fail "mysql: the failure line does not name the user report and the reason"
+  no_secret "$out/mysql-bad-privilege.log" "${secrets[@]}"
+  [ "$(sql mysql "SHOW GRANTS FOR 'report'@'localhost'")" = "$grants" ] || fail "mysql: the refused run changed report's grants"
 
   echo "== mysql: a user that leaves the list stays"
   converge mysql no-report "$dir/converge.yml" -e "$rotated" -e mysql_test_report=false

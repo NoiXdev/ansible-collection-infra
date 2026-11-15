@@ -89,8 +89,10 @@
   `mariadb_databases` and `mariadb_users`. root has no password and uses the unix socket. On
   every run each listed user gets its password and exactly its listed privileges (`_` and `%` in
   `<db>.*` are escaped); role grants and PROXY grants are not revoked, and databases and users
-  that leave a list stay. For fresh servers: another series, a server from Ubuntu's archive (even
-  of the pinned series) or MySQL on the host is refused before any change.
+  that leave a list stay. A privilege the server does not know stops the run naming the user (the
+  passwords are set in a task of their own, without logging). For fresh servers: another series,
+  a server from Ubuntu's archive (even of the pinned series) or MySQL on the host is refused
+  before any change.
 - `mysql`: new role that installs MySQL Community Server from MySQL's apt repository, pinned to
   `mysql_version` (default `"8.4"`), with the same variables and rules as `mariadb`
   (`mysql_settings`, `mysql_databases`, `mysql_users`). The repository has amd64 packages only:
