@@ -24,8 +24,10 @@ argument_specs:
         upgraded php<v>-* package (fpm, cli or an extension), one at a time
         (/usr/local/sbin/php-fpm-rolling-restart). Each must answer its ping before the next
         one restarts; one that does not stops the restart, and the failure is logged
-        (journalctl -t php-fpm-rolling-restart). In classic mode there is no hook and the
-        package's own restart applies.
+        (journalctl -t php-fpm-rolling-restart). needrestart, if installed, is told to leave
+        the php-fpm@ units to the hook (/etc/needrestart/conf.d/50noixdev-php-fpm.conf). In
+        classic mode there is no hook and no needrestart override, and the package's own
+        restart applies.
       - >-
         php_pools is the complete list: a pool that leaves it is stopped and disabled and its
         config removed; its tmp_dir and log stay.

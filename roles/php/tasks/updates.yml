@@ -2,7 +2,7 @@
 # unattended-upgrades installs the PPA's updates in both modes. One master per
 # pool: after each dpkg run that upgraded a php<v>-* package, the apt hook
 # restarts that version's pools one at a time. Classic mode has no hook and no
-# script: the package's own restart applies there.
+# script: the package's own restart (and needrestart's) applies there.
 - name: Install the rolling restart
   ansible.builtin.template:
     src: php-fpm-rolling-restart.sh.j2
@@ -21,14 +21,37 @@
     mode: "0644"
   when: php_fpm_per_pool_service | bool
 
-# The hook goes first; it does nothing without the script anyway.
-- name: Remove the rolling restart and its hook
+# needrestart (on Ubuntu servers by default) runs after every apt run too,
+# before the hook, and would restart all pools of a version at once: it leaves
+# the php-fpm@ units to the hook. The file does nothing without needrestart.
+- name: Create needrestart's config directory
+  ansible.builtin.file:
+    path: /etc/needrestart/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: php_fpm_per_pool_service | bool
+
+- name: Leave the pools to the rolling restart in needrestart
+  ansible.builtin.template:
+    src: 50noixdev-php-fpm.conf.j2
+    dest: /etc/needrestart/conf.d/50noixdev-php-fpm.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: php_fpm_per_pool_service | bool
+
+# The hook goes first; it does nothing without the script anyway. In classic
+# mode needrestart restarts the package services as usual.
+- name: Remove the rolling restart, its hook and the needrestart config
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
   loop:
     - /etc/apt/apt.conf.d/99noixdev-php-fpm-restart
     - /usr/local/sbin/php-fpm-rolling-restart
+    - /etc/needrestart/conf.d/50noixdev-php-fpm.conf
   when: not php_fpm_per_pool_service | bool
 
 - name: Let unattended-upgrades install the PPA's updates

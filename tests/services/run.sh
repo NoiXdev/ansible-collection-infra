@@ -1165,12 +1165,27 @@ package_services_stay() {
   done
 }
 
+# needrestart_deferred NAME: needrestart ran in apt's run NAME (or in
+# `needrestart -r l`, its output $out/php-NAME.log), restarted no php-fpm@
+# pool and listed production as deferred instead.
+needrestart_deferred() {
+  local log="$out/php-$1.log"
+  [ -z "$(awk '/^(Restarting services|Services to be restarted)/ { r = 1; next } /^$/ { r = 0 } r && /php-fpm@/' "$log")" ] \
+    || { cat "$log" >&2; fail "php/$1: needrestart restarted php-fpm@ pools"; }
+  awk '/^Service restarts being deferred/ { d = 1; next } /^$/ { d = 0 } d && /systemctl restart php-fpm@production[.]service/ { found = 1 }
+       END { exit !found }' "$log" || { cat "$log" >&2; fail "php/$1: needrestart did not list production as deferred"; }
+}
+
 # The rolling restart after a PHP update (one master per pool), after the
-# classic suite: production and staging on 8.3, extra on 8.4.
+# classic suite: production and staging on 8.3, extra on 8.4. needrestart is
+# installed, as on a stock Ubuntu server: its apt hook runs before the role's.
 suite_php_updates() {
   local dir="$here/php" prod staging extra count expected log rc started took
   local knobs=(-e php_test_staging_version=8.3 -e php_test_extra=true -e php_fpm_restart_timeout=5)
   local script=/usr/local/sbin/php-fpm-rolling-restart conf=/etc/php-fpm/production/pool.conf
+
+  hx php sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y -q needrestart >/dev/null' || fail "php: needrestart could not be installed"
+  hx php test -e /etc/apt/apt.conf.d/99needrestart || fail "php: needrestart's apt hook is missing"
 
   echo "== php: updates: production and staging on 8.3, extra on 8.4"
   converge php updates "$dir/converge.yml" "${knobs[@]}"
@@ -1208,6 +1223,7 @@ suite_php_updates() {
   expected="$(printf '%s\n' 'PHP 8.3 packages were upgraded: restarting the pools one at a time' \
     'restarting production (PHP 8.3)' 'production answers' 'restarting staging (PHP 8.3)' 'staging answers')"
   [ "$(rr_since "$count")" = "$expected" ] || fail "php: the hook's journal: $(rr_since "$count")"
+  needrestart_deferred hook
   package_services_stay hook
   play php "$dir/verify.yml" "${knobs[@]}"
 
@@ -1221,6 +1237,11 @@ suite_php_updates() {
   [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted without the script"
   [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted without the script"
   [ -z "$(rr_since "$count")" ] || fail "php: the hook ran without the script: $(rr_since "$count")"
+  needrestart_deferred no-script
+  # The pools still run the replaced binary: needrestart's list mode names
+  # them as deferred, not as restarts.
+  hx php needrestart -r l >"$out/php-needrestart-list.log" 2>&1 || fail "php: needrestart -r l failed"
+  needrestart_deferred needrestart-list
 
   echo "== php: updates: apt reinstalls php8.4-intl alone, the hook restarts extra (8.4) only"
   prod="$(pid php php-fpm@production)"

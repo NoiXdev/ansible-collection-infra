@@ -190,16 +190,18 @@
              | map('join', '/fpm/pool.d/') | map('regex_replace', '$', '.conf') | list }}
       when: not php_fpm_per_pool_service | bool
 
-    # The PPA in unattended-upgrades (both modes); the rolling restart and its
-    # apt hook in one master per pool only (classic mode: the package's own
-    # restart).
+    # The PPA in unattended-upgrades (both modes); the rolling restart, its
+    # apt hook and needrestart's override in one master per pool only (classic
+    # mode: the package's own restart).
     - name: Read the update files and apt's config
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          for f in /usr/local/sbin/php-fpm-rolling-restart /etc/apt/apt.conf.d/99noixdev-php-fpm-restart /etc/apt/apt.conf.d/52noixdev-php-ppa; do
+          for f in /usr/local/sbin/php-fpm-rolling-restart /etc/apt/apt.conf.d/99noixdev-php-fpm-restart /etc/apt/apt.conf.d/52noixdev-php-ppa \
+              /etc/needrestart/conf.d/50noixdev-php-fpm.conf; do
             if [ -e "$f" ]; then echo "$f $(stat -c '%a %U %G' "$f")"; else echo "$f absent"; fi
           done
+          echo "needrestart_override=$(grep -cxF '$nrconf{override_rc}{qr(^php-fpm@.+\.service$)} = 0;' /etc/needrestart/conf.d/50noixdev-php-fpm.conf 2>/dev/null || true)"
           apt-config dump | grep -E '^(Unattended-Upgrade::Origins-Pattern|DPkg::(Pre|Post)-Invoke)::' || true
         executable: /bin/bash
       register: php_verify_updates
@@ -222,6 +224,8 @@
           - "'/etc/apt/apt.conf.d/99noixdev-php-fpm-restart 644 root root' in php_verify_updates.stdout_lines"
           - php_verify_updates.stdout_lines | select('match', '^DPkg::Pre-Invoke::.*php-fpm-rolling-restart --dpkg-pre-invoke') | list | length == 1
           - php_verify_updates.stdout_lines | select('match', '^DPkg::Post-Invoke::.*php-fpm-rolling-restart --dpkg-post-invoke') | list | length == 1
+          - "'/etc/needrestart/conf.d/50noixdev-php-fpm.conf 644 root root' in php_verify_updates.stdout_lines"
+          - "'needrestart_override=1' in php_verify_updates.stdout_lines"
         fail_msg: "{{ php_verify_updates.stdout_lines }}"
       when: php_fpm_per_pool_service | bool
 
@@ -230,6 +234,7 @@
         that:
           - "'/usr/local/sbin/php-fpm-rolling-restart absent' in php_verify_updates.stdout_lines"
           - "'/etc/apt/apt.conf.d/99noixdev-php-fpm-restart absent' in php_verify_updates.stdout_lines"
+          - "'/etc/needrestart/conf.d/50noixdev-php-fpm.conf absent' in php_verify_updates.stdout_lines"
           - php_verify_updates.stdout_lines | select('match', '^DPkg::') | select('search', 'php-fpm-rolling-restart') | list | length == 0
         fail_msg: "{{ php_verify_updates.stdout_lines }}"
       when: not php_fpm_per_pool_service | bool

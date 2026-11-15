@@ -1,0 +1,6 @@
+# Managed by noixdev.infra (php role). Changes here are overwritten.
+# needrestart (installed by default on Ubuntu servers) would restart every
+# php-fpm@ pool of a version at once after an update, before the role's apt
+# hook restarts them one at a time (/usr/local/sbin/php-fpm-rolling-restart).
+# It lists them as deferred instead.
+$nrconf{override_rc}{qr(^php-fpm@.+\.service$)} = 0;
