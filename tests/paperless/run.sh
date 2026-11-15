@@ -28,8 +28,9 @@
 # the import with a passphrase and the failed update run at -vvv, and their
 # output must not hold a test secret.
 # Then the refusals on an installation: a changed paperless_db_password
-# refused before any change (-vvv), and the new password taken once the
-# database has it (ALTER USER, as the refusal says).
+# refused before any change (-vvv), a compose file that is not YAML refused
+# without a line of it in the output (-vvv), and the new password taken once
+# the database has it (ALTER USER, as the refusal says).
 # Then the data: left-over data without a compose file refused, and an
 # installation whose data directories are gone (an unmounted volume) refused
 # in every state without creating anything; with
@@ -125,14 +126,16 @@ expect_in_log() {
   grep -qF -- "$2" "$out/$1.log" || { cat "$out/$1.log" >&2; fail "$1.log lacks: $2"; }
 }
 # Fails when the log is missing or empty (it would prove nothing) or holds a
-# test secret, as it is or up to its first quote or backslash (a quoted or
-# escaped copy): expect_no_secrets <name>.
+# test secret, as it is, with its $ doubled (as the compose file holds it),
+# or either of them up to its first quote or backslash (a quoted or escaped
+# copy): expect_no_secrets <name>.
 expect_no_secrets() {
-  local log="$out/$1.log" secret part
+  local log="$out/$1.log" secret doubled part
   [ -s "$log" ] || fail "$1.log is missing or empty, so it cannot show that no secret is in it"
   for secret in "${secrets[@]}"; do
     [ "${#secret}" -ge 8 ] || fail "a test secret is shorter than 8 characters: check vars.yml"
-    for part in "$secret" "${secret%%[\'\"\\\`]*}"; do
+    doubled="${secret//\$/\$\$}"
+    for part in "$secret" "${secret%%[\'\"\\\`]*}" "$doubled" "${doubled%%[\'\"\\\`]*}"; do
       if [ "${#part}" -ge 8 ] && grep -qF -- "$part" "$log"; then
         fail "$1.log holds a test secret (${part:0:4}...): $(grep -nF -- "$part" "$log" | head -n 3 | cut -c1-200)"
       fi
@@ -632,6 +635,21 @@ test_refusals() {
   expect_no_secrets db-password
   unchanged db-password
   [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the refused run: $(webserver)"
+
+  echo "== a compose file that is not YAML must be refused without showing a line of it"
+  hx cp -p "$dir/compose.yaml" /root/compose.yaml
+  # The line of the database password, as a hand edit could break it.
+  hx sed -i 's/^\( *POSTGRES_PASSWORD: .*\)$/\1 broken/' "$dir/compose.yaml"
+  compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  play_fails compose-not-yaml "$here/converge.yml" -vvv "${small_vars[@]}"
+  expect_in_log compose-not-yaml "$dir/compose.yaml is not YAML"
+  expect_no_secrets compose-not-yaml
+  unchanged compose-not-yaml
+  if grep -qF -- "broken" "$out/compose-not-yaml.log"; then
+    fail "the refusal shows a line of the compose file: $(grep -nF -- broken "$out/compose-not-yaml.log" | head -n 3 | cut -c1-80)"
+  fi
+  hx cp -p /root/compose.yaml "$dir/compose.yaml"
+  expect_idempotent "${small_vars[@]}"
 
   echo "== a password changed in the database as the refusal says must be taken"
   set_db_password "$rotated_db_password"

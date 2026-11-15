@@ -39,17 +39,15 @@ paperless_import_rel: >-
 paperless_import_container_dir: "{{ paperless_container_dirs.export }}/{{ paperless_import_rel }}"
 
 # The Paperless version of the compose file on disk (the tag of the
-# webserver image), empty when there is none. paperless_compose_before is set
-# by state.yml.
+# webserver image), empty when there is none. paperless_compose_on_disk, the
+# compose file on disk parsed (empty when there is none), is set by
+# state.yml, which parses it in a no_log task.
 paperless_installed_version: >-
-  {%- set compose = paperless_compose_before | default('', true) | from_yaml if paperless_compose_before | default('', true) else {} -%}
-  {%- set image = (((compose if compose is mapping else {}).services | default({})).webserver | default({})).image | default('') | string -%}
+  {%- set image = ((paperless_compose_on_disk.services | default({})).webserver | default({})).image | default('') | string -%}
   {{ image.rpartition(':')[2] if ':' in image.rpartition('/')[2] else '' }}
 
 # The services of the compose file on disk.
-paperless_services_before: >-
-  {%- set compose = paperless_compose_before | default('', true) | from_yaml if paperless_compose_before | default('', true) else {} -%}
-  {{ ((compose if compose is mapping else {}).services | default({})) | list }}
+paperless_services_before: "{{ paperless_compose_on_disk.services | default({}) | list }}"
 
 # The PostgreSQL major of paperless_postgres_image: the leading digits of its
 # tag (postgres:18, postgres:18.1-alpine), empty without them. It must match

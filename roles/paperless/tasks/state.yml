@@ -8,14 +8,15 @@
 #                password) differs from the one on disk
 #   noop         everything as the role writes it
 # Also sets paperless_installed (a compose file exists),
-# paperless_compose_before (the compose file on disk, which
-# paperless_installed_version reads), paperless_files_read (the files on
+# paperless_compose_before (the compose file on disk),
+# paperless_compose_on_disk (it parsed, which paperless_installed_version
+# reads), paperless_files_read (the files on
 # disk, which a rollback puts back), paperless_files_changed (the paths of
 # the files that differ) and paperless_down (the expected services that are
 # not running). With an import record, paperless_import_dir is ignored.
 # Changes nothing; refuses, before anything else, a paperless_data_dir that is
-# not a mountpoint (with paperless_data_dir_mountpoint) and a compose file
-# without all of paperless_data_subdirs (an unmounted volume); then a marker
+# not a mountpoint (with paperless_data_dir_mountpoint), a compose file that
+# is not YAML and a compose file without all of paperless_data_subdirs (an unmounted volume); then a marker
 # beside the record of a completed import, an install or import that did
 # not complete, left-over data without a compose
 # file, a compose file without a Paperless version, a
@@ -86,6 +87,28 @@
     paperless_compose_read: >-
       {{ paperless_files_read.results | selectattr('item.path', 'equalto', paperless_compose_file) | first }}
   no_log: true
+
+# Once, in a no_log task: an error of the YAML parser can quote a line of the
+# file, which holds the secret key and the passwords, so a file that is not
+# YAML gets a message of its own without the error. One that is YAML but not
+# a mapping parses as empty and names no version, which is refused below.
+- name: Check that the compose file is YAML
+  block:
+    - name: Parse the compose file
+      ansible.builtin.set_fact:
+        paperless_compose_on_disk: "{{ paperless_compose_parsed if paperless_compose_parsed is mapping else {} }}"
+      vars:
+        paperless_compose_parsed: "{{ (paperless_compose_before or '{}') | from_yaml }}"
+      no_log: true
+  rescue:
+    - name: Fail on a compose file that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ paperless_compose_file }} is not YAML, so the role cannot tell
+          what is installed and changes nothing. The parser's error is not
+          shown: it can quote a line of the file, which holds the secret key
+          and the passwords. Put back the compose file the role wrote (docker
+          compose config --quiet in {{ paperless_dir }} shows the error).
 
 # Only install and import create the subdirectories, and the containers do
 # not create a missing one, so their absence beside a compose file is data
@@ -207,10 +230,8 @@
 - name: Compare paperless_db_password with the compose file
   ansible.builtin.set_fact:
     paperless_db_password_changed: >-
-      {{ (((paperless_compose_yaml.services | default({})).db | default({})).environment | default({})).POSTGRES_PASSWORD
+      {{ (((paperless_compose_on_disk.services | default({})).db | default({})).environment | default({})).POSTGRES_PASSWORD
          | default('') | string | replace('$$', '$') != paperless_db_password | string }}
-  vars:
-    paperless_compose_yaml: "{{ paperless_compose_before | from_yaml }}"
   no_log: true
   when: paperless_installed
 
