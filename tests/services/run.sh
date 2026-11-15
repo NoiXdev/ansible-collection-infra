@@ -54,22 +54,27 @@ start() {
     [ "$tries" -lt 120 ] || fail "$1: the container $name did not boot within 120 seconds"
     sleep 1
   done
-  [ "$1" = mysql ] && systemd_fallback "$name"
+  if [ "$1" = mysql ]; then systemd_fallback "$name"; fi
   return 0
 }
 
 # systemd_fallback NAME: systemd in an emulated amd64 container (Docker Desktop
 # on Apple silicon) boots to degraded but cannot start any service. A probe
-# unit tells; when it fails, a stand-in systemctl that runs mysqld directly is
-# installed, and the run log says so. On a real amd64 host the probe passes and
-# the real systemd and mysql.service run unchanged.
+# unit tells; when it fails on a Docker host that is not x86_64, a stand-in
+# systemctl that runs mysqld directly is installed, and the log says so (the
+# final summary repeats it). On an x86_64 Docker host a failing probe fails the
+# suite, and when it passes the real systemd and mysql.service run unchanged.
+shim_used=0
 systemd_fallback() {
-  local name="$1"
+  local name="$1" host_arch
   if docker exec "$name" sh -c 'printf "[Service]\nType=oneshot\nExecStart=/bin/true\n" > /etc/systemd/system/noixdev-probe.service \
       && systemctl daemon-reload && systemctl start noixdev-probe.service; rc=$?; rm -f /etc/systemd/system/noixdev-probe.service; exit $rc' >/dev/null 2>&1; then
     return 0
   fi
-  docker cp "$here/systemctl-shim" "$name:/usr/local/bin/systemctl"
+  host_arch="$(docker info --format '{{.Architecture}}')"
+  [ "$host_arch" != x86_64 ] || fail "$name: systemd cannot start a service on an x86_64 Docker host"
+  docker cp "$here/systemctl-shim" "$name:/usr/local/bin/systemctl" || fail "$name: the systemctl shim could not be installed"
+  shim_used=1
   echo "== WARNING: emulated amd64: mysql.service not exercised, systemctl shim in use"
 }
 
@@ -286,6 +291,26 @@ suite_mariadb() {
   hx mariadb sh -c 'test ! -e /usr/sbin/mariadbd && test ! -e /etc/apt/sources.list.d/mariadb.sources' \
     || fail "mariadb: a refused run installed something"
 
+  echo "== mariadb: the distro's MariaDB is refused (another series, or the pinned one from another origin)"
+  hx mariadb apt-get update -q >/dev/null
+  hx mariadb env DEBIAN_FRONTEND=noninteractive apt-get install -y -q mariadb-server >/dev/null
+  version="$(hx mariadb dpkg-query -W -f='${Version}' mariadb-server)"
+  echo "   distro mariadb-server on $ubuntu: $version"
+  case "$version" in
+    1:11.8.*)
+      refused mariadb distro-origin "mariadb: installed mariadb-server $version is not from deb.mariadb.org; the role manages MariaDB's own packages only" \
+        "$dir/converge.yml" -e "$empty" ;;
+    *)
+      refused mariadb distro-series "mariadb: installed mariadb-server $version is series 10.11, mariadb_version is 11.8; a series change is a separate, deliberate step" \
+        "$dir/converge.yml" -e "$empty" ;;
+  esac
+  hx mariadb sh -c 'test ! -e /etc/apt/sources.list.d/mariadb.sources && test ! -e /etc/apt/keyrings/mariadb.asc && test ! -e /etc/apt/preferences.d/mariadb' \
+    || fail "mariadb: the refused run left repository files"
+  [ "$(hx mariadb dpkg-query -W -f='${Version}' mariadb-server)" = "$version" ] || fail "mariadb: the distro package changed after the refused run"
+  hx mariadb env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q 'mariadb-*' 'mysql-common' >/dev/null
+  hx mariadb env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -q --purge >/dev/null
+  hx mariadb rm -rf /var/lib/mysql /etc/mysql
+
   echo "== mariadb: a run whose repository refresh failed is not followed by another series"
   # The first run adds the source and the pin, then its refresh fails: the
   # package lists stay without the vendor's packages.
@@ -437,21 +462,28 @@ suite_mysql() {
   hx mysql sh -c 'test ! -e /usr/sbin/mysqld && test ! -e /etc/apt/sources.list.d/mysql.sources' \
     || fail "mysql: a refused run installed something"
 
-  echo "== mysql: the distro's MySQL of another series is refused"
-  if [ "$ubuntu" = 24.04 ]; then
-    hx mysql apt-get update -q >/dev/null
-    hx mysql env DEBIAN_FRONTEND=noninteractive apt-get install -y -q mysql-server >/dev/null
-    distro="$(hx mysql dpkg-query -W -f='${Version}' mysql-server)"
-    echo "   distro mysql-server on $ubuntu: $distro"
-    refused mysql distro-series "mysql: installed mysql-server $distro is series 8.0, mysql_version is 8.4; a series change is a separate, deliberate step" \
-      "$dir/converge.yml" -e "$empty"
-    hx mysql sh -c 'test ! -e /etc/apt/sources.list.d/mysql.sources' || fail "mysql: the refused run added the repository"
-    hx mysql env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q 'mysql-*' >/dev/null
-    hx mysql env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -q --purge >/dev/null
-    hx mysql rm -rf /var/lib/mysql /etc/mysql
-  else
-    echo "   the distro's MySQL on $ubuntu is already the pinned series; nothing to refuse"
-  fi
+  echo "== mysql: the distro's MySQL is refused (another series, or the pinned one from another origin)"
+  hx mysql apt-get update -q >/dev/null
+  hx mysql env DEBIAN_FRONTEND=noninteractive apt-get install -y -q mysql-server >/dev/null
+  distro="$(hx mysql dpkg-query -W -f='${Version}' mysql-server)"
+  echo "   distro mysql-server on $ubuntu: $distro"
+  case "$distro" in
+    8.4.*)
+      # The series matches the pin, so only the origin tells it from the vendor's.
+      refused mysql distro-origin "mysql: installed mysql-server $distro is not from repo.mysql.com; the role manages MySQL's own packages only" \
+        "$dir/converge.yml" -e "$empty" ;;
+    *)
+      refused mysql distro-series "mysql: installed mysql-server $distro is series 8.0, mysql_version is 8.4; a series change is a separate, deliberate step" \
+        "$dir/converge.yml" -e "$empty" ;;
+  esac
+  hx mysql sh -c 'test ! -e /etc/apt/sources.list.d/mysql.sources && test ! -e /etc/apt/keyrings/mysql.asc && test ! -e /etc/apt/preferences.d/mysql' \
+    || fail "mysql: the refused run left repository files"
+  [ "$(hx mysql dpkg-query -W -f='${Version}' mysql-server)" = "$distro" ] || fail "mysql: the distro package changed after the refused run"
+  hx mysql sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}\n" mysql-community-server 2>/dev/null | grep -q "^.i"' \
+    || fail "mysql: the refused run installed the vendor's server"
+  hx mysql env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q 'mysql-*' >/dev/null
+  hx mysql env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -q --purge >/dev/null
+  hx mysql rm -rf /var/lib/mysql /etc/mysql
 
   echo "== mysql: a run whose repository refresh failed is not followed by another series"
   # The first run adds the source and the pin, then its refresh fails: the
@@ -564,3 +596,6 @@ for role in $services; do
   "suite_$role"
 done
 echo "== services ($services) passed on ubuntu $ubuntu"
+if [ "$shim_used" = 1 ]; then
+  echo "== WARNING: emulated amd64: mysql.service not exercised, systemctl shim in use"
+fi
