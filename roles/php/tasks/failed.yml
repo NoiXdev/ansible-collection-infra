@@ -1,0 +1,32 @@
+---
+# Included from a rescue: a task failed after others (or its own earlier loop
+# items) had changed what needs a reload or restart. The handlers run now, so
+# the pools do not stay on their old state while the next run, seeing no
+# change, would leave them there. They work from the registered results, test
+# each config first and touch only pools with a config on disk. Then the run
+# fails with the task's own messages (none from a no_log task).
+
+# A failed task notifies nothing, even when some of its loop items changed
+# (one version's packages installed, the next one's failed).
+- name: Notify the handlers of what the failed task changed
+  ansible.builtin.debug:
+    msg: '"{{ ansible_failed_task.name }}" changed something before it failed'
+  changed_when: true
+  when: ansible_failed_result.results | default([ansible_failed_result]) | map(attribute='changed', default=false) | select | list | length > 0
+  notify: php pools changed
+
+- name: Run the reloads and restarts notified before the failure
+  ansible.builtin.meta: flush_handlers
+
+- name: Fail as the task did
+  ansible.builtin.fail:
+    msg: >-
+      php: "{{ ansible_failed_task.name }}" failed{{ (': ' ~ php_failed_messages | join('; ')) if php_failed_messages else '' }};
+      the reloads and restarts notified before it have run
+  vars:
+    php_failed_messages: >-
+      {{ [] if ansible_failed_task.no_log | default(false)
+         else ((ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed')
+                | map(attribute='msg', default='') | list)
+               + ([ansible_failed_result.msg | default('')] if ansible_failed_result.results is not defined else []))
+              | select | unique | list }}

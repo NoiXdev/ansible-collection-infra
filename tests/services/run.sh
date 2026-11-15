@@ -762,6 +762,40 @@ php_planted_links() {
     || fail "php: session was not recreated: $(hx php stat -c '%U:%G %a' /srv/staging/tmp/session)"
 }
 
+# loads POOL ROOT EXTENSION: the pool has EXTENSION loaded within 10
+# seconds (a reload is a signal).
+loads() {
+  local tries=0
+  until ask "$1" "$2" | grep -qF "\"$3\""; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 10 ] || return 1
+    sleep 1
+  done
+}
+
+# php_failed_run_reloads: a run that fails after it installed a new extension
+# for 8.3 (a typo in 8.4's list) still reloads the 8.3 pools, so the fixed
+# run, which changes nothing for 8.3, does not leave them without it. The
+# pools reload (USR2): their MainPIDs stay.
+php_failed_run_reloads() {
+  local dir="$here/php"
+  local fixed='{"php_versions": [{"version": "8.3", "extensions": ["intl", "mbstring", "bcmath"]}, {"version": "8.4", "extensions": ["intl", "mbstring"]}]}'
+  local typo='{"php_versions": [{"version": "8.3", "extensions": ["intl", "mbstring", "bcmath"]}, {"version": "8.4", "extensions": ["intll"]}]}'
+  echo "== php: a new 8.3 extension and a typo in 8.4's list: the run fails, the 8.3 pools load the extension"
+  ! loads production /srv/prod bcmath || fail "php: production has bcmath before the test"
+  if play php "$dir/converge.yml" "${upgraded[@]}" -e "$typo" >"$out/php-typo-new-extension.log" 2>&1; then
+    fail "php: the run with php8.4-intll did not fail"
+  fi
+  grep -qF "php8.4-intll" "$out/php-typo-new-extension.log" || { cat "$out/php-typo-new-extension.log" >&2; fail "php: the failure does not name php8.4-intll"; }
+  loads production /srv/prod bcmath || fail "php: production did not load bcmath after the failed run"
+  loads staging /srv/staging bcmath || fail "php: staging did not load bcmath after the failed run"
+  php_running typo-new-extension
+  converge php typo-fixed "$dir/converge.yml" "${upgraded[@]}" -e "$fixed"
+  loads production /srv/prod bcmath || fail "php: production does not have bcmath after the fixed run"
+  loads staging /srv/staging bcmath || fail "php: staging does not have bcmath after the fixed run"
+  php_running typo-fixed
+}
+
 suite_php() {
   local dir="$here/php" codename version policy prod staging tries rotate name conf
   local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
@@ -859,6 +893,7 @@ suite_php() {
   refused php typo "php8.3-intll" "$dir/converge.yml" "${upgraded[@]}" \
     -e '{"php_versions": [{"version": "8.3", "extensions": ["intll"]}, {"version": "8.4", "extensions": ["intl", "mbstring"]}]}'
   php_running typo
+  php_failed_run_reloads
 
   echo "== php: invalid pools are refused before any change"
   refused php unknown-user "php: php_pools entry production runs as nosuchuser, which does not exist; the role does not create users" \

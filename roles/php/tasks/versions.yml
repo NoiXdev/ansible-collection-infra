@@ -1,36 +1,44 @@
 ---
-# php<v>-cli, php<v>-fpm and php<v>-<extension> per extension. A new extension
-# reloads the pools of its version.
-- name: Install the PHP versions
-  ansible.builtin.apt:
-    name: "{{ (['cli', 'fpm'] + item.extensions | default([])) | map('regex_replace', '^', 'php' ~ item.version ~ '-') | list }}"
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
-  loop: "{{ php_versions }}"
-  loop_control:
-    label: "{{ item.version }}"
-  register: php_packages
-  notify: php pools changed
+# A failure in this block flushes what it notified before the run fails
+# (tasks/failed.yml): a new extension of one version is loaded although a
+# typo in another version's list stops the run.
+- name: Install the versions and php_ini
+  block:
+    # php<v>-cli, php<v>-fpm and php<v>-<extension> per extension. A new extension
+    # reloads the pools of its version.
+    - name: Install the PHP versions
+      ansible.builtin.apt:
+        name: "{{ (['cli', 'fpm'] + item.extensions | default([])) | map('regex_replace', '^', 'php' ~ item.version ~ '-') | list }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      loop: "{{ php_versions }}"
+      loop_control:
+        label: "{{ item.version }}"
+      register: php_packages
+      notify: php pools changed
 
-# cgi-fcgi asks a pool's socket directly (health checks).
-- name: Install the FastCGI client and logrotate
-  ansible.builtin.apt:
-    name: [libfcgi-bin, logrotate]
-    state: present
+    # cgi-fcgi asks a pool's socket directly (health checks).
+    - name: Install the FastCGI client and logrotate
+      ansible.builtin.apt:
+        name: [libfcgi-bin, logrotate]
+        state: present
 
-- name: Write php_ini for the CLI and FPM of every version
-  ansible.builtin.template:
-    src: php.ini.j2
-    dest: "/etc/php/{{ item.0.version }}/{{ item.1 }}/conf.d/90-noixdev.ini"
-    owner: root
-    group: root
-    mode: "0644"
-  loop: "{{ php_versions | product(['cli', 'fpm']) | list }}"
-  loop_control:
-    label: "{{ item.0.version }}/{{ item.1 }}"
-  register: php_ini_files
-  notify: php pools changed
+    - name: Write php_ini for the CLI and FPM of every version
+      ansible.builtin.template:
+        src: php.ini.j2
+        dest: "/etc/php/{{ item.0.version }}/{{ item.1 }}/conf.d/90-noixdev.ini"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ php_versions | product(['cli', 'fpm']) | list }}"
+      loop_control:
+        label: "{{ item.0.version }}/{{ item.1 }}"
+      register: php_ini_files
+      notify: php pools changed
+  rescue:
+    - name: Apply the changes so far and fail
+      ansible.builtin.include_tasks: failed.yml
 
 - name: Choose the version php on the shell runs
   community.general.alternatives:

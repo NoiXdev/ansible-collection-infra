@@ -43,69 +43,82 @@
     state: absent
   loop: *php_left
 
-- name: Install the instance unit
-  ansible.builtin.template:
-    src: php-fpm@.service.j2
-    dest: /etc/systemd/system/php-fpm@.service
-    owner: root
-    group: root
-    mode: "0644"
-  register: php_unit
-  notify: php pools changed
+# A failure from the unit to the master configs flushes what was notified
+# before the run fails (tasks/failed.yml): a pool whose env already names its
+# new version does not keep running the old one.
+- name: Write the unit and the pool configs
+  block:
+    - name: Install the instance unit
+      ansible.builtin.template:
+        src: php-fpm@.service.j2
+        dest: /etc/systemd/system/php-fpm@.service
+        owner: root
+        group: root
+        mode: "0644"
+      register: php_unit
+      notify: php pools changed
 
-- name: Create the pool config dirs
-  ansible.builtin.file:
-    path: "/etc/php-fpm/{{ item }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-  loop: "{{ php_pool_names }}"
+    - name: Create the pool config dirs
+      ansible.builtin.file:
+        path: "/etc/php-fpm/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: "{{ php_pool_names }}"
 
-# The version and the socket's owner and group: a change restarts the pool.
-- name: Write the instance environments
-  ansible.builtin.template:
-    src: instance.env.j2
-    dest: "/etc/php-fpm/{{ item.name }}/env"
-    owner: root
-    group: root
-    mode: "0644"
-  loop: "{{ php_pools_public }}"
-  loop_control:
-    label: "{{ item.name }}"
-  register: php_env_files
-  notify: php pools changed
+    # The version and the socket's owner and group: a change restarts the pool.
+    - name: Write the instance environments
+      ansible.builtin.template:
+        src: instance.env.j2
+        dest: "/etc/php-fpm/{{ item.name }}/env"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ php_pools_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: php_env_files
+      notify: php pools changed
 
-# The pool configs carry the env: no_log, and only root reads them. FPM tests
-# each one before it replaces the old.
-- name: Write the pool configs
-  ansible.builtin.template:
-    src: pool.conf.j2
-    dest: "/etc/php-fpm/{{ item.name }}/pool.conf"
-    owner: root
-    group: root
-    mode: "0640"
-    validate: "php-fpm{{ item.version }} -t -y %s"
-  loop: "{{ php_pools }}"
-  loop_control:
-    label: "{{ item.name }}"
-  no_log: true
-  register: php_pool_files
-  notify: php pools changed
+    # The pool configs carry the env: no_log, and only root reads them. FPM tests
+    # each one before it replaces the old.
+    - name: Write the pool configs
+      ansible.builtin.template:
+        src: pool.conf.j2
+        dest: "/etc/php-fpm/{{ item.name }}/pool.conf"
+        owner: root
+        group: root
+        mode: "0640"
+        validate: "php-fpm{{ item.version }} -t -y %s"
+      loop: "{{ php_pools }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+      register: php_pool_files
+      notify: php pools changed
 
-- name: Write the master configs
-  ansible.builtin.template:
-    src: php-fpm.conf.j2
-    dest: "/etc/php-fpm/{{ item.name }}/php-fpm.conf"
-    owner: root
-    group: root
-    mode: "0644"
-    validate: "php-fpm{{ item.version }} -t -y %s"
-  loop: "{{ php_pools_public }}"
-  loop_control:
-    label: "{{ item.name }}"
-  register: php_fpm_files
-  notify: php pools changed
+    - name: Write the master configs
+      ansible.builtin.template:
+        src: php-fpm.conf.j2
+        dest: "/etc/php-fpm/{{ item.name }}/php-fpm.conf"
+        owner: root
+        group: root
+        mode: "0644"
+        validate: "php-fpm{{ item.version }} -t -y %s"
+      loop: "{{ php_pools_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: php_fpm_files
+      notify: php pools changed
+  rescue:
+    - name: Reload systemd for the changed unit before the handlers
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: php_unit is defined and php_unit is changed
+
+    - name: Apply the changes so far and fail
+      ansible.builtin.include_tasks: failed.yml
 
 - name: Reload systemd for the changed unit
   ansible.builtin.systemd_service:

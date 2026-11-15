@@ -50,6 +50,11 @@ php_reload_pools: >-
       + (php_pools_public | selectattr('version', 'in', php_reload_versions) | map(attribute='name') | list))
      | unique | difference(php_restart_pools) | list }}
 
+# The pools with /etc/php-fpm/<name>/php-fpm.conf on disk, which the first
+# handler finds.
+php_configured_pools: >-
+  {{ php_pool_configs.files | default([]) | map(attribute='path') | map('dirname') | map('basename') | list }}
+
 # The versions whose package service php<v>-fpm is installed: the listed ones
 # and any other the service facts of tasks/pools.yml show.
 php_fpm_package_versions: >-
