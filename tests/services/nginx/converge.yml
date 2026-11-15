@@ -124,6 +124,7 @@
             owner: root
             group: root
             mode: "0755"
+          register: nginx_test_upstream_file
 
         - name: Install the upstream's unit
           ansible.builtin.copy:
@@ -139,11 +140,12 @@
             owner: root
             group: root
             mode: "0644"
+          register: nginx_test_upstream_unit
 
         - name: Start the upstream
           ansible.builtin.systemd_service:
             name: noixdev-test-upstream
-            state: started
+            state: "{{ 'restarted' if nginx_test_upstream_file is changed or nginx_test_upstream_unit is changed else 'started' }}"
             enabled: true
             daemon_reload: true
 

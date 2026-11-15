@@ -123,6 +123,38 @@
       loop_control:
         label: "{{ item.item.url }}"
 
+    # The workers run as www-data, not as the package's nginx user: a request
+    # body above client_body_buffer_size and a proxied response above the
+    # proxy buffers (to a client slower than the upstream) go through the
+    # temp files in /var/cache/nginx.
+    - name: Create a request body of 1 MiB
+      ansible.builtin.command:
+        argv: [truncate, -s, 1M, /root/nginx-verify-upload]
+      changed_when: false
+
+    - name: Upload it to the PHP site and download 4 MiB through the proxy site
+      ansible.builtin.command:
+        argv: "{{ ['curl', '-sS', '-k', '--max-time', '30', '--resolve', item.host ~ ':443:127.0.0.1'] + item.args
+                  + ['https://' ~ item.host ~ item.path] }}"
+      loop:
+        - host: prod.example.test
+          path: /upload
+          args: [-H, "Content-Type: application/octet-stream", --data-binary, "@/root/nginx-verify-upload"]
+        - host: node.example.test
+          path: /big
+          args: [--limit-rate, 2M, -o, /dev/null, -w, "%{http_code} %{size_download}"]
+      loop_control:
+        label: "{{ item.host }}{{ item.path }}"
+      register: nginx_verify_large
+      changed_when: false
+
+    - name: Check the upload and the download
+      ansible.builtin.assert:
+        that:
+          - "'\"body\":1048576' in nginx_verify_large.results[0].stdout"
+          - nginx_verify_large.results[1].stdout == '200 4194304'
+        fail_msg: "{{ nginx_verify_large.results | map(attribute='stdout') | list }}"
+
     - name: Ask for TLS 1.1 and TLS 1.2
       ansible.builtin.shell:
         cmd: >-

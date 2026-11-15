@@ -5,4 +5,5 @@ echo json_encode([
     'user' => posix_getpwuid(posix_geteuid())['name'],
     'uri' => $_SERVER['REQUEST_URI'] ?? '',
     'https' => $_SERVER['HTTPS'] ?? '',
+    'body' => strlen(file_get_contents('php://input')),
 ]), "\n";

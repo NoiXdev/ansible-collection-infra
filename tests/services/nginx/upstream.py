@@ -3,7 +3,7 @@
 
   upstream.py serve ADDRESS PORT
       Answers GET with "node upstream" and the X-Forwarded-* headers it got,
-      and echoes the text frames of a WebSocket upgrade.
+      GET /big with 4 MiB, and echoes the text frames of a WebSocket upgrade.
   upstream.py ws-check ADDRESS PORT SERVER_NAME MESSAGE
       Opens a WebSocket over TLS (SNI SERVER_NAME, no certificate check),
       sends MESSAGE and prints what comes back.
@@ -86,6 +86,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if opcode == 0x1:
                     self.wfile.write(frame(0x1, payload, False))
                     self.wfile.flush()
+        if self.path == "/big":
+            # Larger than nginx's proxy buffers.
+            data = b"b" * (4 << 20)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         body = "node upstream\n" + "".join(
             f"{name}: {self.headers.get(name, '')}\n"
             for name in ("Host", "X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host")
