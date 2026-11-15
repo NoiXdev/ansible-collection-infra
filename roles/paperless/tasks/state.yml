@@ -19,7 +19,8 @@
 # beside the record of a completed import, an install or import that did
 # not complete, left-over data without a compose
 # file, a compose file without a Paperless version, a
-# downgrade, a PostgreSQL major other than the database's, and an import
+# downgrade, a paperless_db_password that the database does not take, a
+# PostgreSQL major other than the database's, and an import
 # into an installation (no record), of an export outside
 # paperless_export_dir, without a manifest, of another Paperless version,
 # made with a passphrase that is not given, or that paperless_uid cannot
@@ -197,6 +198,69 @@
           migrate its database down, and changes nothing. Set
           paperless_version to {{ paperless_installed_version }} or newer.
       when: paperless_version is version(paperless_installed_version, '<')
+
+# PostgreSQL takes POSTGRES_PASSWORD only when it creates the cluster: on an
+# existing one a new paperless_db_password would reach Paperless but not the
+# database, and Paperless could not log in. The compose file on disk records
+# the password the role wrote last (with $ doubled, as the template writes
+# it); compared in a no_log task, so that neither password is in the output.
+- name: Compare paperless_db_password with the compose file
+  ansible.builtin.set_fact:
+    paperless_db_password_changed: >-
+      {{ (((paperless_compose_yaml.services | default({})).db | default({})).environment | default({})).POSTGRES_PASSWORD
+         | default('') | string | replace('$$', '$') != paperless_db_password | string }}
+  vars:
+    paperless_compose_yaml: "{{ paperless_compose_before | from_yaml }}"
+  no_log: true
+  when: paperless_installed
+
+# A new password may be the database's already, set by hand as the refusal
+# below says. Asked over the network as Paperless connects (the local socket
+# and 127.0.0.1 need no password); the password goes through stdin into the
+# environment of psql (the x keeps trailing newlines), and the task is
+# no_log. The next task fails with the error.
+- name: Check that the database takes the new paperless_db_password
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - db
+      - sh
+      - -c
+      - >-
+        PGPASSWORD="$(cat; echo x)"; PGPASSWORD="${PGPASSWORD%x}"; export PGPASSWORD;
+        PGCONNECT_TIMEOUT=10 exec psql --host=db --username=paperless --dbname=paperless
+        --no-psqlrc --tuples-only --command='SELECT 1'
+    chdir: "{{ paperless_dir }}"
+    stdin: "{{ paperless_db_password }}"
+    stdin_add_newline: false
+  register: paperless_hidden
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - paperless_installed
+    - paperless_db_password_changed | bool
+
+- name: Refuse a paperless_db_password the database does not take
+  ansible.builtin.fail:
+    msg: >-
+      paperless_db_password differs from the password in
+      {{ paperless_compose_file }}, and the database does not take it
+      ({{ paperless_hidden_error }}). PostgreSQL takes a password only when
+      it creates the database, so Paperless could not log in with the new
+      one; the role changes nothing. To change the password, set it in the
+      database first: in {{ paperless_dir }} run docker compose exec db psql
+      -U paperless -d postgres and enter \password paperless (an ALTER USER
+      paperless PASSWORD that keeps the password off the command line), then
+      run the role again with the new paperless_db_password. Or set
+      paperless_db_password back to the old one.
+  when:
+    - paperless_installed
+    - paperless_db_password_changed | bool
+    - paperless_hidden.rc != 0
 
 # The PostgreSQL image keeps its cluster in a directory per major below the
 # mount (18/docker; main.yml refuses images older than 18): another major starts

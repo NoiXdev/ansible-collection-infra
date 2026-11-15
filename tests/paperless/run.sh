@@ -27,6 +27,9 @@
 # a rollback that failed too refuses every version. The install,
 # the import with a passphrase and the failed update run at -vvv, and their
 # output must not hold a test secret.
+# Then the refusals on an installation: a changed paperless_db_password
+# refused before any change (-vvv), and the new password taken once the
+# database has it (ALTER USER, as the refusal says).
 # Then the data: left-over data without a compose file refused, and an
 # installation whose data directories are gone (an unmounted volume) refused
 # in every state without creating anything; with
@@ -79,6 +82,9 @@ old_images=("$(value_of "$defaults" paperless_image):$old_version" busybox:1.37)
 backups="$dir/data/backups"
 marker="$dir/update-failed"
 sample_sum="$(shasum -a 256 <"$here/sample.pdf" | cut -d' ' -f1)"
+# The database password the refusals scenario rotates to; a $ that compose and
+# a shell must not expand.
+rotated_db_password='test-db-ro$tated-pass-0'
 # The test secrets, which no run's output may hold.
 secrets=(
   "$(value_of "$here/vars.yml" paperless_secret_key)"
@@ -86,6 +92,7 @@ secrets=(
   "$admin_password"
   "$samba_password"
   "$passphrase"
+  "$rotated_db_password"
 )
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
@@ -593,6 +600,49 @@ test_failed_update() {
   hx test -e "$marker" || fail "the refused run removed the marker"
 }
 
+# Sets the password of the database user paperless, as the refusal of a
+# changed paperless_db_password says, over the local socket and through stdin:
+# set_db_password <password>.
+set_db_password() {
+  local quote="'"
+  printf "ALTER USER paperless PASSWORD '%s';\n" "${1//$quote/$quote$quote}" \
+    | docker exec -i "$host" sh -c "cd $dir && docker compose exec -T db psql -q -U paperless -d postgres -v ON_ERROR_STOP=1" \
+    || fail "cannot set the password of the database user"
+}
+
+test_refusals() {
+  echo "== a changed database password must be refused before any change"
+  new_host
+  load_images
+  # Without Samba and Tika: the refusals do not need them.
+  small_vars=(-e '{"paperless_samba": false, "paperless_tika": false}')
+  converge "${small_vars[@]}"
+  compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  containers_before="$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)"
+  unchanged() {
+    expect_unchanged "$1"
+    [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run $1 changed the compose file"
+    [ "$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)" = "$containers_before" ] \
+      || fail "the refused run $1 created or removed containers"
+  }
+  play_fails db-password "$here/converge.yml" -vvv "${small_vars[@]}" -e "paperless_db_password=$rotated_db_password" \
+    -e paperless_health_timeout=60
+  expect_in_log db-password "paperless_db_password differs from the password in $dir/compose.yaml, and the database does not take it"
+  expect_in_log db-password "ALTER USER"
+  expect_no_secrets db-password
+  unchanged db-password
+  [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the refused run: $(webserver)"
+
+  echo "== a password changed in the database as the refusal says must be taken"
+  set_db_password "$rotated_db_password"
+  converge -v "${small_vars[@]}" -e "paperless_db_password=$rotated_db_password"
+  expect_no_secrets converge
+  grep -q "reconfigure.yml" "$out/converge.log" || fail "the new password was not a reconfigure"
+  [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the new password: $(webserver)"
+  api /api/documents/ >/dev/null || fail "the API does not answer after the new password"
+  expect_idempotent "${small_vars[@]}" -e "paperless_db_password=$rotated_db_password"
+}
+
 test_missing_data() {
   echo "== left-over data without a compose file must be refused before any change"
   new_host
@@ -673,10 +723,10 @@ test_mountpoint() {
 
 # All scenarios by default; NOIXDEV_INFRA_PAPERLESS_TESTS="update failed_update"
 # runs only these (import needs install in the same run).
-for scenario in ${NOIXDEV_INFRA_PAPERLESS_TESTS:-settings install import update failed_update missing_data mountpoint}; do
+for scenario in ${NOIXDEV_INFRA_PAPERLESS_TESTS:-settings install import update failed_update refusals missing_data mountpoint}; do
   case "$scenario" in
-    settings | install | import | update | failed_update | missing_data | mountpoint) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, import, update, failed_update, missing_data, mountpoint)" ;;
+    settings | install | import | update | failed_update | refusals | missing_data | mountpoint) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, import, update, failed_update, refusals, missing_data, mountpoint)" ;;
   esac
 done
 
