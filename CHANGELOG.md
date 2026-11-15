@@ -13,14 +13,22 @@
   the pools run in the packages' `php<v>-fpm` services instead, and switching moves every pool.
   Pool `env` values starting with `$` are refused (FPM would expand them), a changed socket owner
   or listen group restarts the pool, and a config FPM rejects never replaces a running one: it is
-  tested before anything is switched. Ubuntu's `php<v>-*` packages are pinned to -1 and the PPA
-  preferred, so a run that cannot reach the PPA never installs Ubuntu's PHP. The PPA joins
+  tested before anything is switched. Pool `env` and `ini` values never appear in the run's output.
+  A pool with group root (gid 0) and pool names longer than 64 characters are refused before any
+  change. `tmp_dir` and its `session`, `upload` and `sys` dirs are created without following
+  links (the three dirs as the pool user): a link in `tmp_dir` or its path stops the run, naming
+  it. A run that fails after a change, for example on a typo in one version's extensions, still
+  reloads or restarts the pools for what it changed before it fails. Ubuntu's `php<v>-*`
+  packages are pinned to -1 and the PPA preferred, so a run that cannot reach the PPA never
+  installs Ubuntu's PHP. The PPA joins
   unattended-upgrades in both modes; with one master per pool an apt hook restarts the pools of
   each version with an upgraded `php<v>-*` package (extensions too) one at a time
   (`/usr/local/sbin/php-fpm-rolling-restart`). Each restart is bounded by
   `php_fpm_restart_timeout`; a pool that does not come back stops the rolling restart (see
-  `journalctl -t php-fpm-rolling-restart`) while apt still succeeds. In classic mode the package's
-  own restart applies.
+  `journalctl -t php-fpm-rolling-restart`) while apt still succeeds. needrestart, installed by
+  default on Ubuntu servers, is told to leave the `php-fpm@` pools to that hook
+  (`/etc/needrestart/conf.d/50noixdev-php-fpm.conf`) instead of restarting them all at once. In
+  classic mode the package's own restart applies, needrestart's included.
 - `composer`: new role that installs Composer as `/usr/local/bin/composer` from the official phar
   at an exact version (`composer_version`) checked against a pinned SHA-256 (`composer_sha256`,
   from getcomposer.org's `.sha256sum`; a wrong checksum leaves the installed Composer alone),
