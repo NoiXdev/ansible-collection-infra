@@ -1,9 +1,8 @@
 # {{ ansible_managed }}
 # Named to sort after the package's mysqld.cnf: the files of the directory are
 # read in name order and the last value wins.
+# The listen addresses are in zz-noixdev-bind.cnf.
 [mysqld]
-bind-address = {{ mysql_bind_address }}
-mysqlx-bind-address = {{ mysql_bind_address }}
 {% for key, value in mysql_settings | dictsort %}
 {{ key }} = {{ ('ON' if value else 'OFF') if value is boolean else value }}
 {% endfor %}

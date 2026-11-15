@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# The listen addresses, written before the package is installed: MySQL's own
+# mysqld.cnf sets none, and the server the package starts would listen on
+# every interface. Named to sort after mysqld.cnf: the files of the directory
+# are read in name order and the last value wins.
+[mysqld]
+bind-address = {{ mysql_bind_address }}
+mysqlx-bind-address = {{ mysql_bind_address }}

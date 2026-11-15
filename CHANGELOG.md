@@ -98,7 +98,9 @@
   (`mysql_settings`, `mysql_databases`, `mysql_users`). The repository has amd64 packages only:
   other architectures are refused. The role pins Ubuntu's `mysql-*` and `libmysqlclient*`
   packages to -1 host-wide, accounts use `caching_sha2_password`, and the X protocol listens on
-  the bind address too. Another series, a server from Ubuntu's archive or MariaDB on the host is
+  the bind address too. Both addresses are written before the package is installed (its own
+  config sets none), so a first run that stops early never leaves MySQL on every interface.
+  Another series, a server from Ubuntu's archive or MariaDB on the host is
   refused before any change.
 
 ## 0.5.0 — 2026-11-14

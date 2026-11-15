@@ -93,6 +93,27 @@
   loop: [root-pass, re-root-pass]
   when: mysql_installed.stdout_lines | select('match', '^.i +[|]mysql-community-server[|]') | list | length == 0
 
+# MySQL's own config sets no address: the server the package starts would
+# listen on every interface (3306 and 33060) until the role's config is in
+# place, and stay so when a first run stops before that (at an unknown
+# setting, say). The addresses come first; they need no check by the server.
+- name: Create the config directory
+  ansible.builtin.file:
+    path: /etc/mysql/mysql.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Set the listen addresses
+  ansible.builtin.template:
+    src: zz-noixdev-bind.cnf.j2
+    dest: /etc/mysql/mysql.conf.d/zz-noixdev-bind.cnf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart mysql
+
 # python3-pymysql is what the mysql_db and mysql_user modules connect with;
 # the server's start script calls apparmor's profile loader.
 - name: Install MySQL

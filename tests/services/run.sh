@@ -578,6 +578,25 @@ suite_mysql() {
   hx mysql test -e /etc/apt/sources.list.d/mysql.sources || fail "mysql: the blocked run did not add the source"
   hx mysql sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}" mysql-community-server 2>/dev/null | grep -q "^.i"' \
     || fail "mysql: the blocked run installed mysql-community-server"
+
+  echo "== mysql: a first run that stops at an unknown setting leaves the server on the bind address only"
+  # The run after the blocked one is the first install: the package's own
+  # config sets no address (the server would listen on every interface), and
+  # the unknown setting stops the run before the role's config is written.
+  log="$out/mysql-first-run-typo.log"
+  if play mysql "$dir/converge.yml" -e "$empty" -e '{"mysql_settings": {"max_conections": 200}}' >"$log" 2>&1; then
+    fail "mysql: the first run with an unknown setting did not fail"
+  fi
+  grep -qF "failed to validate" "$log" || { cat "$log" >&2; fail "mysql: the first run did not stop at the config check"; }
+  hx mysql sh -c 'dpkg-query -W -f "\${db:Status-Abbrev}" mysql-community-server | grep -q "^ii"' \
+    || fail "mysql: the first run with an unknown setting did not install the server"
+  if [ "$(hx mysql systemctl is-active mysql || true)" != active ]; then
+    echo "   the package left the server stopped; starting it with the package's config"
+    hx mysql systemctl start mysql || fail "mysql: the server installed by the stopped first run does not start"
+  fi
+  bound="$(hx mysql ss -Hltn | awk '$4 ~ /:(3306|33060)$/ {print $4}' | sort -u | paste -sd' ' -)"
+  [ "$bound" = "127.0.0.1:3306 127.0.0.1:33060" ] \
+    || fail "mysql: after a first run stopped at an unknown setting the server listens on '$bound', not 127.0.0.1:3306 and :33060 only"
   converge mysql stale-lists "$dir/converge.yml" -e "$empty"
   version="$(hx mysql dpkg-query -W -f='${Version}' mysql-community-server)"
   case "$version" in
