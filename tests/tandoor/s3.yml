@@ -5,7 +5,7 @@
 # that must reach Tandoor verbatim; run.sh rotates to s3_rotated_secret_key
 # and back.
 converge_s3: true
-s3_rustfs_image: rustfs/rustfs:1.0.4
+s3_rustfs_image: rustfs/rustfs:1.0.5
 s3_aws_cli_image: amazon/aws-cli:2.31.0
 s3_secret_key: test-s3-se$cret-key-0
 s3_rotated_secret_key: test-s3-ro$tated-key-0
