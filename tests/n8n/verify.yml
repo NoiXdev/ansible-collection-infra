@@ -4,7 +4,9 @@
 # variable, default 0) Valkey and the workers; the owner's login (n8n's
 # session cookie), the owner locked against changes through the API, and a
 # workflow with a Webhook node, created and activated through the API once
-# per installation, that answers its production webhook. n8n allows five
+# per installation, that answers its production webhook; and a second one
+# (noix-files) that writes the text of its webhook call to a file below
+# /files, which run.sh calls (expect_file_written). n8n allows five
 # logins a minute per e-mail address, so this playbook logs in once.
 - name: Verify
   hosts: all
@@ -50,6 +52,49 @@
       connections:
         Webhook:
           main: [[{node: Respond, type: main, index: 0}]]
+    # POST /webhook/noix-files with {"name": ..., "text": ...} writes the text
+    # to /files/<name>.txt and answers once the file is written.
+    verify_files_workflow:
+      name: noix-files
+      settings: {}
+      nodes:
+        - id: 7b9e2a40-0000-4000-8000-000000000011
+          name: Webhook
+          type: n8n-nodes-base.webhook
+          typeVersion: 2
+          position: [0, 0]
+          webhookId: 7b9e2a40-0000-4000-8000-0000000000b1
+          parameters:
+            httpMethod: POST
+            path: noix-files
+            responseMode: lastNode
+            options: {}
+        - id: 7b9e2a40-0000-4000-8000-000000000012
+          name: To file
+          type: n8n-nodes-base.convertToFile
+          typeVersion: 1.1
+          position: [220, 0]
+          parameters:
+            operation: toText
+            sourceProperty: body.text
+            binaryPropertyName: data
+            options: {}
+        - id: 7b9e2a40-0000-4000-8000-000000000013
+          name: Write
+          type: n8n-nodes-base.readWriteFile
+          typeVersion: 1.1
+          position: [440, 0]
+          parameters:
+            operation: write
+            # n8n's expression, which Ansible must not template.
+            fileName: !unsafe "={{ '/files/' + $('Webhook').item.json.body.name + '.txt' }}"
+            dataPropertyName: data
+            options: {}
+      connections:
+        Webhook:
+          main: [[{node: To file, type: main, index: 0}]]
+        To file:
+          main: [[{node: Write, type: main, index: 0}]]
   tasks:
     - name: Find the containers of the compose project
       ansible.builtin.command:
@@ -97,6 +142,9 @@
           # Docker waits longer than n8n's shutdown, so running executions
           # finish on a stop.
           - "'N8N_GRACEFUL_SHUTDOWN_TIMEOUT=30' in n8n.Config.Env"
+          # The file nodes may use the bound files directory (n8n's own
+          # default is ~/.n8n-files, which no bind keeps).
+          - "'N8N_RESTRICT_FILE_ACCESS_TO=/files' in n8n.Config.Env"
           - n8n.Config.StopTimeout == 45
           - "'N8N_INSTANCE_OWNER_MANAGED_BY_ENV=true' in n8n.Config.Env"
           - ('N8N_INSTANCE_OWNER_EMAIL=' ~ n8n_owner_email) in n8n.Config.Env
@@ -285,6 +333,34 @@
         fail_msg: "{{ verify_activated.json | to_json }}"
         quiet: true
       when: verify_created is not skipped
+
+    - name: Create the files workflow
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/rest/workflows"
+        method: POST
+        headers: "{{ verify_auth }}"
+        body_format: json
+        body: "{{ verify_files_workflow }}"
+      register: verify_files_created
+      when: verify_workflows.json.data | selectattr('name', 'equalto', 'noix-files') | list | length == 0
+
+    - name: Activate the files workflow
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/rest/workflows/{{ verify_files_created.json.data.id }}/activate"
+        method: POST
+        headers: "{{ verify_auth }}"
+        body_format: json
+        body:
+          versionId: "{{ verify_files_created.json.data.versionId }}"
+      register: verify_files_activated
+      when: verify_files_created is not skipped
+
+    - name: Check that the files workflow is active
+      ansible.builtin.assert:
+        that: verify_files_activated.json.data.active
+        fail_msg: "{{ verify_files_activated.json | to_json }}"
+        quiet: true
+      when: verify_files_created is not skipped
 
     # n8n registers the webhook within seconds of the activation.
     - name: Call the production webhook through Traefik

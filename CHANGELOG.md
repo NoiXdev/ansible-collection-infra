@@ -201,6 +201,8 @@
   subdirectories fails in every state, before any other refusal. More settings go through
   `n8n_env`; the ones the role sets itself, and every `DB_`, `QUEUE_`, `N8N_INSTANCE_OWNER_` and
   `N8N_ENDPOINT_` key, are refused, and so is a key without a value; `N8N_PROXY_HOPS` defaults to 1.
+  `N8N_RESTRICT_FILE_ACCESS_TO` defaults to `/files`, so the Read/Write Files from Disk nodes use the
+  files directory in `n8n_data_dir` (n8n's own default is inside the container and lost on a recreate).
   `N8N_GRACEFUL_SHUTDOWN_TIMEOUT` (30 seconds, set by the role) lets running executions finish on a
   stop and the containers get 15 seconds more before Docker kills them, so a stop can take about 45
   seconds and an update in queue mode waits for two health phases. Health is n8n's readiness, which

@@ -12,9 +12,10 @@
 #             environment and mounts, the owner's login through Traefik, the
 #             owner locked against changes through the API, a workflow with a
 #             Webhook node created and activated through the API that answers
-#             its production webhook, a $ reaching the container verbatim,
-#             the compose file 0600, the key's fingerprint, no published
-#             port); a new owner password as a reconfigure (the old one no
+#             its production webhook, a second workflow that writes a file
+#             below /files, which is then on the host in the data directory,
+#             a $ reaching the container verbatim, the compose file 0600, the
+#             key's fingerprint, no published port); a new owner password as a reconfigure (the old one no
 #             longer logs in, the new one does); a run without changes that
 #             fails on a stopped container; a changed n8n_db_password refused
 #             before any change, a compose file that is not YAML refused
@@ -31,8 +32,9 @@
 #             image and environment, all healthy); the production webhook
 #             answers through the main instance and its execution runs on the
 #             worker (the main instance's log enqueues it, the worker's log
-#             starts it); a run without changes that fails on a stopped
-#             worker; two workers, then back to normal mode (no Valkey,
+#             starts it), and so does the workflow that writes a file below
+#             /files, which is then on the host; a run without changes that
+#             fails on a stopped worker; two workers, then back to normal mode (no Valkey,
 #             no workers), then queue mode again, each a reconfigure that
 #             keeps the workflow active and its webhook answering
 #   update    an update from the last 2.46 release with the webhook workflow:
@@ -342,21 +344,56 @@ expect_workflow_active() {
   [ "$active" = t ] || fail "the webhook workflow is not active: '$active'"
 }
 # Calls the production webhook and fails unless it answers and its
-# execution ran on one of the workers: the main instance's log enqueues it
-# and a worker's log starts it. expect_ran_on_worker <worker service...>.
+# execution ran on one of the workers: expect_ran_on_worker <worker
+# service...>.
 expect_ran_on_worker() {
-  local id worker
   expect_answer 200 '"ok":true' /webhook/noix-test -X POST
+  expect_last_execution_on_worker "$@"
+}
+# Fails unless the newest execution ran on one of the workers: the main
+# instance's log enqueues it and a worker's log starts it. The logs are read
+# in full first: grep -q in a pipe would end docker's output with SIGPIPE,
+# which pipefail turns into a failure. expect_last_execution_on_worker
+# <worker service...>.
+expect_last_execution_on_worker() {
+  local id worker log
   id="$(sql 'SELECT max(id) FROM execution_entity')"
   [ -n "$id" ] || fail "the webhook left no execution in the database"
-  logs n8n | grep -qF "Enqueued execution $id (job" || fail "the main instance did not enqueue execution $id"
+  log="$(logs n8n)"
+  grep -qF "Enqueued execution $id (job" <<<"$log" || fail "the main instance did not enqueue execution $id"
   for _ in $(seq 10); do
     for worker in "$@"; do
-      logs "$worker" | grep -qF "Worker started execution $id (job" && return 0
+      log="$(logs "$worker")"
+      grep -qF "Worker started execution $id (job" <<<"$log" && return 0
     done
     sleep 1
   done
   fail "no worker of $* started execution $id"
+}
+# The error messages in the data of the newest execution, for a failure.
+last_execution_error() {
+  local data
+  data="$(sql 'SELECT data FROM execution_data ORDER BY "executionId" DESC LIMIT 1')"
+  grep -oE '"[^"]*(not allowed|rror)[^"]*"' <<<"$data" | head -n 3 | tr '\n' ' '
+}
+# Calls the webhook of the files workflow (verify.yml) and fails unless n8n
+# answers and the file it wrote below /files is in n8n_data_dir/files on the
+# host with the text sent; with workers, unless one of them ran it:
+# expect_file_written [worker service...].
+expect_file_written() {
+  local name answer
+  name="noix-file-$(date +%s)-$RANDOM"
+  # n8n registers the webhook within seconds of the activation.
+  for _ in $(seq 15); do
+    answer="$(request /webhook/noix-files -X POST -H 'Content-Type: application/json' \
+      --data "{\"name\": \"$name\", \"text\": \"written by n8n\"}")"
+    [ "${answer##*$'\n'}" = 404 ] || break
+    sleep 2
+  done
+  [ "${answer##*$'\n'}" = 200 ] || fail "the files webhook answered ${answer##*$'\n'}: $(printf '%s' "${answer%$'\n'*}" | head -c 300) ($(last_execution_error))"
+  [ "$(hx cat "$dir/data/files/$name.txt" 2>/dev/null)" = "written by n8n" ] \
+    || fail "n8n did not write $dir/data/files/$name.txt: $(hx ls -la "$dir/data/files")"
+  [ "$#" = 0 ] || expect_last_execution_on_worker "$@"
 }
 # Fails unless the Valkey container has no mount at all (no volume, no
 # bind): it keeps the queue in memory only.
@@ -493,6 +530,7 @@ test_install() {
   expect_no_secrets converge
   expect_idempotent
   play "$here/verify.yml"
+  expect_file_written
 
   echo "== a new owner password must be a reconfigure that n8n applies"
   converge -v -e "n8n_owner_password=$rotated_owner_password"
@@ -631,6 +669,7 @@ test_queue() {
   # main instance.
   play "$here/verify.yml" -e n8n_workers=1
   expect_ran_on_worker worker-1
+  expect_file_written worker-1
 
   echo "== a run without changes must fail on a stopped worker and start nothing"
   hx sh -c "cd $dir && docker compose stop worker-1" >/dev/null 2>&1

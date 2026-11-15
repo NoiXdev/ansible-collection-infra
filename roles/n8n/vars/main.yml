@@ -63,10 +63,14 @@ n8n_env_owned_prefixes: [DB_, QUEUE_, N8N_INSTANCE_OWNER_, N8N_ENDPOINT_]
 # X-Forwarded-For, which n8n's rate limits read the client address from; on a
 # stop, n8n waits up to N8N_GRACEFUL_SHUTDOWN_TIMEOUT seconds for the
 # executions that run (n8n's own default, written out so that the stop grace
-# period below follows it).
+# period below follows it); the Read/Write Files from Disk nodes may use
+# only the files directory, which is bound on the main instance and every
+# worker and kept in n8n_data_dir (n8n's own default, ~/.n8n-files, is in
+# the container and lost on every recreate).
 n8n_env_defaults:
   N8N_PROXY_HOPS: 1
   N8N_GRACEFUL_SHUTDOWN_TIMEOUT: 30
+  N8N_RESTRICT_FILE_ACCESS_TO: /files
 # The seconds n8n waits for its executions on a stop, and the grace period of
 # the main instance and the workers (stop_grace_period) above it: docker
 # compose stop, and the recreate of a container, send SIGTERM and SIGKILL

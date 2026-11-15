@@ -75,6 +75,9 @@ n8n_redis_image: docker.io/valkey/valkey:9-alpine
 # when more proxies add to X-Forwarded-For. N8N_GRACEFUL_SHUTDOWN_TIMEOUT
 # (seconds, default 30) is how long n8n waits for running executions on a
 # stop; Docker waits 15 seconds more before it kills n8n.
+# N8N_RESTRICT_FILE_ACCESS_TO defaults to /files (n8n_data_dir/files on the
+# host), the only directory the Read/Write Files from Disk nodes may use;
+# more directories, separated by ;, must be kept on a volume of their own.
 n8n_env: {}
 
 # Backups taken before every update (a dump of the database, a copy of the
