@@ -69,6 +69,33 @@
   `imported.yml` with a message to remove only the marker). The admin password and the import
   passphrase reach the container through stdin, so they are not in the output even at `-vvv`. See
   the role's guide in the docs.
+- `nodejs`: new role that installs one Node.js major series from NodeSource (`nodejs_version`,
+  default `"24"`) and global npm packages at exact versions (`nodejs_npm_packages`, each with
+  `name` and `version`; ranges and tags are refused). A `nodejs` of another series (Ubuntu's own,
+  another NodeSource series) is refused before any change: a series change is a separate step.
+- `redis`: new role that installs Redis from packages.redis.io, pinned to `redis_version`
+  (default `"8"`). Without `redis_instances` the package's `redis-server` runs on
+  `redis_bind_address:6379` (`redis_password`, `redis_maxmemory`, `redis_maxmemory_policy`,
+  `redis_persistence`); with it, each entry runs as `redis-server@<name>` with its own config,
+  data directory and log, on a `port` or a `unixsocket` (`/run/redis-<name>/redis.sock`, group
+  `redis-<name>`, `clients` added to the group). Entries are checked before any change. An
+  instance without a password on a port is open to every local user: set a password or use a
+  socket instance. An instance that leaves the list is stopped and disabled; its data stays. A
+  `redis-server` of another series is refused before any change.
+- `mariadb`: new role that installs MariaDB from mariadb.org, pinned to `mariadb_version`
+  (default `"11.8"`), on `mariadb_bind_address` (default `127.0.0.1`), with `mariadb_settings`,
+  `mariadb_databases` and `mariadb_users`. root has no password and uses the unix socket. On
+  every run each listed user gets its password and exactly its listed privileges (`_` and `%` in
+  `<db>.*` are escaped); role grants and PROXY grants are not revoked, and databases and users
+  that leave a list stay. For fresh servers: another series, a server from Ubuntu's archive (even
+  of the pinned series) or MySQL on the host is refused before any change.
+- `mysql`: new role that installs MySQL Community Server from MySQL's apt repository, pinned to
+  `mysql_version` (default `"8.4"`), with the same variables and rules as `mariadb`
+  (`mysql_settings`, `mysql_databases`, `mysql_users`). The repository has amd64 packages only:
+  other architectures are refused. The role pins Ubuntu's `mysql-*` and `libmysqlclient*`
+  packages to -1 host-wide, accounts use `caching_sha2_password`, and the X protocol listens on
+  the bind address too. Another series, a server from Ubuntu's archive or MariaDB on the host is
+  refused before any change.
 
 ## 0.5.0 — 2026-11-14
 

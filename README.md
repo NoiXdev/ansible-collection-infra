@@ -38,6 +38,10 @@ are on the documentation site.
 | `crowdsec` | CrowdSec agent and its firewall bouncer, which also covers published Docker ports |
 | `oh_my_zsh` | zsh with one shared, pinned Oh My Zsh checkout and a managed `~/.zshrc` per user, with the noix theme or your own |
 | `motd` | Login banner in `/etc/update-motd.d` with a title, your own lines and system information |
+| `nodejs` | Node.js from NodeSource, one pinned major series, with global npm packages at exact versions |
+| `redis` | Redis from packages.redis.io, pinned to a series, as the default instance or one instance per environment on a port or a unix socket |
+| `mariadb` | MariaDB from mariadb.org, pinned to a series, with databases and users whose password and exact privileges are enforced |
+| `mysql` | MySQL Community Server from MySQL's apt repository (amd64 only), pinned to a series, with databases and users whose password and exact privileges are enforced |
 
 ## Install
 
