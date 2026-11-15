@@ -1,0 +1,74 @@
+---
+# The backup before an update, with n8n and its workers stopped:
+# n8n_backup_dir/<UTC time>-<installed version>/ (mode 0700) with n8n.dump
+# (pg_dump -Fc, read back in full with pg_restore), home/ (a copy of the n8n
+# home, cp -a: n8n rewrites files in it, so hard links would change with it)
+# and compose.yaml (the compose file it ran with). Valkey holds no data, and
+# the files directory is not touched by an update. Made below <name>.partial
+# and renamed once complete; sets n8n_backup last, so a failure before that
+# has changed nothing but the partial directory, which the caller removes.
+
+- name: Create the backup directory
+  ansible.builtin.file:
+    path: "{{ n8n_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Name the backup
+  ansible.builtin.set_fact:
+    n8n_backup_next: >-
+      {{ n8n_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ n8n_installed_version }}
+
+- name: Create the partial backup
+  ansible.builtin.file:
+    path: "{{ n8n_backup_next }}.partial"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# Over the local socket of the database container, which needs no password.
+- name: Dump the database
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 077
+      dump={{ (n8n_backup_next ~ '.partial/n8n.dump') | quote }}
+      docker compose exec -T db pg_dump --format=custom --username=n8n --dbname=n8n >"$dump"
+      docker compose exec -T db pg_restore --file=/dev/null <"$dump"
+    chdir: "{{ n8n_dir }}"
+  changed_when: true
+
+# It holds n8n's config with the encryption key; the backup directory is
+# root's only.
+- name: Copy the n8n home
+  ansible.builtin.command:
+    argv: [cp, -a, "{{ n8n_data_dir }}/home", "{{ n8n_backup_next }}.partial/home"]
+  changed_when: true
+
+- name: Keep the compose file with the backup
+  ansible.builtin.copy:
+    dest: "{{ n8n_backup_next }}.partial/compose.yaml"
+    content: "{{ n8n_compose_before }}"
+    owner: root
+    group: root
+    mode: "0600"
+  # It holds the encryption key, the passwords and the owner's hash.
+  no_log: true
+
+# Not into a backup of that name (the same second), which mv would move it
+# into.
+- name: Complete the backup
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      backup={{ n8n_backup_next | quote }}
+      if [ -e "$backup" ]; then echo "$backup exists" >&2; exit 1; fi
+      mv "$backup.partial" "$backup"
+  changed_when: true
+
+- name: Note the backup
+  ansible.builtin.set_fact:
+    n8n_backup: "{{ n8n_backup_next }}"

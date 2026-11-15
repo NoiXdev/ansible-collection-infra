@@ -1,0 +1,200 @@
+---
+# The pin is newer than the installed version. The new image first (a failed
+# pull changes nothing); then n8n and its workers stopped, the backup
+# (snapshot.yml: dump, home), the compose file written with the new version,
+# the stack started (n8n migrates its database on start) and checked (the
+# readiness of main and workers needs the migrated database), the owner's
+# hash made in the new image, which every later run does, and the backups
+# pruned to the newest n8n_dumps_keep. A failure before the backup is
+# complete removes the partial backup, starts the stack as it was and fails.
+# After it, restore.yml rolls back to the backup, the marker n8n_marker_file
+# names the failed version, and the run fails.
+
+- name: Update n8n
+  vars:
+    n8n_new_image: "{{ n8n_image }}:{{ n8n_version }}"
+  block:
+    - name: Look for the image of n8n {{ n8n_version }}
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ n8n_new_image }}"]
+      register: n8n_new_image_local
+      changed_when: false
+      failed_when: false
+
+    - name: Pull n8n {{ n8n_version }}
+      ansible.builtin.command:
+        argv: [docker, pull, --quiet, "{{ n8n_new_image }}"]
+      changed_when: true
+      when: n8n_new_image_local.rc != 0
+
+    # Nothing writes to the database or the home during the backup. The
+    # services of the compose file on disk: the workers that run now, which
+    # a new n8n_workers may change. Valkey holds no data and keeps running.
+    - name: Stop n8n and its workers for the update
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'compose', 'stop'] + (n8n_compose_on_disk.services | list | reject('in', ['db', 'redis']) | list) }}"
+        chdir: "{{ n8n_dir }}"
+      changed_when: true
+
+    - name: Back up the database and the home
+      ansible.builtin.include_tasks: snapshot.yml
+
+    - name: Write the compose file with n8n {{ n8n_version }}
+      ansible.builtin.copy:
+        dest: "{{ n8n_compose_file }}"
+        content: "{{ n8n_compose }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the encryption key, the passwords and the owner's hash.
+      no_log: true
+
+    - name: Start n8n {{ n8n_version }}
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that n8n is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when n8n is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          n8n {{ n8n_version }} is not healthy within {{ n8n_health_timeout }}
+          seconds ({{ n8n_health_lines | join('; ') }})
+      when: not n8n_healthy
+
+    # state.yml made the hash in the image of the installed version. Every
+    # later run makes it in this one, so a release in which it cannot be
+    # made (bcryptjs moved) is rolled back now instead of failing each run
+    # after it. The key and the password go through stdin, and the task is
+    # no_log; the next task fails with the error.
+    - name: Make the owner's password hash in n8n {{ n8n_version }}
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --interactive
+          - --pull=never
+          - --network=none
+          - --entrypoint=node
+          - "{{ n8n_new_image }}"
+          - --eval
+          - "{{ n8n_owner_hash_script }}"
+        stdin: "{{ {'key': n8n_encryption_key | string, 'password': n8n_owner_password | string} | to_json }}"
+        stdin_add_newline: false
+      register: n8n_hidden
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Fail when the new n8n cannot make the owner's password hash
+      ansible.builtin.fail:
+        msg: >-
+          n8n {{ n8n_version }} cannot make the owner's password hash
+          ({{ n8n_hidden_error if n8n_hidden.rc != 0 else 'it makes another hash' }}),
+          which the role makes in the n8n image on every run: the role does
+          not know where this release keeps bcryptjs
+      when: n8n_hidden.rc != 0 or n8n_hidden.stdout != n8n_owner_password_hash
+
+  rescue:
+    - name: Note what failed
+      ansible.builtin.set_fact:
+        n8n_update_error: "{{ n8n_failure | trim }}"
+
+    - name: Recover from a failure before the backup was complete
+      when: n8n_backup is not defined
+      block:
+        - name: Remove the partial backup
+          ansible.builtin.file:
+            path: "{{ n8n_backup_next }}.partial"
+            state: absent
+          when: n8n_backup_next is defined
+
+        # The compose file is still the one the run started with.
+        - name: Start n8n again
+          block:
+            - name: Start the installed n8n again
+              community.docker.docker_compose_v2:
+                project_src: "{{ n8n_dir }}"
+                state: present
+          rescue:
+            - name: Note the failed start
+              ansible.builtin.set_fact:
+                n8n_restart_error: "{{ n8n_failure | trim }}"
+
+        - name: Fail when the update failed before the backup
+          ansible.builtin.fail:
+            msg: >-
+              The n8n update from {{ n8n_installed_version }} to
+              {{ n8n_version }} in {{ n8n_dir }} failed before anything
+              changed ({{ n8n_update_error }}).
+              {{ ('n8n ' ~ n8n_installed_version ~ ' was started again.')
+                 if n8n_restart_error is not defined
+                 else ('Starting n8n ' ~ n8n_installed_version ~ ' again failed too ('
+                       ~ n8n_restart_error ~ '); start it with docker compose up -d in '
+                       ~ n8n_dir ~ '.') }}
+
+    - name: Roll back to the backup
+      ansible.builtin.include_tasks: restore.yml
+
+    # Written whether or not the rollback worked: the failed version is not
+    # tried again on the next run.
+    - name: Write the marker of the failed update
+      ansible.builtin.copy:
+        dest: "{{ n8n_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.n8n role: the update to
+          # failed_version failed. The role does not try that version again
+          # while this file exists; remove it to retry.
+          {{ {'failed_version': n8n_version,
+              'rolled_back_to': n8n_installed_version if n8n_healthy else none,
+              'backup': n8n_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')}
+             | combine({} if n8n_healthy else {'restore_error': n8n_restore_error})
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Fail with the rollback
+      ansible.builtin.fail:
+        msg: >-
+          The n8n update from {{ n8n_installed_version }} to
+          {{ n8n_version }} in {{ n8n_dir }} failed, rolled back to
+          {{ n8n_installed_version }} ({{ n8n_update_error }}). The role
+          restored the database and the n8n home from the backup
+          {{ n8n_backup }} with the previous compose file; the home of the
+          failed attempt is in {{ n8n_backup }}-failed. It does not try
+          {{ n8n_version }} again while {{ n8n_marker_file }} exists: remove
+          it to retry, or set n8n_version to another version.
+      when: n8n_healthy
+
+    - name: Fail with the failed rollback
+      ansible.builtin.fail:
+        msg: >-
+          The n8n update from {{ n8n_installed_version }} to
+          {{ n8n_version }} in {{ n8n_dir }} failed ({{ n8n_update_error }}),
+          and rolling back to {{ n8n_installed_version }} failed too
+          ({{ n8n_restore_error }}), so n8n may be down.
+          {{ n8n_restore_hint }} {{ n8n_marker_file }} stops further updates
+          to {{ n8n_version }}; remove it once n8n runs again.
+
+# Only after a successful update; the names start with the time, so they
+# sort by age. <backup>-failed directories of rolled back updates stay.
+- name: Find the backups
+  ansible.builtin.find:
+    paths: "{{ n8n_backup_dir }}"
+    file_type: directory
+    patterns: ['^\d{8}T\d{6}Z-\d+\.\d+\.\d+$']
+    use_regex: true
+  register: n8n_backups
+
+- name: Remove the oldest backups
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (n8n_backups.files | map(attribute='path') | sort)[: -(n8n_dumps_keep | int)] }}"

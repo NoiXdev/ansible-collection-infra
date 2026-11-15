@@ -1,19 +1,89 @@
 ---
 # Reads the host and sets n8n_state:
 #   install      no compose file
+#   update       n8n_version is newer than the installed version
 #   reconfigure  the compose file the role writes differs from the one on
 #                disk (another n8n_workers among it: queue mode, Valkey and
 #                the workers are services of the compose file)
 #   noop         everything as the role writes it
 # Also sets n8n_installed (a compose file exists), n8n_compose_before (the
-# compose file on disk), n8n_compose_on_disk (it parsed, which
-# n8n_installed_version reads), n8n_owner_password_hash (the owner's bcrypt
-# hash, which the compose file holds) and n8n_down (the expected services
-# that are not running). Refuses, before any change, a compose file that is
+# compose file on disk, which a rollback puts back), n8n_compose_on_disk (it
+# parsed, which n8n_installed_version reads), n8n_marker_read and n8n_marker
+# (the marker of a failed update), n8n_owner_password_hash (the owner's
+# bcrypt hash, which the compose file holds) and n8n_down (the expected
+# services that are not running). Refuses, before any change: first a marker
+# of a failed update (one of a failed rollback refuses every version, one of
+# a rollback that worked the failed version), then a compose file that is
 # not YAML, an install that did not complete (its marker), a compose file
-# without an n8n version and an n8n_db_password that the database does not
-# take. The only change it can make is pulling the n8n image, which the
-# owner's hash is made with.
+# without an n8n version, a downgrade, an encryption key whose sha256 is not
+# the installation's fingerprint (or no fingerprint), an n8n_db_password
+# that the database does not take, and a PostgreSQL major other than the
+# database's. The only change it can make is pulling the pinned n8n image on
+# a host without an n8n container, which the owner's hash is made with.
+
+# Written by update.yml after a failed update; it names the failed version.
+- name: Read the marker of a failed update
+  ansible.builtin.slurp:
+    src: "{{ n8n_marker_file }}"
+  register: n8n_marker_read
+  failed_when: false
+
+# A marker that is not YAML cannot say which version failed.
+- name: Check the marker of a failed update
+  when: n8n_marker_read.content is defined
+  block:
+    - name: Parse the marker
+      ansible.builtin.set_fact:
+        n8n_marker: "{{ n8n_marker_yaml if n8n_marker_yaml is mapping else {} }}"
+      vars:
+        n8n_marker_yaml: "{{ n8n_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Fail on a marker that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ n8n_marker_file }} exists, but it is not YAML, so the role cannot
+          tell which n8n update failed and changes nothing. Check n8n, then
+          remove the file (rm {{ n8n_marker_file }}).
+
+# The rollback failed (or the marker does not say it worked): the database
+# may be empty or half restored, and the backup holds the data. Any version
+# would take a backup of that database, come up healthy and remove the
+# marker, the last pointer to the real backup, so every version is refused,
+# before every other refusal: a rollback that failed before it put the
+# previous compose file back leaves the failed version in it, and an older
+# pin must hear this, not the downgrade refusal.
+- name: Refuse every version after a failed rollback
+  ansible.builtin.fail:
+    msg: >-
+      {{ n8n_marker_file }} exists: the n8n update to
+      {{ n8n_marker.failed_version | default('?') }} failed on
+      {{ n8n_marker.time | default('?') }}, and rolling back failed too
+      ({{ n8n_marker.restore_error | default('?') }}). The database may be
+      empty or half restored; the data is in the backup {{ n8n_backup }}.
+      The role refuses every version and changes nothing until n8n is
+      restored. {{ n8n_restore_hint }} Then check n8n (its workflows and
+      credentials) and remove the marker (rm {{ n8n_marker_file }}).
+  vars:
+    n8n_backup: "{{ n8n_marker.backup | default('?', true) }}"
+  when:
+    - n8n_marker_read.content is defined
+    - not n8n_marker.rolled_back_to | default(none)
+
+# A marker that names no version blocks every version.
+- name: Refuse the version of a failed update
+  ansible.builtin.fail:
+    msg: >-
+      {{ n8n_marker_file }} exists: the n8n update to {{ n8n_version }}
+      failed on {{ n8n_marker.time | default('?') }} (rolled back to
+      {{ n8n_marker.rolled_back_to }}; backup
+      {{ n8n_marker.backup | default('?') }}). The role does not try
+      {{ n8n_version }} again and changes nothing while the marker names it.
+      To try again, remove it (rm {{ n8n_marker_file }}); or set n8n_version
+      to another version, and the marker is removed once a run with it
+      succeeds.
+  when:
+    - n8n_marker_read.content is defined
+    - (n8n_marker.failed_version | default(n8n_version) | string) == n8n_version | string
 
 - name: Read the compose file
   ansible.builtin.slurp:
@@ -65,15 +135,83 @@
       nothing. {{ n8n_install_hint }}
   when: n8n_install_marker_stat.stat.exists
 
-- name: Check that the compose file names the n8n version
-  ansible.builtin.assert:
-    that: n8n_installed_version is match('^\d+\.\d+\.\d+$')
-    fail_msg: >-
-      The n8n image in {{ n8n_compose_file }} has no tag X.Y.Z, so the role
-      cannot tell which n8n version is installed and changes nothing. Put
-      back the compose file the role wrote.
-    quiet: true
+- name: Check the installed version
   when: n8n_installed
+  block:
+    - name: Check that the compose file names the n8n version
+      ansible.builtin.assert:
+        that: n8n_installed_version is match('^\d+\.\d+\.\d+$')
+        fail_msg: >-
+          The n8n image in {{ n8n_compose_file }} has no tag X.Y.Z, so the
+          role cannot tell which n8n version is installed and changes
+          nothing. Put back the compose file the role wrote.
+        quiet: true
+
+    # n8n cannot migrate its database down.
+    - name: Refuse a downgrade
+      ansible.builtin.fail:
+        msg: >-
+          n8n_version {{ n8n_version }} is lower than the installed version
+          {{ n8n_installed_version }} in {{ n8n_dir }}; the role refuses to
+          downgrade, n8n cannot migrate its database down, and changes
+          nothing. Set n8n_version to {{ n8n_installed_version }} or newer.
+      when: n8n_version is version(n8n_installed_version, '<')
+
+# n8n encrypts the credentials in the database with the key: with another
+# one it cannot decrypt them, and the next start can make that permanent.
+# install.yml records the key's sha256; an installation without the record
+# (lost, or made by hand) is refused too, as the role could not tell a
+# changed key. The record is root's only and the comparison no_log: a plain
+# hash of the key is a quick test of a guessed key.
+- name: Check the encryption key
+  when: n8n_installed
+  block:
+    - name: Look for the fingerprint of the encryption key
+      ansible.builtin.stat:
+        path: "{{ n8n_key_fingerprint_file }}"
+        get_checksum: false
+      register: n8n_fingerprint_stat
+
+    - name: Refuse an installation without the fingerprint of its key
+      ansible.builtin.fail:
+        msg: >-
+          {{ n8n_key_fingerprint_file }} does not exist, but n8n is installed
+          in {{ n8n_dir }}. The role records there the fingerprint (sha256) of
+          the encryption key the installation was made with; without it, it
+          cannot tell whether n8n_encryption_key is that key, and with another
+          key n8n could not decrypt the credentials. The role changes nothing
+          and does not write the fingerprint itself. Write it from the key
+          the running n8n uses: in {{ n8n_dir }} run (umask 077; docker
+          compose exec -T n8n sh -c 'printf %s "$N8N_ENCRYPTION_KEY" |
+          sha256sum' | cut -d' ' -f1 >{{ n8n_key_fingerprint_file }}), then
+          run the role again; it then refuses an n8n_encryption_key that is
+          not that key.
+      when: not n8n_fingerprint_stat.stat.exists
+
+    - name: Read the fingerprint of the encryption key
+      ansible.builtin.slurp:
+        src: "{{ n8n_key_fingerprint_file }}"
+      register: n8n_fingerprint_read
+      no_log: true
+
+    - name: Compare n8n_encryption_key with the fingerprint
+      ansible.builtin.set_fact:
+        n8n_key_matches: >-
+          {{ n8n_fingerprint_read.content | b64decode | trim == n8n_encryption_key | string | hash('sha256') }}
+      no_log: true
+
+    - name: Refuse another encryption key
+      ansible.builtin.fail:
+        msg: >-
+          n8n_encryption_key is not the key of the installation in
+          {{ n8n_dir }}: its sha256 differs from the fingerprint in
+          {{ n8n_key_fingerprint_file }}, which the install wrote. n8n
+          encrypts the credentials in the database with the key, so with
+          another one it could not decrypt them; the role does not change the
+          key of an installation and changes nothing. Set n8n_encryption_key
+          back to the installation's key (docker compose exec n8n printenv
+          N8N_ENCRYPTION_KEY in {{ n8n_dir }} shows it).
+      when: not n8n_key_matches | bool
 
 # PostgreSQL takes POSTGRES_PASSWORD only when it creates the cluster: on an
 # existing one a new n8n_db_password would reach n8n but not the database,
@@ -135,18 +273,107 @@
     - n8n_db_password_changed | bool
     - n8n_hidden.rc != 0
 
-# The owner's hash is made in the n8n image (n8n_owner_hash_script), which a
-# fresh install or a new version may not have yet.
+# The PostgreSQL image keeps its cluster in a directory per major below the
+# mount (18/docker; main.yml refuses images older than 18): another major
+# starts an empty cluster or none at all, so the one cluster's PG_VERSION must
+# name the major of n8n_postgres_image. More than one cluster (an old one left
+# by pg_upgrade) is refused: which one is current cannot be told, and a stale
+# one would start with old data. Up to three levels deep, above the
+# PG_VERSION files of the databases inside a cluster.
+- name: Look for the PostgreSQL cluster
+  ansible.builtin.find:
+    paths: "{{ n8n_data_dir }}/postgres"
+    patterns: [PG_VERSION]
+    file_type: file
+    recurse: true
+    depth: 3
+  register: n8n_pg_version_files
+  when: n8n_installed
+
+- name: Read the PostgreSQL major of the cluster
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ n8n_pg_version_files.files | default([]) | map(attribute='path') | sort }}"
+  register: n8n_pg_version_read
+
+- name: Refuse more than one PostgreSQL cluster
+  ansible.builtin.fail:
+    msg: >-
+      {{ n8n_data_dir }}/postgres holds more than one PostgreSQL cluster:
+      {{ n8n_pg_clusters | join(', ') }}. The role cannot tell which one n8n
+      uses (an old one left by pg_upgrade would start with old data) and
+      changes nothing. Move every cluster but the current one out of
+      {{ n8n_data_dir }}/postgres, then run the role again.
+  vars:
+    n8n_pg_clusters: >-
+      {%- set found = [] -%}
+      {%- for read in n8n_pg_version_read.results -%}
+      {%-   set _ = found.append(read.item ~ ' (PostgreSQL ' ~ (read.content | b64decode | trim) ~ ')') -%}
+      {%- endfor -%}
+      {{ found }}
+  when: n8n_pg_version_read.results | length > 1
+
+- name: Refuse another PostgreSQL major
+  ansible.builtin.fail:
+    msg: >-
+      n8n_postgres_image {{ n8n_postgres_image }} is PostgreSQL
+      {{ n8n_postgres_major }}, but the database in
+      {{ n8n_data_dir }}/postgres is PostgreSQL {{ n8n_pg_major }}
+      ({{ n8n_pg_version_read.results[0].item }}). A new major does not read
+      the old cluster; the role changes nothing. Set n8n_postgres_image back
+      to PostgreSQL {{ n8n_pg_major }}, or upgrade the cluster (pg_upgrade,
+      or a dump restored into the new major) first.
+  vars:
+    n8n_pg_major: "{{ n8n_pg_version_read.results[0].content | b64decode | trim }}"
+  when:
+    - n8n_pg_version_read.results | length == 1
+    - n8n_postgres_major != n8n_pg_major
+
+# The owner's hash is made in an n8n image (n8n_owner_hash_script): the one
+# the installed n8n container runs, which is on the host and known to work,
+# so that an update makes it before anything changes (update.yml checks the
+# new image once it runs). Without a container (a fresh install), the pinned
+# image, pulled when the host lacks it. bcrypt with the same salt gives the
+# same hash in either.
+- name: Find the n8n container
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - --all
+      - --quiet
+      - --filter
+      - label=com.docker.compose.project={{ n8n_project }}
+      - --filter
+      - label=com.docker.compose.service=n8n
+  register: n8n_container
+  changed_when: false
+  when: n8n_installed
+
+- name: Read the image of the n8n container
+  ansible.builtin.command:
+    argv: [docker, inspect, --format, "{{ '{{.Image}}' }}", "{{ n8n_container.stdout_lines | first }}"]
+  register: n8n_container_image
+  changed_when: false
+  when: n8n_container.stdout_lines | default([]) | length > 0
+
+- name: Note the image the owner's hash is made in
+  ansible.builtin.set_fact:
+    n8n_hash_image: >-
+      {{ n8n_container_image.stdout
+         if n8n_container_image.stdout | default('') | length > 0
+         else n8n_image ~ ':' ~ n8n_version }}
+
 - name: Look for the n8n image
   ansible.builtin.command:
-    argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ n8n_image }}:{{ n8n_version }}"]
+    argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ n8n_hash_image }}"]
   register: n8n_image_inspect
   changed_when: false
   failed_when: false
 
 - name: Pull the n8n image
   ansible.builtin.command:
-    argv: [docker, pull, --quiet, "{{ n8n_image }}:{{ n8n_version }}"]
+    argv: [docker, pull, --quiet, "{{ n8n_hash_image }}"]
   changed_when: true
   when: n8n_image_inspect.rc != 0
 
@@ -163,7 +390,7 @@
       - --pull=never
       - --network=none
       - --entrypoint=node
-      - "{{ n8n_image }}:{{ n8n_version }}"
+      - "{{ n8n_hash_image }}"
       - --eval
       - "{{ n8n_owner_hash_script }}"
     stdin: "{{ {'key': n8n_encryption_key | string, 'password': n8n_owner_password | string} | to_json }}"
@@ -176,9 +403,8 @@
 - name: Fail when the owner's password hash was not made
   ansible.builtin.fail:
     msg: >-
-      The owner's password hash could not be made in
-      {{ n8n_image }}:{{ n8n_version }} ({{ n8n_hidden_error }}). The role
-      changes nothing.
+      The owner's password hash could not be made in {{ n8n_hash_image }}
+      ({{ n8n_hidden_error }}). The role changes nothing.
   when: n8n_hidden.rc != 0 or n8n_hidden.stdout is not match('^\$2b\$10\$[./A-Za-z0-9]{53}$')
 
 - name: Note the owner's password hash
@@ -199,6 +425,7 @@
     n8n_down: "{{ n8n_services | difference(n8n_ps.stdout_lines | default([])) }}"
     n8n_state: >-
       {{ 'install' if not n8n_installed
+         else 'update' if n8n_version is version(n8n_installed_version, '>')
          else 'reconfigure' if n8n_compose_before != n8n_compose
          else 'noop' }}
   no_log: true

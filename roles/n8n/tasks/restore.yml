@@ -1,0 +1,114 @@
+---
+# Rolls a failed update back to n8n_backup: the stack stopped, the compose
+# file put back as it was before the run, the database recreated empty and
+# loaded from the dump, the n8n home moved aside to <backup>-failed and the
+# copy put back, then the previous stack started and checked with health.yml
+# (the services of the previous compose file), both waits bounded by
+# n8n_rollback_timeout. The previous compose file comes first, so the
+# database is restored in the previous database container. Never fails by
+# itself: n8n_healthy says whether n8n is healthy again, n8n_restore_error
+# what failed.
+
+- name: Roll back to the backup
+  block:
+    # All of it: the failed version's main instance and workers must not
+    # write to the database while it is restored.
+    - name: Stop n8n for the rollback
+      ansible.builtin.command:
+        argv: [docker, compose, stop]
+        chdir: "{{ n8n_dir }}"
+      changed_when: true
+
+    - name: Put the previous compose file back
+      ansible.builtin.copy:
+        dest: "{{ n8n_compose_file }}"
+        content: "{{ n8n_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the encryption key, the passwords and the owner's hash.
+      no_log: true
+
+    - name: Start the previous database
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_dir }}"
+        services: [db]
+        state: present
+        pull: missing
+
+    - name: Note when the wait for the database starts
+      ansible.builtin.set_fact:
+        n8n_wait_start: "{{ now().timestamp() }}"
+
+    # Fails after n8n_rollback_timeout seconds; retries is an upper bound.
+    - name: Wait for the database
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, pg_isready, --username=n8n, --dbname=n8n, --timeout=2]
+        chdir: "{{ n8n_dir }}"
+      register: n8n_db_ready
+      until: >-
+        n8n_db_ready.rc == 0
+        or now().timestamp() - n8n_wait_start | float >= n8n_rollback_timeout | int
+      retries: "{{ (n8n_rollback_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
+      delay: 2
+      changed_when: false
+
+    # An empty database, not pg_restore --clean: --clean drops only what is in
+    # the dump, so tables the new version added would stay. Over the local
+    # socket, which needs no password.
+    - name: Recreate the database
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, psql, --username=n8n, --dbname=postgres, --no-psqlrc, --set=ON_ERROR_STOP=1]
+        chdir: "{{ n8n_dir }}"
+        stdin: |
+          DROP DATABASE IF EXISTS n8n WITH (FORCE);
+          CREATE DATABASE n8n OWNER n8n;
+      changed_when: true
+
+    - name: Restore the database dump
+      ansible.builtin.shell:
+        cmd: >-
+          docker compose exec -T db pg_restore --single-transaction --exit-on-error
+          --username=n8n --dbname=n8n <{{ (n8n_backup ~ '/n8n.dump') | quote }}
+        chdir: "{{ n8n_dir }}"
+      changed_when: true
+
+    # The copy first, so the home is missing only between two renames.
+    - name: Put the n8n home back
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          backup={{ n8n_backup | quote }}
+          root={{ n8n_data_dir | quote }}
+          mkdir -m 0700 "$backup-failed"
+          rm -rf "$root/.home.restore"
+          cp -a "$backup/home" "$root/.home.restore"
+          mv "$root/home" "$backup-failed/home"
+          mv "$root/.home.restore" "$root/home"
+      changed_when: true
+
+    - name: Start the previous n8n
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that the previous n8n is healthy
+      ansible.builtin.include_tasks: health.yml
+      vars:
+        n8n_health_wait: "{{ n8n_rollback_timeout }}"
+        n8n_health_services: "{{ n8n_compose_on_disk.services | list }}"
+
+    - name: Note the rollback
+      ansible.builtin.set_fact:
+        n8n_restore_error: >-
+          {{ '' if n8n_healthy
+             else 'n8n ' ~ n8n_installed_version ~ ' is not healthy within '
+                  ~ n8n_rollback_timeout ~ ' seconds (' ~ n8n_health_lines | join('; ') ~ ')' }}
+
+  rescue:
+    - name: Note the failed rollback
+      ansible.builtin.set_fact:
+        n8n_healthy: false
+        n8n_restore_error: "{{ n8n_failure | trim }}"

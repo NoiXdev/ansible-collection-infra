@@ -75,9 +75,14 @@ n8n_redis_image: docker.io/valkey/valkey:9-alpine
 # when more proxies add to X-Forwarded-For.
 n8n_env: {}
 
-# Dumps of the database taken before every update, in
-# n8n_data_dir/backups; the newest n8n_dumps_keep are kept.
+# Backups taken before every update (a dump of the database, a copy of the
+# n8n home and the compose file), in n8n_data_dir/backups; the newest
+# n8n_dumps_keep are kept.
 n8n_dumps_keep: 3
 # Seconds to wait for n8n, its workers, Valkey and the database to become
 # healthy.
 n8n_health_timeout: 300
+# Seconds a rollback after a failed update waits for the previous version
+# and its database; a failed update may fail fast, while the previous
+# version's start must not be cut short.
+n8n_rollback_timeout: "{{ n8n_health_timeout }}"

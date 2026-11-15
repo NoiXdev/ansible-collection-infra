@@ -74,6 +74,7 @@
       - n8n_workers | int >= 0
       - n8n_dumps_keep | int >= 1
       - n8n_health_timeout | int > 0
+      - n8n_rollback_timeout | int > 0
     fail_msg: >-
       n8n_dir and n8n_data_dir must be absolute paths, the basename of n8n_dir
       (the compose project) only lowercase letters, digits, - and _;
@@ -83,8 +84,9 @@
       n8n_traefik_webhook_middlewares middleware names (name@provider);
       n8n_image and n8n_redis_image must be set, n8n_postgres_image with a tag
       that starts with the PostgreSQL major (postgres:18,
-      postgres:18.1-alpine); n8n_traefik_priority, n8n_dumps_keep and
-      n8n_health_timeout must be positive, n8n_workers not negative.
+      postgres:18.1-alpine); n8n_traefik_priority, n8n_dumps_keep,
+      n8n_health_timeout and n8n_rollback_timeout must be positive,
+      n8n_workers not negative.
     quiet: true
 
 # From 18 on the image keeps its cluster below /var/lib/postgresql (in
@@ -141,6 +143,8 @@
   vars:
     n8n_env_null: "{{ n8n_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
 
+# Also refuses after a failed update (its marker), on a downgrade, another
+# PostgreSQL major and another encryption key.
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
 
@@ -148,6 +152,11 @@
   ansible.builtin.include_tasks: install.yml
   when: n8n_state == 'install'
 
+- name: Update n8n
+  ansible.builtin.include_tasks: update.yml
+  when: n8n_state == 'update'
+
+# A reconfigure keeps the version, so the schema stays and it takes no backup.
 - name: Reconfigure n8n
   ansible.builtin.include_tasks: reconfigure.yml
   when: n8n_state == 'reconfigure'
@@ -176,3 +185,11 @@
           ({{ n8n_health_lines | join('; ') }}). The role restarts nothing on
           a run without changes; see docker compose logs in {{ n8n_dir }}.
       when: not n8n_healthy
+
+# Reached only by a run that succeeded, so the marker names another version
+# and records a rollback that worked.
+- name: Remove the marker of a failed update of another version
+  ansible.builtin.file:
+    path: "{{ n8n_marker_file }}"
+    state: absent
+  when: n8n_marker_read.content is defined

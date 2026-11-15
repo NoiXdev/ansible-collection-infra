@@ -35,11 +35,29 @@
 #             worker; two workers, then back to normal mode (no Valkey,
 #             no workers), then queue mode again, each a reconfigure that
 #             keeps the workflow active and its webhook answering
-# The failed install runs at -v, the install and the refusals on an
-# installation at -vvv, every other converge at -v; their output must not
-# hold a test secret (nor the owner's password hash). Every successful
-# converge is repeated and must change nothing (the owner's password hash
-# among it).
+#   update    an update from the last 2.46 release with the webhook workflow:
+#             a new n8n_db_password with it refused before any change; a
+#             backup (a dump read back in full, a copy of the n8n home, the
+#             compose file) taken and the oldest pruned, the workflow still
+#             active and its webhook answering; a downgrade, another
+#             PostgreSQL major, a second cluster and a changed encryption key
+#             refused before any change, and so is a missing fingerprint of
+#             the key (with the right key or another), until it is written
+#             again as the refusal says
+#   failed_update
+#             an update to an image that exits at once: rolled back with the
+#             workflow, the marker that names the failed version and blocks
+#             it, and a run with another version that removes the marker; an
+#             update to a release in which the owner's hash cannot be made
+#             (n8n moved in the image), rolled back although it is healthy;
+#             then a rollback that fails too (the previous image cannot be
+#             started), whose marker refuses every version, an older one
+#             before the downgrade refusal
+# The failed install runs at -v, the install, the refusals on an
+# installation and the failed update at -vvv, every other converge at -v;
+# their output must not hold a test secret (nor the owner's password hash).
+# Every successful converge is repeated and must change nothing (the owner's
+# password hash among it).
 # NOIXDEV_INFRA_N8N_TESTS selects scenarios (see the end of the file);
 # NOIXDEV_INFRA_N8N_TEST_HOST and NOIXDEV_INFRA_N8N_TEST_OUT (the directory
 # of the logs and image tarballs) let two runs go side by side.
@@ -72,6 +90,9 @@ owner_password="$(value_of "$here/vars.yml" n8n_owner_password)"
 # to; a $ that compose and a shell must not expand.
 rotated_owner_password='Test-owner-ro$tated-0'
 rotated_db_password='test-db-ro$tated-pass-0'
+# Another encryption key than the installation's, which the update scenario
+# must refuse.
+changed_key='test-encryption-key-$changed-00000000'
 # The test secrets, which no run's output may hold; the install adds the
 # owner's password hash.
 secrets=(
@@ -80,7 +101,16 @@ secrets=(
   "$owner_password"
   "$rotated_owner_password"
   "$rotated_db_password"
+  "$changed_key"
 )
+# The update tests: the release they install first (the last 2.46 release)
+# and an image that exits at once, tagged as an n8n release of a test image.
+old_version=2.46.7
+busybox=busybox:1.37.0
+old_images=("$(value_of "$defaults" n8n_image):$old_version" "$busybox")
+backups="$dir/data/backups"
+marker="$dir/update-failed"
+fingerprint="$dir/encryption-key.sha256"
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -317,6 +347,41 @@ expect_redis_without_mounts() {
   local mounts
   mounts="$(hx sh -c "docker inspect --format '{{json .Mounts}}' \$(cd $dir && docker compose ps --quiet redis)")"
   [ "$mounts" = '[]' ] || fail "the redis service has mounts: $mounts"
+}
+
+# A failed update of the installation on the test host: to the new release of
+# a test image that exits at once, which fails fast (30 seconds), while the
+# rollback has the time a slow start of the previous release may need.
+# failed_update <log> [converge options...].
+failed_update() {
+  local name="$1"
+  shift
+  hx docker tag "$busybox" "test.invalid/n8n:$version"
+  play_fails "$name" "$here/converge.yml" "$@" -e n8n_image=test.invalid/n8n -e n8n_health_timeout=30 \
+    -e n8n_rollback_timeout=300
+  expect_rolled_back "$name"
+}
+# Fails unless the failed update <log> rolled back to the old release: its
+# message, n8n healthy with the old image, the workflow active, and the
+# marker that names the failed version, the old one and the backup (sets
+# backup).
+expect_rolled_back() {
+  expect_in_log "$1" "update from $old_version to $version in $dir failed, rolled back to $old_version"
+  expect_no_secrets "$1"
+  [ "$(service n8n)" = "${old_images[0]} running healthy" ] || fail "n8n after the rollback: $(service n8n)"
+  hx grep -qx "failed_version: $version" "$marker" || fail "the marker does not name $version: $(hx cat "$marker")"
+  hx grep -qx "rolled_back_to: $old_version" "$marker" || fail "the marker does not name $old_version: $(hx cat "$marker")"
+  backup="$(hx sed -n 's/^backup: //p' "$marker")"
+  [ "$(hx head -c 5 "$backup/n8n.dump")" = PGDMP ] || fail "the marker's backup $backup has no dump"
+  hx test -d "$backup-failed/home" || fail "the home of the failed update was not moved to $backup-failed"
+  expect_workflow_active
+  wait_healthy
+  expect_answer 200 '"ok":true' /webhook/noix-test -X POST
+}
+# The fingerprint of the installation's encryption key, as the refusal of a
+# missing one says to write it: from the key of the running n8n container.
+write_fingerprint() {
+  hx sh -c "cd $dir && (umask 077; docker compose exec -T n8n sh -c 'printf %s \"\$N8N_ENCRYPTION_KEY\" | sha256sum' | cut -d' ' -f1 >$fingerprint)"
 }
 
 # The scenarios, run by the loop at the end.
@@ -574,12 +639,183 @@ test_queue() {
   expect_ran_on_worker worker-1
 }
 
+test_update() {
+  echo "== an update must take a dump and a copy of the home and prune the oldest backups"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "n8n_version=$old_version"
+  # Creates and activates the webhook workflow on the old release.
+  play "$here/verify.yml"
+  # Older backups; with the new one there are four, and three are kept.
+  hx mkdir -p "$backups/20200101T000000Z-2.40.0" "$backups/20200101T000001Z-2.40.0" "$backups/20200101T000002Z-2.40.0"
+  # A new password with a new version: refused before the update, which would
+  # fail on it and roll back.
+  note_untouched
+  play_fails update-db-password "$here/converge.yml" -v -e "n8n_db_password=$rotated_db_password"
+  expect_in_log update-db-password "n8n_db_password differs from the password in $dir/compose.yaml, and the database does not take it"
+  expect_no_secrets update-db-password
+  expect_untouched update-db-password
+  hx test ! -e "$marker" || fail "the refused update wrote the marker"
+  [ "$(service n8n)" = "${old_images[0]} running healthy" ] || fail "n8n after the refused update: $(service n8n)"
+  converge -v
+  expect_no_secrets converge
+  grep -q "update.yml" "$out/converge.log" || fail "the new version was not an update"
+  [ "$(service n8n)" = "${images[0]} running healthy" ] || fail "n8n after the update: $(service n8n)"
+  backup="$(hx sh -c "ls -d $backups/*-$old_version")"
+  [ "$(printf '%s\n' "$backup" | wc -l | tr -d ' ')" = 1 ] || fail "not one backup of $old_version: $backup"
+  [ "$(hx head -c 5 "$backup/n8n.dump")" = PGDMP ] || fail "the backup $backup has no dump in pg_dump's custom format"
+  [ "$(hx stat -c %s "$backup/n8n.dump")" -gt 10000 ] || fail "the dump in $backup is too small to hold n8n's database"
+  [ -n "$(hx ls -A "$backup/home")" ] || fail "the backup $backup has no copy of the n8n home"
+  [ "$(hx stat -c '%u %a' "$backup/home")" = "1000 700" ] || fail "the copy of the home lost its owner or mode: $(hx stat -c '%u %a' "$backup/home")"
+  [ "$(hx stat -c %a "$backup/compose.yaml")" = 600 ] || fail "the backup's compose file is not 0600"
+  hx grep -q "n8n:$old_version" "$backup/compose.yaml" || fail "the backup's compose file is not the one of $old_version"
+  hx test ! -e "$backups/20200101T000000Z-2.40.0" || fail "the oldest backup was not pruned"
+  [ "$(hx ls "$backups" | wc -l | tr -d ' ')" = 3 ] || fail "the backups are not the newest three: $(hx ls "$backups")"
+  wait_healthy
+  expect_workflow_active
+  expect_answer 200 '"ok":true' /webhook/noix-test -X POST
+  expect_idempotent
+  play "$here/verify.yml"
+
+  echo "== a downgrade, another PostgreSQL major and a second cluster must be refused before any change"
+  note_untouched
+  play_fails downgrade "$here/converge.yml" -e "n8n_version=$old_version"
+  expect_in_log downgrade "n8n_version $old_version is lower than the installed version $version"
+  expect_untouched downgrade
+  play_fails postgres-major "$here/converge.yml" -e n8n_postgres_image=docker.io/library/postgres:19
+  expect_in_log postgres-major "docker.io/library/postgres:19 is PostgreSQL 19, but the database"
+  expect_in_log postgres-major "is PostgreSQL 18"
+  expect_untouched postgres-major
+  # An old cluster next to the current one, as a copy-mode pg_upgrade leaves it.
+  hx sh -c "mkdir -p $dir/data/postgres/17/docker && echo 17 >$dir/data/postgres/17/docker/PG_VERSION"
+  play_fails postgres-clusters "$here/converge.yml"
+  expect_in_log postgres-clusters "more than one PostgreSQL cluster"
+  expect_in_log postgres-clusters "$dir/data/postgres/17/docker/PG_VERSION (PostgreSQL 17)"
+  expect_in_log postgres-clusters "$dir/data/postgres/18/docker/PG_VERSION (PostgreSQL 18)"
+  expect_untouched postgres-clusters
+  hx rm -r "$dir/data/postgres/17"
+
+  echo "== a changed encryption key must be refused before any change"
+  play_fails key-changed "$here/converge.yml" -vvv -e "n8n_encryption_key=$changed_key"
+  expect_in_log key-changed "n8n_encryption_key is not the key of the installation in $dir"
+  expect_in_log key-changed "$fingerprint"
+  expect_no_secrets key-changed
+  expect_untouched key-changed
+
+  echo "== a missing fingerprint of the key must be refused, with the right key or another"
+  hx cp -p "$fingerprint" /root/encryption-key.sha256
+  hx rm "$fingerprint"
+  play_fails key-unrecorded "$here/converge.yml" -vvv -e "n8n_encryption_key=$changed_key"
+  expect_in_log key-unrecorded "$fingerprint does not exist"
+  expect_no_secrets key-unrecorded
+  expect_untouched key-unrecorded
+  hx test ! -e "$fingerprint" || fail "the refused run wrote the fingerprint"
+  play_fails key-unrecorded-same "$here/converge.yml"
+  expect_in_log key-unrecorded-same "$fingerprint does not exist"
+  expect_untouched key-unrecorded-same
+  hx test ! -e "$fingerprint" || fail "the refused run wrote the fingerprint"
+  # As the refusal says; the fingerprint is then the one install wrote.
+  expect_in_log key-unrecorded-same "sha256sum"
+  write_fingerprint
+  [ "$(hx cat "$fingerprint")" = "$(hx cat /root/encryption-key.sha256)" ] \
+    || fail "the fingerprint written as the refusal says is not the one of the installation's key"
+  [ "$(hx stat -c %a "$fingerprint")" = 600 ] || fail "the fingerprint written as the refusal says is not 0600"
+  play_fails key-changed-again "$here/converge.yml" -e "n8n_encryption_key=$changed_key"
+  expect_in_log key-changed-again "n8n_encryption_key is not the key of the installation in $dir"
+  expect_untouched key-changed-again
+  expect_idempotent
+  [ "$(service n8n)" = "${images[0]} running healthy" ] || fail "n8n after the refusals: $(service n8n)"
+}
+
+test_failed_update() {
+  echo "== a failed update must roll back and block the failed version"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "n8n_version=$old_version"
+  play "$here/verify.yml"
+  failed_update update-failed -vvv
+  expect_in_log update-failed "the home of the failed attempt is in $backup-failed. It does not try $version again"
+
+  echo "== a run with the failed version must change nothing"
+  note_untouched
+  play_fails update-blocked "$here/converge.yml"
+  expect_in_log update-blocked "$marker exists: the n8n update to $version failed"
+  expect_in_log update-blocked "rolled back to $old_version"
+  expect_untouched update-blocked
+
+  echo "== a run with another version must remove the marker"
+  converge -e "n8n_version=$old_version"
+  hx test ! -e "$marker" || fail "a successful run with $old_version kept the marker"
+  expect_idempotent -e "n8n_version=$old_version"
+
+  echo "== an update to a release in which the owner's hash cannot be made must roll back"
+  # n8n moved in the image (its command a script that starts it there): it
+  # runs and is healthy, but the owner's hash, which every later run makes
+  # in it, cannot find bcryptjs.
+  docker exec -i "$host" docker build -q -t "test.invalid/n8n:$version" - >/dev/null <<DOCKERFILE
+FROM ${images[0]}
+USER root
+RUN mv /usr/local/lib/node_modules/n8n /usr/local/lib/node_modules/n8n-moved \
+  && rm /usr/local/bin/n8n \
+  && printf '#!/bin/sh\\nexec node /usr/local/lib/node_modules/n8n-moved/bin/n8n "\$@"\\n' >/usr/local/bin/n8n \
+  && chmod 755 /usr/local/bin/n8n
+USER node
+DOCKERFILE
+  play_fails update-hash "$here/converge.yml" -v -e n8n_image=test.invalid/n8n -e n8n_rollback_timeout=300
+  expect_in_log update-hash "n8n $version cannot make the owner's password hash"
+  expect_rolled_back update-hash
+  hx rm "$marker"
+
+  echo "== a failed rollback must refuse every version until n8n is restored by hand"
+  # The installed release under a name that is then untagged: the rollback
+  # cannot start it again (no such registry), after the database was
+  # recreated and loaded.
+  hx docker tag "${old_images[0]}" "test.invalid/n8n:$old_version"
+  converge -e "n8n_version=$old_version" -e n8n_image=test.invalid/n8n
+  hx docker rmi "test.invalid/n8n:$old_version" >/dev/null
+  hx docker rmi "test.invalid/n8n:$version" >/dev/null
+  hx docker tag "$busybox" "test.invalid/n8n:$version"
+  play_fails rollback-failed "$here/converge.yml" -v -e n8n_image=test.invalid/n8n -e n8n_health_timeout=30
+  expect_in_log rollback-failed "update from $old_version to $version in $dir failed"
+  expect_in_log rollback-failed "and rolling back to $old_version failed too"
+  expect_in_log rollback-failed "Roll back by hand in $dir"
+  expect_no_secrets rollback-failed
+  hx grep -qx "failed_version: $version" "$marker" || fail "the marker does not name $version: $(hx cat "$marker")"
+  hx grep -qx "rolled_back_to: null" "$marker" || fail "the marker records a rollback: $(hx cat "$marker")"
+  backup="$(hx sed -n 's/^backup: //p' "$marker")"
+  note_untouched
+  # A newer release than the failed one: it would back up the database the
+  # failed rollback left and remove the marker.
+  play_fails rollback-blocked "$here/converge.yml" -e n8n_version=2.99.0
+  expect_in_log rollback-blocked "$marker exists: the n8n update to $version failed"
+  expect_in_log rollback-blocked "rolling back failed too"
+  expect_in_log rollback-blocked "the data is in the backup $backup"
+  expect_in_log rollback-blocked "The role refuses every version"
+  if grep -qF -- "set n8n_version to another version" "$out/rollback-blocked.log"; then
+    fail "the refusal after a failed rollback suggests another version"
+  fi
+  expect_untouched rollback-blocked
+  hx test -e "$marker" || fail "the refused run removed the marker"
+  # An older release than the compose file names: the failed rollback comes
+  # before the downgrade.
+  play_fails rollback-blocked-older "$here/converge.yml" -e n8n_version=2.46.0
+  expect_in_log rollback-blocked-older "rolling back failed too"
+  expect_in_log rollback-blocked-older "The role refuses every version"
+  if grep -qF -- "is lower than the installed version" "$out/rollback-blocked-older.log"; then
+    fail "the refusal after a failed rollback is the downgrade refusal"
+  fi
+  expect_untouched rollback-blocked-older
+  hx test -e "$marker" || fail "the refused run removed the marker"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_N8N_TESTS="refusals router" runs
 # only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue}; do
+for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update failed_update}; do
   case "$scenario" in
-    refusals | install | router | queue) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (refusals, install, router, queue)" ;;
+    refusals | install | router | queue | update | failed_update) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, failed_update)" ;;
   esac
 done
 

@@ -114,9 +114,16 @@ argument_specs:
           settings the role sets itself are refused.
       n8n_dumps_keep:
         type: int
-        description: Number of dumps kept before updates.
+        description: >-
+          Number of backups (a database dump and a copy of the n8n home,
+          taken before every update) kept in n8n_data_dir/backups.
       n8n_health_timeout:
         type: int
         description: >-
           Seconds to wait for n8n, its workers, Valkey and the database to
           become healthy.
+      n8n_rollback_timeout:
+        type: int
+        description: >-
+          Seconds a rollback after a failed update waits for the previous
+          version and its database (default n8n_health_timeout).

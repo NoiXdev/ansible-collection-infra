@@ -1,15 +1,17 @@
 ---
 # Waits up to n8n_health_timeout seconds (n8n_health_wait, when the includer
-# sets it) until every container of n8n_services reports the health status
-# healthy, and sets n8n_healthy and n8n_health_lines (service, state and
-# health of each container). n8n's own check asks /healthz/readiness, which
-# needs the database, and on a worker Valkey too (QUEUE_HEALTH_CHECK_ACTIVE);
-# Valkey's answers a ping. Never fails by itself.
+# sets it) until every container of n8n_services (n8n_health_services, when
+# the includer sets it: a rollback checks the previous compose file's)
+# reports the health status healthy, and sets n8n_healthy and
+# n8n_health_lines (service, state and health of each container). n8n's own
+# check asks /healthz/readiness, which needs the database, and on a worker
+# Valkey too (QUEUE_HEALTH_CHECK_ACTIVE); Valkey's answers a ping. Never
+# fails by itself.
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:
     n8n_health_start: "{{ now().timestamp() }}"
-    n8n_health_expected: "{{ n8n_services | map('regex_replace', '^(.*)$', '\\1 running healthy') | list }}"
+    n8n_health_expected: "{{ n8n_health_services | default(n8n_services) | map('regex_replace', '^(.*)$', '\\1 running healthy') | list }}"
 
 # retries is an upper bound (every attempt takes at least the delay); the
 # deadline ends the wait after those seconds.
