@@ -3,21 +3,23 @@
 #
 # php-fpm-rolling-restart VERSION
 #   Restarts each running php-fpm@<name> whose /etc/php-fpm/<name>/env names
-#   PHP VERSION, one at a time, in the order of their names. Each one must
-#   answer its ping (/php-fpm-ping: pong) within {{ php_fpm_restart_timeout }} seconds before the
-#   next one restarts. One that does not stops the run (exit 1): the pools not
-#   restarted yet keep running. Messages go to stderr and to the journal
+#   PHP VERSION, one at a time, in the order of their names. The restart may
+#   take up to {{ php_fpm_restart_timeout }} seconds, and then the pool must answer its ping
+#   (/php-fpm-ping: pong) within {{ php_fpm_restart_timeout }} seconds before the next one
+#   restarts. One that does not stops the run (exit 1): the pools not restarted
+#   yet keep running. Messages go to stderr and to the journal
 #   (journalctl -t php-fpm-rolling-restart).
 #
 # --dpkg-pre-invoke, --dpkg-post-invoke
 #   For the apt hook /etc/apt/apt.conf.d/99noixdev-php-fpm-restart: before a
 #   dpkg run, remember where dpkg's log ends; after it, run the restart above
-#   for each version whose php<v>-fpm the run upgraded (or reinstalled), as
-#   the log names it. A failure is logged, never passed on to apt (exit 0).
+#   for each version with a php<v>-* package (fpm, cli, an extension) the run
+#   upgraded or reinstalled, as the log names it. A failure is logged, never
+#   passed on to apt (exit 0).
 set -u
 
 tag=php-fpm-rolling-restart
-timeout={{ php_fpm_restart_timeout }}
+limit={{ php_fpm_restart_timeout }}
 dpkg_log=/var/log/dpkg.log
 # Under /run: a reboot restarts every pool anyway.
 dpkg_log_mark=/run/php-fpm-rolling-restart.dpkg-log-offset
@@ -33,11 +35,12 @@ answers() {
     timeout 2 cgi-fcgi -bind -connect "/run/php/$1.sock" 2>/dev/null | tr -d '\r' | grep -qx pong
 }
 
-# restart NAME: restart the pool, then wait for its ping.
+# restart NAME: restart the pool, then wait for its ping. A restart that hangs
+# must not hold up apt: systemd's own start timeout is 90 seconds.
 restart() {
   local name="$1" deadline
-  systemctl restart "php-fpm@$name" || return 1
-  deadline=$((SECONDS + timeout))
+  timeout "$limit" systemctl restart "php-fpm@$name" || return 1
+  deadline=$((SECONDS + limit))
   until answers "$name"; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 1
@@ -77,13 +80,13 @@ dpkg_post_invoke() {
   size="$(stat -c %s "$dpkg_log" 2>/dev/null)" || return 0
   # A log rotated in between starts again.
   [ "$size" -ge "$mark" ] || mark=0
-  # "<date> <time> upgrade php8.3-fpm:<arch> <old> <new>", also for a
-  # reinstall of the same version.
+  # "<date> <time> upgrade php8.3-intl:<arch> <old> <new>", also for a
+  # reinstall of the same version. The role's pin keeps php<v>-* to the PPA.
   for version in $(tail -c +"$((mark + 1))" "$dpkg_log" \
-      | sed -n -E 's/^[^ ]+ [^ ]+ upgrade php([0-9]+[.][0-9]+)-fpm:[^ ]+ .*$/\1/p' | sort -u -V); do
-    log "php$version-fpm was upgraded: restarting its pools one at a time"
+      | sed -n -E 's/^[^ ]+ [^ ]+ upgrade php([0-9]+[.][0-9]+)-[^: ]+:[^ ]+ .*$/\1/p' | sort -u -V); do
+    log "PHP $version packages were upgraded: restarting the pools one at a time"
     rolling_restart "$version" \
-      || log "php$version-fpm: the rolling restart stopped; the pools not restarted yet keep running"
+      || log "PHP $version: the rolling restart stopped; the pools not restarted yet keep running"
   done
 }
 

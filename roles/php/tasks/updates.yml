@@ -1,8 +1,8 @@
 ---
-# One master per pool: unattended-upgrades installs the PPA's updates, and
-# after each dpkg run that upgraded php<v>-fpm the apt hook restarts that
-# version's pools one at a time. Classic mode has none of these files: the
-# package's own restart applies there.
+# unattended-upgrades installs the PPA's updates in both modes. One master per
+# pool: after each dpkg run that upgraded a php<v>-* package, the apt hook
+# restarts that version's pools one at a time. Classic mode has no hook and no
+# script: the package's own restart applies there.
 - name: Install the rolling restart
   ansible.builtin.template:
     src: php-fpm-rolling-restart.sh.j2
@@ -21,6 +21,16 @@
     mode: "0644"
   when: php_fpm_per_pool_service | bool
 
+# The hook goes first; it does nothing without the script anyway.
+- name: Remove the rolling restart and its hook
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/apt.conf.d/99noixdev-php-fpm-restart
+    - /usr/local/sbin/php-fpm-rolling-restart
+  when: not php_fpm_per_pool_service | bool
+
 - name: Let unattended-upgrades install the PPA's updates
   ansible.builtin.template:
     src: 52noixdev-php-ppa.j2
@@ -28,15 +38,3 @@
     owner: root
     group: root
     mode: "0644"
-  when: php_fpm_per_pool_service | bool
-
-# The hook goes first; it does nothing without the script anyway.
-- name: Remove the rolling restart, its hook and the PPA in unattended-upgrades
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop:
-    - /etc/apt/apt.conf.d/99noixdev-php-fpm-restart
-    - /usr/local/sbin/php-fpm-rolling-restart
-    - /etc/apt/apt.conf.d/52noixdev-php-ppa
-  when: not php_fpm_per_pool_service | bool

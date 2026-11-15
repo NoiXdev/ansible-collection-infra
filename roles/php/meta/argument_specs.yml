@@ -19,12 +19,13 @@ argument_specs:
         group restarts it. Switching modes moves every pool; files in pool.d without the role's
         header are left alone.
       - >-
-        Security updates (one master per pool): unattended-upgrades also installs the PPA's
-        updates, and an apt hook restarts the pools of each version whose php<v>-fpm was
-        upgraded, one at a time (/usr/local/sbin/php-fpm-rolling-restart). Each must answer its
-        ping before the next one restarts; one that does not stops the restart, and the
-        failure is logged (journalctl -t php-fpm-rolling-restart). In classic mode none of this
-        is installed and the package's own restart applies.
+        Security updates: unattended-upgrades also installs the PPA's updates, in both modes.
+        With one master per pool, an apt hook restarts the pools of each version with an
+        upgraded php<v>-* package (fpm, cli or an extension), one at a time
+        (/usr/local/sbin/php-fpm-rolling-restart). Each must answer its ping before the next
+        one restarts; one that does not stops the restart, and the failure is logged
+        (journalctl -t php-fpm-rolling-restart). In classic mode there is no hook and the
+        package's own restart applies.
       - >-
         php_pools is the complete list: a pool that leaves it is stopped and disabled and its
         config removed; its tmp_dir and log stay.
@@ -117,8 +118,9 @@ argument_specs:
       php_fpm_restart_timeout:
         type: int
         description: >-
-          One master per pool: seconds each pool has to answer its ping after the restart that
-          follows a PHP update, before the rolling restart stops (a positive number).
+          One master per pool: after a PHP update, the seconds each pool's restart may take, and
+          then the seconds it has to answer its ping, before the rolling restart stops (a
+          positive number).
       php_apt_url:
         type: str
         description: The PPA's URL.

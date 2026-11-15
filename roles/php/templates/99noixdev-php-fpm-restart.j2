@@ -1,6 +1,6 @@
 // Managed by noixdev.infra (php role). Changes here are overwritten.
-// After a dpkg run that upgraded php<v>-fpm, its php-fpm@ pools restart one at
-// a time (/usr/local/sbin/php-fpm-rolling-restart). Neither command fails the
-// run, and both do nothing without the script.
+// After a dpkg run that upgraded a php<v>-* package, that version's php-fpm@
+// pools restart one at a time (/usr/local/sbin/php-fpm-rolling-restart).
+// Neither command fails the run, and both do nothing without the script.
 DPkg::Pre-Invoke { "if [ -x /usr/local/sbin/php-fpm-rolling-restart ]; then /usr/local/sbin/php-fpm-rolling-restart --dpkg-pre-invoke || true; fi"; };
 DPkg::Post-Invoke { "if [ -x /usr/local/sbin/php-fpm-rolling-restart ]; then /usr/local/sbin/php-fpm-rolling-restart --dpkg-post-invoke || true; fi"; };

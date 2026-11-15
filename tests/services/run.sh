@@ -1008,14 +1008,15 @@ rr_since() {
     | tail -n +"$(($1 + 1))" | sed -E 's/ \(pid [0-9]+\)$//'
 }
 
-# reinstall NAME: apt reinstalls php8.3-fpm (the same version, from the PPA).
-# dpkg logs it as an upgrade, and apt runs it with the apt hooks, as
-# unattended-upgrades does (a bare dpkg -i runs none). The package's own
-# scripts run unchecked: no policy-rc.d. The log is $out/php-NAME.log.
+# reinstall NAME [PACKAGE]: apt reinstalls PACKAGE (php8.3-fpm by default;
+# the same version, from the PPA). dpkg logs it as an upgrade, and apt runs it
+# with the apt hooks, as unattended-upgrades does (a bare dpkg -i runs none).
+# The package's own scripts run unchecked: no policy-rc.d. The log is
+# $out/php-NAME.log.
 reinstall() {
   hx php sh -c 'mv /usr/sbin/policy-rc.d /usr/sbin/policy-rc.d.off \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall php8.3-fpm; rc=$?; \
-    mv /usr/sbin/policy-rc.d.off /usr/sbin/policy-rc.d; exit $rc' >"$out/php-$1.log" 2>&1 \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall "$1"; rc=$?; \
+    mv /usr/sbin/policy-rc.d.off /usr/sbin/policy-rc.d; exit $rc' sh "${2:-php8.3-fpm}" >"$out/php-$1.log" 2>&1 \
     || { cat "$out/php-$1.log" >&2; fail "php/$1: apt failed"; }
 }
 
@@ -1069,7 +1070,7 @@ suite_php_updates() {
   [ "$(pid php php-fpm@production)" != "$prod" ] || fail "php: the hook did not restart production"
   [ "$(pid php php-fpm@staging)" != "$staging" ] || fail "php: the hook did not restart staging"
   [ "$(pid php php-fpm@extra)" = "$extra" ] || fail "php: the hook restarted extra (8.4)"
-  expected="$(printf '%s\n' 'php8.3-fpm was upgraded: restarting its pools one at a time' \
+  expected="$(printf '%s\n' 'PHP 8.3 packages were upgraded: restarting the pools one at a time' \
     'restarting production (PHP 8.3)' 'production answers' 'restarting staging (PHP 8.3)' 'staging answers')"
   [ "$(rr_since "$count")" = "$expected" ] || fail "php: the hook's journal: $(rr_since "$count")"
   package_services_stay hook
@@ -1085,6 +1086,20 @@ suite_php_updates() {
   [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted without the script"
   [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted without the script"
   [ -z "$(rr_since "$count")" ] || fail "php: the hook ran without the script: $(rr_since "$count")"
+
+  echo "== php: updates: apt reinstalls php8.4-intl alone, the hook restarts extra (8.4) only"
+  prod="$(pid php php-fpm@production)"
+  staging="$(pid php php-fpm@staging)"
+  extra="$(pid php php-fpm@extra)"
+  count="$(rr_count)"
+  reinstall extension php8.4-intl
+  [ "$(pid php php-fpm@extra)" != "$extra" ] || fail "php: the hook did not restart extra on php8.4-intl"
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production (8.3) restarted on php8.4-intl"
+  [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging (8.3) restarted on php8.4-intl"
+  expected="$(printf '%s\n' 'PHP 8.4 packages were upgraded: restarting the pools one at a time' \
+    'restarting extra (PHP 8.4)' 'extra answers')"
+  [ "$(rr_since "$count")" = "$expected" ] || fail "php: the hook's journal: $(rr_since "$count")"
+  package_services_stay extension
 
   echo "== php: updates: extra moves to 8.3"
   converge php updates-extra "$dir/converge.yml" "${knobs[@]}" -e php_test_extra_version=8.3
@@ -1127,6 +1142,26 @@ suite_php_updates() {
   [ "$(rr_since "$count" | tail -n 1)" = 'production did not come back; stopping' ] || fail "php: the journal: $(rr_since "$count")"
   [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted after production failed"
 
+  echo "== php: updates: a restart that hangs stops the run after the timeout"
+  # The start waits in ExecStartPre far beyond php_fpm_restart_timeout (5).
+  hx php sh -c 'mkdir -p /run/systemd/system/php-fpm@production.service.d \
+    && printf "[Service]\nExecStartPre=/bin/sleep 120\n" > /run/systemd/system/php-fpm@production.service.d/hang.conf \
+    && systemctl daemon-reload'
+  extra="$(pid php php-fpm@extra)"
+  staging="$(pid php php-fpm@staging)"
+  count="$(rr_count)"
+  started="$(date +%s)"
+  rc=0
+  hx php "$script" 8.3 >"$out/php-rr-hangs.log" 2>&1 || rc=$?
+  took=$(($(date +%s) - started))
+  [ "$rc" = 1 ] || { cat "$out/php-rr-hangs.log" >&2; fail "php: php-fpm-rolling-restart exited $rc, not 1"; }
+  [ "$took" -lt 30 ] || fail "php: the run waited $took seconds for the hung restart"
+  [ "$(rr_since "$count" | tail -n 1)" = 'production did not come back; stopping' ] || fail "php: the journal: $(rr_since "$count")"
+  [ "$(pid php php-fpm@extra)" != "$extra" ] || fail "php: extra did not restart before production"
+  [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted after production hung"
+  hx php sh -c 'rm -r /run/systemd/system/php-fpm@production.service.d && systemctl daemon-reload \
+    && systemctl restart php-fpm@production'
+
   echo "== php: updates: a failing restart in the hook is logged and apt passes"
   hx php sh -c "echo 'no_such_entry = 1' >> $conf"
   extra="$(pid php php-fpm@extra)"
@@ -1134,7 +1169,7 @@ suite_php_updates() {
   reinstall hook-fails
   grep -qxF 'php-fpm-rolling-restart: production did not come back; stopping' "$out/php-hook-fails.log" \
     || { cat "$out/php-hook-fails.log" >&2; fail "php: apt's output does not report the failure"; }
-  [ "$(rr_since "$count" | tail -n 1)" = 'php8.3-fpm: the rolling restart stopped; the pools not restarted yet keep running' ] \
+  [ "$(rr_since "$count" | tail -n 1)" = 'PHP 8.3: the rolling restart stopped; the pools not restarted yet keep running' ] \
     || fail "php: the hook's journal: $(rr_since "$count")"
   [ "$(pid php php-fpm@extra)" != "$extra" ] || fail "php: the hook did not restart extra"
   [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: the hook restarted staging after production failed"

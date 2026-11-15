@@ -46,9 +46,10 @@ php_fpm_per_pool_service: true
 # The group of every pool socket (nginx's), besides the pool user.
 php_fpm_listen_group: www-data
 
-# One master per pool: after a PHP update, the apt hook restarts the pools of
-# the upgraded version one at a time. Each one has this many seconds to answer
-# its ping before the restart stops (the pools not restarted yet keep running).
+# One master per pool: after an update of a php<v>-* package, the apt hook
+# restarts that version's pools one at a time. Each restart may take this many
+# seconds, and then the pool has as many to answer its ping, before the
+# rolling restart stops (the pools not restarted yet keep running).
 php_fpm_restart_timeout: 30
 
 php_apt_url: https://ppa.launchpadcontent.net/ondrej/php/ubuntu
