@@ -1,0 +1,97 @@
+---
+# Classic mode: the pools of each version run in its package service
+# php<v>-fpm, from /etc/php/<v>/fpm/pool.d/<name>.conf.
+
+# From one master per pool: the instances stop and their configs go.
+- name: Check for instance configs
+  ansible.builtin.stat:
+    path: /etc/php-fpm
+  register: php_instance_root
+
+- name: Find the instance configs
+  ansible.builtin.find:
+    paths: /etc/php-fpm
+    file_type: any
+  register: php_instance_entries
+  when: php_instance_root.stat.exists
+
+- name: Stop the instances
+  ansible.builtin.systemd_service:
+    name: "php-fpm@{{ item }}"
+    state: stopped
+    enabled: false
+  loop: >-
+    {{ php_instance_entries.files | default([]) | selectattr('isdir') | map(attribute='path')
+       | map('basename') | sort }}
+
+- name: Remove the instance configs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ php_instance_entries.files | default([]) | map(attribute='path') | sort }}"
+
+# Pool files with the role's header that are not in the list; the others in
+# pool.d are left alone.
+- name: Remove the pool files that left the list
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ php_managed_pool_paths | difference(php_classic_pool_paths) | sort }}"
+  register: php_classic_removed
+  notify: php pools changed
+
+# Before the new pool files: the socket of a pool that moves to another
+# version is free for it (a reload only signals the master). A version that
+# keeps pools starts again in the handlers.
+- name: Stop the package services of the versions without pools
+  ansible.builtin.systemd_service:
+    name: "php{{ item }}-fpm"
+    state: stopped
+    enabled: false
+  loop: "{{ php_fpm_package_versions | difference(php_classic_versions) }}"
+
+- name: Stop the package services a pool leaves for another version
+  ansible.builtin.systemd_service:
+    name: "php{{ item }}-fpm"
+    state: stopped
+  loop: "{{ php_classic_moved_versions }}"
+
+# A reload keeps a socket the master already has as it is: a pool whose socket
+# has another owner or group restarts its version.
+- name: Read the pool sockets
+  ansible.builtin.stat:
+    path: "/run/php/{{ item.name }}.sock"
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: php_classic_sockets
+
+# The pool files carry the env: no_log, and only root reads them. FPM tests
+# each one before it replaces the old.
+- name: Write the pool files
+  ansible.builtin.template:
+    src: pool.conf.j2
+    dest: "/etc/php/{{ item.version }}/fpm/pool.d/{{ item.name }}.conf"
+    owner: root
+    group: root
+    mode: "0640"
+    validate: "php-fpm{{ item.version }} -t -y %s"
+  loop: "{{ php_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  register: php_classic_pool_files
+  notify: php pools changed
+
+- name: Restart or reload the changed versions
+  ansible.builtin.meta: flush_handlers
+
+- name: Start the package services of the versions with pools
+  ansible.builtin.systemd_service:
+    name: "php{{ item }}-fpm"
+    state: started
+    enabled: true
+  loop: "{{ php_classic_versions }}"

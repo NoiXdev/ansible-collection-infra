@@ -12,6 +12,8 @@
     php_test_staging_memory_limit: 192M
     php_test_staging_user: app_staging
     php_test_staging_pm: {}
+    # A third pool on 8.4, so 8.4 keeps a pool when staging leaves it.
+    php_test_extra: false
     php_versions:
       - version: "8.3"
         extensions: [intl, mbstring]
@@ -37,9 +39,14 @@
       open_basedir: [/srv/staging]
       ini:
         memory_limit: "{{ php_test_staging_memory_limit }}"
+    php_test_extra_pool:
+      name: extra
+      version: "8.4"
+      user: app_staging2
     php_pools: >-
       {{ [php_test_production]
-         + ([php_test_staging_pool] if php_test_staging | bool else []) }}
+         + ([php_test_staging_pool] if php_test_staging | bool else [])
+         + ([php_test_extra_pool] if php_test_extra | bool else []) }}
   pre_tasks:
     - name: Create the app users
       ansible.builtin.user:

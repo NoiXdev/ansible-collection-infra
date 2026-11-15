@@ -13,6 +13,12 @@ argument_specs:
         change restarts only that pool. The packages' php<v>-fpm services are stopped and
         disabled, and their www pools removed.
       - >-
+        With php_fpm_per_pool_service false (classic mode), the pools go to
+        /etc/php/<v>/fpm/pool.d/<name>.conf and run in their version's php<v>-fpm; only the
+        versions with pools run. A change reloads that version's service, a new socket owner or
+        group restarts it. Switching modes moves every pool; files in pool.d without the role's
+        header are left alone.
+      - >-
         php_pools is the complete list: a pool that leaves it is stopped and disabled and its
         config removed; its tmp_dir and log stay.
     options:
@@ -95,7 +101,9 @@ argument_specs:
             description: Environment variables of the pool's workers; never printed.
       php_fpm_per_pool_service:
         type: bool
-        description: One master per pool (php-fpm@<name>); true is the only mode for now.
+        description: >-
+          true for one master per pool (php-fpm@<name>), false for the pools in the packages'
+          php<v>-fpm services (classic mode).
       php_fpm_listen_group:
         type: str
         description: The group of every pool socket besides the pool user (nginx's).

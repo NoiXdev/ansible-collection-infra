@@ -860,6 +860,85 @@ suite_php() {
   hx php test ! -e /etc/php-fpm/staging || fail "php: staging's config is still there"
   hx php test -d /srv/staging/tmp/session || fail "php: staging's tmp_dir is gone"
   [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted when staging left"
+
+  suite_php_classic
+}
+
+# php_classic_running: php8.3-fpm and php8.4-fpm still run as PROD and STAGING
+# after a failed or refused run ($1 names it).
+php_classic_running() {
+  [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php/$1: php8.3-fpm restarted"
+  [ "$(pid php php8.4-fpm)" = "$staging" ] || fail "php/$1: php8.4-fpm restarted"
+}
+
+# Classic mode (the pools in the packages' php<v>-fpm services) and the switch
+# in both directions, after suite_php's steps.
+suite_php_classic() {
+  local dir="$here/php" prod staging conf files
+  local classic=(-e php_fpm_per_pool_service=false)
+  local memory=(-e php_test_staging_memory_limit=160M)
+  local secrets=('$d e' 'APP_ENV')
+
+  echo "== php: classic mode moves the pools into the package services (with --diff -v)"
+  # A pool the role does not manage, and one with its header that is not listed.
+  hx php sh -c 'printf "; a pool of its own\n[custom]\nuser = www-data\ngroup = www-data\nlisten = /run/php/custom.sock\npm = ondemand\npm.max_children = 1\n" > /etc/php/8.3/fpm/pool.d/custom.conf'
+  hx php sh -c 'printf "; Managed by noixdev.infra (php role). Changes here are overwritten.\n[old]\nuser = www-data\ngroup = www-data\nlisten = /run/php/old.sock\npm = ondemand\npm.max_children = 1\n" > /etc/php/8.4/fpm/pool.d/old.conf'
+  converge php classic "$dir/converge.yml" --diff -v "${classic[@]}"
+  play php "$dir/verify.yml" "${classic[@]}"
+  hx php test -S /run/php/custom.sock || fail "php: php8.3-fpm does not run the pool the role does not manage"
+
+  echo "== php: classic mode: a changed ini of staging reloads php8.4-fpm only (with --diff -vvv)"
+  prod="$(pid php php8.3-fpm)"
+  staging="$(pid php php8.4-fpm)"
+  converge php classic-memory "$dir/converge.yml" --diff -vvv "${classic[@]}" "${memory[@]}"
+  play php "$dir/verify.yml" "${classic[@]}" "${memory[@]}"
+  [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php: php8.3-fpm restarted on staging's change"
+  [ "$(pid php php8.4-fpm)" = "$staging" ] || fail "php: php8.4-fpm restarted instead of a reload"
+
+  echo "== php: classic mode: a pool config FPM rejects never replaces the running one"
+  conf="$(hx php md5sum /etc/php/8.4/fpm/pool.d/staging.conf)"
+  refused php classic-fpm-rejects "failed to validate" "$dir/converge.yml" -v "${classic[@]}" "${memory[@]}" \
+    -e '{"php_test_staging_pm": {"mode": "static", "max_children": 2147483648}}'
+  [ "$(hx php md5sum /etc/php/8.4/fpm/pool.d/staging.conf)" = "$conf" ] || fail "php: the rejected config replaced staging's"
+  php_classic_running classic-fpm-rejects
+  ask staging /srv/staging | grep -qF '"user":"app_staging"' || fail "php: staging does not answer after the rejected config"
+
+  echo "== php: classic mode: the --diff logs have no env value"
+  for log in classic classic-idempotence classic-memory classic-memory-idempotence classic-fpm-rejects; do
+    no_secret "$out/php-$log.log" "${secrets[@]}"
+  done
+
+  echo "== php: classic mode: a new socket owner restarts php8.4-fpm, php8.3-fpm keeps running"
+  converge php classic-owner "$dir/converge.yml" "${classic[@]}" "${memory[@]}" -e php_test_staging_user=app_staging2
+  play php "$dir/verify.yml" "${classic[@]}" "${memory[@]}" -e php_test_staging_user=app_staging2
+  [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php: php8.3-fpm restarted on staging's new socket owner"
+  [ "$(pid php php8.4-fpm)" != "$staging" ] || fail "php: php8.4-fpm did not restart on staging's new socket owner"
+
+  echo "== php: classic mode: staging moves to 8.3 while extra keeps php8.4-fpm"
+  # php8.4-fpm stops before php8.3-fpm takes over staging's socket.
+  local owner=("${classic[@]}" "${memory[@]}" -e php_test_staging_user=app_staging2)
+  converge php classic-extra "$dir/converge.yml" "${owner[@]}" -e php_test_extra=true
+  play php "$dir/verify.yml" "${owner[@]}" -e php_test_extra=true
+  prod="$(pid php php8.3-fpm)"
+  staging="$(pid php php8.4-fpm)"
+  converge php classic-move "$dir/converge.yml" "${owner[@]}" -e php_test_extra=true -e php_test_staging_version=8.3
+  play php "$dir/verify.yml" "${owner[@]}" -e php_test_extra=true -e php_test_staging_version=8.3
+  [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php: php8.3-fpm restarted instead of a reload when staging moved in"
+  [ "$(pid php php8.4-fpm)" != "$staging" ] || fail "php: php8.4-fpm kept running while staging moved away"
+  hx php env SCRIPT_NAME=/php-fpm-ping SCRIPT_FILENAME=/php-fpm-ping REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php/extra.sock \
+    | grep -qx pong || fail "php: extra does not answer on php8.4-fpm"
+
+  echo "== php: classic mode: extra leaves, php8.4-fpm has no pool left and stops"
+  converge php classic-no-extra "$dir/converge.yml" "${owner[@]}" -e php_test_staging_version=8.3
+  play php "$dir/verify.yml" "${owner[@]}" -e php_test_staging_version=8.3
+  [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php: php8.3-fpm restarted when extra left php8.4-fpm"
+
+  echo "== php: back to one master per pool, the package services stop"
+  converge php per-pool-again "$dir/converge.yml"
+  play php "$dir/verify.yml"
+  files="$(hx php sh -c 'cd /etc/php && ls -1 8.3/fpm/pool.d 8.4/fpm/pool.d')"
+  [ "$files" = "$(printf '8.3/fpm/pool.d:\ncustom.conf\n\n8.4/fpm/pool.d:')" ] \
+    || fail "php: pool.d should keep only the file the role does not manage: $files"
 }
 
 

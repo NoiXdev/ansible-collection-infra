@@ -50,6 +50,23 @@
   loop_control:
     label: "{{ item.version }}"
 
+# Every php<v>-fpm on the host, also of a version that left php_versions.
+- name: Read the services
+  ansible.builtin.service_facts:
+
+# The other files in pool.d are left alone in both modes.
+- name: Find the pool files with the role's header in the package services
+  ansible.builtin.find:
+    paths: "{{ php_fpm_package_versions | map('regex_replace', '^', '/etc/php/') | map('regex_replace', '$', '/fpm/pool.d') | list }}"
+    patterns: "*.conf"
+    contains: '(?i).*managed by noixdev\.infra'
+  register: php_managed_pool_files
+  when: php_fpm_package_versions | length > 0
+
 - name: Run one master per pool
   ansible.builtin.include_tasks: per_pool.yml
   when: php_fpm_per_pool_service | bool
+
+- name: Run the pools in the package services
+  ansible.builtin.include_tasks: classic.yml
+  when: not php_fpm_per_pool_service | bool

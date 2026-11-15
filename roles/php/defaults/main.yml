@@ -16,7 +16,8 @@ php_ini: {}
 
 # The complete list of pools on the host: a pool that is not listed is
 # stopped and its config removed (its tmp_dir and log stay). Each pool runs as
-# php-fpm@<name> with its own master and listens on /run/php/<name>.sock:
+# php-fpm@<name> with its own master (or in php<v>-fpm, see
+# php_fpm_per_pool_service) and listens on /run/php/<name>.sock:
 #   - name: production
 #     version: "8.3"
 #     user: app_prod                # must exist, never root
@@ -35,8 +36,11 @@ php_ini: {}
 #       TYPO3_CONTEXT: Production
 php_pools: []
 
-# One FPM master per pool (php-fpm@<name>); the packages' services are stopped
-# and disabled.
+# true: one FPM master per pool (php-fpm@<name>); the packages' services are
+# stopped and disabled. false (classic mode): the pools go to
+# /etc/php/<v>/fpm/pool.d/<name>.conf and run in their version's php<v>-fpm,
+# which runs only for versions that have pools. Switching moves every pool.
+# Files in pool.d without the role's header are left alone in both modes.
 php_fpm_per_pool_service: true
 
 # The group of every pool socket (nginx's), besides the pool user.
