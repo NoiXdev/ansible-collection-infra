@@ -259,9 +259,8 @@ suite_redis() {
 
   echo "== redis: two instances (the first run with --diff -v), idempotence"
   converge redis instances "$dir/instances.yml" --diff -v
-  for secret in 's-pass' 'o d$%'; do
-    ! grep -qF -- "$secret" "$out/redis-instances.log" "$out/redis-instances-idempotence.log" \
-      || fail "redis: a converge log with --diff -v contains a password ($secret)"
+  for log in instances instances-idempotence; do
+    no_secret "$out/redis-$log.log" 's-pass' 'o d$%'
   done
   play redis "$dir/verify.yml"
 
