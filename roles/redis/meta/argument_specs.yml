@@ -6,7 +6,8 @@ argument_specs:
       - Installs redis-server of one major series from packages.redis.io, pinned to that series.
       - >-
         A redis-server of another series that is installed already (the distro's, for example)
-        is refused before any change; a series change is a separate, deliberate step.
+        is refused before any change; a series change is a separate, deliberate step. So is a
+        redis-server that is not from packages.redis.io (the distro's redis 8 on 26.04).
       - >-
         Without redis_instances the package's redis-server runs on redis_bind_address:6379.
         With redis_instances each entry runs as redis-server@<name>, and the package's service

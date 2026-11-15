@@ -16,3 +16,10 @@ redis_changed_instances: >-
       + (redis_socket_dropins.results | selectattr('changed') | map(attribute='item.name') | list)
       + (redis_port_dropins.results | selectattr('changed') | map(attribute='item') | list))
      | unique | list }}
+
+# The packages the apt pin covers.
+redis_apt_packages: redis redis-server redis-tools redis-sentinel
+
+# The Maintainer field of the vendor's packages (what dpkg keeps of an installed
+# package); the distro's say "Ubuntu Developers".
+redis_vendor_maintainer: Redis Ltd.

@@ -82,7 +82,8 @@
   `redis-<name>`, `clients` added to the group). Entries are checked before any change. An
   instance without a password on a port is open to every local user: set a password or use a
   socket instance. An instance that leaves the list is stopped and disabled; its data stays. A
-  `redis-server` of another series is refused before any change.
+  `redis-server` of another series, or one that is not from packages.redis.io (Ubuntu 26.04's
+  own 8, for example), is refused before any change; Ubuntu's Redis packages are pinned to -1.
 - `mariadb`: new role that installs MariaDB from mariadb.org, pinned to `mariadb_version`
   (default `"11.8"`), on `mariadb_bind_address` (default `127.0.0.1`), with `mariadb_settings`,
   `mariadb_databases` and `mariadb_users`. root has no password and uses the unix socket. On

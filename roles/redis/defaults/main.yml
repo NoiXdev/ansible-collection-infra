@@ -1,6 +1,7 @@
 ---
 # Major series from packages.redis.io. A different series installed already
-# (the distro's redis 7 on 24.04, for example) is refused, never replaced.
+# (the distro's redis 7 on 24.04, for example) is refused, never replaced, and
+# so is a redis-server from anywhere else (the distro's redis 8 on 26.04).
 redis_version: "8"
 
 redis_apt_url: https://packages.redis.io/deb

@@ -16,7 +16,7 @@
 
 - name: Read the installed redis-server
   ansible.builtin.command:
-    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Version}' redis-server
+    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Version}|${Maintainer}' redis-server
   register: redis_installed
   changed_when: false
   failed_when: false
@@ -37,6 +37,21 @@
     - redis_installed.rc == 0
     - redis_installed.stdout is match('^ii')
     - redis_installed_series != redis_version
+
+# The distro's redis-server has the pinned series on 26.04 (5:8.0.5-1ubuntu0.1)
+# and apt would swap it for the vendor's in place. dpkg keeps the Maintainer
+# field of what is installed, whatever the package lists say.
+- name: Refuse a server that is not from the packages.redis.io repository
+  ansible.builtin.fail:
+    msg: >-
+      redis: installed redis-server {{ redis_installed_version }} is not from
+      {{ redis_apt_url | urlsplit('hostname') }}; the role manages Redis's own packages only
+  vars:
+    redis_installed_version: "{{ redis_installed.stdout.split('|')[1] }}"
+  when:
+    - redis_installed.rc == 0
+    - redis_installed.stdout is match('^ii')
+    - redis_installed.stdout is not search('[|]' ~ (redis_vendor_maintainer | regex_escape))
 
 - name: Add the packages.redis.io repository
   ansible.builtin.include_tasks: repository.yml

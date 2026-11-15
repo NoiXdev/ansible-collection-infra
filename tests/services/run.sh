@@ -188,8 +188,55 @@ default_active() {
 }
 
 suite_redis() {
-  local dir="$here/redis" version prod staging bound rotate
+  local dir="$here/redis" version series policy prod staging bound rotate
   start redis
+
+  echo "== redis: the distro's redis-server is refused (another series, or the pinned one from another origin)"
+  hx redis apt-get update -q >/dev/null
+  hx redis env DEBIAN_FRONTEND=noninteractive apt-get install -y -q redis-server >/dev/null
+  version="$(hx redis dpkg-query -W -f='${Version}' redis-server)"
+  echo "   distro redis-server on $ubuntu: $version"
+  series="${version#*:}"
+  series="${series%%.*}"
+  if [ "$series" = 8 ]; then
+    # The series matches the pin, so only the origin tells it from the vendor's.
+    refused redis distro-origin "redis: installed redis-server $version is not from packages.redis.io; the role manages Redis's own packages only" \
+      "$dir/converge.yml"
+  else
+    refused redis distro-series "redis: installed redis-server $version is series $series, redis_version is 8; a series change is a separate, deliberate step" \
+      "$dir/converge.yml"
+  fi
+  hx redis sh -c 'test ! -e /etc/apt/sources.list.d/redis.sources && test ! -e /etc/apt/keyrings/redis.asc && test ! -e /etc/apt/preferences.d/redis' \
+    || fail "redis: the refused run left repository files"
+  [ "$(hx redis dpkg-query -W -f='${Version}' redis-server)" = "$version" ] || fail "redis: the distro package changed after the refused run"
+  hx redis env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q redis-server redis-tools >/dev/null
+  hx redis env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -q --purge >/dev/null
+  hx redis rm -rf /etc/redis /var/lib/redis /var/log/redis
+
+  echo "== redis: a run whose repository refresh failed is not followed by the distro's redis-server"
+  # The first run adds the source and the pin, then its refresh fails: the
+  # package lists stay without the vendor's packages. The key comes from the
+  # same host as the packages, so apt alone is cut off.
+  hx redis sh -c 'echo "Acquire::https::Proxy::packages.redis.io \"http://127.0.0.1:9\";" > /etc/apt/apt.conf.d/99-block-redis'
+  if play redis "$dir/converge.yml" >"$out/redis-blocked.log" 2>&1; then
+    fail "redis: the run with packages.redis.io unreachable did not fail"
+  fi
+  hx redis rm -f /etc/apt/apt.conf.d/99-block-redis
+  hx redis test -e /etc/apt/sources.list.d/redis.sources || fail "redis: the blocked run did not add the source"
+  hx redis sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}" redis-server 2>/dev/null | grep -q "^.i"' \
+    || fail "redis: the blocked run installed redis-server"
+  converge redis stale-lists "$dir/converge.yml"
+  version="$(hx redis dpkg-query -W -f='${Version}' redis-server)"
+  case "$version" in
+    *rl[0-9]*~*) echo "   installed the vendor's $version" ;;
+    *) fail "redis: after a failed refresh the role installed $version, not the vendor's" ;;
+  esac
+  # The vendor's versions win by origin; every other version of the Redis
+  # packages (the distro's 7 on 24.04, its 8 on 26.04) is never installed.
+  policy="$(hx redis apt-cache policy redis redis-server redis-tools redis-sentinel)"
+  awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
+         if ((v ~ /rl[0-9]+~/ && p != 990) || (v !~ /rl[0-9]+~/ && p != -1)) { print v, p; bad = 1 } }
+       END { exit bad }' <<<"$policy" || fail "redis: the pin gives the wrong priorities: $policy"
 
   echo "== redis: the default instance, converge and idempotence"
   converge redis default "$dir/converge.yml"
