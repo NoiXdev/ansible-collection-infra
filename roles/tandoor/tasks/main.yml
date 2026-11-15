@@ -164,69 +164,9 @@
   vars:
     tandoor_env_null: "{{ tandoor_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
 
+# Also refuses after a failed update (its marker).
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
-
-# Written by update.yml after a failed update; it names the failed version.
-- name: Read the marker of a failed update
-  ansible.builtin.slurp:
-    src: "{{ tandoor_marker_file }}"
-  register: tandoor_marker_read
-  failed_when: false
-
-# A marker that is not YAML cannot say which version failed.
-- name: Check the marker of a failed update
-  when: tandoor_marker_read.content is defined
-  block:
-    - name: Parse the marker
-      ansible.builtin.set_fact:
-        tandoor_marker: "{{ tandoor_marker_yaml if tandoor_marker_yaml is mapping else {} }}"
-      vars:
-        tandoor_marker_yaml: "{{ tandoor_marker_read.content | b64decode | from_yaml }}"
-  rescue:
-    - name: Fail on a marker that is not YAML
-      ansible.builtin.fail:
-        msg: >-
-          {{ tandoor_marker_file }} exists, but it is not YAML, so the role
-          cannot tell which Tandoor update failed and changes nothing. Check
-          Tandoor, then remove the file (rm {{ tandoor_marker_file }}).
-
-# The rollback failed (or the marker does not say it worked): the database
-# may be empty or half restored, and the backup holds the data. Any version
-# would take a backup of that database, come up healthy and remove the
-# marker, the last pointer to the real backup, so every version is refused.
-- name: Refuse every version after a failed rollback
-  ansible.builtin.fail:
-    msg: >-
-      {{ tandoor_marker_file }} exists: the Tandoor update to
-      {{ tandoor_marker.failed_version | default('?') }} failed on
-      {{ tandoor_marker.time | default('?') }}, and rolling back failed too
-      ({{ tandoor_marker.restore_error | default('?') }}). The database may
-      be empty or half restored; the data is in the backup {{ tandoor_backup }}.
-      The role refuses every version and changes nothing until Tandoor is
-      restored. {{ tandoor_restore_hint }} Then check Tandoor (its recipes and
-      images) and remove the marker (rm {{ tandoor_marker_file }}).
-  vars:
-    tandoor_backup: "{{ tandoor_marker.backup | default('?', true) }}"
-  when:
-    - tandoor_marker_read.content is defined
-    - not tandoor_marker.rolled_back_to | default(none)
-
-# A marker that names no version blocks every version.
-- name: Refuse the version of a failed update
-  ansible.builtin.fail:
-    msg: >-
-      {{ tandoor_marker_file }} exists: the Tandoor update to
-      {{ tandoor_version }} failed on {{ tandoor_marker.time | default('?') }}
-      (rolled back to {{ tandoor_marker.rolled_back_to }}; backup
-      {{ tandoor_marker.backup | default('?') }}). The role does not try
-      {{ tandoor_version }} again and changes nothing while the marker names
-      it. To try again, remove it (rm {{ tandoor_marker_file }}); or set
-      tandoor_version to another version, and the marker is removed once a
-      run with it succeeds.
-  when:
-    - tandoor_marker_read.content is defined
-    - (tandoor_marker.failed_version | default(tandoor_version) | string) == tandoor_version
 
 - name: Check the first admin for the install
   ansible.builtin.assert:

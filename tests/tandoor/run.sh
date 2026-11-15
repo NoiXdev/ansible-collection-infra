@@ -39,7 +39,8 @@
 #             marker that names the failed version and blocks it, and a run
 #             with another version that removes the marker; then a rollback
 #             that fails too (the previous image cannot be started), whose
-#             marker refuses every version
+#             marker refuses every version, an older one before the downgrade
+#             refusal
 #   refusals  on an installation, a changed tandoor_db_password refused
 #             before any change, with Tandoor still healthy;
 #             a compose file that is not YAML refused without a line of it in
@@ -651,6 +652,17 @@ test_failed_update() {
   fi
   expect_untouched rollback-blocked
   hx test -e "$marker" || fail "the refused run removed the marker"
+  # An older release than the compose file names: the failed rollback comes
+  # before the downgrade.
+  play_fails rollback-blocked-older "$here/converge.yml" -e tandoor_version=2.6.0
+  expect_in_log rollback-blocked-older "rolling back failed too"
+  expect_in_log rollback-blocked-older "The role refuses every version"
+  if grep -qF -- "is lower than the installed version" "$out/rollback-blocked-older.log"; then
+    fail "the refusal after a failed rollback is the downgrade refusal"
+  fi
+  expect_untouched rollback-blocked-older
+  hx test -e "$marker" || fail "the refused run removed the marker"
+
   echo "== a failed update with media in S3 must roll back the database and keep the images"
   new_host
   load_images
