@@ -389,6 +389,29 @@
     label: "{{ item.name | default('#' ~ (nginx_index + 1)) }}"
   no_log: true
 
+# Deploy snippets come with a later version of the role; until then a host or
+# a site that asks for them is refused rather than served without them.
+- name: Check for deploy snippets, which this version does not support yet
+  ansible.builtin.assert:
+    that:
+      - not nginx_user_includes
+      - nginx_include_user | length == 0
+    fail_msg: >-
+      nginx: {{ 'nginx_user_includes is true' if nginx_user_includes else 'nginx_include_user is set' }};
+      deploy snippets are not supported yet by this version of the role
+    quiet: true
+
+- name: Check for site deploy snippets, which this version does not support yet
+  ansible.builtin.assert:
+    that: not item.user_includes
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} sets user_includes; deploy snippets are not
+      supported yet by this version of the role
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 # Anubis comes with a later version of the role; until then a site that asks
 # for it is refused rather than served without it.
 - name: Check for settings this version does not support yet

@@ -91,7 +91,7 @@ argument_specs:
           - headers, a dict of headers to add or replace; an empty value removes one.
           - rate_limit, the name of a zone of nginx_rate_limit_zones; a request over the rate and burst gets 429 (Too Many Requests).
           - client_max_body_size, 64m by default.
-          - user_includes, true by default (deploy snippets).
+          - user_includes (false by default, deploy snippets) is not supported yet by this version; true is refused.
           - >-
             basic_auth, {users: [{name, password}], allow: [address or CIDR]}: Basic auth for the
             whole site, except the ACME challenges (answered on port 80). The role hashes the
@@ -134,10 +134,14 @@ argument_specs:
         description: The noix error pages for nginx's own error responses.
       nginx_user_includes:
         type: bool
-        description: Deploy snippets for every site; false turns them off.
+        description: >-
+          Deploy snippets for every site; false by default. Not supported yet by this version:
+          true is refused before any change.
       nginx_include_user:
         type: str
-        description: The user whose snippets are included at http level; none when empty.
+        description: >-
+          The user whose snippets are included at http level; none when empty. Not supported yet
+          by this version: a user name is refused before any change.
       nginx_acme_email:
         type: str
         description: The Let's Encrypt account address; required when a site uses tls letsencrypt.

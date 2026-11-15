@@ -1979,6 +1979,13 @@ suite_nginx() {
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"rl\", \"domains\": [\"rl.example.test\"], $tls_off, \"rate_limit\": \"nosuchzone\"}]}"
   refused nginx unknown-key "nginx: nginx_sites entry x has unknown keys (priv); its keys are" \
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], $tls_off, \"priv\": true}]}"
+  # Deploy snippets are not supported yet (defaults false).
+  refused nginx user-includes "nginx: nginx_user_includes is true; deploy snippets are not supported yet by this version of the role" \
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_user_includes": true}'
+  refused nginx include-user "nginx: nginx_include_user is set; deploy snippets are not supported yet by this version of the role" \
+    "$dir/converge.yml" "${fast[@]}" -e nginx_include_user=app_prod
+  refused nginx site-user-includes "nginx: nginx_sites entry x sets user_includes; deploy snippets are not supported yet by this version of the role" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], $tls_off, \"user_includes\": true}]}"
   version="$(hx nginx dpkg-query -W -f='${Version}' nginx)"
   refused nginx other-series "nginx: installed nginx $version is series $series, nginx_version is 1.26; a series change is a separate, deliberate step" \
     "$dir/converge.yml" "${fast[@]}" -e nginx_version=1.26

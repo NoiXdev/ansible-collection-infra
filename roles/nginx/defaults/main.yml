@@ -32,7 +32,6 @@ nginx_apt_key_fingerprint: 8540A6F18833A80E9C1653A42FD21310B49F6B46
 #     headers: {}                      # added or replaced; "" removes one
 #     rate_limit: default              # a zone of nginx_rate_limit_zones
 #     client_max_body_size: 64m
-#     user_includes: true
 #     extra: ""                        # raw config inside the server block
 nginx_sites: []
 
@@ -58,9 +57,12 @@ nginx_resolvers: [127.0.0.53]
 # The noix error pages for nginx's own error responses.
 nginx_error_pages: true
 
-# Deploy snippets: per site in ~<user>/.config/nginx/<name>/, and at http
-# level in ~<nginx_include_user>/.config/nginx/global/ (only when set).
-nginx_user_includes: true
+# Deploy snippets (per site in ~<user>/.config/nginx/<name>/, and at http
+# level in ~<nginx_include_user>/.config/nginx/global/) are not supported yet
+# by this version of the role: nginx_user_includes true, a non-empty
+# nginx_include_user and a site's user_includes true are refused before any
+# change.
+nginx_user_includes: false
 nginx_include_user: ""
 
 # Let's Encrypt (tls letsencrypt, through certbot from Ubuntu's archive): the
