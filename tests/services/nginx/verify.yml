@@ -24,6 +24,31 @@
       - url: https://prod.example.test/uploads/evil.php
         status: 404
         absent: ["<?php", evil ran]
+      # Neither the case nor another PHP extension serves the source.
+      - url: https://prod.example.test/uploads/evil.PHP
+        status: 404
+        absent: ["<?php", evil upper ran]
+      - url: https://prod.example.test/uploads/evil.phtml
+        status: 404
+        absent: ["<?php", evil phtml ran]
+      # A path after the front controller that ends in .php is a PHP file
+      # that is not listed.
+      - url: https://prod.example.test/index.php/x.php
+        status: 404
+        absent: ['"script"']
+      # No PATH_INFO: a path below a script reaches the front controller, and
+      # the script in front of it does not run.
+      - url: https://prod.example.test/index.php/foo
+        status: 200
+        contains: ['"script":"index.php"', '"uri":"\/index.php\/foo"']
+      - url: https://prod.example.test/uploads/evil.php/foo
+        status: 200
+        contains: ['"script":"index.php"']
+        absent: [evil ran, "<?php"]
+      - url: https://prod.example.test/setup/install.php/x
+        status: 200
+        contains: ['"script":"index.php"']
+        absent: [install ran]
       - url: https://prod.example.test/missing/route?a=1
         status: 200
         contains: ['"script":"index.php"', '"uri":"\/missing\/route?a=1"']

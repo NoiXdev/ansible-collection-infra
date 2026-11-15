@@ -72,6 +72,8 @@
           loop:
             - {dest: /srv/prod/public/setup/install.php, user: app_prod, content: "<?php echo \"install ran\\n\";\n"}
             - {dest: /srv/prod/public/uploads/evil.php, user: app_prod, content: "<?php echo \"evil ran\\n\";\n"}
+            - {dest: /srv/prod/public/uploads/evil.PHP, user: app_prod, content: "<?php echo \"evil upper ran\\n\";\n"}
+            - {dest: /srv/prod/public/uploads/evil.phtml, user: app_prod, content: "<?php echo \"evil phtml ran\\n\";\n"}
             - {dest: /srv/prod/public/.env, user: app_prod, content: "APP_KEY=s3cr3t-env\n"}
             - {dest: /srv/prod/public/.git/config, user: app_prod, content: "[core]\n"}
             - {dest: /srv/prod/public/composer.json, user: app_prod, content: "{}\n"}
