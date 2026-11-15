@@ -929,6 +929,17 @@ suite_php() {
   refused php lost-group "php: php_pools entry production runs as lostgroup, whose primary group (gid 4242) has no group entry; set group" \
     "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "lostgroup"}]}'
   hx php userdel lostgroup
+  refused php root-group "php: php_pools entry production runs with the group root (gid 0); a pool runs with an unprivileged group" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "group": "root"}]}'
+  # A user whose primary group is root, without group.
+  hx php useradd -M -N -g root -s /usr/sbin/nologin rootgroup
+  refused php root-primary-group "php: php_pools entry production runs with the group root (gid 0); a pool runs with an unprivileged group" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "rootgroup"}]}'
+  hx php userdel rootgroup
+  # 64 characters fit the socket path (108 bytes) and the unit name.
+  name="$(printf 'a%.0s' {1..65})"
+  refused php long-name "php: php_pools entry $name has a name of 65 characters; at most 64 fit its socket path /run/php/<name>.sock and its unit php-fpm@<name>" \
+    "$dir/converge.yml" -e "{\"php_pools\": [{\"name\": \"$name\", \"version\": \"8.3\", \"user\": \"app_prod\"}]}"
   php_running refusals
 
   echo "== php: a pool config FPM rejects never replaces the running one"

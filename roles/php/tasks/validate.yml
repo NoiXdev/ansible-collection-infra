@@ -56,6 +56,19 @@
   loop_control:
     label: "{{ item.name }}"
 
+# /run/php/<name>.sock must fit sun_path (108 bytes), and php-fpm@<name>
+# systemd's 255 characters of a unit name; 64 leaves room for both.
+- name: Check the length of the pool names
+  ansible.builtin.assert:
+    that: item.name | length <= 64
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} has a name of {{ item.name | length }} characters; at most
+      64 fit its socket path /run/php/<name>.sock and its unit php-fpm@<name>
+    quiet: true
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Check that every name is used once
   ansible.builtin.assert:
     that: php_pool_names | select('eq', item.name) | list | length == 1
@@ -127,6 +140,18 @@
       {{ ansible_facts.getent_passwd[item.user][2] }}) has no group entry; set group
     quiet: true
   loop: "{{ php_pools_public | rejectattr('group', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# FPM's own test lets group root pass, the master then refuses to start.
+- name: Check that no pool runs with the root group
+  ansible.builtin.assert:
+    that: ansible_facts.getent_group[php_pool_groups[item.name]][1] | int != 0
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} runs with the group {{ php_pool_groups[item.name] }}
+      (gid 0); a pool runs with an unprivileged group
+    quiet: true
+  loop: "{{ php_pools_public }}"
   loop_control:
     label: "{{ item.name }}"
 

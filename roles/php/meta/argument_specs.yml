@@ -59,7 +59,9 @@ argument_specs:
           name:
             type: str
             required: true
-            description: Pool name (^[a-z0-9_-]+$, unique, not www); the unit is php-fpm@<name>.
+            description: >-
+              Pool name (^[a-z0-9_-]+$, at most 64 characters, unique, not www); the unit is
+              php-fpm@<name>.
           version:
             type: str
             required: true
@@ -70,7 +72,7 @@ argument_specs:
             description: The user the workers run as; it must exist and must not be root.
           group:
             type: str
-            description: The workers' group; the user's primary group by default.
+            description: The workers' group; the user's primary group by default. Never root (gid 0).
           pm:
             type: dict
             description: The process manager.
