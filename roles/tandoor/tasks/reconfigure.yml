@@ -3,7 +3,8 @@
 # are written, the stack brought to them, and Tandoor checked.
 
 # The image reads it on start, and a bind of a single file keeps the old one
-# after the copy replaced it: a new secret key recreates the containers.
+# after the copy replaced it. A new secret key changes the label of the web
+# service (tandoor_s3_secret_hash), so compose recreates the web container.
 - name: Write the S3 secret file
   ansible.builtin.copy:
     dest: "{{ tandoor_s3_secret_file }}"
@@ -31,7 +32,20 @@
     state: present
     pull: missing
     remove_orphans: true
-    recreate: "{{ 'always' if tandoor_s3_secret_copy is changed else 'auto' }}"
+
+# A secret file rewritten while the key stayed (it was changed by hand) gives
+# compose nothing to recreate, but the web container still reads the old
+# file.
+- name: Recreate the web container for the rewritten S3 secret file
+  community.docker.docker_compose_v2:
+    project_src: "{{ tandoor_dir }}"
+    services: [web]
+    dependencies: false
+    state: present
+    recreate: always
+  when:
+    - tandoor_s3_secret_copy is changed
+    - tandoor_s3_secret_hash in tandoor_web_s3_hash.stdout_lines | default([])
 
 - name: Check that Tandoor is healthy
   ansible.builtin.include_tasks: health.yml

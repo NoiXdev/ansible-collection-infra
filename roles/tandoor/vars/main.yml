@@ -23,6 +23,12 @@ tandoor_media: "{{ 'S3' if tandoor_s3_enabled | bool else 'local' }}"
 # docker inspect.
 tandoor_s3_secret_file: "{{ tandoor_dir }}/s3-secret"
 tandoor_s3_secret_target: /run/secrets/s3-secret
+# A label of the web container with a hash of the S3 secret key, salted with
+# tandoor_secret_key so that it does not give the key away: a new key changes
+# the web service, so compose recreates the web container (not the
+# database), and state.yml tells a container that kept the old key.
+tandoor_s3_secret_label: noixdev.tandoor.s3-secret-hash
+tandoor_s3_secret_hash: "{{ (tandoor_secret_key ~ ':' ~ tandoor_s3_settings.secret_key) | hash('sha256') }}"
 
 # The subdirectories of tandoor_data_dir whose absence means the data is
 # missing (an unmounted volume): only install creates them, and the

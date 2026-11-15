@@ -26,7 +26,10 @@
 #             bucket and not on the host, its signed URL downloads it, the
 #             secret key is in a 0600 file and in neither the compose file nor
 #             docker inspect, /media/ is not on the API router; a new secret
-#             key recreates Tandoor; a run without tandoor_s3 is refused
+#             key recreates web and leaves the database running, a web
+#             container left with the old key (a failed docker compose up) is
+#             recreated on the next run, and so is one whose secret file was
+#             changed by hand; a run without tandoor_s3 is refused
 #   update    an update from an older release with a recipe and its image: a
 #             new tandoor_db_password with it refused before any change; a
 #             backup (a dump read back in full, a hard-link copy of the
@@ -466,16 +469,54 @@ test_s3() {
   hx test ! -e "$dir/data/mediafiles" || fail "an S3 installation has $dir/data/mediafiles"
   play "$here/verify.yml" -e "@$here/s3.yml"
 
-  echo "== a new S3 secret key must recreate Tandoor"
+  echo "== a new S3 secret key must recreate web and leave the database running"
   expect_container_secret "$s3_secret" "the secret key"
   web_before="$(hx sh -c "cd $dir && docker compose ps --quiet web")"
+  db_before="$(db_id)"
+  # The files of the installation with the first key, for the stale web
+  # container below.
+  hx cp -p "$dir/compose.yaml" /root/compose.yaml.first
+  hx cp -p "$dir/s3-secret" /root/s3-secret.first
   # s3.yml's tandoor_s3 with the rotated key; RustFS keeps its own.
   converge -v -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret"
   expect_no_secrets converge
   grep -q "reconfigure.yml" "$out/converge.log" || fail "the new secret key was not a reconfigure"
   [ "$(hx cat "$dir/s3-secret")" = "$s3_rotated_secret" ] || fail "$dir/s3-secret does not hold the new secret key"
   [ "$(hx sh -c "cd $dir && docker compose ps --quiet web")" != "$web_before" ] || fail "the new secret key did not recreate web"
+  [ "$(db_id)" = "$db_before" ] || fail "the new secret key recreated the database"
   expect_container_secret "$s3_rotated_secret" "the new secret key"
+  expect_idempotent -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret"
+
+  echo "== a web container left with the old key (a failed docker compose up) must be recreated on the next run"
+  # The files with the rotated key, and web as a docker compose up that
+  # failed after the role wrote them leaves it: with the first key.
+  hx cp -p "$dir/compose.yaml" /root/compose.yaml.rotated
+  hx cp -p "$dir/s3-secret" /root/s3-secret.rotated
+  hx cp -p /root/compose.yaml.first "$dir/compose.yaml"
+  hx cp -p /root/s3-secret.first "$dir/s3-secret"
+  hx sh -c "cd $dir && docker compose up -d" >/dev/null 2>&1
+  wait_healthy
+  hx cp -p /root/compose.yaml.rotated "$dir/compose.yaml"
+  hx cp -p /root/s3-secret.rotated "$dir/s3-secret"
+  expect_container_secret "$s3_secret" "the first key in the stale container"
+  db_before="$(db_id)"
+  converge -v -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret"
+  expect_no_secrets converge
+  grep -q "reconfigure.yml" "$out/converge.log" || fail "a web container with the old key was not a reconfigure"
+  expect_container_secret "$s3_rotated_secret" "the new secret key after the retry"
+  [ "$(db_id)" = "$db_before" ] || fail "the retry recreated the database"
+  expect_idempotent -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret"
+
+  echo "== a secret file changed by hand must be put back and web recreated"
+  # Rewritten in place, so the container sees it; the role's copy is a new file.
+  hx sh -c "printf hand-edited >$dir/s3-secret"
+  db_before="$(db_id)"
+  converge -v -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret"
+  expect_no_secrets converge
+  expect_container_secret "$s3_rotated_secret" "the new secret key after the hand edit"
+  [ "$(db_id)" = "$db_before" ] || fail "putting the secret file back recreated the database"
+
+  echo "== the first S3 secret key again"
   converge -v -e "@$here/s3.yml"
   expect_no_secrets converge
   expect_container_secret "$s3_secret" "the secret key again"

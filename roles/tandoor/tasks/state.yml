@@ -3,7 +3,8 @@
 #   install      no compose file and none of tandoor_data_subdirs
 #   update       tandoor_version is newer than the installed version
 #   reconfigure  the compose file the role writes differs from the one on
-#                disk, or the S3 secret file from the secret key
+#                disk, or the S3 secret file or the key of the web
+#                container from the secret key
 #   noop         everything as the role writes it
 # Also sets tandoor_installed (a compose file exists), tandoor_compose_before
 # (the compose file on disk, which a rollback puts back),
@@ -374,6 +375,28 @@
     - tandoor_installed
     - tandoor_s3_enabled | bool
 
+# The key the web container was created with (the label of
+# tandoor_s3_secret_hash). A docker compose up that failed after the files
+# were written leaves the container with the old key while the files on disk
+# match; the label tells, and the run is a reconfigure.
+- name: Read the S3 secret key hash of the web container
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - --all
+      - --filter
+      - label=com.docker.compose.project={{ tandoor_project }}
+      - --filter
+      - label=com.docker.compose.service=web
+      - --format
+      - "{{ '{{.Label \"' ~ tandoor_s3_secret_label ~ '\"}}' }}"
+  register: tandoor_web_s3_hash
+  changed_when: false
+  when:
+    - tandoor_installed
+    - tandoor_s3_enabled | bool
+
 - name: Read the services that run
   ansible.builtin.command:
     argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
@@ -391,6 +414,7 @@
          else 'update' if tandoor_version is version(tandoor_installed_version, '>')
          else 'reconfigure' if tandoor_compose_before != tandoor_compose
          or (tandoor_s3_enabled | bool
-             and tandoor_s3_secret_read.content | default('') | b64decode != tandoor_s3_settings.secret_key | string)
+             and (tandoor_s3_secret_read.content | default('') | b64decode != tandoor_s3_settings.secret_key | string
+                  or tandoor_web_s3_hash.stdout_lines | default([]) | reject('eq', tandoor_s3_secret_hash) | list | length > 0))
          else 'noop' }}
   no_log: true

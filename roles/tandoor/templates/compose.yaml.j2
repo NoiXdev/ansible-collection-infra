@@ -138,6 +138,11 @@ services:
       - {{ q('traefik.http.routers.' ~ api_router ~ '.service=' ~ tandoor_project) }}
       # Plain HTTP stays on the compose networks; Traefik terminates TLS.
       - {{ q('traefik.http.services.' ~ tandoor_project ~ '.loadbalancer.server.port=80') }}
+{% if tandoor_s3_enabled | bool %}
+      # The S3 secret key the container reads, as a salted hash: a new key
+      # recreates this container.
+      - {{ q(tandoor_s3_secret_label ~ '=' ~ tandoor_s3_secret_hash) }}
+{% endif %}
     restart: unless-stopped
 
 volumes:
