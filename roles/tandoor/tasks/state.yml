@@ -8,12 +8,36 @@
 # Also sets tandoor_installed (a compose file exists), tandoor_compose_before
 # (the compose file on disk, which tandoor_installed_version reads, and which
 # a rollback puts back), tandoor_s3_secret_read (with S3, the secret file on
-# disk), tandoor_data_found (the data subdirectories that exist) and
+# disk), tandoor_data_found (the subdirectories of tandoor_data_subdirs that
+# exist), tandoor_data_present (any of postgres and mediafiles that exist) and
 # tandoor_down (the expected services that are not running). Changes
-# nothing; refuses an install that did not complete (its marker), left-over
-# data without a compose file, a change between local media and S3, a
-# compose file without a Tandoor version, a downgrade, and a PostgreSQL
-# major other than the database's.
+# nothing; refuses, before anything else, a tandoor_data_dir that is not a
+# mountpoint (with tandoor_data_dir_mountpoint) and a compose file without
+# the data subdirectories of its media (an unmounted volume); then an install
+# that did not complete (its marker), left-over data without a compose file,
+# a change between local media and S3, a compose file without a Tandoor
+# version, a downgrade, and a PostgreSQL major other than the database's.
+
+# A block volume that is not mounted leaves its mountpoint as an empty
+# directory on the root filesystem; an install there would put the data
+# beside the volume.
+- name: Check that the data directory is a mountpoint
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ tandoor_data_dir }}"]
+  register: tandoor_data_dir_mounted
+  changed_when: false
+  failed_when: false
+  when: tandoor_data_dir_mountpoint | bool
+
+- name: Refuse a data directory that is not a mountpoint
+  ansible.builtin.fail:
+    msg: >-
+      tandoor_data_dir_mountpoint is on, but {{ tandoor_data_dir }} is not a
+      mountpoint: is the volume mounted? The role changes nothing. Mount the
+      volume at {{ tandoor_data_dir }}, then run the role again.
+  when:
+    - tandoor_data_dir_mountpoint | bool
+    - tandoor_data_dir_mounted.rc != 0
 
 - name: Read the compose file
   ansible.builtin.slurp:
@@ -27,16 +51,42 @@
   ansible.builtin.stat:
     path: "{{ tandoor_data_dir }}/{{ item }}"
     get_checksum: false
-  loop: "{{ tandoor_data_subdirs }}"
+  # Both media modes: the installation may record the other one than this
+  # run sets, which is refused below.
+  loop: "{{ (tandoor_data_subdirs + ['postgres', 'mediafiles']) | unique }}"
   register: tandoor_subdirs_stat
 
 - name: Note what is on the host
   ansible.builtin.set_fact:
     tandoor_compose_before: "{{ tandoor_compose_read.content | default('') | b64decode }}"
     tandoor_installed: "{{ tandoor_compose_read.content is defined }}"
-    tandoor_data_found: >-
+    tandoor_data_present: >-
       {{ tandoor_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
+    tandoor_data_found: >-
+      {{ tandoor_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item')
+         | select('in', tandoor_data_subdirs) | list }}
   no_log: true
+
+# Only install creates the subdirectories, and the containers do not create a
+# missing one, so their absence beside a compose file is data that is not
+# there (an unmounted volume), never a state to repair. The media the compose
+# file records decide whether mediafiles is expected: an S3 installation has
+# none, and a run that would change the media is refused further down.
+- name: Refuse an installation without its data
+  ansible.builtin.fail:
+    msg: >-
+      Tandoor is installed in {{ tandoor_dir }} ({{ tandoor_compose_file }}),
+      but {{ tandoor_data_dir }} lacks {{ tandoor_data_missing | join(', ') }}:
+      is the volume mounted? The role changes nothing and creates none of
+      them. Mount the volume (or put the data back) at
+      {{ tandoor_data_dir }}, then run the role again.
+  vars:
+    tandoor_data_expected: "{{ ['postgres'] + ([] if tandoor_installed_media == 'S3' else ['mediafiles']) }}"
+    # In the order of tandoor_data_expected, which difference does not keep.
+    tandoor_data_missing: "{{ tandoor_data_expected | reject('in', tandoor_data_present) | list }}"
+  when:
+    - tandoor_installed
+    - tandoor_data_missing | length > 0
 
 - name: Look for the marker of an install in progress
   ansible.builtin.stat:

@@ -38,6 +38,16 @@
 #             with another version that removes the marker; then a rollback
 #             that fails too (the previous image cannot be started), whose
 #             marker refuses every version
+#   missing_data
+#             left-over data without a compose file refused; an installation
+#             whose data directories are gone (an unmounted volume) refused in
+#             every state (no change, an update, a reconfigure, a failed-update
+#             marker) without creating anything or starting a container, and,
+#             with media in S3 (in the s3 scenario), without expecting a media
+#             subdirectory
+#   mountpoint
+#             tandoor_data_dir_mountpoint on a plain directory refused,
+#             nothing created; an install onto a tmpfs
 # The failed install and the update run at -v, the install, a reconfigure
 # and the failed update at -vvv, every repeated converge at -v; their output
 # must not hold a test secret. Every successful converge is repeated and must
@@ -453,6 +463,27 @@ test_s3() {
   [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run changed the compose file"
   [ "$(containers)" = "$containers_before" ] || fail "the refused run created or removed containers"
   hx test ! -e "$dir/data/mediafiles" || fail "the refused run created $dir/data/mediafiles"
+
+  echo "== an S3 installation without its data directory must be refused, expecting no media subdirectory"
+  hx sh -c "cd $dir && docker compose stop" >/dev/null 2>&1
+  hx mv "$dir/data" "$dir/data.away"
+  hx mkdir "$dir/data"
+  note_untouched
+  play_fails missing-data-s3 "$here/converge.yml" -v -e "@$here/s3.yml"
+  expect_in_log missing-data-s3 "$dir/data lacks postgres: is the volume mounted?"
+  expect_no_secrets missing-data-s3
+  expect_untouched missing-data-s3
+  # The recorded media decide, not this run's tandoor_s3: the missing data
+  # come before the change from S3 to local media.
+  play_fails missing-data-s3-local "$here/converge.yml"
+  expect_in_log missing-data-s3-local "$dir/data lacks postgres: is the volume mounted?"
+  expect_untouched missing-data-s3-local
+  [ -z "$(hx ls -A "$dir/data")" ] || fail "a refused run created in $dir/data: $(hx ls -A "$dir/data")"
+  hx rmdir "$dir/data"
+  hx mv "$dir/data.away" "$dir/data"
+  hx sh -c "cd $dir && docker compose start" >/dev/null 2>&1
+  wait_healthy
+  expect_idempotent -e "@$here/s3.yml"
 }
 
 # Notes the compose file and the containers, for expect_untouched.
@@ -607,12 +638,91 @@ test_failed_update() {
   hx test ! -e "$dir/data/mediafiles" || fail "the rollback of an S3 installation made $dir/data/mediafiles"
 }
 
+test_missing_data() {
+  echo "== left-over data without a compose file must be refused before any change"
+  new_host
+  hx mkdir -p "$dir/data/postgres"
+  tree() { hx sh -c "find $dir -exec stat -c '%n %a %u %g %s %Y' {} + | sort"; }
+  before="$(tree)"
+  role_fails leftover
+  expect_in_log leftover "left-over data"
+  expect_in_log leftover "$dir/data (postgres)"
+  expect_unchanged leftover
+  [ "$(tree)" = "$before" ] || fail "the refused run changed $dir"
+  hx rm -rf "$dir"
+
+  echo "== a missing data volume must be refused in every state and nothing created"
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "tandoor_version=$old_version"
+  hx sh -c "cd $dir && docker compose stop" >/dev/null 2>&1
+  # As an unmounted volume leaves it: its mountpoint, empty.
+  hx mv "$dir/data" "$dir/data.away"
+  hx mkdir "$dir/data"
+  if hx sh -c "cd $dir && docker compose start" >"$out/start-missing.log" 2>&1; then
+    fail "docker compose start succeeded without the data directories"
+  fi
+  [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet")" ] || fail "a container runs without the data directories"
+  note_untouched
+  # missing_refused <name> [extra vars...]
+  missing_refused() {
+    local name="$1"
+    shift
+    play_fails "$name" "$here/converge.yml" "$@"
+    expect_in_log "$name" "$dir/data lacks postgres, mediafiles"
+    expect_in_log "$name" "is the volume mounted?"
+    expect_untouched "$name"
+    [ -z "$(hx ls -A "$dir/data")" ] || fail "the refused run $name created in $dir/data: $(hx ls -A "$dir/data")"
+    [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet")" ] || fail "the refused run $name started a container"
+  }
+  # A run without changes, a reconfigure (another environment variable), an
+  # update (the newer version) and a run after a failed update (its marker).
+  missing_refused missing-data -e "tandoor_version=$old_version"
+  missing_refused missing-data-reconfigure -e "tandoor_version=$old_version" -e '{"tandoor_env": {"TEST_SETTING": "1"}}'
+  missing_refused missing-data-update
+  printf 'failed_version: %s\nrolled_back_to: %s\nbackup: /nonexistent\n' "$version" "$old_version" \
+    | hx sh -c "cat >$marker"
+  missing_refused missing-data-marker
+  hx rm "$marker"
+
+  echo "== with the data back the installation must run as before"
+  hx rmdir "$dir/data"
+  hx mv "$dir/data.away" "$dir/data"
+  hx sh -c "cd $dir && docker compose start" >/dev/null 2>&1
+  wait_healthy
+  expect_idempotent -e "tandoor_version=$old_version"
+}
+
+test_mountpoint() {
+  echo "== tandoor_data_dir_mountpoint must refuse a data directory that is not a mountpoint"
+  new_host
+  mountpoint_vars=(-e '{"tandoor_data_dir_mountpoint": true}')
+  role_fails not-mountpoint "${mountpoint_vars[@]}"
+  expect_in_log not-mountpoint "$dir/data is not a mountpoint"
+  expect_in_log not-mountpoint "is the volume mounted?"
+  hx test ! -e "$dir" || fail "the refused run created $dir"
+  hx mkdir -p "$dir/data"
+  role_fails not-mountpoint-dir "${mountpoint_vars[@]}"
+  expect_in_log not-mountpoint-dir "$dir/data is not a mountpoint"
+  [ -z "$(hx ls -A "$dir/data")" ] || fail "the refused run created in $dir/data: $(hx ls -A "$dir/data")"
+  [ "$(hx ls -A "$dir")" = data ] || fail "the refused run created in $dir: $(hx ls -A "$dir")"
+
+  echo "== install onto a mountpoint"
+  hx mount -t tmpfs tmpfs "$dir/data"
+  load_images
+  converge "${mountpoint_vars[@]}"
+  hx mountpoint -q "$dir/data" || fail "$dir/data is no longer a mountpoint"
+  hx sh -c "find $dir/data/postgres -name PG_VERSION | grep -q ." || fail "the database is not on the mountpoint"
+  hx test -d "$dir/data/mediafiles" || fail "the media are not on the mountpoint"
+  expect_idempotent "${mountpoint_vars[@]}"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_TANDOOR_TESTS="settings router"
 # runs only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update}; do
+for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update missing_data mountpoint}; do
   case "$scenario" in
-    settings | install | router | s3 | update | failed_update) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update)" ;;
+    settings | install | router | s3 | update | failed_update | missing_data | mountpoint) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, missing_data, mountpoint)" ;;
   esac
 done
 
