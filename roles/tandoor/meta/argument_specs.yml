@@ -7,7 +7,10 @@ argument_specs:
     options:
       tandoor_version:
         type: str
-        description: Tandoor image tag (X.Y.Z, no v); the major must be 2.
+        description: >-
+          Tandoor image tag (X.Y.Z, no v); the major must be 2. A newer one
+          than the installed version is an update with a dump and a rollback
+          on failure; an older one is refused.
       tandoor_image:
         type: str
         description: Tandoor image without its tag.
@@ -87,7 +90,8 @@ argument_specs:
         type: str
         description: >-
           PostgreSQL image with its tag, major 18 or newer (older images keep
-          the database on a volume of their own, outside tandoor_data_dir).
+          the database on a volume of their own, outside tandoor_data_dir)
+          and the major of the database.
       tandoor_email:
         type: dict
         description: SMTP for invites and password resets; off while host is empty.

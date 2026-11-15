@@ -1,0 +1,120 @@
+---
+# Rolls a failed update back to tandoor_backup: the web container stopped,
+# the compose file (and with S3 the secret file) put back as they were
+# before the run, the database recreated empty and loaded from the dump,
+# with local media the media moved aside to <backup>-failed and the copy put
+# back (as hard links again), then the previous stack started and checked
+# with health.yml. The previous files come first, so the database is
+# restored in the previous database container. Media in S3 stay as they are:
+# the backup has none. Never fails by itself: tandoor_healthy says whether
+# Tandoor is healthy again, tandoor_restore_error what failed.
+
+- name: Roll back to the backup
+  block:
+    - name: Stop Tandoor for the rollback
+      ansible.builtin.command:
+        argv: [docker, compose, stop, web]
+        chdir: "{{ tandoor_dir }}"
+      changed_when: true
+
+    - name: Put the previous S3 secret file back
+      ansible.builtin.copy:
+        dest: "{{ tandoor_s3_secret_file }}"
+        content: "{{ tandoor_s3_secret_read.content | b64decode }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: tandoor_s3_secret_read.content is defined
+
+    - name: Put the previous compose file back
+      ansible.builtin.copy:
+        dest: "{{ tandoor_compose_file }}"
+        content: "{{ tandoor_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the secret key and the passwords.
+      no_log: true
+
+    - name: Start the previous database
+      community.docker.docker_compose_v2:
+        project_src: "{{ tandoor_dir }}"
+        services: [db]
+        state: present
+        pull: missing
+
+    - name: Note when the wait for the database starts
+      ansible.builtin.set_fact:
+        tandoor_wait_start: "{{ now().timestamp() }}"
+
+    # Fails after tandoor_health_timeout seconds; retries is an upper bound.
+    - name: Wait for the database
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, pg_isready, --username=tandoor, --dbname=tandoor, --timeout=2]
+        chdir: "{{ tandoor_dir }}"
+      register: tandoor_db_ready
+      until: >-
+        tandoor_db_ready.rc == 0
+        or now().timestamp() - tandoor_wait_start | float >= tandoor_health_timeout | int
+      retries: "{{ (tandoor_health_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
+      delay: 2
+      changed_when: false
+
+    # An empty database, not pg_restore --clean: --clean drops only what is in
+    # the dump, so tables the new version added would stay. Over the local
+    # socket, which needs no password.
+    - name: Recreate the database
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, psql, --username=tandoor, --dbname=postgres, --no-psqlrc, --set=ON_ERROR_STOP=1]
+        chdir: "{{ tandoor_dir }}"
+        stdin: |
+          DROP DATABASE IF EXISTS tandoor WITH (FORCE);
+          CREATE DATABASE tandoor OWNER tandoor;
+      changed_when: true
+
+    - name: Restore the database dump
+      ansible.builtin.shell:
+        cmd: >-
+          docker compose exec -T db pg_restore --single-transaction --exit-on-error
+          --username=tandoor --dbname=tandoor <{{ (tandoor_backup ~ '/tandoor.dump') | quote }}
+        chdir: "{{ tandoor_dir }}"
+      changed_when: true
+
+    # The copy first, so the media are missing only between two renames.
+    - name: Put the media back
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          backup={{ tandoor_backup | quote }}
+          root={{ tandoor_data_dir | quote }}
+          mkdir -m 0700 "$backup-failed"
+          rm -rf "$root/.mediafiles.restore"
+          cp -al "$backup/mediafiles" "$root/.mediafiles.restore"
+          mv "$root/mediafiles" "$backup-failed/mediafiles"
+          mv "$root/.mediafiles.restore" "$root/mediafiles"
+      changed_when: true
+      when: not tandoor_s3_enabled | bool
+
+    - name: Start the previous Tandoor
+      community.docker.docker_compose_v2:
+        project_src: "{{ tandoor_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that the previous Tandoor is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Note the rollback
+      ansible.builtin.set_fact:
+        tandoor_restore_error: >-
+          {{ '' if tandoor_healthy
+             else 'Tandoor ' ~ tandoor_installed_version ~ ' is not healthy within '
+                  ~ tandoor_health_timeout ~ ' seconds (' ~ tandoor_health_lines | join('; ') ~ ')' }}
+
+  rescue:
+    - name: Note the failed rollback
+      ansible.builtin.set_fact:
+        tandoor_healthy: false
+        tandoor_restore_error: "{{ tandoor_failure | trim }}"

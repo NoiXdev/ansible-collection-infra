@@ -1,0 +1,181 @@
+---
+# The pin is newer than the installed version. The new image first (a failed
+# pull changes nothing); then the web container stopped, the backup
+# (snapshot.yml: dump, local media), the files written with the new version,
+# the stack started (Tandoor migrates its database on start) and checked,
+# and the backups pruned to the newest tandoor_dumps_keep. A failure before
+# the backup is complete removes the partial backup, starts the stack as it
+# was and fails. After it, restore.yml rolls back to the backup, the marker
+# tandoor_marker_file names the failed version, and the run fails.
+
+- name: Update Tandoor
+  vars:
+    tandoor_new_image: "{{ tandoor_image }}:{{ tandoor_version }}"
+  block:
+    - name: Look for the image of Tandoor {{ tandoor_version }}
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ tandoor_new_image }}"]
+      register: tandoor_new_image_local
+      changed_when: false
+      failed_when: false
+
+    - name: Pull Tandoor {{ tandoor_version }}
+      ansible.builtin.command:
+        argv: [docker, pull, --quiet, "{{ tandoor_new_image }}"]
+      changed_when: true
+      when: tandoor_new_image_local.rc != 0
+
+    # Nothing writes to the database or the media during the backup.
+    - name: Stop Tandoor for the update
+      ansible.builtin.command:
+        argv: [docker, compose, stop, web]
+        chdir: "{{ tandoor_dir }}"
+      changed_when: true
+
+    - name: Back up the database and the media
+      ansible.builtin.include_tasks: snapshot.yml
+
+    - name: Write the S3 secret file
+      ansible.builtin.copy:
+        dest: "{{ tandoor_s3_secret_file }}"
+        content: "{{ tandoor_s3_settings.secret_key }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: tandoor_s3_enabled | bool
+
+    - name: Write the compose file with Tandoor {{ tandoor_version }}
+      ansible.builtin.copy:
+        dest: "{{ tandoor_compose_file }}"
+        content: "{{ tandoor_compose }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the secret key and the passwords.
+      no_log: true
+
+    # The new image recreates the web container, which reads the S3 secret
+    # file on start.
+    - name: Start Tandoor {{ tandoor_version }}
+      community.docker.docker_compose_v2:
+        project_src: "{{ tandoor_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that Tandoor is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Tandoor is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Tandoor {{ tandoor_version }} is not healthy within
+          {{ tandoor_health_timeout }} seconds ({{ tandoor_health_lines | join('; ') }})
+      when: not tandoor_healthy
+
+  rescue:
+    - name: Note what failed
+      ansible.builtin.set_fact:
+        tandoor_update_error: "{{ tandoor_failure | trim }}"
+
+    - name: Recover from a failure before the backup was complete
+      when: tandoor_backup is not defined
+      block:
+        - name: Remove the partial backup
+          ansible.builtin.file:
+            path: "{{ tandoor_backup_next }}.partial"
+            state: absent
+          when: tandoor_backup_next is defined
+
+        # The files are still the ones the run started with.
+        - name: Start Tandoor again
+          block:
+            - name: Start the installed Tandoor again
+              community.docker.docker_compose_v2:
+                project_src: "{{ tandoor_dir }}"
+                state: present
+          rescue:
+            - name: Note the failed start
+              ansible.builtin.set_fact:
+                tandoor_restart_error: "{{ tandoor_failure | trim }}"
+
+        - name: Fail when the update failed before the backup
+          ansible.builtin.fail:
+            msg: >-
+              The Tandoor update from {{ tandoor_installed_version }} to
+              {{ tandoor_version }} in {{ tandoor_dir }} failed before
+              anything changed ({{ tandoor_update_error }}).
+              {{ ('Tandoor ' ~ tandoor_installed_version ~ ' was started again.')
+                 if tandoor_restart_error is not defined
+                 else ('Starting Tandoor ' ~ tandoor_installed_version ~ ' again failed too ('
+                       ~ tandoor_restart_error ~ '); start it with docker compose up -d in '
+                       ~ tandoor_dir ~ '.') }}
+
+    - name: Roll back to the backup
+      ansible.builtin.include_tasks: restore.yml
+
+    # Written whether or not the rollback worked: the failed version is not
+    # tried again on the next run.
+    - name: Write the marker of the failed update
+      ansible.builtin.copy:
+        dest: "{{ tandoor_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.tandoor role: the update to
+          # failed_version failed. The role does not try that version again
+          # while this file exists; remove it to retry.
+          {{ {'failed_version': tandoor_version,
+              'rolled_back_to': tandoor_installed_version if tandoor_healthy else none,
+              'backup': tandoor_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')}
+             | combine({} if tandoor_healthy else {'restore_error': tandoor_restore_error})
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Fail with the rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Tandoor update from {{ tandoor_installed_version }} to
+          {{ tandoor_version }} in {{ tandoor_dir }} failed, rolled back to
+          {{ tandoor_installed_version }} ({{ tandoor_update_error }}).
+          {{ tandoor_restored }} It does not try {{ tandoor_version }} again
+          while {{ tandoor_marker_file }} exists: remove it to retry, or set
+          tandoor_version to another version.
+      vars:
+        tandoor_restored: >-
+          {{ ('The role restored the database from the backup ' ~ tandoor_backup
+              ~ ' with the previous compose file; the media in S3 stay as they are.')
+             if tandoor_s3_enabled | bool
+             else ('The role restored the database and the media from the backup ' ~ tandoor_backup
+                   ~ ' with the previous compose file; the media of the failed attempt are in '
+                   ~ tandoor_backup ~ '-failed.') }}
+      when: tandoor_healthy
+
+    - name: Fail with the failed rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Tandoor update from {{ tandoor_installed_version }} to
+          {{ tandoor_version }} in {{ tandoor_dir }} failed
+          ({{ tandoor_update_error }}), and rolling back to
+          {{ tandoor_installed_version }} failed too
+          ({{ tandoor_restore_error }}), so Tandoor may be down.
+          {{ tandoor_restore_hint }} {{ tandoor_marker_file }} stops further
+          updates to {{ tandoor_version }}; remove it once Tandoor runs again.
+
+# Only after a successful update; the names start with the time, so they
+# sort by age. <backup>-failed directories of rolled back updates stay.
+- name: Find the backups
+  ansible.builtin.find:
+    paths: "{{ tandoor_backup_dir }}"
+    file_type: directory
+    patterns: ['^\d{8}T\d{6}Z-\d+\.\d+\.\d+$']
+    use_regex: true
+  register: tandoor_backups
+
+- name: Remove the oldest backups
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (tandoor_backups.files | map(attribute='path') | sort)[: -(tandoor_dumps_keep | int)] }}"

@@ -26,9 +26,20 @@
 #             secret key is in a 0600 file and in neither the compose file nor
 #             docker inspect, /media/ is not on the API router; a new secret
 #             key recreates Tandoor; a run without tandoor_s3 is refused
-# The failed install runs at -v, the install and a reconfigure at -vvv, every
-# repeated converge at -v; their output must not hold a test secret. Every
-# successful converge is repeated and must change nothing.
+#   update    an update from an older release with a recipe and its image: a
+#             backup (a dump read back in full, a hard-link copy of the
+#             media) taken and the oldest pruned, the recipe and the image
+#             unchanged, verify.yml on the new release; a downgrade, another
+#             PostgreSQL major and a second cluster refused before any change
+#   failed_update
+#             an update to an image that exits at once, with local media and
+#             with media in S3: rolled back with the recipe and its image, the
+#             marker that names the failed version and blocks it, and a run
+#             with another version that removes the marker
+# The failed install and the update run at -v, the install, a reconfigure
+# and the failed update at -vvv, every repeated converge at -v; their output
+# must not hold a test secret. Every successful converge is repeated and must
+# change nothing.
 # NOIXDEV_INFRA_TANDOOR_TESTS selects scenarios (see the end of the file);
 # NOIXDEV_INFRA_TANDOOR_TEST_HOST and NOIXDEV_INFRA_TANDOOR_TEST_OUT (the
 # directory of the logs and image tarballs) let two runs go side by side.
@@ -63,6 +74,13 @@ s3_images=(
 s3_secret="$(value_of "$here/s3.yml" s3_secret_key)"
 s3_rotated_secret="$(value_of "$here/s3.yml" s3_rotated_secret_key)"
 admin_password="$(value_of "$here/vars.yml" tandoor_admin_password)"
+# A web image that exits at once, tagged as a Tandoor release of a test image.
+busybox=busybox:1.37.0
+# The update tests: the older release they install first.
+old_version=2.6.15
+old_images=("$(value_of "$defaults" tandoor_image):$old_version" "$busybox")
+backups="$dir/data/backups"
+marker="$dir/update-failed"
 # The test secrets, which no run's output may hold.
 secrets=(
   "$(value_of "$here/vars.yml" tandoor_secret_key)"
@@ -217,6 +235,30 @@ req = urllib.request.Request("http://127.0.0.1/_allauth/app/v1/auth/login", data
 print(json.load(urllib.request.urlopen(req))["meta"]["session_token"])
 ' admin
 }
+# recipe.py on the test host: recipe <command> [args...]; see recipe.py. The
+# admin password of the token command goes through stdin.
+recipe() {
+  hx test -e /tmp/recipe.py || docker exec -i "$host" sh -c 'cat >/tmp/recipe.py' <"$here/recipe.py"
+  docker exec -i "$host" python3 /tmp/recipe.py "$@"
+}
+# Logs the admin in (once per installation: Tandoor allows three logins a
+# minute) and creates a recipe with an image; sets token, recipe_id and
+# image_sum (the image as Tandoor serves it).
+add_recipe() {
+  wait_healthy
+  token="$(printf '%s' "$admin_password" | recipe token admin)" || fail "the login of the admin failed"
+  recipe_id="$(recipe add "$token" </dev/null)" || fail "the recipe was not created"
+  image_sum="$(recipe check "$token" "$recipe_id" </dev/null)" || fail "the new recipe or its image is missing"
+}
+# Fails unless the recipe of add_recipe is there with the same image:
+# expect_recipe <when>.
+expect_recipe() {
+  local sum
+  sum="$(recipe check "$token" "$recipe_id" </dev/null)" || fail "the recipe or its image is missing $1"
+  [ "$sum" = "$image_sum" ] || fail "the image of the recipe changed $1"
+}
+# The image, state and health of the web container.
+web() { hx sh -c "cd $dir && docker compose ps --all --format '{{.Image}} {{.State}} {{.Health}}' web"; }
 
 # The scenarios, run by the loop at the end.
 test_settings() {
@@ -273,10 +315,10 @@ test_install() {
   echo "== a failed install must stop the stack and be refused until it is removed"
   new_host
   load_images
-  load_set busybox:1.37
+  load_set "$busybox"
   # A web image that exits at once: the database runs, Tandoor never becomes
   # healthy.
-  hx docker tag busybox:1.37 "test.invalid/recipes:$version"
+  hx docker tag "$busybox" "test.invalid/recipes:$version"
   play_fails install-failed "$here/converge.yml" -v -e tandoor_image=test.invalid/recipes -e tandoor_health_timeout=20
   expect_in_log install-failed "The install of Tandoor $version in $dir failed (Fail when Tandoor is not healthy:"
   expect_in_log install-failed "check that nothing in it is worth keeping"
@@ -411,12 +453,126 @@ test_s3() {
   hx test ! -e "$dir/data/mediafiles" || fail "the refused run created $dir/data/mediafiles"
 }
 
+# Notes the compose file and the containers, for expect_untouched.
+note_untouched() {
+  compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  containers_before="$(containers)"
+}
+# Fails unless the refused run <name> changed nothing: its recap, the compose
+# file and the containers since note_untouched.
+expect_untouched() {
+  expect_unchanged "$1"
+  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run $1 changed the compose file"
+  [ "$(containers)" = "$containers_before" ] || fail "the refused run $1 created or removed containers"
+}
+
+test_update() {
+  echo "== an update must take a dump and a copy of the media and prune the oldest backups"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "tandoor_version=$old_version"
+  add_recipe
+  # Older backups; with the new one there are four, and three are kept.
+  hx mkdir -p "$backups/20200101T000000Z-2.6.0" "$backups/20200101T000001Z-2.6.0" "$backups/20200101T000002Z-2.6.0"
+  converge -v
+  expect_no_secrets converge
+  grep -q "update.yml" "$out/converge.log" || fail "the new version was not an update"
+  [ "$(web)" = "${images[0]} running healthy" ] || fail "web after the update: $(web)"
+  backup="$(hx sh -c "ls -d $backups/*-$old_version")"
+  [ "$(printf '%s\n' "$backup" | wc -l | tr -d ' ')" = 1 ] || fail "not one backup of $old_version: $backup"
+  [ "$(hx head -c 5 "$backup/tandoor.dump")" = PGDMP ] || fail "the backup $backup has no dump in pg_dump's custom format"
+  # A hard-link copy: the image in the backup is the one in the media.
+  hx sh -c "find $backup/mediafiles -name '*.png' -links +1 | grep -q ." \
+    || fail "the backup $backup has no hard-linked image in mediafiles: $(hx find "$backup/mediafiles")"
+  hx test ! -e "$backups/20200101T000000Z-2.6.0" || fail "the oldest backup was not pruned"
+  [ "$(hx ls "$backups" | wc -l | tr -d ' ')" = 3 ] || fail "the backups are not the newest three: $(hx ls "$backups")"
+  expect_recipe "after the update"
+  expect_idempotent
+  play "$here/verify.yml"
+
+  echo "== a downgrade, another PostgreSQL major and a second cluster must be refused before any change"
+  note_untouched
+  play_fails downgrade "$here/converge.yml" -e "tandoor_version=$old_version"
+  expect_in_log downgrade "tandoor_version $old_version is lower than the installed version $version"
+  expect_untouched downgrade
+  play_fails postgres-major "$here/converge.yml" -e tandoor_postgres_image=docker.io/library/postgres:19
+  expect_in_log postgres-major "docker.io/library/postgres:19 is PostgreSQL 19, but the database"
+  expect_in_log postgres-major "is PostgreSQL 18"
+  expect_untouched postgres-major
+  # An old cluster next to the current one, as a copy-mode pg_upgrade leaves it.
+  hx sh -c "mkdir -p $dir/data/postgres/17/docker && echo 17 >$dir/data/postgres/17/docker/PG_VERSION"
+  play_fails postgres-clusters "$here/converge.yml"
+  expect_in_log postgres-clusters "more than one PostgreSQL cluster"
+  expect_in_log postgres-clusters "$dir/data/postgres/17/docker/PG_VERSION (PostgreSQL 17)"
+  expect_in_log postgres-clusters "$dir/data/postgres/18/docker/PG_VERSION (PostgreSQL 18)"
+  expect_untouched postgres-clusters
+  hx rm -r "$dir/data/postgres/17"
+  [ "$(web)" = "${images[0]} running healthy" ] || fail "web after the refusals: $(web)"
+}
+
+# A failed update of the installation on the test host: to the new release of
+# a test image that exits at once. failed_update <log> [converge options...].
+failed_update() {
+  local name="$1"
+  shift
+  hx docker tag "$busybox" "test.invalid/recipes:$version"
+  play_fails "$name" "$here/converge.yml" "$@" -e tandoor_image=test.invalid/recipes -e tandoor_health_timeout=30
+  expect_in_log "$name" "update from $old_version to $version in $dir failed, rolled back to $old_version"
+  expect_no_secrets "$name"
+  [ "$(web)" = "${old_images[0]} running healthy" ] || fail "web after the rollback: $(web)"
+  hx grep -qx "failed_version: $version" "$marker" || fail "the marker does not name $version: $(hx cat "$marker")"
+  hx grep -qx "rolled_back_to: $old_version" "$marker" || fail "the marker does not name $old_version: $(hx cat "$marker")"
+  backup="$(hx sed -n 's/^backup: //p' "$marker")"
+  [ "$(hx head -c 5 "$backup/tandoor.dump")" = PGDMP ] || fail "the marker's backup $backup has no dump"
+}
+
+test_failed_update() {
+  echo "== a failed update must roll back and block the failed version"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "tandoor_version=$old_version"
+  add_recipe
+  failed_update update-failed -vvv
+  expect_recipe "after the rollback"
+  hx test -d "$backup-failed/mediafiles" || fail "the media of the failed update were not moved to $backup-failed"
+  expect_in_log update-failed "the media of the failed attempt are in $backup-failed. It does not try $version again"
+
+  echo "== a run with the failed version must change nothing"
+  note_untouched
+  play_fails update-blocked "$here/converge.yml"
+  expect_in_log update-blocked "$marker exists: the Tandoor update to $version failed"
+  expect_in_log update-blocked "rolled back to $old_version"
+  expect_untouched update-blocked
+
+  echo "== a run with another version must remove the marker"
+  converge -e "tandoor_version=$old_version"
+  hx test ! -e "$marker" || fail "a successful run with $old_version kept the marker"
+  expect_idempotent -e "tandoor_version=$old_version"
+
+  echo "== a failed update with media in S3 must roll back the database and keep the images"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  load_set "${s3_images[@]}"
+  hx sh -c 'echo "127.0.0.1 s3.test" >>/etc/hosts'
+  converge -e "@$here/s3.yml" -e "tandoor_version=$old_version"
+  add_recipe
+  failed_update update-failed-s3 -v -e "@$here/s3.yml"
+  expect_recipe "after the rollback with media in S3"
+  expect_in_log update-failed-s3 "the media in S3 stay as they are. It does not try $version again"
+  hx test ! -e "$backup/mediafiles" || fail "the backup of an S3 installation has mediafiles"
+  hx test ! -e "$backup-failed" || fail "the rollback of an S3 installation made $backup-failed"
+  hx test ! -e "$dir/data/mediafiles" || fail "the rollback of an S3 installation made $dir/data/mediafiles"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_TANDOOR_TESTS="settings router"
 # runs only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3}; do
+for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update}; do
   case "$scenario" in
-    settings | install | router | s3) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, router, s3)" ;;
+    settings | install | router | s3 | update | failed_update) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update)" ;;
   esac
 done
 

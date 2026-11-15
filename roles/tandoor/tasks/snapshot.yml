@@ -1,0 +1,73 @@
+---
+# The backup before an update, with the web container stopped:
+# tandoor_backup_dir/<UTC time>-<installed version>/ (mode 0700) with
+# tandoor.dump (pg_dump -Fc, read back in full with pg_restore), with local
+# media mediafiles/ (a hard-link copy, cp -al: same filesystem, no space),
+# and compose.yaml (the compose file it ran with). Media in S3 are not copied:
+# the update does not touch the bucket. Made below <name>.partial and renamed
+# once complete; sets tandoor_backup last, so a failure before that has
+# changed nothing but the partial directory, which the caller removes.
+
+- name: Create the backup directory
+  ansible.builtin.file:
+    path: "{{ tandoor_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Name the backup
+  ansible.builtin.set_fact:
+    tandoor_backup_next: >-
+      {{ tandoor_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ tandoor_installed_version }}
+
+- name: Create the partial backup
+  ansible.builtin.file:
+    path: "{{ tandoor_backup_next }}.partial"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# Over the local socket of the database container, which needs no password.
+- name: Dump the database
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 077
+      dump={{ (tandoor_backup_next ~ '.partial/tandoor.dump') | quote }}
+      docker compose exec -T db pg_dump --format=custom --username=tandoor --dbname=tandoor >"$dump"
+      docker compose exec -T db pg_restore --file=/dev/null <"$dump"
+    chdir: "{{ tandoor_dir }}"
+  changed_when: true
+
+- name: Copy the media
+  ansible.builtin.command:
+    argv: [cp, -al, "{{ tandoor_data_dir }}/mediafiles", "{{ tandoor_backup_next }}.partial/mediafiles"]
+  changed_when: true
+  when: not tandoor_s3_enabled | bool
+
+- name: Keep the compose file with the backup
+  ansible.builtin.copy:
+    dest: "{{ tandoor_backup_next }}.partial/compose.yaml"
+    content: "{{ tandoor_compose_before }}"
+    owner: root
+    group: root
+    mode: "0600"
+  # It holds the secret key and the passwords.
+  no_log: true
+
+# Not into a backup of that name (the same second), which mv would move it
+# into.
+- name: Complete the backup
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      backup={{ tandoor_backup_next | quote }}
+      if [ -e "$backup" ]; then echo "$backup exists" >&2; exit 1; fi
+      mv "$backup.partial" "$backup"
+  changed_when: true
+
+- name: Note the backup
+  ansible.builtin.set_fact:
+    tandoor_backup: "{{ tandoor_backup_next }}"

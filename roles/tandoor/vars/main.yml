@@ -122,3 +122,19 @@ tandoor_install_hint: >-
   {{ 'subdirectories' if tandoor_data_subdirs | length > 1 else 'subdirectory' }}
   {{ tandoor_data_subdirs | join(' and ') }} of
   {{ tandoor_data_dir }}, then run the role again.
+
+# After a failed rollback: how to put the backup back by hand.
+tandoor_restore_hint: >-
+  Roll back by hand in {{ tandoor_dir }}: run docker compose stop web; copy
+  {{ tandoor_backup | default('?') }}/compose.yaml to
+  {{ tandoor_compose_file }}; recreate the database (docker compose exec -T
+  db psql -U tandoor -d postgres -c 'DROP DATABASE IF EXISTS tandoor WITH
+  (FORCE)' -c 'CREATE DATABASE tandoor OWNER tandoor') and load the dump with
+  docker compose exec -T db pg_restore --single-transaction -U tandoor -d
+  tandoor < {{ tandoor_backup | default('?') }}/tandoor.dump;
+  {{ tandoor_restore_media_hint }}then run docker compose up -d.
+# The local media step of tandoor_restore_hint, with its trailing space.
+tandoor_restore_media_hint: >-
+  {{ '' if tandoor_s3_enabled | bool
+     else 'put ' ~ tandoor_backup | default('?') ~ '/mediafiles back in place of '
+          ~ tandoor_data_dir ~ '/mediafiles (cp -al); ' }}

@@ -1,6 +1,9 @@
 ---
 # Tandoor Recipes release (tag of vabene1111/recipes, X.Y.Z without a v);
-# the major must be 2.
+# the major must be 2. A release newer than the installed one is an update:
+# a dump of the database and a copy of the local media first, a rollback to
+# them when the new release does not become healthy (tandoor_dir/update-failed
+# then blocks that release). An older release is refused.
 tandoor_version: 2.7.2
 tandoor_image: vabene1111/recipes
 
@@ -53,7 +56,8 @@ tandoor_admin_password: ""
 tandoor_admin_email: ""
 
 # PostgreSQL 18 or newer: older images keep the database on a volume of their
-# own, outside tandoor_data_dir, and are refused.
+# own, outside tandoor_data_dir, and are refused. A major other than the
+# database's is refused too: upgrade the cluster first.
 tandoor_postgres_image: docker.io/library/postgres:18
 
 # SMTP for invites and password resets; off while host is empty. tls is
@@ -90,8 +94,8 @@ tandoor_s3:
 # settings the role sets itself are refused; true and false become 1 and 0.
 tandoor_env: {}
 
-# Dumps and media copies taken before every update; the newest
-# tandoor_dumps_keep are kept.
+# Dumps and local media copies taken before every update, in
+# tandoor_data_dir/backups; the newest tandoor_dumps_keep are kept.
 tandoor_dumps_keep: 3
 # Seconds to wait for Tandoor and the database to become healthy.
 tandoor_health_timeout: 300
