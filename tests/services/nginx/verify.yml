@@ -1,0 +1,164 @@
+---
+# The three sites of converge.yml with its default knobs. Every request goes
+# to 127.0.0.1 with the site's name (curl --resolve); the headers and the body
+# come back together (HTTP/1.1, so the header names keep their case).
+- name: Verify the nginx sites
+  hosts: testhost
+  vars:
+    nginx_verify_headers:
+      - "X-Content-Type-Options: nosniff\r"
+      - "Referrer-Policy: strict-origin-when-cross-origin\r"
+      - "X-Frame-Options: SAMEORIGIN\r"
+      - "Strict-Transport-Security: max-age=31536000\r"
+      - "Server: nginx\r"
+    nginx_verify_requests:
+      # The front controller, from the pool as app_prod.
+      - url: https://prod.example.test/
+        status: 200
+        contains: ['"script":"index.php"', '"user":"app_prod"', '"https":"on"']
+      - url: https://prod.example.test/setup/install.php
+        status: 200
+        contains: [install ran]
+      # The file exists: a .php file that is not listed never runs, and its
+      # source is never served.
+      - url: https://prod.example.test/uploads/evil.php
+        status: 404
+        absent: ["<?php", evil ran]
+      - url: https://prod.example.test/missing/route?a=1
+        status: 200
+        contains: ['"script":"index.php"', '"uri":"\/missing\/route?a=1"']
+      - url: http://prod.example.test/x?y=1
+        status: 301
+        contains: ["Location: https://prod.example.test/x?y=1\r"]
+      - url: https://www.prod.example.test/x?y=1
+        status: 301
+        contains: ["Location: https://prod.example.test/x?y=1\r"]
+      - url: http://www.prod.example.test/x
+        status: 301
+        contains: ["Location: https://prod.example.test/x\r"]
+      - url: https://prod.example.test/
+        status: 200
+        contains: "{{ nginx_verify_headers }}"
+        absent: [includeSubDomains, preload, "Server: nginx/"]
+      - url: https://prod.example.test/.well-known/x.txt
+        status: 200
+        contains: [well-known]
+      - url: https://node.example.test/app
+        status: 200
+        contains: [node upstream, "X-Forwarded-Proto: https", "X-Forwarded-Host: node.example.test", "X-Forwarded-For: 127.0.0.1"]
+      - url: https://node.example.test/app
+        status: 200
+        contains: "{{ nginx_verify_headers }}"
+      - url: https://static.example.test/
+        status: 200
+        contains: "{{ ['static index'] + nginx_verify_headers }}"
+      # Blocked: every file exists.
+      - {url: "https://prod.example.test/.env", status: 404}
+      - {url: "https://prod.example.test/.git/config", status: 404}
+      - {url: "https://prod.example.test/composer.json", status: 404}
+      - {url: "https://prod.example.test/composer.lock", status: 404}
+      - {url: "https://prod.example.test/dump.sql", status: 404}
+      - {url: "https://prod.example.test/a.bak", status: 404}
+      - {url: "https://prod.example.test/a.swp", status: 404}
+      - {url: "https://prod.example.test/a~", status: 404}
+  tasks:
+    - name: Ask the sites
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --http1.1
+          - -sS
+          - -k
+          - -D
+          - "-"
+          - --max-time
+          - "10"
+          - --resolve
+          - "{{ nginx_verify_host }}:80:127.0.0.1"
+          - --resolve
+          - "{{ nginx_verify_host }}:443:127.0.0.1"
+          - "{{ item.url }}"
+      vars:
+        nginx_verify_host: "{{ item.url | urlsplit('hostname') }}"
+      loop: "{{ nginx_verify_requests }}"
+      loop_control:
+        label: "{{ item.url }}"
+      register: nginx_verify_responses
+      changed_when: false
+
+    - name: Check the answers
+      ansible.builtin.assert:
+        that:
+          - item.stdout is search('^HTTP/1.1 ' ~ (item.item.status) ~ ' ')
+          - item.item.contains | default([]) | reject('in', item.stdout) | list | length == 0
+          - item.item.absent | default([]) | select('in', item.stdout) | list | length == 0
+        fail_msg: "{{ item.item.url }} answered: {{ item.stdout }}"
+        quiet: true
+      loop: "{{ nginx_verify_responses.results }}"
+      loop_control:
+        label: "{{ item.item.url }}"
+
+    - name: Ask for TLS 1.1 and TLS 1.2
+      ansible.builtin.shell:
+        cmd: >-
+          openssl s_client -connect 127.0.0.1:443 -servername prod.example.test
+          -{{ item }} -cipher DEFAULT@SECLEVEL=0 </dev/null 2>&1
+      loop: [tls1_1, tls1_2]
+      register: nginx_verify_tls
+      changed_when: false
+      failed_when: false
+
+    - name: Check that only TLS 1.2 is accepted
+      ansible.builtin.assert:
+        that:
+          - nginx_verify_tls.results[0].rc != 0
+          - nginx_verify_tls.results[0].stdout is search('alert protocol version|no protocols available|unsupported protocol')
+          - nginx_verify_tls.results[1].rc == 0
+          - "nginx_verify_tls.results[1].stdout is search('Protocol *: TLSv1[.]2')"
+        fail_msg: >-
+          TLS 1.1: {{ nginx_verify_tls.results[0].stdout }} TLS 1.2: {{ nginx_verify_tls.results[1].stdout }}
+
+    # curl: 52 is an empty reply (444), 35 a failed handshake.
+    - name: Ask the default server
+      ansible.builtin.command:
+        argv: "{{ ['curl', '-sS', '-k', '--max-time', '10', '--resolve', 'unknown.example.test:80:127.0.0.1',
+                   '--resolve', 'unknown.example.test:443:127.0.0.1', item.url] }}"
+      loop:
+        - {url: http://unknown.example.test/, rc: 52}
+        - {url: https://unknown.example.test/, rc: 35}
+      loop_control:
+        label: "{{ item.url }}"
+      register: nginx_verify_default
+      changed_when: false
+      failed_when: nginx_verify_default.rc != item.rc
+
+    - name: Echo through the proxy site's WebSocket
+      ansible.builtin.command:
+        argv: [python3, /usr/local/bin/noixdev-test-upstream, ws-check, 127.0.0.1, "443", node.example.test, noixdev-echo]
+      register: nginx_verify_ws
+      changed_when: false
+      failed_when: nginx_verify_ws.rc != 0 or nginx_verify_ws.stdout != 'noixdev-echo'
+
+    - name: Read the nginx processes and www-data's groups
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [ps, -o, user=, -o, args=, -C, nginx]
+        - [id, -nG, www-data]
+        - [apt-config, dump, Unattended-Upgrade::Origins-Pattern]
+      register: nginx_verify_state
+      changed_when: false
+
+    - name: Check the workers, the groups and the updates
+      ansible.builtin.assert:
+        that:
+          - nginx_verify_workers | length > 0
+          - nginx_verify_workers | reject('match', '^www-data ') | list | length == 0
+          - nginx_verify_masters | length == 1
+          - nginx_verify_masters[0] is match('^root ')
+          - "'app_prod' in nginx_verify_state.results[1].stdout.split()"
+          - "'origin=nginx,codename=' ~ ansible_facts['distribution_release'] in nginx_verify_state.results[2].stdout"
+        fail_msg: "{{ nginx_verify_state.results | map(attribute='stdout') | list }}"
+      vars:
+        nginx_verify_workers: "{{ nginx_verify_state.results[0].stdout_lines | select('search', 'worker process') | list }}"
+        nginx_verify_masters: "{{ nginx_verify_state.results[0].stdout_lines | select('search', 'master process') | list }}"

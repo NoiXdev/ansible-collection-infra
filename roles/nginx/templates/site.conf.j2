@@ -1,0 +1,141 @@
+{#
+  One site (nginx_site: the site from nginx_sites_public, with tls_files, the
+  certificate and key of its TLS block, or {} while it has none).
+#}
+{% set site = nginx_site %}
+{% set https = site.tls_files | length > 0 %}
+{% set scheme = 'http' if site.tls == 'off' else 'https' %}
+{% set canonical = site.domains[0] %}
+{# The headers: the hardening's, then the site's (by name, in any case); an
+   empty value removes one. #}
+{% set ns = namespace(headers=[]) %}
+{% set own = site.headers | dict2items %}
+{% set own_names = own | map(attribute='key') | map('lower') | list %}
+{% if site.hardening %}
+{%   set defaults = [['X-Content-Type-Options', 'nosniff'], ['Referrer-Policy', 'strict-origin-when-cross-origin'], ['X-Frame-Options', 'SAMEORIGIN']] %}
+{%   if site.hsts and https %}
+{%     set defaults = defaults + [['Strict-Transport-Security', 'max-age=31536000']] %}
+{%   endif %}
+{%   for header in defaults if header[0] | lower not in own_names %}
+{%     set ns.headers = ns.headers + [header] %}
+{%   endfor %}
+{% endif %}
+{% for header in own if header.value | length > 0 %}
+{%   set ns.headers = ns.headers + [[header.key, header.value]] %}
+{% endfor %}
+{# The macros' lines are unindented; each call indents them. #}
+{% macro listen(port, ssl) %}
+listen {{ port }}{{ ' ssl' if ssl else '' }};
+{% if nginx_ipv6 %}
+listen [::]:{{ port }}{{ ' ssl' if ssl else '' }};
+{% endif %}
+{% if ssl %}
+http2 on;
+ssl_certificate {{ site.tls_files.cert }};
+ssl_certificate_key {{ site.tls_files.key }};
+{% if site.tls is mapping %}
+ssl_stapling on;
+ssl_stapling_verify on;
+{% endif %}
+{% endif %}
+{% endmacro %}
+{% macro logs() %}
+access_log /var/log/nginx/{{ site.name }}.access.log main;
+error_log /var/log/nginx/{{ site.name }}.error.log;
+{% endmacro %}
+# managed by noixdev.infra (nginx role): site {{ site.name }}. Changes here are overwritten.
+{% if site.tls != 'off' %}
+# HTTP: a 301 to HTTPS.
+server {
+    {{ listen(80, false) | trim | indent(4) }}
+    server_name {{ site.domains | join(' ') }};
+    {{ logs() | trim | indent(4) }}
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+{% endif %}
+{% if site.redirect_domains | length > 0 %}
+# The redirect domains: a 301 to {{ scheme }}://{{ canonical }}.
+{% for port in ([80] + ([443] if https else [])) %}
+server {
+    {{ listen(port, port == 443) | trim | indent(4) }}
+    server_name {{ site.redirect_domains | join(' ') }};
+    {{ logs() | trim | indent(4) }}
+    location / {
+        return 301 {{ scheme }}://{{ canonical }}$request_uri;
+    }
+}
+
+{% endfor %}
+{% endif %}
+{% if site.tls == 'off' or https %}
+server {
+    {{ listen(443 if https else 80, https) | trim | indent(4) }}
+    server_name {{ site.domains | join(' ') }};
+    {{ logs() | trim | indent(4) }}
+    client_max_body_size {{ site.client_max_body_size }};
+{% if site.root is defined %}
+    root {{ site.root }};
+    index {{ (site.php_front_controller ~ ' ') if site.php_pool is defined else '' }}index.html;
+{% endif %}
+{% if site.rate_limit is defined %}
+{% set zone = nginx_rate_limit_zones | selectattr('name', 'eq', site.rate_limit) | first %}
+    limit_req zone={{ zone.name }} burst={{ zone.burst | default(0) }} nodelay;
+{% endif %}
+{% for header in ns.headers %}
+    add_header {{ header[0] }} "{{ header[1] | replace('\\', '\\\\') | replace('"', '\\"') }}" always;
+{% endfor %}
+{% if site.hardening %}
+
+    include {{ nginx_role_dir }}/hardening.conf;
+{% endif %}
+{% if site.extra | length > 0 %}
+
+    # extra
+    {{ site.extra | indent(4) }}
+{% endif %}
+{% if site.php_pool is defined %}
+
+    # Only the front controller and the listed scripts go to PHP.
+{% for script in [site.php_front_controller] + site.php_scripts %}
+    location = /{{ script }} {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        fastcgi_param DOCUMENT_ROOT $realpath_root;
+        fastcgi_param HTTP_PROXY "";
+        fastcgi_pass unix:/run/php/{{ site.php_pool }}.sock;
+    }
+
+{% endfor %}
+    # Any other PHP file is never run and never served as text.
+    location ~* \.(?:php[0-9]*|phtml|phar)$ {
+        return 404;
+    }
+
+    location / {
+        try_files $uri $uri/ /{{ site.php_front_controller }}$is_args$args;
+    }
+{% elif site.proxy is defined %}
+
+    location / {
+        proxy_pass {{ site.proxy }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+    }
+{% else %}
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+{% endif %}
+}
+{% endif %}

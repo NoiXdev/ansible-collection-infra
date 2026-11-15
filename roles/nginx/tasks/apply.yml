@@ -1,0 +1,107 @@
+---
+# Every config file the role writes goes through here:
+#   nginx_apply_files: [{src: <template>, dest: <path>, mode: "0644", site: {...}}]
+#     (site is optional; the template sees it as nginx_site)
+#   nginx_apply_remove: [<path>, ...]  (optional; files to remove)
+#   nginx_apply_no_log: true           (optional; for files that hold secrets)
+# Each file is written with a backup and each removed one set aside; then
+# nginx -t tests the whole config. When it fails, this run's files are put
+# back (a new one is removed), the reloads notified before run, and the run
+# fails naming nginx's error. When it passes, the backups go and nginx
+# reloads (the handler Reload nginx).
+- name: Write and test the nginx config
+  block:
+    - name: Write the nginx config files
+      ansible.builtin.template:
+        src: "{{ nginx_apply_file.src }}"
+        dest: "{{ nginx_apply_file.dest }}"
+        owner: root
+        group: root
+        mode: "{{ nginx_apply_file.mode }}"
+        backup: true
+      vars:
+        nginx_site: "{{ nginx_apply_file.site | default({}) }}"
+      loop: "{{ nginx_apply_files }}"
+      loop_control:
+        loop_var: nginx_apply_file
+        label: "{{ nginx_apply_file.dest }}"
+      register: nginx_apply_written
+      no_log: "{{ nginx_apply_no_log | default(false) }}"
+      diff: "{{ not (nginx_apply_no_log | default(false)) }}"
+      notify: Reload nginx
+
+    - name: Set the removed nginx config files aside
+      ansible.builtin.command:
+        argv: [mv, -f, --, "{{ item }}", "{{ item }}.noixdev-removed"]
+        removes: "{{ item }}"
+      loop: "{{ nginx_apply_remove | default([]) }}"
+      register: nginx_apply_removed
+      notify: Reload nginx
+
+    - name: Test the nginx config
+      ansible.builtin.command:
+        argv: [nginx, -t, -q]
+      changed_when: false
+      when: nginx_apply_changed | length > 0
+      vars:
+        nginx_apply_changed: "{{ (nginx_apply_written.results + nginx_apply_removed.results) | selectattr('changed') | list }}"
+  rescue:
+    - name: Put back the nginx config files nginx rejected
+      ansible.builtin.command:
+        argv: [mv, -f, --, "{{ item.backup_file }}", "{{ item.nginx_apply_file.dest }}"]
+      loop: "{{ nginx_apply_written.results | default([]) | selectattr('changed') | selectattr('backup_file', 'defined') }}"
+      loop_control:
+        label: "{{ item.nginx_apply_file.dest }}"
+      changed_when: true
+
+    - name: Remove the new nginx config files nginx rejected
+      ansible.builtin.file:
+        path: "{{ item.nginx_apply_file.dest }}"
+        state: absent
+      loop: "{{ nginx_apply_written.results | default([]) | selectattr('changed') | rejectattr('backup_file', 'defined') }}"
+      loop_control:
+        label: "{{ item.nginx_apply_file.dest }}"
+
+    - name: Put back the nginx config files set aside
+      ansible.builtin.command:
+        argv: [mv, -f, --, "{{ item.item }}.noixdev-removed", "{{ item.item }}"]
+      loop: "{{ nginx_apply_removed.results | default([]) | selectattr('changed') }}"
+      loop_control:
+        label: "{{ item.item }}"
+      changed_when: true
+
+    - name: Test the config that is back in place
+      ansible.builtin.command:
+        argv: [nginx, -t, -q]
+      register: nginx_apply_retest
+      changed_when: false
+      failed_when: false
+
+    # Reloads notified by an earlier step of this run (or by a file put back)
+    # run now; nginx tested the config that is back in place first.
+    - name: Run the reloads notified before the failure
+      ansible.builtin.meta: flush_handlers
+
+    - name: Fail naming nginx's error
+      ansible.builtin.fail:
+        msg: >-
+          nginx: {{ 'nginx -t rejected the new config' if ansible_failed_result.cmd is defined
+          else '"' ~ ansible_failed_task.name ~ '" failed' }}; this run's files are back in place
+          {{- '' if nginx_apply_retest.rc == 0 else ' (and nginx -t fails on them too: the config was broken before)' }}:
+          {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('')) | trim }}
+
+- name: Remove the backups of the nginx config files
+  ansible.builtin.file:
+    path: "{{ item.backup_file }}"
+    state: absent
+  loop: "{{ nginx_apply_written.results | selectattr('changed') | selectattr('backup_file', 'defined') }}"
+  loop_control:
+    label: "{{ item.backup_file }}"
+
+- name: Remove the nginx config files set aside
+  ansible.builtin.file:
+    path: "{{ item.item }}.noixdev-removed"
+    state: absent
+  loop: "{{ nginx_apply_removed.results | selectattr('changed') }}"
+  loop_control:
+    label: "{{ item.item }}"

@@ -1,0 +1,6 @@
+---
+# apply.yml tested the config. reloaded starts nginx when it is not running.
+- name: Reload nginx
+  ansible.builtin.systemd_service:
+    name: nginx
+    state: reloaded

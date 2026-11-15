@@ -1,0 +1,6 @@
+// managed by noixdev.infra (nginx role). Changes here are overwritten.
+// unattended-upgrades installs nginx.org's updates too; the apt pin keeps
+// them within the series nginx_version.
+Unattended-Upgrade::Origins-Pattern {
+    "origin={{ nginx_apt_origin }},codename={{ nginx_apt_suite }}";
+};

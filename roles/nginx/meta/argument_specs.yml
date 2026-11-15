@@ -1,0 +1,108 @@
+---
+argument_specs:
+  main:
+    short_description: nginx from nginx.org, hardened, with PHP-pool, proxy and static sites
+    description:
+      - >-
+        Installs nginx of one stable series from nginx.org's repository (Ubuntu 24.04 and 26.04;
+        any other release is refused before any change), pinned to that series. Ubuntu's nginx
+        packages are pinned out, and unattended-upgrades installs nginx.org's updates within the
+        series. An installed nginx of another series, or one that is not nginx.org's (Ubuntu's
+        nginx or nginx-common), is refused before any change.
+      - >-
+        Global hardening: server_tokens off, TLS 1.2 and 1.3 with Mozilla's intermediate ciphers,
+        session tickets off, workers as www-data. A default server closes the connection for an
+        unknown host name on 80 (444) and rejects the TLS handshake on 443.
+      - >-
+        nginx_sites is the complete list: each site is /etc/nginx/sites/<name>.conf, with logs
+        /var/log/nginx/<name>.access.log and <name>.error.log. A site that leaves the list is
+        removed; its web root, logs and certificate stay. www-data joins each site's group, and
+        leaves a group no listed site uses any more.
+      - >-
+        Every config change is tested with nginx -t before nginx reloads; a config nginx rejects
+        is never left in place: the run's files are put back and the run fails naming nginx's
+        error.
+      - >-
+        The site entries are checked by the role, not here, so that every message names the
+        entry; an unknown key in an entry is refused.
+    options:
+      nginx_version:
+        type: str
+        description: major.minor stable series to install, for example "1.30".
+      nginx_apt_url:
+        type: str
+        description: The repository URL.
+      nginx_apt_suite:
+        type: str
+        description: Suite of the repository; the host's release codename by default.
+      nginx_apt_key_url:
+        type: str
+        description: Where the repository key is downloaded from.
+      nginx_apt_key_fingerprint:
+        type: str
+        description: Fingerprint the key must carry; any other key is removed and the run fails.
+      nginx_sites:
+        type: list
+        elements: dict
+        description:
+          - The complete list of sites on the host. Each entry takes exactly these keys.
+          - name (required), ^[a-z0-9_-]+$, at most 64 characters, unique.
+          - >-
+            domains (required), a list of at least one lower-case host name; the first is the
+            canonical name. redirect_domains, a list, answer with a 301 to the canonical name. A
+            domain belongs to one site.
+          - >-
+            user (required), the site's system user; it must exist and must not be root. group,
+            the site's group, by default the user's primary group (never gid 0); www-data joins
+            it, so web roots must be group-readable.
+          - >-
+            One backend at most. php_pool, the name of a php pool, served by fastcgi to
+            /run/php/<php_pool>.sock; only php_front_controller (index.php by default) and the
+            paths in php_scripts (below root) go to PHP, any other .php file returns 404. proxy,
+            an http(s) upstream URL, with WebSocket upgrades and X-Forwarded-* headers. Neither
+            serves root as static files.
+          - root, the document root (an absolute path); required for php_pool and static sites.
+          - >-
+            tls, letsencrypt (the default; nginx_acme_email is then required), off (HTTP only),
+            or {cert, key} with the paths of an existing certificate and key. With TLS, port 80
+            answers with a 301 to HTTPS.
+          - >-
+            hardening (true by default): the headers X-Content-Type-Options nosniff,
+            Referrer-Policy strict-origin-when-cross-origin and X-Frame-Options SAMEORIGIN, HSTS
+            (max-age one year, no includeSubDomains) unless hsts is false, and 404 for dotfiles
+            and dot-dirs except /.well-known/, composer.json, composer.lock, *.sql, *.bak, *.swp
+            and *~.
+          - headers, a dict of headers to add or replace; an empty value removes one.
+          - rate_limit, the name of a zone of nginx_rate_limit_zones.
+          - client_max_body_size, 64m by default.
+          - user_includes, true by default (deploy snippets).
+          - basic_auth and anubis (false by default) are not supported yet by this version.
+          - extra, raw config inside the site's server block.
+      nginx_http_extra:
+        type: str
+        description: Raw config at http level.
+      nginx_real_ip_from:
+        type: list
+        elements: str
+        description: Proxies (addresses or CIDRs) whose X-Forwarded-For is trusted.
+      nginx_rate_limit_zones:
+        type: list
+        elements: dict
+        description:
+          - Rate-limit zones per client address, used by a site's rate_limit.
+          - name (^[a-z0-9_]+$, unique), rate (10r/s or 60r/m, for example) and burst (a whole number).
+      nginx_error_pages:
+        type: bool
+        description: The noix error pages for nginx's own error responses.
+      nginx_user_includes:
+        type: bool
+        description: Deploy snippets for every site; false turns them off.
+      nginx_include_user:
+        type: str
+        description: The user whose snippets are included at http level; none when empty.
+      nginx_acme_email:
+        type: str
+        description: The Let's Encrypt account address; required when a site uses tls letsencrypt.
+      nginx_acme_server:
+        type: str
+        description: The ACME directory; Let's Encrypt's production directory by default.

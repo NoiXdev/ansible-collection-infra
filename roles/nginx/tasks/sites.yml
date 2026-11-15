@@ -1,0 +1,76 @@
+---
+- name: Read the groups www-data joined for the sites
+  ansible.builtin.slurp:
+    src: "{{ nginx_groups_state }}"
+  register: nginx_groups_state_file
+  failed_when: false
+
+# A tls letsencrypt site gets its TLS block once its certificate is there
+# (certbot's cert name is the site's name); until then only its HTTP block.
+- name: Look for the Let's Encrypt certificates
+  ansible.builtin.stat:
+    path: "{{ nginx_letsencrypt_live }}/{{ item.name }}/fullchain.pem"
+  loop: "{{ nginx_sites_public | selectattr('tls', 'eq', 'letsencrypt') }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: nginx_letsencrypt_certs
+
+# www-data reads the web roots through each site's group. A group that no
+# listed site uses any more is left below, after the configs changed; only
+# the groups www-data joined for a site (recorded in nginx_groups_state).
+- name: Let www-data join the site groups
+  ansible.builtin.user:
+    name: www-data
+    groups: "{{ nginx_groups_current }}"
+    append: true
+  when: nginx_groups_current | length > 0
+
+- name: Find the site configs
+  ansible.builtin.find:
+    paths: "{{ nginx_sites_dir }}"
+    patterns: "*.conf"
+    file_type: any
+  register: nginx_site_files
+
+- name: Apply the site configs
+  ansible.builtin.include_tasks: apply.yml
+  vars:
+    nginx_letsencrypt_ready: >-
+      {{ nginx_letsencrypt_certs.results | selectattr('stat.exists') | map(attribute='item.name') | list }}
+    nginx_apply_files: >-
+      {%- set files = [] -%}
+      {%- for site in nginx_sites_public -%}
+      {%- if site.tls is mapping -%}
+      {%-   set tls_files = site.tls -%}
+      {%- elif site.tls == 'letsencrypt' and site.name in nginx_letsencrypt_ready -%}
+      {%-   set tls_files = {'cert': nginx_letsencrypt_live ~ '/' ~ site.name ~ '/fullchain.pem',
+                             'key': nginx_letsencrypt_live ~ '/' ~ site.name ~ '/privkey.pem'} -%}
+      {%- else -%}
+      {%-   set tls_files = {} -%}
+      {%- endif -%}
+      {%- set _ = files.append({'src': 'site.conf.j2', 'dest': nginx_sites_dir ~ '/' ~ site.name ~ '.conf', 'mode': '0644',
+                                'site': site | combine({'tls_files': tls_files})}) -%}
+      {%- endfor -%}
+      {{ files }}
+    nginx_apply_remove: >-
+      {{ nginx_site_files.files | map(attribute='path')
+         | reject('in', nginx_site_names | map('regex_replace', '^(.*)$', nginx_sites_dir ~ '/\1.conf') | list)
+         | sort }}
+
+- name: Let www-data leave the groups no site uses any more
+  ansible.builtin.command:
+    argv: [gpasswd, -d, www-data, "{{ item }}"]
+  loop: "{{ nginx_groups_previous | difference(nginx_groups_current) | select('in', nginx_groups_before) | sort }}"
+  changed_when: true
+
+- name: Remember the groups www-data joined for the sites
+  ansible.builtin.copy:
+    content: |
+      # managed by noixdev.infra (nginx role): the groups www-data joined for the sites.
+      {% for group in nginx_groups_joined %}
+      {{ group }}
+      {% endfor %}
+    dest: "{{ nginx_groups_state }}"
+    owner: root
+    group: root
+    mode: "0644"

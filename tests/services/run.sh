@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host service roles (nodejs, redis, mariadb, mysql, php, composer) on a systemd Ubuntu
+# Host service roles (nodejs, redis, mariadb, mysql, php, composer, nginx) on a systemd Ubuntu
 # container, one fresh container per role:
 #
 #   NOIXDEV_INFRA_SERVICES="nodejs redis" UBUNTU=26.04 tests/services/run.sh
@@ -18,7 +18,7 @@ root="$(dirname "$tests")"
 ubuntu="${UBUNTU:-26.04}"
 prefix="${NOIXDEV_INFRA_TEST_HOST:-noixdev-infra-services-$ubuntu}"
 out="$tests/output/services-$ubuntu"
-services="${NOIXDEV_INFRA_SERVICES:-nodejs redis mariadb mysql php composer}"
+services="${NOIXDEV_INFRA_SERVICES:-nodejs redis mariadb mysql php composer nginx}"
 
 started=()
 cleanup() {
@@ -1385,6 +1385,204 @@ suite_php_updates() {
   hx php cp /root/production-pool.conf "$conf"
   hx php sh -c 'systemctl reset-failed php-fpm@production; systemctl restart php-fpm@production'
   play php "$dir/verify.yml" "${knobs[@]}" -e php_test_extra_version=8.3
+}
+
+# ncurl URL [curl args]: the headers and body of URL, asked in the nginx
+# container over HTTP/1.1 with the URL's host name resolved to 127.0.0.1.
+ncurl() {
+  local url="$1" host; shift
+  host="${url#*://}"
+  host="${host%%/*}"
+  hx nginx curl --http1.1 -sS -k -D - --max-time 10 --resolve "$host:80:127.0.0.1" --resolve "$host:443:127.0.0.1" "$@" "$url"
+}
+
+# ncurl_rc URL: curl's exit code for URL (52: an empty reply, 35: the TLS
+# handshake failed).
+ncurl_rc() {
+  local rc=0
+  ncurl "$1" >/dev/null 2>&1 || rc=$?
+  echo "$rc"
+}
+
+# prod_answers NAME: the prod site answers from its pool after NAME.
+prod_answers() {
+  local answer
+  answer="$(ncurl https://prod.example.test/ || true)"
+  grep -qF '"user":"app_prod"' <<<"$answer" || fail "nginx/$1: prod does not answer from its pool: $answer"
+}
+
+# has_headers URL WANT...: URL's answer has each header line of WANT ("Name:
+# value") and none of the names prefixed with "-" ("-Name").
+has_headers() {
+  local url="$1" answer want; shift
+  answer="$(ncurl "$url" | tr -d '\r')"
+  for want in "$@"; do
+    case "$want" in
+      -*) if grep -qi "^${want#-}:" <<<"$answer"; then fail "nginx: $url has ${want#-}: $answer"; fi ;;
+      *) grep -qxF "$want" <<<"$answer" || fail "nginx: $url lacks $want: $answer" ;;
+    esac
+  done
+}
+
+# nginx_state: the role's files and the apt sources, to show that a refused
+# run changed nothing.
+nginx_state() {
+  hx nginx sh -c 'find /etc/nginx /etc/apt/sources.list.d /etc/apt/preferences.d /etc/apt/apt.conf.d -type f -exec md5sum {} + | sort; id -nG www-data'
+}
+
+# nginx_distro_refused: Ubuntu's nginx-common in a fresh container is refused
+# before any change.
+nginx_distro_refused() {
+  local dir="$here/nginx" version
+  echo "== nginx: Ubuntu's nginx-common is refused before any change"
+  start nginxdistro
+  hx nginxdistro apt-get update -q >/dev/null
+  hx nginxdistro env DEBIAN_FRONTEND=noninteractive apt-get install -y -q nginx-common >/dev/null
+  version="$(hx nginxdistro dpkg-query -W -f='${Version}' nginx-common)"
+  echo "   Ubuntu's nginx-common on $ubuntu: $version"
+  refused nginxdistro distro "nginx: installed nginx-common $version is not from nginx.org; the role manages nginx.org's packages only" \
+    "$dir/converge.yml" -e nginx_test_prepare=false -e '{"nginx_sites": []}'
+  hx nginxdistro sh -c 'test ! -e /etc/apt/sources.list.d/nginx.sources && test ! -e /etc/apt/keyrings/nginx.asc && test ! -e /etc/apt/preferences.d/nginx' \
+    || fail "nginx: the refused run left repository files"
+  [ "$(hx nginxdistro dpkg-query -W -f='${Version}' nginx-common)" = "$version" ] || fail "nginx: nginx-common changed after the refused run"
+  docker rm -f -v "$prefix-nginxdistro" >/dev/null
+}
+
+suite_nginx() {
+  local dir="$here/nginx" codename series version policy before after rc answer
+  local fast=(-e nginx_test_prepare=false)
+  start nginx
+  codename="$(hx nginx sh -c '. /etc/os-release && echo "$VERSION_CODENAME"')"
+
+  case "$ubuntu" in
+    24.04 | 26.04) ;;
+    *)
+      echo "== nginx: Ubuntu $ubuntu is refused before any change"
+      refused nginx release "nginx: Ubuntu $ubuntu is not supported yet: nginx.org has no packages for $codename" \
+        "$dir/converge.yml" "${fast[@]}"
+      hx nginx sh -c 'test ! -e /etc/apt/sources.list.d/nginx.sources && test ! -e /etc/apt/keyrings/nginx.asc' \
+        || fail "nginx: the refused run left repository files"
+      return 0 ;;
+  esac
+
+  nginx_distro_refused
+
+  echo "== nginx: a run whose repository refresh failed is not followed by Ubuntu's nginx"
+  # The first run adds the source and the pin, then its refresh fails: the
+  # package lists stay without nginx.org's packages. The key comes from the
+  # same host as the packages, so apt alone is cut off.
+  hx nginx sh -c 'echo "Acquire::https::Proxy::nginx.org \"http://127.0.0.1:9\";" > /etc/apt/apt.conf.d/99-block-nginx'
+  if play nginx "$dir/converge.yml" >"$out/nginx-blocked.log" 2>&1; then
+    fail "nginx: the run with nginx.org unreachable did not fail"
+  fi
+  hx nginx rm -f /etc/apt/apt.conf.d/99-block-nginx
+  hx nginx test -e /etc/apt/sources.list.d/nginx.sources || { cat "$out/nginx-blocked.log" >&2; fail "nginx: the blocked run did not add the source"; }
+  hx nginx sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}\n" nginx nginx-common 2>/dev/null | grep -q "^.i"' \
+    || fail "nginx: the blocked run installed nginx"
+  policy="$(hx nginx apt-cache policy nginx)"
+  grep -qF 'Candidate: (none)' <<<"$policy" || fail "nginx: without nginx.org's lists Ubuntu's nginx is a candidate: $policy"
+
+  echo "== nginx: converge (on the stale lists) and idempotence"
+  converge nginx install "$dir/converge.yml"
+  series="$(sed -n 's/^nginx_version: "\(.*\)"$/\1/p' "$root/roles/nginx/defaults/main.yml")"
+  [ -n "$series" ] || fail "nginx: no nginx_version in the role's defaults"
+  version="$(hx nginx dpkg-query -W -f='${Version}' nginx)"
+  case "$version" in
+    "$series".*"~$codename") echo "   installed nginx.org's $version" ;;
+    *) fail "nginx: the role installed nginx $version, not nginx.org's $series for $codename" ;;
+  esac
+  answer="$(hx nginx nginx -v 2>&1)"
+  grep -qF "nginx/$series." <<<"$answer" || fail "nginx: nginx -v does not show the series $series: $answer"
+  # nginx.org's versions of the series win; every other one (Ubuntu's and
+  # nginx.org's other series) is never installed.
+  policy="$(hx nginx apt-cache policy nginx)"
+  awk -v series="$series" -v codename="$codename" '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
+         ours = index(v, series ".") == 1 && v ~ ("~" codename "$")
+         if ((ours && p != 990) || (!ours && p != -1)) { print v, p; bad = 1 } }
+       END { exit bad }' <<<"$policy" || fail "nginx: the pin gives the wrong priorities: $policy"
+  play nginx "$dir/verify.yml"
+
+  echo "== nginx: hardening false on static: no security headers, /.env is served"
+  converge nginx no-hardening "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_hardening": false}'
+  has_headers https://static.example.test/ -X-Content-Type-Options -Referrer-Policy -X-Frame-Options -Strict-Transport-Security
+  answer="$(ncurl https://static.example.test/.env)"
+  grep -qxF 'STATIC_ENV=visible' <<<"$answer" || fail "nginx: static does not serve /.env without hardening: $answer"
+  has_headers https://prod.example.test/ 'X-Frame-Options: SAMEORIGIN' 'Strict-Transport-Security: max-age=31536000'
+
+  echo "== nginx: hsts false on static drops HSTS only"
+  converge nginx no-hsts "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_hsts": false}'
+  has_headers https://static.example.test/ -Strict-Transport-Security 'X-Content-Type-Options: nosniff' \
+    'Referrer-Policy: strict-origin-when-cross-origin' 'X-Frame-Options: SAMEORIGIN'
+  answer="$(ncurl https://static.example.test/.env)"
+  [ "$(sed -n '1s/\r$//p' <<<"$answer")" = 'HTTP/1.1 404 Not Found' ] || fail "nginx: static serves /.env with hardening on: $answer"
+
+  echo "== nginx: an empty header value on static drops that header only"
+  converge nginx no-frame-options "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_headers": {"X-Frame-Options": ""}}'
+  has_headers https://static.example.test/ -X-Frame-Options 'X-Content-Type-Options: nosniff' \
+    'Referrer-Policy: strict-origin-when-cross-origin' 'Strict-Transport-Security: max-age=31536000'
+
+  echo "== nginx: back to the defaults"
+  converge nginx defaults "$dir/converge.yml" "${fast[@]}"
+  play nginx "$dir/verify.yml"
+
+  echo "== nginx: a site config nginx rejects fails naming nginx's error, the previous one stays"
+  before="$(hx nginx md5sum /etc/nginx/sites/prod.conf)"
+  if play nginx "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_prod_extra": "this is not nginx;"}' >"$out/nginx-rollback.log" 2>&1; then
+    fail "nginx: the run with a broken extra did not fail"
+  fi
+  grep -qF 'unknown directive "this" in /etc/nginx/sites/prod.conf' "$out/nginx-rollback.log" \
+    || { cat "$out/nginx-rollback.log" >&2; fail "nginx: the failure does not name nginx's error"; }
+  [ "$(hx nginx md5sum /etc/nginx/sites/prod.conf)" = "$before" ] || fail "nginx: prod.conf changed after the rejected run"
+  [ "$(hx nginx sh -c 'ls -A /etc/nginx/sites' | paste -sd' ' -)" = "node.conf prod.conf static.conf" ] \
+    || fail "nginx: the rejected run left files in /etc/nginx/sites: $(hx nginx ls -A /etc/nginx/sites)"
+  prod_answers rollback
+  play nginx "$dir/converge.yml" "${fast[@]}" >"$out/nginx-after-rollback.log" 2>&1 || { cat "$out/nginx-after-rollback.log" >&2; fail "nginx: the run after the rollback failed"; }
+  grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/nginx-after-rollback.log" \
+    || { cat "$out/nginx-after-rollback.log" >&2; fail "nginx: the run after the rollback changed something"; }
+
+  echo "== nginx: a site that leaves the list hits the default server, its root stays"
+  converge nginx no-static "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static": false}'
+  rc="$(ncurl_rc https://static.example.test/)"
+  [ "$rc" = 35 ] || fail "nginx: static's name on 443 did not get the handshake rejected (curl exit $rc)"
+  rc="$(ncurl_rc http://static.example.test/)"
+  [ "$rc" = 52 ] || fail "nginx: static's name on 80 did not get an empty reply (curl exit $rc)"
+  hx nginx test ! -e /etc/nginx/sites/static.conf || fail "nginx: static.conf is still there"
+  hx nginx test -s /srv/static/index.html || fail "nginx: static's root is gone"
+  answer=" $(hx nginx id -nG www-data) "
+  case "$answer" in *" app_static "*) fail "nginx: www-data is still in app_static's group:$answer" ;; esac
+  case "$answer" in *" app_prod "*) ;; *) fail "nginx: www-data left app_prod's group:$answer" ;; esac
+  prod_answers removal
+
+  echo "== nginx: invalid sites are refused before any change"
+  local tls_off='"user": "app_prod", "root": "/srv/prod/public", "tls": "off"'
+  before="$(nginx_state)"
+  refused nginx duplicate-domain "nginx: nginx_sites entry b lists the domain dup.example.test, which entry a lists too; a domain belongs to one site" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"a\", \"domains\": [\"dup.example.test\"], $tls_off},
+      {\"name\": \"b\", \"domains\": [\"b.example.test\"], \"redirect_domains\": [\"dup.example.test\"], $tls_off}]}"
+  refused nginx both-backends "nginx: nginx_sites entry both has php_pool and proxy; a site has one backend at most" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"both\", \"domains\": [\"both.example.test\"], $tls_off,
+      \"php_pool\": \"production\", \"proxy\": \"http://127.0.0.1:3000\"}]}"
+  refused nginx php-without-root "nginx: nginx_sites entry noroot has php_pool production but no root" \
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "noroot", "domains": ["noroot.example.test"], "user": "app_prod", "tls": "off", "php_pool": "production"}]}'
+  refused nginx unknown-user "nginx: nginx_sites entry x has the user nosuchuser, which does not exist; the role does not create users" \
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "x", "domains": ["x.example.test"], "user": "nosuchuser", "root": "/srv/x", "tls": "off"}]}'
+  refused nginx root-user "nginx: nginx_sites entry x has the user root; a site belongs to an unprivileged user" \
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "x", "domains": ["x.example.test"], "user": "root", "root": "/srv/x", "tls": "off"}]}'
+  refused nginx bad-name "nginx: nginx_sites entry 'Bad Name' has an invalid name; it must match ^[a-z0-9_-]+$" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"Bad Name\", \"domains\": [\"x.example.test\"], $tls_off}]}"
+  refused nginx no-acme-email "nginx: nginx_sites entry le uses tls letsencrypt, and nginx_acme_email is empty" \
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "le", "domains": ["le.example.test"], "user": "app_prod", "root": "/srv/prod/public", "tls": "letsencrypt"}]}'
+  refused nginx unknown-zone "nginx: nginx_sites entry rl has rate_limit nosuchzone, which nginx_rate_limit_zones does not define (default)" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"rl\", \"domains\": [\"rl.example.test\"], $tls_off, \"rate_limit\": \"nosuchzone\"}]}"
+  refused nginx unknown-key "nginx: nginx_sites entry x has unknown keys (priv); its keys are" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], $tls_off, \"priv\": true}]}"
+  version="$(hx nginx dpkg-query -W -f='${Version}' nginx)"
+  refused nginx other-series "nginx: installed nginx $version is series $series, nginx_version is 1.26; a series change is a separate, deliberate step" \
+    "$dir/converge.yml" "${fast[@]}" -e nginx_version=1.26
+  after="$(nginx_state)"
+  [ "$after" = "$before" ] || fail "nginx: a refused run changed the host: $(diff <(echo "$before") <(echo "$after") || true)"
+  [ "$(hx nginx dpkg-query -W -f='${Version}' nginx)" = "$version" ] || fail "nginx: nginx changed after a refused run"
+  prod_answers refusals
 }
 
 

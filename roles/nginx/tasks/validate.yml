@@ -1,0 +1,316 @@
+---
+# Every message names the entry. The site loops use nginx_sites_public (the
+# known keys with their defaults, without basic_auth); the key check alone
+# reads the key names of the entries as given. Each check relies on the ones
+# before it.
+- name: Check the series and the global settings
+  ansible.builtin.assert:
+    that:
+      - nginx_version is string and nginx_version is match('^[0-9]+[.][0-9]+$')
+      - nginx_http_extra is string
+      - nginx_acme_email is string
+      - nginx_acme_email == '' or nginx_acme_email is match('^[^@\s]+@[^@\s]+$')
+      - nginx_acme_server is string and nginx_acme_server is match('^https://\S+$')
+      - nginx_error_pages is boolean
+      - nginx_user_includes is boolean
+      - nginx_include_user is string
+    fail_msg: >-
+      nginx: nginx_version must be a major.minor series such as "1.30", nginx_http_extra a
+      string, nginx_acme_email empty or an address, nginx_acme_server an https URL,
+      nginx_error_pages and nginx_user_includes true or false, nginx_include_user a user name
+    quiet: true
+
+- name: Check the trusted proxies
+  ansible.builtin.assert:
+    that: item is string and item is match('^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$')
+    fail_msg: "nginx: nginx_real_ip_from has {{ item }}, which is not an address or CIDR"
+    quiet: true
+  loop: "{{ nginx_real_ip_from }}"
+
+- name: Check the rate-limit zones
+  ansible.builtin.assert:
+    that:
+      - item.keys() | difference(['name', 'rate', 'burst']) | length == 0
+      - item.name is defined and item.name is string and item.name is match('^[a-z0-9_]+$')
+      - nginx_rate_limit_zones | map(attribute='name', default='') | select('eq', item.name) | list | length == 1
+      - item.rate is defined and item.rate is string and item.rate is match('^[0-9]+r/[sm]$')
+      - item.burst | default(0) | string is match('^[0-9]+$')
+    fail_msg: >-
+      nginx: nginx_rate_limit_zones entry {{ item.name | default('#' ~ (nginx_index + 1)) }} is
+      invalid; it takes a unique name (^[a-z0-9_]+$), a rate such as 10r/s or 60r/m, and a burst
+      (a whole number)
+    quiet: true
+  loop: "{{ nginx_rate_limit_zones }}"
+  loop_control:
+    index_var: nginx_index
+    label: "{{ item.name | default('#' ~ (nginx_index + 1)) }}"
+
+- name: Check the site keys
+  ansible.builtin.assert:
+    that: nginx_unknown | length == 0
+    fail_msg: >-
+      nginx: nginx_sites entry {{ nginx_entry }} has unknown keys ({{ nginx_unknown | join(', ') }});
+      its keys are {{ nginx_site_keys | join(', ') }}
+    quiet: true
+  vars:
+    nginx_entry: "{{ nginx_sites_public[nginx_index].name | default('#' ~ (nginx_index + 1)) }}"
+    nginx_unknown: "{{ item | difference(nginx_site_keys) | sort }}"
+  loop: "{{ nginx_sites_key_names }}"
+  loop_control:
+    index_var: nginx_index
+    label: "{{ nginx_entry }}"
+
+- name: Check the site names
+  ansible.builtin.assert:
+    that:
+      - item.name is defined and item.name is string
+      - item.name is match('^[a-z0-9_-]+$') and item.name | length <= 64
+    fail_msg: >-
+      nginx: nginx_sites entry '{{ item.name | default('#' ~ (nginx_index + 1)) }}' has an invalid
+      name; it must match ^[a-z0-9_-]+$ and be at most 64 characters long
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    index_var: nginx_index
+    label: "{{ item.name | default('#' ~ (nginx_index + 1)) }}"
+
+- name: Check that every site name is used once
+  ansible.builtin.assert:
+    that: nginx_site_names | select('eq', item.name) | list | length == 1
+    fail_msg: "nginx: nginx_sites has more than one entry named {{ item.name }}"
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Lower-case host names: they are server_names and certificate names.
+- name: Check the domains
+  ansible.builtin.assert:
+    that:
+      - item.domains is defined and item.domains is sequence and item.domains is not string and item.domains is not mapping
+      - item.domains | length > 0
+      - item.redirect_domains is sequence and item.redirect_domains is not string and item.redirect_domains is not mapping
+      - nginx_domains | reject('string') | list | length == 0
+      - nginx_domains | reject('match', nginx_hostname) | list | length == 0
+      - nginx_domains | unique | length == nginx_domains | length
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has invalid domains; domains is a list of at least
+      one host name and redirect_domains a list (lower-case names such as shop.example.test, each
+      listed once)
+    quiet: true
+  vars:
+    nginx_hostname: '^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+    nginx_domains: "{{ (item.domains | default([]) | list) + (item.redirect_domains | list) }}"
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that every domain belongs to one site
+  ansible.builtin.assert:
+    that: nginx_taken | length == 0
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} lists the domain {{ nginx_first[0] }}, which entry
+      {{ nginx_first[1] }} lists too; a domain belongs to one site
+    quiet: true
+  vars:
+    nginx_first: "{{ nginx_taken | first | default(['', '']) }}"
+    nginx_taken: >-
+      {%- set taken = [] -%}
+      {%- for other in nginx_sites_public[:nginx_index] -%}
+      {%- for domain in item.domains + item.redirect_domains if domain in other.domains + other.redirect_domains -%}
+      {%- set _ = taken.append([domain, other.name]) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ taken }}
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    index_var: nginx_index
+    label: "{{ item.name }}"
+
+- name: Read the system users
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Read the system groups
+  ansible.builtin.getent:
+    database: group
+
+- name: Check that every site user exists
+  ansible.builtin.assert:
+    that: item.user is defined and item.user is string and item.user in ansible_facts.getent_passwd
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has the user {{ item.user | default('(none)') }},
+      which does not exist; the role does not create users
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that no site belongs to root
+  ansible.builtin.assert:
+    that:
+      - item.user != 'root'
+      - ansible_facts.getent_passwd[item.user][1] | int != 0
+    fail_msg: "nginx: nginx_sites entry {{ item.name }} has the user {{ item.user }}; a site belongs to an unprivileged user"
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the site groups
+  ansible.builtin.assert:
+    that: item.group is string and item.group in ansible_facts.getent_group
+    fail_msg: "nginx: nginx_sites entry {{ item.name }} has the group {{ item.group }}, which does not exist"
+    quiet: true
+  loop: "{{ nginx_sites_public | selectattr('group', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the primary groups of the site users
+  ansible.builtin.assert:
+    that: ansible_facts.getent_passwd[item.user][2] in nginx_gid_names
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has the user {{ item.user }}, whose primary group
+      (gid {{ ansible_facts.getent_passwd[item.user][2] }}) has no group entry; set group
+    quiet: true
+  loop: "{{ nginx_sites_public | rejectattr('group', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# www-data joins each site's group.
+- name: Check that no site has the root group
+  ansible.builtin.assert:
+    that: ansible_facts.getent_group[nginx_site_groups[item.name]][1] | int != 0
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has the group {{ nginx_site_groups[item.name] }}
+      (gid 0); www-data joins a site's group, which must be unprivileged
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the backends
+  ansible.builtin.assert:
+    that:
+      - item.php_pool is not defined or item.proxy is not defined
+    fail_msg: "nginx: nginx_sites entry {{ item.name }} has php_pool and proxy; a site has one backend at most"
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the web roots
+  ansible.builtin.assert:
+    that: item.root is defined
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }}
+      {{- (' has php_pool ' ~ item.php_pool ~ ' but no root') if item.php_pool is defined
+          else ' has no backend and no root; a static site serves its root' }}
+    quiet: true
+  loop: "{{ nginx_sites_public | rejectattr('proxy', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Paths and names go into the config as they are: no spaces, quotes, ;, { or
+# }, $ or . and .. parts.
+- name: Check the backend settings
+  ansible.builtin.assert:
+    that:
+      - item.php_pool is not defined or (item.php_pool is string and item.php_pool is match('^[a-z0-9_-]+$'))
+      - item.proxy is not defined or (item.proxy is string and item.proxy is match(nginx_url))
+      - item.root is not defined or (item.root is string and item.root is match(nginx_path))
+      - nginx_root_parts | select('in', ['.', '..']) | list | length == 0
+      - item.php_front_controller is string and item.php_front_controller is match(nginx_script)
+      - item.php_scripts is sequence and item.php_scripts is not string and item.php_scripts is not mapping
+      - item.php_scripts | reject('string') | list | length == 0
+      - item.php_scripts | reject('match', nginx_script) | list | length == 0
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has an invalid php_pool, proxy, root,
+      php_front_controller or php_scripts; php_pool is a pool name (^[a-z0-9_-]+$), proxy an
+      http(s) URL such as http://127.0.0.1:3000, root an absolute path, and the scripts paths
+      below root ending in .php, all without spaces, quotes or . and .. parts
+    quiet: true
+  vars:
+    nginx_path: '^(/[A-Za-z0-9._@+=,~-]+)+/?$'
+    nginx_url: '^https?://[A-Za-z0-9.\[\]:_-]+(/[A-Za-z0-9._~%/-]*)?$'
+    nginx_script: '^(?!.*(^|/)[.]{1,2}(/|$))[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*[.]php$'
+    nginx_root_parts: "{{ item.root | default('/') | string | split('/') }}"
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the TLS settings
+  ansible.builtin.assert:
+    that: >-
+      item.tls in ['letsencrypt', 'off']
+      or (item.tls is mapping and item.tls.keys() | sort == ['cert', 'key']
+          and item.tls.cert is string and item.tls.cert is match(nginx_path)
+          and item.tls.key is string and item.tls.key is match(nginx_path))
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has an invalid tls; it is letsencrypt, off, or
+      {cert, key} with the absolute paths of a certificate and its key
+    quiet: true
+  vars:
+    nginx_path: '^(/[A-Za-z0-9._@+=,~-]+)+$'
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the Let's Encrypt address
+  ansible.builtin.assert:
+    that: nginx_acme_email | length > 0
+    fail_msg: "nginx: nginx_sites entry {{ item.name }} uses tls letsencrypt, and nginx_acme_email is empty"
+    quiet: true
+  loop: "{{ nginx_sites_public | selectattr('tls', 'eq', 'letsencrypt') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the switches and headers
+  ansible.builtin.assert:
+    that:
+      - item.hardening is boolean and item.hsts is boolean
+      - item.user_includes is boolean and item.anubis is boolean
+      - item.headers is mapping
+      - nginx_headers | rejectattr('key', 'match', '^[A-Za-z0-9-]+$') | list | length == 0
+      - nginx_headers | rejectattr('value', 'string') | list | length == 0
+      - nginx_headers | selectattr('value', 'search', '[\r\n\x00]') | list | length == 0
+      - item.client_max_body_size | string is match('^[0-9]+[kKmMgG]?$')
+      - item.extra is string
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has an invalid hardening, hsts, user_includes,
+      anubis, headers, client_max_body_size or extra; the switches are true or false, headers
+      names (^[A-Za-z0-9-]+$) with one-line string values, client_max_body_size a size such as
+      64m, and extra a string
+    quiet: true
+  vars:
+    nginx_headers: "{{ item.headers | dict2items if item.headers is mapping else [] }}"
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the rate limits
+  ansible.builtin.assert:
+    that: item.rate_limit in nginx_rate_limit_zones | map(attribute='name') | list
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has rate_limit {{ item.rate_limit }}, which
+      nginx_rate_limit_zones does not define ({{ nginx_rate_limit_zones | map(attribute='name') | join(', ') }})
+    quiet: true
+  loop: "{{ nginx_sites_public | selectattr('rate_limit', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Basic auth and Anubis come with later versions of the role; until then a
+# site that asks for them is refused rather than served without them.
+- name: Check for settings this version does not support yet
+  ansible.builtin.assert:
+    that:
+      - "'basic_auth' not in nginx_sites_key_names[nginx_index]"
+      - not item.anubis
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} sets basic_auth or anubis, which this version of
+      the role does not support yet
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    index_var: nginx_index
+    label: "{{ item.name }}"

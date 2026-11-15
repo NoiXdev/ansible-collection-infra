@@ -1,0 +1,88 @@
+---
+- name: Install what the repository needs
+  ansible.builtin.apt:
+    name: [ca-certificates, gnupg, python3-debian]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the nginx.org apt key
+  ansible.builtin.get_url:
+    url: "{{ nginx_apt_key_url }}"
+    dest: /etc/apt/keyrings/nginx.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the key fingerprints
+  ansible.builtin.command:
+    cmd: gpg --batch --show-keys --with-colons /etc/apt/keyrings/nginx.asc
+  register: nginx_apt_key
+  changed_when: false
+  check_mode: false
+
+- name: Reject an unexpected key
+  when: nginx_apt_key.stdout is not search('^fpr:+' ~ nginx_apt_key_fingerprint | upper ~ ':', multiline=True)
+  block:
+    - name: Remove the key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/nginx.asc
+        state: absent
+
+    - name: Stop
+      ansible.builtin.fail:
+        msg: >-
+          nginx: {{ nginx_apt_key_url }} does not carry the key
+          {{ nginx_apt_key_fingerprint }}; the key file was removed.
+
+- name: Add the nginx.org apt repository
+  ansible.builtin.deb822_repository:
+    name: nginx
+    types: [deb]
+    uris: "{{ nginx_apt_url }}"
+    suites: ["{{ nginx_apt_suite }}"]
+    components: [nginx]
+    signed_by: /etc/apt/keyrings/nginx.asc
+  register: nginx_apt_repository
+
+# The pin goes in before any refresh, so a failed refresh never leaves
+# Ubuntu's nginx as the candidate.
+- name: Pin the series
+  ansible.builtin.template:
+    src: preferences.j2
+    dest: /etc/apt/preferences.d/nginx
+    owner: root
+    group: root
+    mode: "0644"
+
+# A refresh that failed in an earlier run leaves the source in place but its
+# packages out of the lists; the next run refreshes then too.
+- name: Read where nginx can come from
+  ansible.builtin.command:
+    cmd: apt-cache policy nginx
+  register: nginx_apt_policy
+  changed_when: false
+  check_mode: false
+
+- name: Refresh the package lists for the repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: >-
+    nginx_apt_repository is changed
+    or (nginx_apt_url | regex_replace('/+$', '')) not in nginx_apt_policy.stdout
+
+- name: Let unattended-upgrades install nginx.org's updates
+  ansible.builtin.template:
+    src: unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/52noixdev-nginx
+    owner: root
+    group: root
+    mode: "0644"

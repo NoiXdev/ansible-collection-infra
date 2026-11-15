@@ -1,0 +1,19 @@
+# managed by noixdev.infra (nginx role). Changes here are overwritten.
+# Included in each site with hardening on: these paths return 404.
+# Dotfiles and dot-dirs (.env, .git, ...), except /.well-known/.
+location ~ /\.(?!well-known(?:/|$)) {
+    return 404;
+}
+
+location ~* (?:^|/)composer\.(?:json|lock)$ {
+    return 404;
+}
+
+# Dumps, backups and editor files.
+location ~* \.(?:sql|bak|swp)$ {
+    return 404;
+}
+
+location ~ ~$ {
+    return 404;
+}

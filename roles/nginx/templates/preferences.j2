@@ -1,0 +1,20 @@
+{#
+  apt takes the first stanza that matches a version:
+  - Ubuntu's nginx packages are never installed;
+  - nginx.org's versions of the series win (with or without an epoch);
+  - any other version (another series) is never installed.
+  Without nginx.org's package lists there is no candidate, and the install
+  fails instead of falling back to Ubuntu's nginx.
+#}
+Explanation: managed by noixdev.infra (nginx role). Changes here are overwritten.
+Package: {{ nginx_apt_packages }}
+Pin: release o=Ubuntu
+Pin-Priority: -1
+
+Package: {{ nginx_apt_packages }}
+Pin: version /^([0-9]+:)?{{ nginx_version | regex_escape }}\./
+Pin-Priority: 990
+
+Package: {{ nginx_apt_packages }}
+Pin: version *
+Pin-Priority: -1

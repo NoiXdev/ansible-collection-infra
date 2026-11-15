@@ -1,0 +1,114 @@
+---
+# The releases nginx.org has packages for.
+nginx_supported_releases: [noble, resolute]
+
+# The origin nginx.org's Release files name, and the Maintainer field of its
+# packages (what dpkg keeps of an installed package; Ubuntu's say "Ubuntu
+# Developers").
+nginx_apt_origin: nginx
+nginx_vendor_maintainer: NGINX Packaging
+
+# The packages the apt pin covers: nginx.org's nginx and modules, and Ubuntu's
+# nginx-common, nginx-core, libnginx-mod-* and the rest.
+nginx_apt_packages: nginx nginx-* libnginx-*
+
+# Installed packages of these names that are not nginx.org's are refused.
+nginx_distro_packages: [nginx, nginx-common, nginx-core, nginx-full, nginx-light, nginx-extras]
+
+# Mozilla's "intermediate" TLS configuration (guidelines 6.0). The hybrid
+# post-quantum group needs OpenSSL 3.5, which 24.04 does not have.
+nginx_tls_ciphers: >-
+  ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305
+nginx_tls_curves: >-
+  {{ 'X25519:prime256v1:secp384r1' if ansible_facts['distribution_release'] == 'noble'
+     else 'X25519MLKEM768:X25519:prime256v1:secp384r1' }}
+
+# The directory of each site's config, and the role's own files.
+nginx_sites_dir: /etc/nginx/sites
+nginx_role_dir: /etc/nginx/noixdev
+# The groups www-data joined for the sites, so the next run can leave the
+# ones no listed site uses any more.
+nginx_groups_state: /etc/nginx/noixdev/site-groups
+
+# Where certbot keeps a tls letsencrypt site's certificate (cert name: the
+# site's name).
+nginx_letsencrypt_live: /etc/letsencrypt/live
+
+nginx_site_keys:
+  - name
+  - domains
+  - redirect_domains
+  - user
+  - group
+  - php_pool
+  - proxy
+  - root
+  - php_front_controller
+  - php_scripts
+  - tls
+  - hardening
+  - hsts
+  - headers
+  - rate_limit
+  - client_max_body_size
+  - basic_auth
+  - anubis
+  - user_includes
+  - extra
+
+nginx_site_defaults:
+  redirect_domains: []
+  php_front_controller: index.php
+  php_scripts: []
+  tls: letsencrypt
+  hardening: true
+  hsts: true
+  headers: {}
+  client_max_body_size: 64m
+  anubis: false
+  user_includes: true
+  extra: ""
+
+# The sites with their defaults and only the keys the role knows, without
+# basic_auth (it may hold passwords): every loop and template uses these. A
+# loop prints its items with -v, also with a label. The key names of each
+# entry, in list order, are nginx_sites_key_names.
+nginx_sites_key_names: "{{ nginx_sites | map('dict2items') | map('map', attribute='key') | map('list') | list }}"
+# YAML reads an unquoted tls: off as false; both mean off here.
+nginx_sites_public: >-
+  {%- set sites = [] -%}
+  {%- for site in nginx_sites -%}
+  {%- set known = site | dict2items | selectattr('key', 'in', nginx_site_keys | difference(['basic_auth'])) | items2dict -%}
+  {%- set entry = nginx_site_defaults | combine(known) -%}
+  {%- set _ = sites.append(entry | combine({'tls': 'off'}) if entry.tls is sameas false else entry) -%}
+  {%- endfor -%}
+  {{ sites }}
+nginx_site_names: "{{ nginx_sites_public | map(attribute='name', default='') | list }}"
+
+# Each site's group: the one it names, or its user's primary group. Needs the
+# getent facts of tasks/validate.yml.
+nginx_gid_names: >-
+  {{ dict(ansible_facts.getent_group.values() | map(attribute=1) | zip(ansible_facts.getent_group.keys())) }}
+nginx_site_groups: >-
+  {{ dict(nginx_site_names | zip(nginx_sites_public | map(attribute='user')
+       | map('extract', ansible_facts.getent_passwd) | map(attribute=2) | map('extract', nginx_gid_names)))
+     | combine(dict(nginx_sites_public | selectattr('group', 'defined') | map(attribute='name')
+       | zip(nginx_sites_public | selectattr('group', 'defined') | map(attribute='group')))) }}
+
+# The groups www-data joins (each site's), the ones it was in before this run
+# (the getent facts of tasks/validate.yml), the ones it joined for the sites
+# in earlier runs (nginx_groups_state, read in tasks/sites.yml), and the ones
+# to remember: those still in use, and those it joins now.
+nginx_groups_current: "{{ nginx_site_groups.values() | unique | sort }}"
+nginx_groups_before: >-
+  {{ ansible_facts.getent_group | dict2items | selectattr('value.2', 'search', '(^|,)www-data(,|$)')
+     | map(attribute='key') | list }}
+nginx_groups_previous: >-
+  {{ (nginx_groups_state_file.content | default('') | b64decode).splitlines()
+     | reject('match', '^#') | reject('eq', '') | list }}
+nginx_groups_joined: >-
+  {{ (nginx_groups_previous | intersect(nginx_groups_current))
+     | union(nginx_groups_current | difference(nginx_groups_before)) | sort }}
+
+# IPv6 listeners only where the host has IPv6.
+nginx_ipv6: "{{ ansible_facts.all_ipv6_addresses | default([]) | length > 0 }}"

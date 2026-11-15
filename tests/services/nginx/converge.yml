@@ -1,0 +1,239 @@
+---
+# The backends first: the site users and web roots, a self-signed certificate
+# for *.example.test, the upstream of the proxy site and the php pool
+# production (the php role on 24.04; the php role has no 26.04 packages yet,
+# so there a pool of Ubuntu's php-fpm on the same socket stands in). Then the
+# nginx role with three sites. The knobs below change the sites between runs;
+# -e nginx_sites=[...] replaces the whole list for the invalid cases.
+- name: Prepare the backends
+  hosts: testhost
+  vars:
+    # false skips this play (the refusals change nothing, and later runs need
+    # nothing new from it).
+    nginx_test_prepare: true
+    php_versions:
+      - version: "8.3"
+    php_pools:
+      - name: production
+        version: "8.3"
+        user: app_prod
+  tasks:
+    - name: Prepare the backends
+      when: nginx_test_prepare | bool
+      block:
+        - name: Install the test tools
+          ansible.builtin.apt:
+            name: [curl, openssl, procps]
+            state: present
+            update_cache: true
+            cache_valid_time: 3600
+
+        - name: Create the site users
+          ansible.builtin.user:
+            name: "{{ item }}"
+            shell: /bin/bash
+          loop: [app_prod, app_node, app_static]
+
+        # Group-readable only: nginx reads them through the site's group.
+        - name: Create the web roots
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: directory
+            owner: "{{ item.user }}"
+            group: "{{ item.user }}"
+            mode: "0750"
+          loop:
+            - {path: /srv/prod, user: app_prod}
+            - {path: /srv/prod/public, user: app_prod}
+            - {path: /srv/prod/public/setup, user: app_prod}
+            - {path: /srv/prod/public/uploads, user: app_prod}
+            - {path: /srv/prod/public/.git, user: app_prod}
+            - {path: /srv/prod/public/.well-known, user: app_prod}
+            - {path: /srv/static, user: app_static}
+          loop_control:
+            label: "{{ item.path }}"
+
+        - name: Install the front controller
+          ansible.builtin.copy:
+            src: index.php
+            dest: /srv/prod/public/index.php
+            owner: app_prod
+            group: app_prod
+            mode: "0640"
+
+        # Every file exists, so a 404 comes from nginx, not from a missing file.
+        - name: Install the other files of the web roots
+          ansible.builtin.copy:
+            content: "{{ item.content }}"
+            dest: "{{ item.dest }}"
+            owner: "{{ item.user }}"
+            group: "{{ item.user }}"
+            mode: "0640"
+          loop:
+            - {dest: /srv/prod/public/setup/install.php, user: app_prod, content: "<?php echo \"install ran\\n\";\n"}
+            - {dest: /srv/prod/public/uploads/evil.php, user: app_prod, content: "<?php echo \"evil ran\\n\";\n"}
+            - {dest: /srv/prod/public/.env, user: app_prod, content: "APP_KEY=s3cr3t-env\n"}
+            - {dest: /srv/prod/public/.git/config, user: app_prod, content: "[core]\n"}
+            - {dest: /srv/prod/public/composer.json, user: app_prod, content: "{}\n"}
+            - {dest: /srv/prod/public/composer.lock, user: app_prod, content: "{}\n"}
+            - {dest: /srv/prod/public/dump.sql, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/a.bak, user: app_prod, content: "backup\n"}
+            - {dest: /srv/prod/public/a.swp, user: app_prod, content: "swap\n"}
+            - {dest: /srv/prod/public/a~, user: app_prod, content: "editor\n"}
+            - {dest: /srv/prod/public/.well-known/x.txt, user: app_prod, content: "well-known\n"}
+            - {dest: /srv/static/index.html, user: app_static, content: "static index\n"}
+            - {dest: /srv/static/.env, user: app_static, content: "STATIC_ENV=visible\n"}
+          loop_control:
+            label: "{{ item.dest }}"
+
+        - name: Create the certificate directory
+          ansible.builtin.file:
+            path: /etc/ssl/noixdev-test
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Create a self-signed certificate for *.example.test
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - req
+              - -x509
+              - -newkey
+              - rsa:2048
+              - -nodes
+              - -days
+              - "30"
+              - -subj
+              - /CN=*.example.test
+              - -addext
+              - subjectAltName=DNS:*.example.test,DNS:*.prod.example.test
+              - -keyout
+              - /etc/ssl/noixdev-test/example.test.key
+              - -out
+              - /etc/ssl/noixdev-test/example.test.crt
+            creates: /etc/ssl/noixdev-test/example.test.crt
+
+        - name: Install the upstream
+          ansible.builtin.copy:
+            src: upstream.py
+            dest: /usr/local/bin/noixdev-test-upstream
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Install the upstream's unit
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=HTTP and WebSocket echo for the nginx tests
+              [Service]
+              User=app_node
+              ExecStart=/usr/bin/python3 /usr/local/bin/noixdev-test-upstream serve 127.0.0.1 3000
+              [Install]
+              WantedBy=multi-user.target
+            dest: /etc/systemd/system/noixdev-test-upstream.service
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Start the upstream
+          ansible.builtin.systemd_service:
+            name: noixdev-test-upstream
+            state: started
+            enabled: true
+            daemon_reload: true
+
+        - name: Run the pool with the php role
+          ansible.builtin.include_role:
+            name: noixdev.infra.php
+          when: ansible_facts['distribution_release'] == 'noble'
+
+        - name: Run the pool with Ubuntu's php-fpm
+          when: ansible_facts['distribution_release'] != 'noble'
+          vars:
+            nginx_test_php_dir: "{{ nginx_test_php_dirs.files | map(attribute='path') | first }}"
+          block:
+            - name: Install Ubuntu's php-fpm
+              ansible.builtin.apt:
+                name: php-fpm
+                state: present
+
+            - name: Find Ubuntu's php version
+              ansible.builtin.find:
+                paths: /etc/php
+                file_type: directory
+                recurse: false
+              register: nginx_test_php_dirs
+
+            - name: Write the pool production
+              ansible.builtin.copy:
+                content: |
+                  [production]
+                  user = app_prod
+                  group = app_prod
+                  listen = /run/php/production.sock
+                  listen.owner = app_prod
+                  listen.group = www-data
+                  listen.mode = 0660
+                  pm = ondemand
+                  pm.max_children = 2
+                dest: "{{ nginx_test_php_dir }}/fpm/pool.d/production.conf"
+                owner: root
+                group: root
+                mode: "0644"
+              register: nginx_test_php_pool
+
+            - name: Remove the package's www pool
+              ansible.builtin.file:
+                path: "{{ nginx_test_php_dir }}/fpm/pool.d/www.conf"
+                state: absent
+              register: nginx_test_php_www
+
+            - name: Restart php-fpm for the pool
+              ansible.builtin.systemd_service:
+                name: "php{{ nginx_test_php_dir | basename }}-fpm"
+                state: "{{ 'restarted' if nginx_test_php_pool is changed or nginx_test_php_www is changed else 'started' }}"
+
+- name: Converge the nginx role
+  hosts: testhost
+  vars:
+    nginx_test_static: true
+    nginx_test_static_hardening: true
+    nginx_test_static_hsts: true
+    nginx_test_static_headers: {}
+    nginx_test_prod_extra: ""
+    nginx_test_tls:
+      cert: /etc/ssl/noixdev-test/example.test.crt
+      key: /etc/ssl/noixdev-test/example.test.key
+    nginx_test_prod:
+      name: prod
+      domains: [prod.example.test]
+      redirect_domains: [www.prod.example.test]
+      user: app_prod
+      php_pool: production
+      root: /srv/prod/public
+      php_scripts: [setup/install.php]
+      tls: "{{ nginx_test_tls }}"
+      extra: "{{ nginx_test_prod_extra }}"
+    nginx_test_node:
+      name: node
+      domains: [node.example.test]
+      user: app_node
+      proxy: http://127.0.0.1:3000
+      tls: "{{ nginx_test_tls }}"
+    nginx_test_static_site:
+      name: static
+      domains: [static.example.test]
+      user: app_static
+      root: /srv/static
+      tls: "{{ nginx_test_tls }}"
+      hardening: "{{ nginx_test_static_hardening }}"
+      hsts: "{{ nginx_test_static_hsts }}"
+      headers: "{{ nginx_test_static_headers }}"
+    nginx_sites: >-
+      {{ [nginx_test_prod, nginx_test_node]
+         + ([nginx_test_static_site] if nginx_test_static | bool else []) }}
+  roles:
+    - noixdev.infra.nginx

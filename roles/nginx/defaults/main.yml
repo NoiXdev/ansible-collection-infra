@@ -1,0 +1,63 @@
+---
+# major.minor stable series from nginx.org's repository (1.30 is the stable
+# series as of 2026-11; 1.31 is mainline). Updates within the series come
+# through unattended-upgrades. An nginx of another series that is installed
+# already is refused, never replaced.
+nginx_version: "1.30"
+
+nginx_apt_url: https://nginx.org/packages/ubuntu
+nginx_apt_suite: "{{ ansible_facts['distribution_release'] }}"
+nginx_apt_key_url: https://nginx.org/keys/nginx_signing.key
+# The key that signs the repository (nginx signing key <signing-key-2@nginx.com>).
+nginx_apt_key_fingerprint: 8540A6F18833A80E9C1653A42FD21310B49F6B46
+
+# The complete list of sites on the host: a site that is not listed is removed
+# (its config; its web root, logs and certificate stay).
+#   - name: prod                       # ^[a-z0-9_-]+$, unique
+#     domains: [shop.example.test]     # the first is the canonical name
+#     redirect_domains: [www.shop.example.test]   # 301 to the canonical name
+#     user: app_prod                   # must exist, never root
+#     group: app_prod                  # the user's primary group by default;
+#                                      # nginx's www-data joins it
+#     # One backend at most: php_pool or proxy; neither serves root as static
+#     # files.
+#     php_pool: production             # fastcgi to /run/php/production.sock
+#     root: /srv/prod/public           # required for php_pool and static
+#     php_front_controller: index.php  # the default
+#     php_scripts: [setup/install.php] # other .php files passed to PHP
+#     # proxy: http://127.0.0.1:3000   # with WebSocket upgrades
+#     tls: letsencrypt                 # the default; off, or {cert, key}
+#     hardening: true                  # headers, HSTS, blocked paths
+#     hsts: true
+#     headers: {}                      # added or replaced; "" removes one
+#     rate_limit: default              # a zone of nginx_rate_limit_zones
+#     client_max_body_size: 64m
+#     user_includes: true
+#     extra: ""                        # raw config inside the server block
+nginx_sites: []
+
+# Raw config at http level.
+nginx_http_extra: ""
+
+# Proxies whose X-Forwarded-For is trusted (a CDN or a load balancer in
+# front); addresses or CIDRs.
+nginx_real_ip_from: []
+
+# Rate-limit zones a site can name in rate_limit, per client address.
+nginx_rate_limit_zones:
+  - name: default
+    rate: 10r/s
+    burst: 20
+
+# The noix error pages for nginx's own error responses.
+nginx_error_pages: true
+
+# Deploy snippets: per site in ~<user>/.config/nginx/<name>/, and at http
+# level in ~<nginx_include_user>/.config/nginx/global/ (only when set).
+nginx_user_includes: true
+nginx_include_user: ""
+
+# Let's Encrypt: the account address (required when a site uses tls
+# letsencrypt) and the ACME directory.
+nginx_acme_email: ""
+nginx_acme_server: https://acme-v02.api.letsencrypt.org/directory
