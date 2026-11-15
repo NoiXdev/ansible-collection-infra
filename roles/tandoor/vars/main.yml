@@ -133,8 +133,12 @@ tandoor_restore_hint: >-
   docker compose exec -T db pg_restore --single-transaction -U tandoor -d
   tandoor < {{ tandoor_backup | default('?') }}/tandoor.dump;
   {{ tandoor_restore_media_hint }}then run docker compose up -d.
-# The local media step of tandoor_restore_hint, with its trailing space.
+# The media step of tandoor_restore_hint, with its trailing space: the local
+# media from the backup, or with S3 a note on the secret file, which the
+# backup does not hold.
 tandoor_restore_media_hint: >-
-  {{ '' if tandoor_s3_enabled | bool
+  {{ ('the backup does not hold ' ~ tandoor_s3_secret_file ~ ': if the update changed'
+      ~ ' tandoor_s3.secret_key, put the previous key back into it; ')
+     if tandoor_s3_enabled | bool
      else 'put ' ~ tandoor_backup | default('?') ~ '/mediafiles back in place of '
           ~ tandoor_data_dir ~ '/mediafiles (cp -al); ' }}

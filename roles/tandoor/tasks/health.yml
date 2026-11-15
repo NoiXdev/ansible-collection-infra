@@ -1,16 +1,16 @@
 ---
-# Waits up to tandoor_health_timeout seconds until the web and the database
-# containers report the health status healthy, and sets tandoor_healthy and
-# tandoor_health_lines (service, state and health of each container). The
-# web container's check asks Django through the image's nginx. Never fails by
-# itself.
+# Waits up to tandoor_health_timeout seconds (tandoor_health_wait, when the
+# includer sets it) until the web and the database containers report the
+# health status healthy, and sets tandoor_healthy and tandoor_health_lines
+# (service, state and health of each container). The web container's check
+# asks Django through the image's nginx. Never fails by itself.
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:
     tandoor_health_start: "{{ now().timestamp() }}"
 
 # retries is an upper bound (every attempt takes at least the delay); the
-# deadline ends the wait after tandoor_health_timeout seconds.
+# deadline ends the wait after those seconds.
 - name: Wait until the web and the database containers are healthy
   ansible.builtin.command:
     argv: [docker, compose, ps, --all, --format, "{{ '{{.Service}} {{.State}} {{.Health}}' }}"]
@@ -18,8 +18,8 @@
   register: tandoor_health
   until: >-
     ['web running healthy', 'db running healthy'] | difference(tandoor_health.stdout_lines | default([])) | length == 0
-    or now().timestamp() - tandoor_health_start | float >= tandoor_health_timeout | int
-  retries: "{{ (tandoor_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+    or now().timestamp() - tandoor_health_start | float >= tandoor_health_wait | default(tandoor_health_timeout) | int
+  retries: "{{ (tandoor_health_wait | default(tandoor_health_timeout) | int / 5) | round(0, 'ceil') | int + 1 }}"
   delay: 5
   changed_when: false
   failed_when: false

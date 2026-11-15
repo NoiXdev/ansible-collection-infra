@@ -4,7 +4,8 @@
 # before the run, the database recreated empty and loaded from the dump,
 # with local media the media moved aside to <backup>-failed and the copy put
 # back (as hard links again), then the previous stack started and checked
-# with health.yml. The previous files come first, so the database is
+# with health.yml, both waits bounded by tandoor_rollback_timeout. The
+# previous files come first, so the database is
 # restored in the previous database container. Media in S3 stay as they are:
 # the backup has none. Never fails by itself: tandoor_healthy says whether
 # Tandoor is healthy again, tandoor_restore_error what failed.
@@ -48,7 +49,7 @@
       ansible.builtin.set_fact:
         tandoor_wait_start: "{{ now().timestamp() }}"
 
-    # Fails after tandoor_health_timeout seconds; retries is an upper bound.
+    # Fails after tandoor_rollback_timeout seconds; retries is an upper bound.
     - name: Wait for the database
       ansible.builtin.command:
         argv: [docker, compose, exec, -T, db, pg_isready, --username=tandoor, --dbname=tandoor, --timeout=2]
@@ -56,8 +57,8 @@
       register: tandoor_db_ready
       until: >-
         tandoor_db_ready.rc == 0
-        or now().timestamp() - tandoor_wait_start | float >= tandoor_health_timeout | int
-      retries: "{{ (tandoor_health_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
+        or now().timestamp() - tandoor_wait_start | float >= tandoor_rollback_timeout | int
+      retries: "{{ (tandoor_rollback_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
       delay: 2
       changed_when: false
 
@@ -105,13 +106,15 @@
 
     - name: Check that the previous Tandoor is healthy
       ansible.builtin.include_tasks: health.yml
+      vars:
+        tandoor_health_wait: "{{ tandoor_rollback_timeout }}"
 
     - name: Note the rollback
       ansible.builtin.set_fact:
         tandoor_restore_error: >-
           {{ '' if tandoor_healthy
              else 'Tandoor ' ~ tandoor_installed_version ~ ' is not healthy within '
-                  ~ tandoor_health_timeout ~ ' seconds (' ~ tandoor_health_lines | join('; ') ~ ')' }}
+                  ~ tandoor_rollback_timeout ~ ' seconds (' ~ tandoor_health_lines | join('; ') ~ ')' }}
 
   rescue:
     - name: Note the failed rollback

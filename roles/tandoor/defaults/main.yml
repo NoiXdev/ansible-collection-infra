@@ -99,3 +99,6 @@ tandoor_env: {}
 tandoor_dumps_keep: 3
 # Seconds to wait for Tandoor and the database to become healthy.
 tandoor_health_timeout: 300
+# Seconds a rollback after a failed update waits for the previous version
+# and its database.
+tandoor_rollback_timeout: "{{ tandoor_health_timeout }}"

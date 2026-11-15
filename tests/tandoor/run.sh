@@ -35,7 +35,9 @@
 #             an update to an image that exits at once, with local media and
 #             with media in S3: rolled back with the recipe and its image, the
 #             marker that names the failed version and blocks it, and a run
-#             with another version that removes the marker
+#             with another version that removes the marker; then a rollback
+#             that fails too (the previous image cannot be started), whose
+#             marker refuses every version
 # The failed install and the update run at -v, the install, a reconfigure
 # and the failed update at -vvv, every repeated converge at -v; their output
 # must not hold a test secret. Every successful converge is repeated and must
@@ -512,12 +514,15 @@ test_update() {
 }
 
 # A failed update of the installation on the test host: to the new release of
-# a test image that exits at once. failed_update <log> [converge options...].
+# a test image that exits at once, which fails fast (30 seconds), while the
+# rollback has the time a slow start of the previous release may need.
+# failed_update <log> [converge options...].
 failed_update() {
   local name="$1"
   shift
   hx docker tag "$busybox" "test.invalid/recipes:$version"
-  play_fails "$name" "$here/converge.yml" "$@" -e tandoor_image=test.invalid/recipes -e tandoor_health_timeout=30
+  play_fails "$name" "$here/converge.yml" "$@" -e tandoor_image=test.invalid/recipes -e tandoor_health_timeout=30 \
+    -e tandoor_rollback_timeout=300
   expect_in_log "$name" "update from $old_version to $version in $dir failed, rolled back to $old_version"
   expect_no_secrets "$name"
   [ "$(web)" = "${old_images[0]} running healthy" ] || fail "web after the rollback: $(web)"
@@ -551,6 +556,35 @@ test_failed_update() {
   hx test ! -e "$marker" || fail "a successful run with $old_version kept the marker"
   expect_idempotent -e "tandoor_version=$old_version"
 
+  echo "== a failed rollback must refuse every version until Tandoor is restored by hand"
+  # The installed release under a name that is then untagged: the rollback
+  # cannot start it again (no such registry), after the database was
+  # recreated and loaded.
+  hx docker tag "${old_images[0]}" "test.invalid/recipes:$old_version"
+  converge -e "tandoor_version=$old_version" -e tandoor_image=test.invalid/recipes
+  hx docker rmi "test.invalid/recipes:$old_version" >/dev/null
+  play_fails rollback-failed "$here/converge.yml" -v -e tandoor_image=test.invalid/recipes -e tandoor_health_timeout=30
+  expect_in_log rollback-failed "update from $old_version to $version in $dir failed"
+  expect_in_log rollback-failed "and rolling back to $old_version failed too"
+  expect_in_log rollback-failed "Roll back by hand in $dir"
+  expect_no_secrets rollback-failed
+  hx grep -qx "failed_version: $version" "$marker" || fail "the marker does not name $version: $(hx cat "$marker")"
+  hx grep -qx "rolled_back_to: null" "$marker" || fail "the marker records a rollback: $(hx cat "$marker")"
+  backup="$(hx sed -n 's/^backup: //p' "$marker")"
+  note_untouched
+  # A newer release than the failed one: it would back up the database the
+  # failed rollback left and remove the marker.
+  play_fails rollback-blocked "$here/converge.yml" -e tandoor_version=2.99.0
+  expect_in_log rollback-blocked "$marker exists: the Tandoor update to $version failed"
+  expect_in_log rollback-blocked "rolling back failed too"
+  expect_in_log rollback-blocked "the data is in the backup $backup"
+  expect_in_log rollback-blocked "The role refuses every version"
+  if grep -qF -- "set tandoor_version to another version" "$out/rollback-blocked.log"; then
+    fail "the refusal after a failed rollback suggests another version"
+  fi
+  expect_untouched rollback-blocked
+  hx test -e "$marker" || fail "the refused run removed the marker"
+
   echo "== a failed update with media in S3 must roll back the database and keep the images"
   new_host
   load_images
@@ -562,6 +596,12 @@ test_failed_update() {
   failed_update update-failed-s3 -v -e "@$here/s3.yml"
   expect_recipe "after the rollback with media in S3"
   expect_in_log update-failed-s3 "the media in S3 stay as they are. It does not try $version again"
+  note_untouched
+  play_fails update-blocked-s3 "$here/converge.yml" -v -e "@$here/s3.yml"
+  expect_in_log update-blocked-s3 "$marker exists: the Tandoor update to $version failed"
+  expect_in_log update-blocked-s3 "rolled back to $old_version"
+  expect_no_secrets update-blocked-s3
+  expect_untouched update-blocked-s3
   hx test ! -e "$backup/mediafiles" || fail "the backup of an S3 installation has mediafiles"
   hx test ! -e "$backup-failed" || fail "the rollback of an S3 installation made $backup-failed"
   hx test ! -e "$dir/data/mediafiles" || fail "the rollback of an S3 installation made $dir/data/mediafiles"

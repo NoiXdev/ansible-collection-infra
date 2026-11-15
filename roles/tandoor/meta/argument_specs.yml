@@ -162,3 +162,8 @@ argument_specs:
       tandoor_health_timeout:
         type: int
         description: Seconds to wait for Tandoor and the database to become healthy.
+      tandoor_rollback_timeout:
+        type: int
+        description: >-
+          Seconds a rollback after a failed update waits for the previous
+          version and its database (default tandoor_health_timeout).

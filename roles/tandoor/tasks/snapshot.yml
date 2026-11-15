@@ -3,8 +3,11 @@
 # tandoor_backup_dir/<UTC time>-<installed version>/ (mode 0700) with
 # tandoor.dump (pg_dump -Fc, read back in full with pg_restore), with local
 # media mediafiles/ (a hard-link copy, cp -al: same filesystem, no space),
-# and compose.yaml (the compose file it ran with). Media in S3 are not copied:
-# the update does not touch the bucket. Made below <name>.partial and renamed
+# and compose.yaml (the compose file it ran with). The hard links hold only
+# because Tandoor writes media as new files: a version that rewrote files in
+# place would change the backup too. Media in S3 are not copied, and neither
+# is the S3 secret file: the update does not touch the bucket. Made below
+# <name>.partial and renamed
 # once complete; sets tandoor_backup last, so a failure before that has
 # changed nothing but the partial directory, which the caller removes.
 
