@@ -39,9 +39,8 @@ tandoor_marker_file: "{{ tandoor_dir }}/update-failed"
 # refuses.
 tandoor_install_marker: "{{ tandoor_dir }}/install-incomplete"
 
-# The compose file on disk, parsed; empty when there is none.
-# tandoor_compose_before is set by state.yml.
-tandoor_compose_on_disk: "{{ (tandoor_compose_before | default('', true) or '{}') | from_yaml }}"
+# tandoor_compose_on_disk, the compose file on disk parsed (empty when there
+# is none), is set by state.yml, which parses it in a no_log task.
 # The Tandoor version of the compose file on disk (the tag of the web image),
 # empty when there is none.
 tandoor_installed_version: >-

@@ -6,18 +6,20 @@
 #                disk, or the S3 secret file from the secret key
 #   noop         everything as the role writes it
 # Also sets tandoor_installed (a compose file exists), tandoor_compose_before
-# (the compose file on disk, which tandoor_installed_version reads, and which
-# a rollback puts back), tandoor_s3_secret_read (with S3, the secret file on
-# disk), tandoor_data_found (the subdirectories of tandoor_data_subdirs that
-# exist), tandoor_data_present (any of postgres and mediafiles that exist) and
-# tandoor_down (the expected services that are not running). Changes
-# nothing; refuses, before anything else, a tandoor_data_dir that is not a
-# mountpoint (with tandoor_data_dir_mountpoint) and a compose file without
-# the data subdirectories of its media (an unmounted volume); then an install
-# that did not complete (its marker), left-over data without a compose file,
-# a change between local media and S3, a compose file without a Tandoor
-# version, a downgrade, a tandoor_db_password that the database does not
-# take, and a PostgreSQL major other than the database's.
+# (the compose file on disk, which a rollback puts back),
+# tandoor_compose_on_disk (it parsed, which tandoor_installed_version and
+# tandoor_installed_media read), tandoor_s3_secret_read (with S3, the secret
+# file on disk), tandoor_data_found (the subdirectories of
+# tandoor_data_subdirs that exist), tandoor_data_present (any of postgres and
+# mediafiles that exist) and tandoor_down (the expected services that are not
+# running). Changes nothing; refuses, before anything else, a
+# tandoor_data_dir that is not a mountpoint (with
+# tandoor_data_dir_mountpoint), a compose file that is not YAML and a compose
+# file without the data subdirectories of its media (an unmounted volume);
+# then an install that did not complete (its marker), left-over data without
+# a compose file, a change between local media and S3, a compose file
+# without a Tandoor version, a downgrade, a tandoor_db_password that the
+# database does not take, and a PostgreSQL major other than the database's.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -67,6 +69,28 @@
       {{ tandoor_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item')
          | select('in', tandoor_data_subdirs) | list }}
   no_log: true
+
+# Once, in a no_log task: an error of the YAML parser can quote a line of the
+# file, which holds the secret key and the passwords, so a file that is not
+# YAML gets a message of its own without the error. One that is YAML but not
+# a mapping parses as empty and names no version, which is refused below.
+- name: Check that the compose file is YAML
+  block:
+    - name: Parse the compose file
+      ansible.builtin.set_fact:
+        tandoor_compose_on_disk: "{{ tandoor_compose_parsed if tandoor_compose_parsed is mapping else {} }}"
+      vars:
+        tandoor_compose_parsed: "{{ (tandoor_compose_before or '{}') | from_yaml }}"
+      no_log: true
+  rescue:
+    - name: Fail on a compose file that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ tandoor_compose_file }} is not YAML, so the role cannot tell what
+          is installed and changes nothing. The parser's error is not shown:
+          it can quote a line of the file, which holds the secret key and the
+          passwords. Put back the compose file the role wrote (docker compose
+          config --quiet in {{ tandoor_dir }} shows the error).
 
 # Only install creates the subdirectories, and the containers do not create a
 # missing one, so their absence beside a compose file is data that is not
