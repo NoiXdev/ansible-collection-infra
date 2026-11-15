@@ -26,6 +26,15 @@
 #             reach n8n; with n8n_traefik_public_api /api/v1/ reaches n8n too
 #             (401 without a key); with the middleware on the public router
 #             only, the reverse
+#   queue     an install in queue mode with one worker (verify.yml: Valkey
+#             without a volume or bind, the workers with the main instance's
+#             image and environment, all healthy); the production webhook
+#             answers through the main instance and its execution runs on the
+#             worker (the main instance's log enqueues it, the worker's log
+#             starts it); a run without changes that fails on a stopped
+#             worker; two workers, then back to normal mode (no Valkey,
+#             no workers), then queue mode again, each a reconfigure that
+#             keeps the workflow active and its webhook answering
 # The failed install runs at -v, the install and the refusals on an
 # installation at -vvv, every other converge at -v; their output must not
 # hold a test secret (nor the owner's password hash). Every successful
@@ -53,6 +62,7 @@ version="$(value_of "$defaults" n8n_version)"
 images=(
   "$(value_of "$defaults" n8n_image):$version"
   "$(value_of "$defaults" n8n_postgres_image)"
+  "$(value_of "$defaults" n8n_redis_image)"
   "$(value_of "$traefik_defaults" traefik_image)"
   "$(value_of "$traefik_defaults" traefik_socket_proxy_image)"
 )
@@ -262,6 +272,52 @@ set_db_password() {
 }
 # The id of the database container.
 db_id() { hx sh -c "cd $dir && docker compose ps --quiet db"; }
+# Runs SQL from the argument in n8n's database (the local socket needs no
+# password) and prints the rows unaligned: sql <statement>.
+sql() {
+  printf '%s\n' "$1" \
+    | docker exec -i "$host" sh -c "cd $dir && docker compose exec -T db psql -q -U n8n -d n8n -tA -v ON_ERROR_STOP=1"
+}
+# The log of a compose service: logs <service>.
+logs() { hx sh -c "cd $dir && docker compose logs --no-color --no-log-prefix $1"; }
+# Fails unless the services of the compose project are exactly these:
+# expect_services <service...>.
+expect_services() {
+  local found
+  found="$(hx sh -c "cd $dir && docker compose ps --all --format '{{.Service}}'" | sort | tr '\n' ' ')"
+  [ "$found" = "$(printf '%s\n' "$@" | sort | tr '\n' ' ')" ] || fail "the services are $found, not $*"
+}
+# Fails unless the webhook workflow is active, as the database records it
+# (no login: n8n allows five a minute).
+expect_workflow_active() {
+  local active
+  active="$(sql "SELECT active FROM workflow_entity WHERE name = 'noix-test'")"
+  [ "$active" = t ] || fail "the webhook workflow is not active: '$active'"
+}
+# Calls the production webhook and fails unless it answers and its
+# execution ran on one of the workers: the main instance's log enqueues it
+# and a worker's log starts it. expect_ran_on_worker <worker service...>.
+expect_ran_on_worker() {
+  local id worker
+  expect_answer 200 '"ok":true' /webhook/noix-test -X POST
+  id="$(sql 'SELECT max(id) FROM execution_entity')"
+  [ -n "$id" ] || fail "the webhook left no execution in the database"
+  logs n8n | grep -qF "Enqueued execution $id (job" || fail "the main instance did not enqueue execution $id"
+  for _ in $(seq 10); do
+    for worker in "$@"; do
+      logs "$worker" | grep -qF "Worker started execution $id (job" && return 0
+    done
+    sleep 1
+  done
+  fail "no worker of $* started execution $id"
+}
+# Fails unless the Valkey container has no mount at all (no volume, no
+# bind): it keeps the queue in memory only.
+expect_redis_without_mounts() {
+  local mounts
+  mounts="$(hx sh -c "docker inspect --format '{{json .Mounts}}' \$(cd $dir && docker compose ps --quiet redis)")"
+  [ "$mounts" = '[]' ] || fail "the redis service has mounts: $mounts"
+}
 
 # The scenarios, run by the loop at the end.
 test_refusals() {
@@ -461,12 +517,69 @@ test_router() {
   expect_idempotent ${settings[@]+"${settings[@]}"}
 }
 
+test_queue() {
+  echo "== queue mode: the webhook's execution must run on the worker"
+  new_host
+  load_images
+  converge -vvv -e n8n_workers=1
+  expect_no_secrets converge
+  note_owner_hash
+  expect_no_secrets converge
+  expect_idempotent -e n8n_workers=1
+  expect_services db n8n redis worker-1
+  expect_redis_without_mounts
+  # Creates and activates the webhook workflow, which answers through the
+  # main instance.
+  play "$here/verify.yml" -e n8n_workers=1
+  expect_ran_on_worker worker-1
+
+  echo "== a run without changes must fail on a stopped worker and start nothing"
+  hx sh -c "cd $dir && docker compose stop worker-1" >/dev/null 2>&1
+  play_fails worker-stopped "$here/converge.yml" -e n8n_workers=1
+  expect_in_log worker-stopped "the services worker-1 are not running"
+  expect_unchanged worker-stopped
+  [ -z "$(hx sh -c "cd $dir && docker compose ps --quiet worker-1")" ] || fail "the run started the worker"
+  hx sh -c "cd $dir && docker compose start worker-1" >/dev/null 2>&1
+
+  echo "== a second worker must be a reconfigure"
+  converge -v -e n8n_workers=2
+  expect_no_secrets converge
+  grep -q "reconfigure.yml" "$out/converge.log" || fail "the second worker was not a reconfigure"
+  expect_idempotent -e n8n_workers=2
+  expect_services db n8n redis worker-1 worker-2
+  expect_redis_without_mounts
+  wait_healthy
+  play "$here/verify.yml" -e n8n_workers=2
+  expect_workflow_active
+  expect_ran_on_worker worker-1 worker-2
+
+  echo "== back to normal mode: no Valkey, no workers, the workflow still active"
+  converge -v -e n8n_workers=0
+  expect_no_secrets converge
+  grep -q "reconfigure.yml" "$out/converge.log" || fail "normal mode was not a reconfigure"
+  expect_idempotent -e n8n_workers=0
+  expect_services db n8n
+  wait_healthy
+  expect_workflow_active
+  play "$here/verify.yml" -e n8n_workers=0
+
+  echo "== queue mode again: the workflow still active, its execution on the worker"
+  converge -v -e n8n_workers=1
+  expect_no_secrets converge
+  grep -q "reconfigure.yml" "$out/converge.log" || fail "queue mode was not a reconfigure"
+  expect_idempotent -e n8n_workers=1
+  expect_services db n8n redis worker-1
+  wait_healthy
+  expect_workflow_active
+  expect_ran_on_worker worker-1
+}
+
 # All scenarios by default; NOIXDEV_INFRA_N8N_TESTS="refusals router" runs
 # only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router}; do
+for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue}; do
   case "$scenario" in
-    refusals | install | router) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (refusals, install, router)" ;;
+    refusals | install | router | queue) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (refusals, install, router, queue)" ;;
   esac
 done
 

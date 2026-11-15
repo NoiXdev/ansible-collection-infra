@@ -3,7 +3,8 @@
 # sets it) until every container of n8n_services reports the health status
 # healthy, and sets n8n_healthy and n8n_health_lines (service, state and
 # health of each container). n8n's own check asks /healthz/readiness, which
-# needs the database. Never fails by itself.
+# needs the database, and on a worker Valkey too (QUEUE_HEALTH_CHECK_ACTIVE);
+# Valkey's answers a ping. Never fails by itself.
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:

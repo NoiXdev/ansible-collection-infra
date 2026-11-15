@@ -69,7 +69,10 @@ argument_specs:
           instead of the UI router.
       n8n_workers:
         type: int
-        description: Worker containers; 0 runs n8n in its normal mode.
+        description: >-
+          Worker containers; 0 runs n8n in its normal mode, 1 or more in
+          queue mode with Valkey and that many workers. A change is a
+          reconfigure.
       n8n_encryption_key:
         type: str
         no_log: true
@@ -114,4 +117,6 @@ argument_specs:
         description: Number of dumps kept before updates.
       n8n_health_timeout:
         type: int
-        description: Seconds to wait for n8n and the database to become healthy.
+        description: >-
+          Seconds to wait for n8n, its workers, Valkey and the database to
+          become healthy.

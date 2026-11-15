@@ -39,7 +39,14 @@ n8n_traefik_middlewares: []
 n8n_traefik_webhook_middlewares: []
 n8n_traefik_public_api: false
 
-# Worker containers: 0 runs n8n in its normal mode.
+# Worker containers: 0 runs n8n in its normal mode, where the main instance
+# runs every execution. 1 or more runs queue mode: the main instance queues
+# the executions of active workflows (production webhooks, triggers) in
+# Valkey (n8n_redis_image) and that many workers, with the main instance's
+# image, version and settings, run them; executions started by hand in the
+# editor stay on the main instance unless n8n_env sets
+# OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS to true. A change is a reconfigure
+# that moves no data; executions running at that moment are lost.
 n8n_workers: 0
 
 # Required on every run, without a default; keep them in a vault:
@@ -57,7 +64,9 @@ n8n_workers: 0
 # PostgreSQL 18 or newer: older images keep the database on a volume of their
 # own, outside n8n_data_dir, and are refused.
 n8n_postgres_image: docker.io/library/postgres:18
-# Redis for the queue (n8n_workers 1 or more); it keeps no data on disk.
+# Redis for the queue (n8n_workers 1 or more); it keeps no data on disk
+# (no snapshot, no append-only file, no volume): the executions live in
+# PostgreSQL.
 n8n_redis_image: docker.io/valkey/valkey:9-alpine
 
 # More settings for the n8n containers (GENERIC_TIMEZONE, execution pruning,
@@ -69,5 +78,6 @@ n8n_env: {}
 # Dumps of the database taken before every update, in
 # n8n_data_dir/backups; the newest n8n_dumps_keep are kept.
 n8n_dumps_keep: 3
-# Seconds to wait for n8n and the database to become healthy.
+# Seconds to wait for n8n, its workers, Valkey and the database to become
+# healthy.
 n8n_health_timeout: 300

@@ -1,6 +1,7 @@
 ---
 # Checks an installation through Traefik: containers, environment, mounts,
-# the compose file and the key's fingerprint; the owner's login (n8n's
+# the compose file and the key's fingerprint, and with n8n_workers (an extra
+# variable, default 0) Valkey and the workers; the owner's login (n8n's
 # session cookie), the owner locked against changes through the API, and a
 # workflow with a Webhook node, created and activated through the API once
 # per installation, that answers its production webhook. n8n allows five
@@ -11,6 +12,10 @@
   vars_files: [vars.yml]
   vars:
     n8n_dir: /opt/n8n
+    verify_workers: "{{ n8n_workers | default(0) | int }}"
+    verify_worker_services: "{{ range(1, verify_workers | int + 1) | map('string') | map('regex_replace', '^', 'worker-') | list }}"
+    verify_redis_image: >-
+      {{ (lookup('ansible.builtin.file', playbook_dir ~ '/../../roles/n8n/defaults/main.yml') | from_yaml).n8n_redis_image }}
     verify_base: http://127.0.0.1
     # n8n binds its session to the browser-id header of the login.
     verify_headers:
@@ -76,10 +81,9 @@
     - name: Check the containers, their ports, environment and mounts, the compose file and the fingerprint
       ansible.builtin.assert:
         that:
-          - containers | sort == ['db', 'n8n']
-          - containers.values() | map(attribute='State.Running') | select | list | length == 2
-          - n8n.State.Health.Status == 'healthy'
-          - db.State.Health.Status == 'healthy'
+          - containers | sort == (['db', 'n8n'] + ((['redis'] + verify_worker_services) if verify_workers | int > 0 else [])) | sort
+          - containers.values() | map(attribute='State.Running') | select | list | length == containers | length
+          - containers.values() | map(attribute='State.Health.Status') | unique | list == ['healthy']
           # No published port: n8n is reached through Traefik only.
           - containers.values() | map(attribute='HostConfig.PortBindings') | select | list | length == 0
           - "'NOIX_TEST=a$b' in n8n.Config.Env"
@@ -87,7 +91,7 @@
           - "'N8N_HOST=n8n.test' in n8n.Config.Env"
           - "'N8N_PROTOCOL=http' in n8n.Config.Env"
           - "'WEBHOOK_URL=http://n8n.test/' in n8n.Config.Env"
-          - "'EXECUTIONS_MODE=regular' in n8n.Config.Env"
+          - ('EXECUTIONS_MODE=' ~ ('queue' if verify_workers | int > 0 else 'regular')) in n8n.Config.Env
           - "'DB_TYPE=postgresdb' in n8n.Config.Env"
           - "'N8N_PROXY_HOPS=1' in n8n.Config.Env"
           - "'N8N_INSTANCE_OWNER_MANAGED_BY_ENV=true' in n8n.Config.Env"
@@ -130,6 +134,57 @@
           {{ found }}
         n8n: "{{ containers.n8n }}"
         db: "{{ containers.db }}"
+
+    # Valkey holds the queue only, in memory; the workers run the main
+    # instance's image with its environment and the files directory, and
+    # are reached by nothing but the compose network.
+    - name: Check the queue mode, Valkey and the workers
+      ansible.builtin.assert:
+        that:
+          - n8n.Config.Env is superset(['QUEUE_BULL_REDIS_HOST=redis', 'QUEUE_BULL_REDIS_PORT=6379', 'QUEUE_HEALTH_CHECK_ACTIVE=true'])
+          - redis.Config.Image == verify_redis_image
+          - redis.Config.Cmd == ['valkey-server', '--save', '', '--appendonly', 'no']
+          # No volume and no bind: Docker would show either here.
+          - redis.Mounts | length == 0
+          - redis.Config.Healthcheck.Test is defined
+          - redis.NetworkSettings.Networks | list == ['n8n_default']
+          - workers | length == verify_workers | int
+          - workers | rejectattr('Config.Image', 'equalto', n8n.Config.Image) | list | length == 0
+          - workers | map(attribute='Config.Cmd') | unique | list == [['worker']]
+          - workers | map(attribute='Config.Env') | map('sort') | unique | list == [n8n.Config.Env | sort]
+          - workers | map(attribute='Config.Healthcheck.Test') | map('join', ' ') | select('search', '/healthz/readiness') | list | length == workers | length
+          - workers | map(attribute='Mounts') | flatten | map(attribute='Type') | unique | list == ['bind']
+          - >-
+            workers | map(attribute='Mounts') | map('items2dict', key_name='Destination', value_name='Source') | unique | list
+            == [{'/files': n8n_dir ~ '/data/files'}]
+          - workers | map(attribute='NetworkSettings.Networks') | map('list') | unique | list == [['n8n_default']]
+          - workers | map(attribute='Config.Labels') | map('dict2items') | flatten | selectattr('key', 'match', 'traefik') | list | length == 0
+        fail_msg: >-
+          {{ containers.values() | map(attribute='Config.Env') | flatten
+             | reject('match', '(N8N_ENCRYPTION_KEY|DB_POSTGRESDB_PASSWORD|POSTGRES_PASSWORD|N8N_INSTANCE_OWNER_PASSWORD_HASH)=') | list }}
+          {{ containers.values() | map(attribute='Mounts') | list }}
+          {{ containers.values() | map(attribute='Config.Cmd') | list }}
+          {{ containers.values() | map(attribute='NetworkSettings.Networks') | map('list') | list }}
+        quiet: true
+      when: verify_workers | int > 0
+      vars: &verify_containers
+        containers: >-
+          {%- set found = {} -%}
+          {%- for c in verify_inspect.stdout | from_json -%}
+          {%-   set _ = found.update({c.Config.Labels['com.docker.compose.service']: c}) -%}
+          {%- endfor -%}
+          {{ found }}
+        n8n: "{{ containers.n8n }}"
+        redis: "{{ containers.redis }}"
+        workers: "{{ verify_worker_services | map('extract', containers) | list }}"
+
+    - name: Check that normal mode sets no queue
+      ansible.builtin.assert:
+        that: n8n.Config.Env | select('match', 'QUEUE_') | list | length == 0
+        fail_msg: "{{ n8n.Config.Env | select('match', 'QUEUE_') | list }}"
+        quiet: true
+      when: verify_workers | int == 0
+      vars: *verify_containers
 
     # Once Traefik routes to the healthy container.
     - name: Log in as the owner through Traefik

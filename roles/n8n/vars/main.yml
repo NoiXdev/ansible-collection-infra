@@ -64,8 +64,15 @@ n8n_env_owned_prefixes: [DB_, QUEUE_, N8N_INSTANCE_OWNER_, N8N_ENDPOINT_]
 n8n_env_defaults:
   N8N_PROXY_HOPS: 1
 
+# Queue mode (n8n_workers 1 or more): Valkey as redis and one compose
+# service per worker, worker-1 to worker-<n8n_workers>. Services of their
+# own, not one scaled service: each gets its own line in the health check,
+# and a lower n8n_workers leaves the others as orphans, which a reconfigure
+# removes.
+n8n_queue: "{{ n8n_workers | int > 0 }}"
+n8n_worker_services: "{{ range(1, n8n_workers | int + 1) | map('string') | map('regex_replace', '^', 'worker-') | list }}"
 # The compose services the configuration runs.
-n8n_services: [db, n8n]
+n8n_services: "{{ ['db', 'n8n'] + ((['redis'] + n8n_worker_services) if n8n_queue | bool else []) }}"
 
 # The compose file as the role writes it; compared with the one on disk. It
 # needs n8n_owner_password_hash, which state.yml sets.

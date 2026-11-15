@@ -2,7 +2,8 @@
 # Reads the host and sets n8n_state:
 #   install      no compose file
 #   reconfigure  the compose file the role writes differs from the one on
-#                disk
+#                disk (another n8n_workers among it: queue mode, Valkey and
+#                the workers are services of the compose file)
 #   noop         everything as the role writes it
 # Also sets n8n_installed (a compose file exists), n8n_compose_before (the
 # compose file on disk), n8n_compose_on_disk (it parsed, which

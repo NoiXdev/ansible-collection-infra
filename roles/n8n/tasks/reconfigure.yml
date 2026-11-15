@@ -13,6 +13,8 @@
   # It holds the encryption key, the passwords and the owner's hash.
   no_log: true
 
+# remove_orphans: a lower n8n_workers leaves workers, and normal mode
+# Valkey, out of the compose file; their containers are removed.
 - name: Start n8n with the new configuration
   community.docker.docker_compose_v2:
     project_src: "{{ n8n_dir }}"
