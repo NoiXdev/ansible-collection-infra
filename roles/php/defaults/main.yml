@@ -46,6 +46,11 @@ php_fpm_per_pool_service: true
 # The group of every pool socket (nginx's), besides the pool user.
 php_fpm_listen_group: www-data
 
+# One master per pool: after a PHP update, the apt hook restarts the pools of
+# the upgraded version one at a time. Each one has this many seconds to answer
+# its ping before the restart stops (the pools not restarted yet keep running).
+php_fpm_restart_timeout: 30
+
 php_apt_url: https://ppa.launchpadcontent.net/ondrej/php/ubuntu
 php_apt_suite: "{{ ansible_facts['distribution_release'] }}"
 php_apt_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x{{ php_apt_key_fingerprint }}"

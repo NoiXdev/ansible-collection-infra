@@ -826,6 +826,8 @@ suite_php() {
     "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.2", "user": "app_prod"}]}'
   refused php role-owned-ini "php: php_pools entry production sets open_basedir in ini; open_basedir, error_log, session.save_path, upload_tmp_dir and sys_temp_dir belong to the role (it sets them from open_basedir and tmp_dir)" \
     "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "ini": {"open_basedir": "/"}}]}'
+  refused php restart-timeout "php: php_fpm_restart_timeout must be a positive number of seconds, not 0" \
+    "$dir/converge.yml" -e php_fpm_restart_timeout=0
   refused php duplicate-name "php: php_pools has more than one entry named production" \
     "$dir/converge.yml" -e "{\"php_pools\": [$pool, $pool]}"
   refused php www-name "php: php_pools entry 'www' has an invalid name; it must match ^[a-z0-9_-]+$ and must not be www, the packages' own pool" \
@@ -874,6 +876,7 @@ suite_php() {
   [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted when staging left"
 
   suite_php_classic
+  suite_php_updates
 }
 
 # php_classic_running: php8.3-fpm and php8.4-fpm still run as PROD and STAGING
@@ -993,6 +996,154 @@ suite_php_classic() {
   files="$(hx php sh -c 'cd /etc/php && ls -1 8.3/fpm/pool.d 8.4/fpm/pool.d')"
   [ "$files" = "$(printf '8.3/fpm/pool.d:\ncustom.conf\n\n8.4/fpm/pool.d:')" ] \
     || fail "php: pool.d should keep only the file the role does not manage: $files"
+}
+
+# rr_count: how many messages the rolling restart has in the journal.
+rr_count() { hx php sh -c 'journalctl --sync && journalctl -q -t php-fpm-rolling-restart -o cat | wc -l'; }
+
+# rr_since COUNT: the rolling restart's messages after the first COUNT, with
+# the PIDs taken out.
+rr_since() {
+  hx php sh -c 'journalctl --sync && journalctl -q -t php-fpm-rolling-restart -o cat' \
+    | tail -n +"$(($1 + 1))" | sed -E 's/ \(pid [0-9]+\)$//'
+}
+
+# reinstall NAME: apt reinstalls php8.3-fpm (the same version, from the PPA).
+# dpkg logs it as an upgrade, and apt runs it with the apt hooks, as
+# unattended-upgrades does (a bare dpkg -i runs none). The package's own
+# scripts run unchecked: no policy-rc.d. The log is $out/php-NAME.log.
+reinstall() {
+  hx php sh -c 'mv /usr/sbin/policy-rc.d /usr/sbin/policy-rc.d.off \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall php8.3-fpm; rc=$?; \
+    mv /usr/sbin/policy-rc.d.off /usr/sbin/policy-rc.d; exit $rc' >"$out/php-$1.log" 2>&1 \
+    || { cat "$out/php-$1.log" >&2; fail "php/$1: apt failed"; }
+}
+
+# package_services_stay NAME: php8.3-fpm and php8.4-fpm are still inactive and
+# disabled after the package's own scripts ran.
+package_services_stay() {
+  local v
+  for v in 8.3 8.4; do
+    [ "$(hx php systemctl is-active "php$v-fpm" || true)" = inactive ] || fail "php/$1: php$v-fpm runs"
+    [ "$(hx php systemctl is-enabled "php$v-fpm" || true)" = disabled ] || fail "php/$1: php$v-fpm is enabled"
+  done
+}
+
+# The rolling restart after a PHP update (one master per pool), after the
+# classic suite: production and staging on 8.3, extra on 8.4.
+suite_php_updates() {
+  local dir="$here/php" prod staging extra count expected log rc started took
+  local knobs=(-e php_test_staging_version=8.3 -e php_test_extra=true -e php_fpm_restart_timeout=5)
+  local script=/usr/local/sbin/php-fpm-rolling-restart conf=/etc/php-fpm/production/pool.conf
+
+  echo "== php: updates: production and staging on 8.3, extra on 8.4"
+  converge php updates "$dir/converge.yml" "${knobs[@]}"
+  play php "$dir/verify.yml" "${knobs[@]}"
+  hx php cat "$script" >"$out/php-fpm-rolling-restart"
+  shellcheck "$out/php-fpm-rolling-restart" || fail "php: shellcheck finds problems in the rendered $script"
+  # The pattern names the PPA's own origin and codename.
+  hx php apt-cache policy | grep -E 'o=LP-PPA-ondrej-php,.*n=noble,' >/dev/null \
+    || fail "php: apt-cache policy shows no release o=LP-PPA-ondrej-php, n=noble"
+
+  echo "== php: updates: php-fpm-rolling-restart 8.3 restarts production, then staging"
+  prod="$(pid php php-fpm@production)"
+  staging="$(pid php php-fpm@staging)"
+  extra="$(pid php php-fpm@extra)"
+  count="$(rr_count)"
+  hx php "$script" 8.3 || fail "php: php-fpm-rolling-restart 8.3 failed"
+  [ "$(pid php php-fpm@production)" != "$prod" ] || fail "php: production did not restart"
+  [ "$(pid php php-fpm@staging)" != "$staging" ] || fail "php: staging did not restart"
+  [ "$(pid php php-fpm@extra)" = "$extra" ] || fail "php: extra (8.4) restarted"
+  expected="$(printf '%s\n' 'restarting production (PHP 8.3)' 'production answers' 'restarting staging (PHP 8.3)' 'staging answers')"
+  [ "$(rr_since "$count")" = "$expected" ] || fail "php: the journal does not show production, then staging: $(rr_since "$count")"
+  hx php sh -c 'journalctl --sync && journalctl -q -t php-fpm-rolling-restart -o cat' \
+    | grep -qxF "staging answers (pid $(pid php php-fpm@staging))" || fail "php: the journal does not name staging's new PID"
+  ask production /srv/prod | grep -qF '"user":"app_prod"' || fail "php: production does not answer after its restart"
+  ask staging /srv/staging | grep -qF '"user":"app_staging"' || fail "php: staging does not answer after its restart"
+
+  echo "== php: updates: apt reinstalls php8.3-fpm, the hook restarts its pools, extra keeps running"
+  prod="$(pid php php-fpm@production)"
+  staging="$(pid php php-fpm@staging)"
+  count="$(rr_count)"
+  reinstall hook
+  [ "$(pid php php-fpm@production)" != "$prod" ] || fail "php: the hook did not restart production"
+  [ "$(pid php php-fpm@staging)" != "$staging" ] || fail "php: the hook did not restart staging"
+  [ "$(pid php php-fpm@extra)" = "$extra" ] || fail "php: the hook restarted extra (8.4)"
+  expected="$(printf '%s\n' 'php8.3-fpm was upgraded: restarting its pools one at a time' \
+    'restarting production (PHP 8.3)' 'production answers' 'restarting staging (PHP 8.3)' 'staging answers')"
+  [ "$(rr_since "$count")" = "$expected" ] || fail "php: the hook's journal: $(rr_since "$count")"
+  package_services_stay hook
+  play php "$dir/verify.yml" "${knobs[@]}"
+
+  echo "== php: updates: without the script the hook does nothing and apt passes"
+  prod="$(pid php php-fpm@production)"
+  staging="$(pid php php-fpm@staging)"
+  count="$(rr_count)"
+  hx php mv "$script" "$script.off"
+  reinstall no-script
+  hx php mv "$script.off" "$script"
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted without the script"
+  [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted without the script"
+  [ -z "$(rr_since "$count")" ] || fail "php: the hook ran without the script: $(rr_since "$count")"
+
+  echo "== php: updates: extra moves to 8.3"
+  converge php updates-extra "$dir/converge.yml" "${knobs[@]}" -e php_test_extra_version=8.3
+  play php "$dir/verify.yml" "${knobs[@]}" -e php_test_extra_version=8.3
+
+  echo "== php: updates: production does not come back, extra restarted before it, staging keeps running"
+  # extra, production, staging: the order of their names.
+  hx php cp "$conf" /root/production-pool.conf
+  hx php sh -c "echo 'no_such_entry = 1' >> $conf"
+  extra="$(pid php php-fpm@extra)"
+  staging="$(pid php php-fpm@staging)"
+  count="$(rr_count)"
+  rc=0
+  hx php "$script" 8.3 >"$out/php-rr-fails.log" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || { cat "$out/php-rr-fails.log" >&2; fail "php: php-fpm-rolling-restart exited $rc, not 1"; }
+  grep -qxF 'php-fpm-rolling-restart: production did not come back; stopping' "$out/php-rr-fails.log" \
+    || { cat "$out/php-rr-fails.log" >&2; fail "php: the failure was not reported"; }
+  expected="$(printf '%s\n' 'restarting extra (PHP 8.3)' 'extra answers' 'restarting production (PHP 8.3)' 'production did not come back; stopping')"
+  [ "$(rr_since "$count")" = "$expected" ] || fail "php: the journal: $(rr_since "$count")"
+  [ "$(pid php php-fpm@extra)" != "$extra" ] || fail "php: extra did not restart before production"
+  [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted after production failed"
+  hx php env SCRIPT_NAME=/php-fpm-ping SCRIPT_FILENAME=/php-fpm-ping REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php/extra.sock \
+    | grep -qx pong || fail "php: extra does not answer after its restart"
+  ask staging /srv/staging | grep -qF '"user":"app_staging"' || fail "php: staging does not answer after production failed"
+  [ "$(hx php systemctl is-active php-fpm@production || true)" != active ] || fail "php: production runs with the broken config"
+
+  echo "== php: updates: a pool that restarts but does not answer its ping stops the run after the timeout"
+  hx php cp /root/production-pool.conf "$conf"
+  hx php sh -c 'systemctl reset-failed php-fpm@production; systemctl restart php-fpm@production'
+  hx php sed -i 's/^ping.response = pong$/ping.response = nope/' "$conf"
+  hx php grep -qx 'ping.response = nope' "$conf" || fail "php: the test could not change production's ping response"
+  staging="$(pid php php-fpm@staging)"
+  count="$(rr_count)"
+  started="$(date +%s)"
+  rc=0
+  hx php "$script" 8.3 >"$out/php-rr-silent.log" 2>&1 || rc=$?
+  took=$(($(date +%s) - started))
+  [ "$rc" = 1 ] || { cat "$out/php-rr-silent.log" >&2; fail "php: php-fpm-rolling-restart exited $rc, not 1"; }
+  [ "$took" -ge 5 ] || fail "php: the run gave up after $took seconds, before php_fpm_restart_timeout (5)"
+  [ "$(rr_since "$count" | tail -n 1)" = 'production did not come back; stopping' ] || fail "php: the journal: $(rr_since "$count")"
+  [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted after production failed"
+
+  echo "== php: updates: a failing restart in the hook is logged and apt passes"
+  hx php sh -c "echo 'no_such_entry = 1' >> $conf"
+  extra="$(pid php php-fpm@extra)"
+  count="$(rr_count)"
+  reinstall hook-fails
+  grep -qxF 'php-fpm-rolling-restart: production did not come back; stopping' "$out/php-hook-fails.log" \
+    || { cat "$out/php-hook-fails.log" >&2; fail "php: apt's output does not report the failure"; }
+  [ "$(rr_since "$count" | tail -n 1)" = 'php8.3-fpm: the rolling restart stopped; the pools not restarted yet keep running' ] \
+    || fail "php: the hook's journal: $(rr_since "$count")"
+  [ "$(pid php php-fpm@extra)" != "$extra" ] || fail "php: the hook did not restart extra"
+  [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: the hook restarted staging after production failed"
+  package_services_stay hook-fails
+
+  echo "== php: updates: production comes back with its config"
+  hx php cp /root/production-pool.conf "$conf"
+  hx php sh -c 'systemctl reset-failed php-fpm@production; systemctl restart php-fpm@production'
+  play php "$dir/verify.yml" "${knobs[@]}" -e php_test_extra_version=8.3
 }
 
 

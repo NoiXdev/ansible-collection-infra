@@ -14,6 +14,7 @@
     php_test_staging_pm: {}
     # A third pool on 8.4, so 8.4 keeps a pool when staging leaves it.
     php_test_extra: false
+    php_test_extra_version: "8.4"
     php_versions:
       - version: "8.3"
         extensions: [intl, mbstring]
@@ -41,7 +42,7 @@
         memory_limit: "{{ php_test_staging_memory_limit }}"
     php_test_extra_pool:
       name: extra
-      version: "8.4"
+      version: "{{ php_test_extra_version }}"
       user: app_staging2
     php_pools: >-
       {{ [php_test_production]

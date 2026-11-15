@@ -24,6 +24,12 @@
     quiet: true
   when: php_versions | length > 0
 
+- name: Check the restart timeout
+  ansible.builtin.assert:
+    that: php_fpm_restart_timeout | string is match('^[0-9]+$') and php_fpm_restart_timeout | int > 0
+    fail_msg: "php: php_fpm_restart_timeout must be a positive number of seconds, not {{ php_fpm_restart_timeout }}"
+    quiet: true
+
 - name: Check php_ini
   ansible.builtin.assert:
     that: php_bad_ini | length == 0

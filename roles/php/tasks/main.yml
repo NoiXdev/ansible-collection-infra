@@ -21,3 +21,6 @@
 
 - name: Configure the pools
   ansible.builtin.include_tasks: pools.yml
+
+- name: Restart the pools after PHP updates
+  ansible.builtin.include_tasks: updates.yml
