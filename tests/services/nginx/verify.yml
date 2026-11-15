@@ -1,10 +1,13 @@
 ---
 # The three sites of converge.yml with its default knobs. Every request goes
 # to 127.0.0.1 with the site's name (curl --resolve); the headers and the body
-# come back together (HTTP/1.1, so the header names keep their case).
+# come back together (HTTP/1.1, so the header names keep their case). prod's
+# certificate is Pebble's (pebble.yml), for its domain and its redirect
+# domain.
 - name: Verify the nginx sites
   hosts: testhost
   vars:
+    nginx_verify_prod_names: [prod.example.test, www.prod.example.test]
     nginx_verify_headers:
       - "X-Content-Type-Options: nosniff\r"
       - "Referrer-Policy: strict-origin-when-cross-origin\r"
@@ -122,6 +125,85 @@
       loop: "{{ nginx_verify_responses.results }}"
       loop_control:
         label: "{{ item.item.url }}"
+
+    # Without -k: the system trust store has Pebble's root (pebble.yml).
+    - name: Ask prod's domains over HTTPS with the system's trust store
+      ansible.builtin.command:
+        argv: [curl, -sS, -o, /dev/null, -w, "%{http_code}", --max-time, "10", --resolve, "{{ item }}:443:127.0.0.1", "https://{{ item }}/"]
+      loop: "{{ nginx_verify_prod_names }}"
+      register: nginx_verify_trusted
+      changed_when: false
+      failed_when: nginx_verify_trusted.rc != 0
+
+    - name: Read the issuers of prod's certificates
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          openssl s_client -connect 127.0.0.1:443 -servername {{ item }} -verify_return_error </dev/null 2>/dev/null
+          | openssl x509 -noout -issuer -ext subjectAltName
+        executable: /bin/bash
+      loop: "{{ nginx_verify_prod_names }}"
+      register: nginx_verify_issuers
+      changed_when: false
+
+    - name: Check that prod has Pebble's certificate for its domains
+      ansible.builtin.assert:
+        that:
+          - nginx_verify_trusted.results | map(attribute='stdout') | list == ['200', '301']
+          - nginx_verify_issuers.results | rejectattr('stdout', 'search', 'issuer=.*Pebble Intermediate') | list | length == 0
+          # Each name gets the one certificate with exactly both names.
+          - nginx_verify_issuers.results | map(attribute='stdout') | map('regex_findall', 'DNS:[^,\\s]+') | map('sort') | unique | list
+            == [nginx_verify_sans | sort]
+        fail_msg: "{{ nginx_verify_issuers.results | map(attribute='stdout') | list }}"
+      vars:
+        nginx_verify_sans: "{{ nginx_verify_prod_names | map('regex_replace', '^', 'DNS:') | list }}"
+
+    # The challenge root is root's; certbot writes there as root. A file there
+    # answers on port 80 for every TLS site's domains and redirect domains,
+    # before the redirect to HTTPS.
+    # certbot removes the directories it made after each challenge.
+    - name: Create the challenge directory
+      ansible.builtin.file:
+        path: /var/lib/noixdev/acme/.well-known/acme-challenge
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      changed_when: false
+
+    - name: Put a file in the challenge root
+      ansible.builtin.copy:
+        content: "noixdev challenge\n"
+        dest: /var/lib/noixdev/acme/.well-known/acme-challenge/noixdev-verify
+        owner: root
+        group: root
+        mode: "0644"
+      changed_when: false
+
+    - name: Ask for the challenge on port 80
+      ansible.builtin.command:
+        argv: [curl, --http1.1, -sS, -D, "-", --max-time, "10", --resolve, "{{ item }}:80:127.0.0.1",
+               "http://{{ item }}/.well-known/acme-challenge/noixdev-verify"]
+      loop: "{{ nginx_verify_prod_names + ['node.example.test', 'static.example.test'] }}"
+      register: nginx_verify_challenge
+      changed_when: false
+
+    - name: Remove the file from the challenge root
+      ansible.builtin.file:
+        path: /var/lib/noixdev/acme/.well-known/acme-challenge/noixdev-verify
+        state: absent
+      changed_when: false
+
+    - name: Check the challenge answers
+      ansible.builtin.assert:
+        that:
+          - item.stdout is search('^HTTP/1.1 200 ')
+          - "'noixdev challenge' in item.stdout"
+        fail_msg: "{{ item.item }} answered: {{ item.stdout }}"
+        quiet: true
+      loop: "{{ nginx_verify_challenge.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     # The workers run as www-data, not as the package's nginx user: a request
     # body above client_body_buffer_size and a proxied response above the

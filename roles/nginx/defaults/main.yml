@@ -63,7 +63,10 @@ nginx_error_pages: true
 nginx_user_includes: true
 nginx_include_user: ""
 
-# Let's Encrypt: the account address (required when a site uses tls
-# letsencrypt) and the ACME directory.
+# Let's Encrypt (tls letsencrypt, through certbot from Ubuntu's archive): the
+# account address (required when a site uses tls letsencrypt) and the ACME
+# directory. Each site's certificate is /etc/letsencrypt/live/<name>/, for its
+# domains and redirect domains; certbot.timer renews it, and a deploy hook
+# reloads nginx.
 nginx_acme_email: ""
 nginx_acme_server: https://acme-v02.api.letsencrypt.org/directory

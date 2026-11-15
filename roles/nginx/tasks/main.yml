@@ -74,6 +74,11 @@
         name: nginx
         state: started
         enabled: true
+
+    # nginx runs and answers the challenges before certbot asks.
+    - name: Get the Let's Encrypt certificates
+      ansible.builtin.include_tasks: acme.yml
+      when: nginx_acme_sites | length > 0
   rescue:
     - name: Run the reloads notified before the failure
       ansible.builtin.meta: flush_handlers

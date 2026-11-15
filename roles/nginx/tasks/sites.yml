@@ -6,7 +6,8 @@
   failed_when: false
 
 # A tls letsencrypt site gets its TLS block once its certificate is there
-# (certbot's cert name is the site's name); until then only its HTTP block.
+# (certbot's cert name is the site's name); until then only its HTTP block,
+# which answers the challenges of the request in acme.yml.
 - name: Look for the Let's Encrypt certificates
   ansible.builtin.stat:
     path: "{{ nginx_letsencrypt_live }}/{{ item.name }}/fullchain.pem"

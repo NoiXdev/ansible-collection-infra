@@ -33,6 +33,12 @@ nginx_groups_state: /etc/nginx/noixdev/site-groups
 # Where certbot keeps a tls letsencrypt site's certificate (cert name: the
 # site's name).
 nginx_letsencrypt_live: /etc/letsencrypt/live
+# certbot's webroot: the http-01 tokens, served as /.well-known/acme-challenge/
+# on port 80 of every TLS site's domains and redirect domains. Root's only.
+nginx_acme_root: /var/lib/noixdev/acme
+# Run by certbot after each renewal.
+nginx_acme_hook: /etc/letsencrypt/renewal-hooks/deploy/noixdev-nginx
+nginx_acme_sites: "{{ nginx_sites_public | selectattr('tls', 'eq', 'letsencrypt') | list }}"
 
 nginx_site_keys:
   - name

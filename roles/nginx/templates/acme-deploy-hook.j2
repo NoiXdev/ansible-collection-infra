@@ -1,0 +1,8 @@
+#!/bin/sh
+# managed by noixdev.infra (nginx role). Changes here are overwritten.
+# certbot runs this after it renewed a certificate: nginx reloads, so its
+# workers serve the new one. A config that fails nginx -t is not reloaded
+# (nginx keeps what it has loaded), and certbot logs the hook's error.
+set -eu
+nginx -t -q
+systemctl reload nginx

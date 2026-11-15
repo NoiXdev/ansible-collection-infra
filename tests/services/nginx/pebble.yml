@@ -1,0 +1,204 @@
+---
+# Pebble, Let's Encrypt's test ACME server, in the nginx test container: a
+# pinned release from its GitHub releases, checked by its sha256. It listens
+# on localhost:14000 (ACME) and localhost:15000 (management) with a listener
+# certificate from a test CA made here, and validates http-01 challenges on
+# port 80, where nginx answers. The test domains resolve to 127.0.0.1 through
+# /etc/hosts (Pebble uses the system resolver); unresolvable.example.test is
+# left out on purpose. The trust store gets the listener CA (certbot talks to
+# Pebble over HTTPS) and the root Pebble issues from, which its management
+# API hands out (it makes a new one each time it starts).
+- name: Run Pebble
+  hosts: testhost
+  vars:
+    pebble_version: v2.10.1
+    pebble_arches: {x86_64: amd64, aarch64: arm64}
+    pebble_arch: "{{ pebble_arches[ansible_facts['architecture']] }}"
+    # The digests GitHub lists for the release's assets.
+    pebble_checksums:
+      amd64: sha256:4f2fcb5bca8c85c9cf73ad140fccfc0d2be40bd81ab99879c79b7b8a0b4f70ed
+      arm64: sha256:b53fd072a69eb7692451de4e8b0667e0bdf5cccd7e36fc51b8eaf2fcc135ed9f
+    pebble_domains:
+      - prod.example.test
+      - www.prod.example.test
+      - old.prod.example.test
+      - late.example.test
+    pebble_dir: /etc/noixdev-test-pebble
+  tasks:
+    - name: Install the tools
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, openssl]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Download Pebble
+      ansible.builtin.get_url:
+        url: "https://github.com/letsencrypt/pebble/releases/download/{{ pebble_version }}/pebble-linux-{{ pebble_arch }}.tar.gz"
+        dest: "/root/pebble-{{ pebble_version }}-{{ pebble_arch }}.tar.gz"
+        checksum: "{{ pebble_checksums[pebble_arch] }}"
+        mode: "0600"
+
+    - name: Create Pebble's directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - "/root/pebble-{{ pebble_version }}"
+        - "{{ pebble_dir }}"
+
+    - name: Unpack Pebble
+      ansible.builtin.unarchive:
+        src: "/root/pebble-{{ pebble_version }}-{{ pebble_arch }}.tar.gz"
+        dest: "/root/pebble-{{ pebble_version }}"
+        remote_src: true
+        creates: "/root/pebble-{{ pebble_version }}/pebble-linux-{{ pebble_arch }}/linux/{{ pebble_arch }}/pebble"
+
+    - name: Install Pebble
+      ansible.builtin.copy:
+        src: "/root/pebble-{{ pebble_version }}/pebble-linux-{{ pebble_arch }}/linux/{{ pebble_arch }}/pebble"
+        dest: /usr/local/bin/pebble
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      register: pebble_binary
+
+    - name: Write the listener's certificate extensions
+      ansible.builtin.copy:
+        content: |
+          [req]
+          distinguished_name = dn
+          [dn]
+          [ca]
+          basicConstraints = critical, CA:TRUE
+          keyUsage = critical, keyCertSign, cRLSign
+          subjectKeyIdentifier = hash
+          [listener]
+          basicConstraints = critical, CA:FALSE
+          keyUsage = critical, digitalSignature
+          extendedKeyUsage = serverAuth
+          subjectAltName = DNS:localhost, IP:127.0.0.1
+          subjectKeyIdentifier = hash
+          authorityKeyIdentifier = keyid
+        dest: "{{ pebble_dir }}/extensions.cnf"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Create the listener's test CA and certificate
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          cd {{ pebble_dir }}
+          openssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+            -subj "/CN=noixdev test Pebble listener CA" -config extensions.cnf -extensions ca \
+            -keyout ca.key -out ca.crt
+          openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -subj /CN=localhost -config extensions.cnf -keyout listener.key -out listener.csr
+          openssl x509 -req -in listener.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 3650 \
+            -extfile extensions.cnf -extensions listener -out listener.crt
+        creates: "{{ pebble_dir }}/listener.crt"
+      register: pebble_listener
+
+    - name: Trust the listener's CA
+      ansible.builtin.copy:
+        src: "{{ pebble_dir }}/ca.crt"
+        dest: /usr/local/share/ca-certificates/noixdev-test-pebble-listener.crt
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      register: pebble_listener_trust
+
+    - name: Write Pebble's config
+      ansible.builtin.copy:
+        content: "{{ pebble_config | to_nice_json }}\n"
+        dest: "{{ pebble_dir }}/pebble.json"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        pebble_config:
+          pebble:
+            listenAddress: 127.0.0.1:14000
+            managementListenAddress: 127.0.0.1:15000
+            certificate: "{{ pebble_dir }}/listener.crt"
+            privateKey: "{{ pebble_dir }}/listener.key"
+            httpPort: 80
+            tlsPort: 443
+            ocspResponderURL: ""
+            externalAccountBindingRequired: false
+            retryAfter: {authz: 1, order: 1}
+            keyAlgorithm: ecdsa
+            profiles:
+              default:
+                description: The nginx tests' profile
+                validityPeriod: 7776000
+      register: pebble_config_file
+
+    # No random sleeps before a validation and no nonces rejected at random.
+    - name: Install Pebble's unit
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=Pebble, a test ACME server, for the nginx tests
+          After=network.target
+          [Service]
+          Environment=PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0
+          ExecStart=/usr/local/bin/pebble -config {{ pebble_dir }}/pebble.json
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/noixdev-test-pebble.service
+        owner: root
+        group: root
+        mode: "0644"
+      register: pebble_unit
+
+    - name: Start Pebble
+      ansible.builtin.systemd_service:
+        name: noixdev-test-pebble
+        state: "{{ 'restarted' if pebble_changed | length > 0 else 'started' }}"
+        enabled: true
+        daemon_reload: true
+      vars:
+        pebble_changed: "{{ [pebble_binary, pebble_listener, pebble_config_file, pebble_unit] | selectattr('changed') | list }}"
+
+    - name: Let the test domains resolve to this host
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} noixdev nginx tests: Pebble's domains"
+        block: "{{ pebble_domains | map('regex_replace', '^', '127.0.0.1 ') | join('\n') }}"
+        # Docker bind-mounts /etc/hosts: it is written in place.
+        unsafe_writes: true
+
+    - name: Wait for Pebble's management API
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 15000
+        timeout: 60
+
+    - name: Read the root Pebble issues from
+      ansible.builtin.uri:
+        url: https://localhost:15000/roots/0
+        ca_path: "{{ pebble_dir }}/ca.crt"
+        return_content: true
+      register: pebble_root
+
+    - name: Trust Pebble's root
+      ansible.builtin.copy:
+        content: "{{ pebble_root.content }}"
+        dest: /usr/local/share/ca-certificates/noixdev-test-pebble-root.crt
+        owner: root
+        group: root
+        mode: "0644"
+      register: pebble_root_trust
+
+    - name: Update the trust store
+      ansible.builtin.command:
+        argv: [update-ca-certificates]
+      when: pebble_listener_trust is changed or pebble_root_trust is changed
+      changed_when: true

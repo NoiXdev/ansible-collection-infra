@@ -3,8 +3,10 @@
 # for *.example.test, the upstream of the proxy site and the php pool
 # production (the php role on 24.04; the php role has no 26.04 packages yet,
 # so there a pool of Ubuntu's php-fpm on the same socket stands in). Then the
-# nginx role with three sites. The knobs below change the sites between runs;
-# -e nginx_sites=[...] replaces the whole list for the invalid cases.
+# nginx role with three sites: prod takes its certificate from Let's Encrypt,
+# here the Pebble of pebble.yml (run before), node and static the self-signed
+# one. The knobs below change the sites between runs; -e nginx_sites=[...]
+# replaces the whole list for the invalid cases.
 - name: Prepare the backends
   hosts: testhost
   vars:
@@ -208,18 +210,22 @@
     nginx_test_static_hsts: true
     nginx_test_static_headers: {}
     nginx_test_prod_extra: ""
+    nginx_test_prod_redirects: [www.prod.example.test]
+    # Pebble (pebble.yml), whose listener and roots the trust store has.
+    nginx_acme_email: hostmaster@example.test
+    nginx_acme_server: https://localhost:14000/dir
     nginx_test_tls:
       cert: /etc/ssl/noixdev-test/example.test.crt
       key: /etc/ssl/noixdev-test/example.test.key
     nginx_test_prod:
       name: prod
       domains: [prod.example.test]
-      redirect_domains: [www.prod.example.test]
+      redirect_domains: "{{ nginx_test_prod_redirects }}"
       user: app_prod
       php_pool: production
       root: /srv/prod/public
       php_scripts: [setup/install.php]
-      tls: "{{ nginx_test_tls }}"
+      tls: letsencrypt
       extra: "{{ nginx_test_prod_extra }}"
     nginx_test_node:
       name: node

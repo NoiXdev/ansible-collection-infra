@@ -23,6 +23,17 @@ argument_specs:
         is never left in place: the run's files are put back and the run fails naming nginx's
         error.
       - >-
+        tls letsencrypt: certbot from Ubuntu's archive, with the webroot challenge, gets one
+        certificate per site, named after the site (/etc/letsencrypt/live/<name>/), for its
+        domains and redirect domains. A site first gets its HTTP block, then its certificate,
+        then its TLS block; a run asks again only when the certificate is missing or its names
+        differ from the site's. certbot.timer renews the certificates, and the deploy hook
+        /etc/letsencrypt/renewal-hooks/deploy/noixdev-nginx reloads nginx after nginx -t.
+      - >-
+        A certificate request that fails does not stop the other sites: the run fails at the
+        end naming each site and domain that failed, and those sites keep only their HTTP
+        block until a later run gets the certificate.
+      - >-
         The site entries are checked by the role, not here, so that every message names the
         entry; an unknown key in an entry is refused.
     options:
@@ -68,7 +79,8 @@ argument_specs:
           - >-
             tls, letsencrypt (the default; nginx_acme_email is then required), off (HTTP only),
             or {cert, key} with the paths of an existing certificate and key. With TLS, port 80
-            answers with a 301 to HTTPS.
+            answers ACME challenges (/.well-known/acme-challenge/ from /var/lib/noixdev/acme) and
+            otherwise with a 301 to HTTPS, for the domains and the redirect domains.
           - >-
             hardening (true by default): the headers X-Content-Type-Options nosniff,
             Referrer-Policy strict-origin-when-cross-origin and X-Frame-Options SAMEORIGIN, HSTS
@@ -115,4 +127,6 @@ argument_specs:
         description: The Let's Encrypt account address; required when a site uses tls letsencrypt.
       nginx_acme_server:
         type: str
-        description: The ACME directory; Let's Encrypt's production directory by default.
+        description: >-
+          The ACME directory (an https URL) certbot asks; Let's Encrypt's production directory by
+          default. certbot keeps it per certificate for the renewals.

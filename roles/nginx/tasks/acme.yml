@@ -1,0 +1,149 @@
+---
+# tls letsencrypt: certbot from Ubuntu's archive, with the webroot challenge
+# on nginx_acme_root, which every TLS site serves on port 80 for
+# /.well-known/acme-challenge/ (site.conf.j2). sites.yml wrote each site's
+# HTTP block, and its TLS block only where the certificate is there already.
+# Here nginx reloads with those, certbot asks for each site whose certificate
+# is missing or has other names than the site, in list order, and each site
+# that got one gets its TLS block. A request that fails is collected: the
+# other sites go on, and the run fails at the end naming each failed site and
+# domain. That site keeps its HTTP block, and the next run asks again.
+- name: Install certbot
+  ansible.builtin.apt:
+    name: certbot
+    state: present
+
+- name: Create the challenge root
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ nginx_acme_root | dirname }}"
+    - "{{ nginx_acme_root }}"
+
+- name: Create certbot's deploy hook directory
+  ansible.builtin.file:
+    path: "{{ nginx_acme_hook | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# certbot runs it after each renewal (certbot.timer), not after the
+# requests below: the role reloads nginx for those itself.
+- name: Install certbot's deploy hook
+  ansible.builtin.template:
+    src: acme-deploy-hook.j2
+    dest: "{{ nginx_acme_hook }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Start certbot's renewal timer
+  ansible.builtin.systemd_service:
+    name: certbot.timer
+    state: started
+    enabled: true
+
+# The HTTP blocks sites.yml wrote serve the challenges from now on.
+- name: Run the reloads for the new configs
+  ansible.builtin.meta: flush_handlers
+
+- name: Read certbot's certificates
+  ansible.builtin.command:
+    argv: [certbot, certificates]
+  register: nginx_acme_certificates
+  changed_when: false
+  check_mode: false
+
+- name: Ask for the certificates
+  ansible.builtin.command:
+    argv:
+      - certbot
+      - certonly
+      - --webroot
+      - -w
+      - "{{ nginx_acme_root }}"
+      - --cert-name
+      - "{{ item.name }}"
+      - -d
+      - "{{ (item.domains + item.redirect_domains) | join(',') }}"
+      - --email
+      - "{{ nginx_acme_email }}"
+      - --agree-tos
+      - --non-interactive
+      - --server
+      - "{{ nginx_acme_server }}"
+  loop: "{{ nginx_acme_pending }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: nginx_acme_requests
+  changed_when: nginx_acme_requests.rc == 0
+  failed_when: false
+  # A new certificate under a TLS block that is there already.
+  notify: Reload nginx
+  vars:
+    # certbot's names of each certificate: "Certificate Name: <name>", then
+    # "Domains: <name> ...".
+    nginx_acme_names: >-
+      {%- set ns = namespace(name='', certs={}) -%}
+      {%- for line in (nginx_acme_certificates.stdout ~ '\n' ~ nginx_acme_certificates.stderr).splitlines() -%}
+      {%-   if line is match('^\s*Certificate Name: \S') -%}
+      {%-     set ns.name = line | regex_replace('^\s*Certificate Name: ', '') | trim -%}
+      {%-   elif line is match('^\s*Domains: \S') and ns.name | length > 0 -%}
+      {%-     set ns.certs = ns.certs | combine({ns.name: line | regex_replace('^\s*Domains: ', '') | trim | split | sort}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ ns.certs }}
+    nginx_acme_pending: >-
+      {%- set pending = [] -%}
+      {%- for site in nginx_acme_sites -%}
+      {%-   if nginx_acme_names[site.name] | default([]) != (site.domains + site.redirect_domains) | unique | sort -%}
+      {%-     set _ = pending.append(site) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ pending }}
+
+- name: Write the TLS blocks of the new certificates
+  ansible.builtin.include_tasks: apply.yml
+  when: nginx_acme_issued | length > 0
+  vars:
+    nginx_acme_issued: >-
+      {{ nginx_acme_requests.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 0)
+         | map(attribute='item.name') | list }}
+    nginx_apply_files: >-
+      {%- set files = [] -%}
+      {%- for site in nginx_acme_sites if site.name in nginx_acme_issued -%}
+      {%-   set tls_files = {'cert': nginx_letsencrypt_live ~ '/' ~ site.name ~ '/fullchain.pem',
+                             'key': nginx_letsencrypt_live ~ '/' ~ site.name ~ '/privkey.pem'} -%}
+      {%-   set _ = files.append({'src': 'site.conf.j2', 'dest': nginx_sites_dir ~ '/' ~ site.name ~ '.conf', 'mode': '0644',
+                                  'site': site | combine({'tls_files': tls_files})}) -%}
+      {%- endfor -%}
+      {{ files }}
+
+# certbot names the domains whose challenge failed (Domain:, Detail:); for
+# another error, its last line.
+- name: Fail naming the certificates that failed
+  ansible.builtin.fail:
+    msg: >-
+      nginx: certbot got no certificate for {{ nginx_acme_failures | join('; ') }};
+      {{ 'that site keeps' if nginx_acme_failures | length == 1 else 'those sites keep' }}
+      only its HTTP block, and the next run asks again
+  when: nginx_acme_failures | length > 0
+  vars:
+    nginx_acme_failures: >-
+      {%- set failures = [] -%}
+      {%- for result in nginx_acme_requests.results | selectattr('rc', 'defined') | rejectattr('rc', 'eq', 0) -%}
+      {%-   set output = result.stdout ~ '\n' ~ result.stderr -%}
+      {%-   set domains = output | regex_findall('(?m)^\s*Domain: (\S+)') | unique | list -%}
+      {%-   set details = output | regex_findall('(?m)^\s*Detail: (.*\S)') -%}
+      {%-   set lines = output.splitlines() | map('trim') | select | list -%}
+      {%-   set _ = failures.append('site ' ~ result.item.name ~ ' ('
+                                    ~ (domains or (result.item.domains + result.item.redirect_domains)) | join(', ') ~ ': '
+                                    ~ ((details | join('; ')) if details else (lines | last | default('certbot exited with ' ~ result.rc)))
+                                    ~ ')') -%}
+      {%- endfor -%}
+      {{ failures }}

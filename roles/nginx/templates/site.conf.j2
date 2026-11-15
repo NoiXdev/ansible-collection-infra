@@ -43,17 +43,29 @@ resolver_timeout 5s;
 {% endif %}
 {% endif %}
 {% endmacro %}
+{# Before the redirect: a prefix match with ^~ wins over every regex
+   location. The challenge root is root's, and these port 80 blocks have no
+   disable_symlinks (only a site's own server block has, for its root). #}
+{% macro acme() %}
+# ACME http-01 challenges (certbot's webroot).
+location ^~ /.well-known/acme-challenge/ {
+    root {{ nginx_acme_root }};
+    default_type text/plain;
+    try_files $uri =404;
+}
+{% endmacro %}
 {% macro logs() %}
 access_log /var/log/nginx/{{ site.name }}.access.log main;
 error_log /var/log/nginx/{{ site.name }}.error.log;
 {% endmacro %}
 # managed by noixdev.infra (nginx role): site {{ site.name }}. Changes here are overwritten.
 {% if site.tls != 'off' %}
-# HTTP: a 301 to HTTPS.
+# HTTP: ACME challenges, and a 301 to HTTPS.
 server {
     {{ listen(80, false) | trim | indent(4) }}
     server_name {{ site.domains | join(' ') }};
     {{ logs() | trim | indent(4) }}
+    {{ acme() | trim | indent(4) }}
     location / {
         return 301 https://$host$request_uri;
     }
@@ -67,6 +79,9 @@ server {
     {{ listen(port, port == 443) | trim | indent(4) }}
     server_name {{ site.redirect_domains | join(' ') }};
     {{ logs() | trim | indent(4) }}
+{% if port == 80 and site.tls != 'off' %}
+    {{ acme() | trim | indent(4) }}
+{% endif %}
     location / {
         return 301 {{ scheme }}://{{ canonical }}$request_uri;
     }

@@ -1489,6 +1489,115 @@ nginx_distro_refused() {
   docker rm -f -v "$prefix-nginxdistro" >/dev/null
 }
 
+# nginx_serial NAME: the serial of the certificate nginx presents for NAME.
+nginx_serial() {
+  hx nginx sh -c "openssl s_client -connect 127.0.0.1:443 -servername $1 </dev/null 2>/dev/null | openssl x509 -noout -serial"
+}
+
+# nginx_issued: how many certificates certbot has issued for prod.
+nginx_issued() {
+  hx nginx sh -c 'find /etc/letsencrypt/archive/prod -name "cert*.pem" | wc -l'
+}
+
+# nginx_workers MASTER: the PIDs of MASTER's workers, sorted.
+nginx_workers() {
+  hx nginx pgrep -P "$1" | sort
+}
+
+# nginx_trusted URL: the status and the redirect of URL, asked with the
+# system's trust store (Pebble's root, not -k).
+nginx_trusted() {
+  local host="${1#*://}"
+  host="${host%%/*}"
+  hx nginx curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 --resolve "$host:443:127.0.0.1" "$1"
+}
+
+# nginx_acme: prod's certificate from Pebble: issued once, renewed through
+# the deploy hook, reissued for a new name; a site whose certificate fails
+# keeps its HTTP block and leaves every other site alone.
+nginx_acme() {
+  local dir="$here/nginx" fast=(-e nginx_test_prepare=false) answer master workers serial before tries attempt
+  local prod_old='{"nginx_test_prod_redirects": ["www.prod.example.test", "old.prod.example.test"]}'
+  local broken='{"name": "broken", "domains": ["unresolvable.example.test"], "user": "app_static", "root": "/srv/static"}'
+  local late='{"name": "late", "domains": ["late.example.test"], "user": "app_static", "root": "/srv/static"}'
+
+  echo "== nginx: prod's certificate came with the first run, the second asked for none"
+  answer="$(nginx_issued)"
+  [ "$answer" = 1 ] || fail "nginx: certbot issued $answer certificates for prod in two runs, not 1"
+
+  echo "== nginx: certbot's timer is active"
+  answer="$(hx nginx systemctl list-timers --all certbot.timer)"
+  case "$answer" in *certbot.timer*) ;; *) fail "nginx: list-timers does not show certbot.timer: $answer" ;; esac
+  answer="$(hx nginx systemctl is-active certbot.timer || true)"
+  [ "$answer" = active ] || fail "nginx: certbot.timer is $answer"
+
+  echo "== nginx: a forced renewal reloads nginx through the deploy hook: new workers, the same master"
+  master="$(hx nginx systemctl show -p MainPID --value nginx)"
+  workers="$(nginx_workers "$master")"
+  serial="$(nginx_serial prod.example.test)"
+  hx nginx certbot renew --force-renewal --no-random-sleep-on-renew >"$out/nginx-renew.log" 2>&1 \
+    || { cat "$out/nginx-renew.log" >&2; fail "nginx: certbot renew failed"; }
+  # certbot logs the hooks it runs in its log of this run, not on stdout.
+  hx nginx grep -qF 'Running deploy-hook command: /etc/letsencrypt/renewal-hooks/deploy/noixdev-nginx' /var/log/letsencrypt/letsencrypt.log \
+    || { cat "$out/nginx-renew.log" >&2; fail "nginx: the renewal did not run the deploy hook"; }
+  # The old workers finish their requests and exit.
+  tries=0
+  while [ -n "$(comm -12 <(echo "$workers") <(nginx_workers "$master"))" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 30 ] || fail "nginx: the workers $workers are still there after the renewal"
+    sleep 1
+  done
+  [ -n "$(nginx_workers "$master")" ] || fail "nginx: the master $master has no workers after the renewal"
+  answer="$(hx nginx systemctl show -p MainPID --value nginx)"
+  [ "$answer" = "$master" ] || fail "nginx: the renewal restarted nginx (MainPID $master, now $answer)"
+  answer="$(nginx_serial prod.example.test)"
+  [ "$answer" != "$serial" ] || fail "nginx: prod still presents the certificate from before the renewal ($serial)"
+  answer="$(nginx_issued)"
+  [ "$answer" = 2 ] || fail "nginx: certbot issued $answer certificates for prod after the renewal, not 2"
+
+  echo "== nginx: a new redirect domain on prod reissues its certificate with it"
+  converge nginx acme-redirect "$dir/converge.yml" "${fast[@]}" -e "$prod_old"
+  answer="$(nginx_issued)"
+  [ "$answer" = 3 ] || fail "nginx: certbot issued $answer certificates for prod after the new name, not 3"
+  answer="$(nginx_trusted https://old.prod.example.test/x)"
+  [ "$answer" = "301 https://prod.example.test/x" ] || fail "nginx: old.prod.example.test over HTTPS answered $answer"
+  answer="$(nginx_trusted https://prod.example.test/)"
+  [ "$answer" = "200 " ] || fail "nginx: prod.example.test over HTTPS answered $answer"
+
+  echo "== nginx: a certificate that fails leaves its site on HTTP and the other sites alone, and the run names it"
+  master="$(hx nginx systemctl show -p MainPID --value nginx)"
+  before="$(hx nginx md5sum /etc/nginx/sites/prod.conf /etc/nginx/sites/node.conf /etc/nginx/sites/static.conf)"
+  # broken comes before late: late still gets its certificate. The second
+  # run asks again.
+  for attempt in first retry; do
+    if play nginx "$dir/converge.yml" "${fast[@]}" -e "$prod_old" -e "{\"nginx_test_extra_sites\": [$broken, $late]}" \
+        >"$out/nginx-acme-$attempt.log" 2>&1; then
+      fail "nginx: the $attempt run with an unresolvable domain did not fail"
+    fi
+    grep -qF 'nginx: certbot got no certificate for site broken (unresolvable.example.test: ' "$out/nginx-acme-$attempt.log" \
+      || { cat "$out/nginx-acme-$attempt.log" >&2; fail "nginx: the $attempt failed run does not name unresolvable.example.test"; }
+    answer="$(hx nginx systemctl show -p MainPID --value nginx)"
+    [ "$answer" = "$master" ] || fail "nginx: the $attempt failed run restarted nginx (MainPID $master, now $answer)"
+    answer="$(hx nginx md5sum /etc/nginx/sites/prod.conf /etc/nginx/sites/node.conf /etc/nginx/sites/static.conf)"
+    [ "$answer" = "$before" ] || fail "nginx: the $attempt failed run changed the other sites: $answer"
+    hx nginx sh -c '! grep -q "listen 443" /etc/nginx/sites/broken.conf' || fail "nginx: broken has a TLS block: $(hx nginx cat /etc/nginx/sites/broken.conf)"
+    answer="$(ncurl http://unresolvable.example.test/x | tr -d '\r')"
+    grep -qxF 'Location: https://unresolvable.example.test/x' <<<"$answer" || fail "nginx: broken's HTTP block does not answer: $answer"
+    answer="$(nginx_trusted https://late.example.test/)"
+    [ "$answer" = "200 " ] || fail "nginx: late over HTTPS answered $answer after the $attempt failed run"
+    prod_answers "acme-$attempt"
+  done
+  hx nginx test ! -e /etc/letsencrypt/live/broken || fail "nginx: broken has a certificate"
+
+  echo "== nginx: back to prod's own names: the certificate follows, the extra sites go"
+  converge nginx acme-defaults "$dir/converge.yml" "${fast[@]}"
+  answer="$(nginx_issued)"
+  [ "$answer" = 4 ] || fail "nginx: certbot issued $answer certificates for prod after the name went, not 4"
+  answer="$(hx nginx certbot certificates --cert-name prod 2>/dev/null)"
+  grep -qE '^ +Domains: prod[.]example[.]test www[.]prod[.]example[.]test$' <<<"$answer" || fail "nginx: prod's certificate has other names: $answer"
+  hx nginx sh -c 'test ! -e /etc/nginx/sites/broken.conf && test ! -e /etc/nginx/sites/late.conf' || fail "nginx: the extra sites are still there"
+}
+
 suite_nginx() {
   local dir="$here/nginx" codename series version policy before after rc answer
   local fast=(-e nginx_test_prepare=false)
@@ -1507,6 +1616,9 @@ suite_nginx() {
   esac
 
   nginx_distro_refused
+
+  echo "== nginx: Pebble, the ACME server prod's certificate comes from"
+  play nginx "$dir/pebble.yml" >"$out/nginx-pebble.log" 2>&1 || { cat "$out/nginx-pebble.log" >&2; fail "nginx: Pebble did not start"; }
 
   echo "== nginx: a run whose repository refresh failed is not followed by Ubuntu's nginx"
   # The first run adds the source and the pin, then its refresh fails: the
@@ -1542,10 +1654,14 @@ suite_nginx() {
          if ((ours && p != 990) || (!ours && p != -1)) { print v, p; bad = 1 } }
        END { exit bad }' <<<"$policy" || fail "nginx: the pin gives the wrong priorities: $policy"
   play nginx "$dir/verify.yml"
-  # OCSP stapling (a {cert, key} site) resolves its responder at run time.
-  answer="$(hx nginx grep -c '^    resolver 127.0.0.53 valid=300s;$' /etc/nginx/sites/prod.conf)"
-  [ "$answer" = 2 ] || fail "nginx: prod's two TLS servers do not both have the resolver ($answer)"
+  # OCSP stapling (a {cert, key} site) resolves its responder at run time;
+  # a Let's Encrypt site has no stapling.
+  answer="$(hx nginx grep -c '^    resolver 127.0.0.53 valid=300s;$' /etc/nginx/sites/node.conf)"
+  [ "$answer" = 1 ] || fail "nginx: node's TLS server does not have the resolver ($answer)"
+  answer="$(hx nginx grep -c 'resolver' /etc/nginx/sites/prod.conf || true)"
+  [ "$answer" = 0 ] || fail "nginx: prod (Let's Encrypt) has a resolver ($answer)"
   nginx_links
+  nginx_acme
 
   echo "== nginx: hardening false on static: no security headers, /.env is served"
   converge nginx no-hardening "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_hardening": false}'
@@ -1652,7 +1768,7 @@ suite_nginx() {
   refused nginx bad-name "nginx: nginx_sites entry 'Bad Name' has an invalid name; it must match ^[a-z0-9_-]+$" \
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"Bad Name\", \"domains\": [\"x.example.test\"], $tls_off}]}"
   refused nginx no-acme-email "nginx: nginx_sites entry le uses tls letsencrypt, and nginx_acme_email is empty" \
-    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "le", "domains": ["le.example.test"], "user": "app_prod", "root": "/srv/prod/public", "tls": "letsencrypt"}]}'
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_acme_email": ""}' -e '{"nginx_sites": [{"name": "le", "domains": ["le.example.test"], "user": "app_prod", "root": "/srv/prod/public", "tls": "letsencrypt"}]}'
   refused nginx unknown-zone "nginx: nginx_sites entry rl has rate_limit nosuchzone, which nginx_rate_limit_zones does not define (default)" \
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"rl\", \"domains\": [\"rl.example.test\"], $tls_off, \"rate_limit\": \"nosuchzone\"}]}"
   refused nginx unknown-key "nginx: nginx_sites entry x has unknown keys (priv); its keys are" \
