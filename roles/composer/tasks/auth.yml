@@ -1,0 +1,77 @@
+---
+# Everything in a user's home runs as that user (runuser -u, which needs no
+# shell and no sudo), so a symlink the user plants cannot make root write
+# somewhere else. The existing file is compared as text, never parsed, so no
+# error can quote it. The content is secret: no_log on every task that carries it,
+# and no task here prints a module message that could contain it.
+- name: Auth file of {{ composer_user }}
+  vars:
+    composer_entry: "{{ composer_auth | selectattr('user', 'equalto', composer_user) | first }}"
+    composer_auth_dir: "{{ composer_auth_home }}/.config/composer"
+  no_log: true
+  diff: false
+  block:
+    - name: Read the auth file of {{ composer_user }}
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - "{{ composer_user }}"
+          - --
+          - sh
+          - -c
+          - |
+            f="$1/auth.json"
+            [ -e "$f" ] || [ -L "$f" ] || exit 3
+            stat -c '%F %U %a' "$f"
+            cat "$f"
+          - sh
+          - "{{ composer_auth_dir }}"
+      register: composer_auth_read
+      changed_when: false
+      failed_when: composer_auth_read.rc not in [0, 3]
+      check_mode: false
+
+    - name: Write the auth file of {{ composer_user }}
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - "{{ composer_user }}"
+          - --
+          - sh
+          - -c
+          - |
+            set -e
+            umask 077
+            mkdir -p "$1"
+            t="$(mktemp "$1/auth.json.XXXXXX")"
+            trap 'rm -f "$t"' EXIT
+            cat > "$t"
+            mv -f "$t" "$1/auth.json"
+          - sh
+          - "{{ composer_auth_dir }}"
+        stdin: "{{ composer_entry.auth | to_nice_json }}"
+      when:
+        - (composer_entry.state | default('present')) == 'present'
+        - >-
+          composer_auth_read.rc == 3
+          or composer_auth_read.stdout_lines[0] != 'regular file ' ~ composer_user ~ ' 600'
+          or composer_auth_read.stdout_lines[1:] != (composer_entry.auth | to_nice_json).splitlines()
+      changed_when: true
+
+    - name: Remove the auth file of {{ composer_user }}
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - "{{ composer_user }}"
+          - --
+          - rm
+          - -f
+          - --
+          - "{{ composer_auth_home }}/.config/composer/auth.json"
+      when:
+        - (composer_entry.state | default('present')) == 'absent'
+        - composer_auth_read.rc == 0
+      changed_when: true

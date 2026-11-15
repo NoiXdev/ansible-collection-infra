@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host service roles (nodejs, redis, mariadb, mysql, php) on a systemd Ubuntu
+# Host service roles (nodejs, redis, mariadb, mysql, php, composer) on a systemd Ubuntu
 # container, one fresh container per role:
 #
 #   NOIXDEV_INFRA_SERVICES="nodejs redis" UBUNTU=26.04 tests/services/run.sh
@@ -18,7 +18,7 @@ root="$(dirname "$tests")"
 ubuntu="${UBUNTU:-26.04}"
 prefix="${NOIXDEV_INFRA_TEST_HOST:-noixdev-infra-services-$ubuntu}"
 out="$tests/output/services-$ubuntu"
-services="${NOIXDEV_INFRA_SERVICES:-nodejs redis mariadb mysql php}"
+services="${NOIXDEV_INFRA_SERVICES:-nodejs redis mariadb mysql php composer}"
 
 started=()
 cleanup() {
@@ -877,6 +877,64 @@ suite_php() {
 
   suite_php_classic
   suite_php_updates
+}
+
+suite_composer() {
+  local dir="$here/composer" before sha
+  start composer
+  hx composer apt-get update -q >/dev/null
+
+  echo "== composer: a host without php is refused before any change"
+  refused composer no-php "composer: no php on this host; install PHP first" \
+    "$dir/converge.yml" -e composer_test_prepare=false
+  hx composer sh -c 'test ! -e /usr/local/bin/composer && test ! -e /usr/local/bin/composer1' \
+    || fail "composer: the refused run left a binary"
+
+  hx composer env DEBIAN_FRONTEND=noninteractive apt-get install -y -q php-cli >/dev/null
+
+  echo "== composer: converge (with --diff -v) and idempotence"
+  converge composer install "$dir/converge.yml" --diff -v
+  play composer "$dir/verify.yml"
+  echo "== composer: the --diff -vvv log has no auth value"
+  converge composer install-vvv "$dir/converge.yml" --diff -vvv
+  for log in install install-idempotence install-vvv install-vvv-idempotence; do
+    no_secret "$out/composer-$log.log" s3cr3t
+  done
+
+  echo "== composer: a drifted auth.json is rewritten, nothing else changes"
+  hx composer sh -c 'chmod 0644 /home/deploy/.config/composer/auth.json'
+  converge composer drift "$dir/converge.yml"
+  play composer "$dir/verify.yml"
+
+  echo "== composer: a wrong checksum fails and leaves the binaries alone"
+  before="$(hx composer sha256sum /usr/local/bin/composer /usr/local/bin/composer1)"
+  sha="$(printf '0%.0s' {1..64})"
+  refused composer bad-sha "did not match" "$dir/converge.yml" -e "composer_sha256=$sha"
+  refused composer bad-sha1 "did not match" "$dir/converge.yml" -e "composer1_sha256=$sha"
+  [ "$(hx composer sha256sum /usr/local/bin/composer /usr/local/bin/composer1)" = "$before" ] \
+    || fail "composer: a failed download replaced a binary"
+  hx composer sh -c '! ls /usr/local/bin | grep -qv "^composer1\?$"' || fail "composer: a failed download left a file in /usr/local/bin"
+  play composer "$dir/verify.yml"
+
+  echo "== composer: an unknown user is refused, without the secret in the log"
+  refused composer unknown-user "composer: composer_auth names the user nosuchuser, who does not exist" \
+    "$dir/converge.yml" -v -e '{"composer_auth": [{"user": "nosuchuser", "auth": {"http-basic": {"repo.example.test": {"username": "u", "password": "s3cr3t-$x"}}}}]}'
+  no_secret "$out/composer-unknown-user.log" s3cr3t
+
+  echo "== composer: a symlink planted in the user's home does not redirect root"
+  hx composer sh -c 'rm -rf /home/deploy/.config/composer && ln -s /etc /home/deploy/.config/composer'
+  play composer "$dir/converge.yml" >"$out/composer-symlink.log" 2>&1 || true
+  hx composer sh -c 'test ! -e /etc/auth.json' || fail "composer: a file was written through the user's symlink"
+  hx composer sh -c 'rm /home/deploy/.config/composer'
+  converge composer after-symlink "$dir/converge.yml"
+  play composer "$dir/verify.yml"
+
+  echo "== composer: Composer 1 off removes it, state absent removes the auth file"
+  converge composer absent "$dir/converge.yml" -e composer1_enabled=false \
+    -e '{"composer_auth": [{"user": "deploy", "state": "absent"}]}'
+  hx composer test ! -e /usr/local/bin/composer1 || fail "composer: composer1 is still there"
+  hx composer test ! -e /home/deploy/.config/composer/auth.json || fail "composer: the auth file is still there"
+  hx composer test -x /usr/local/bin/composer || fail "composer: composer is gone"
 }
 
 # php_classic_running: php8.3-fpm and php8.4-fpm still run as PROD and STAGING

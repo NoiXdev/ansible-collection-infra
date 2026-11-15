@@ -1,0 +1,25 @@
+---
+# -e composer_auth=[...], composer1_enabled or composer_sha256 replace the
+# defaults for the other cases. composer_test_prepare false skips the user
+# (the refusals change nothing).
+- name: Converge the composer role
+  hosts: testhost
+  vars:
+    composer_test_prepare: true
+    composer1_enabled: true
+    composer_auth:
+      - user: deploy
+        auth:
+          http-basic:
+            repo.example.test:
+              username: u
+              password: s3cr3t-$x
+  pre_tasks:
+    - name: Create the user deploy
+      ansible.builtin.user:
+        name: deploy
+        shell: /bin/bash
+        create_home: true
+      when: composer_test_prepare | bool
+  roles:
+    - noixdev.infra.composer

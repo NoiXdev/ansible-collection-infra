@@ -1,0 +1,46 @@
+---
+argument_specs:
+  main:
+    short_description: Composer at a pinned version, with Composer 1 on request and per-user auth.json
+    description:
+      - >-
+        Installs the Composer phar as /usr/local/bin/composer, checked against a pinned SHA-256
+        before it replaces the installed one. Needs a php on the host (the php role, or any other).
+      - >-
+        Composer 1 is installed as /usr/local/bin/composer1 on request. auth.json files are written
+        as the user they belong to, mode 0600; their content never appears in output or diffs.
+    options:
+      composer_version:
+        type: str
+        description: Composer 2 version, for example "2.11.2".
+      composer_sha256:
+        type: str
+        description: SHA-256 of that version's composer.phar, as published by getcomposer.org.
+      composer1_enabled:
+        type: bool
+        description: Install Composer 1 as /usr/local/bin/composer1 (false removes it).
+      composer1_version:
+        type: str
+        description: Composer 1 version.
+      composer1_sha256:
+        type: str
+        description: SHA-256 of that version's composer.phar.
+      composer_download_url:
+        type: str
+        description: Base URL of the downloads; the phar is <base>/<version>/composer.phar.
+      composer_auth:
+        type: list
+        elements: dict
+        description: auth.json files, one per user.
+        options:
+          user:
+            type: str
+            required: true
+            description: An existing user; the file is ~/.config/composer/auth.json of its home.
+          auth:
+            type: dict
+            description: The file's content (required when state is present).
+          state:
+            type: str
+            choices: [present, absent]
+            description: absent removes the file.

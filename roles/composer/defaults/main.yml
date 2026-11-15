@@ -1,0 +1,26 @@
+---
+# Composer, installed as the official phar at an exact version. The SHA-256
+# is the one getcomposer.org publishes for that phar
+# (https://getcomposer.org/download/<version>/composer.phar.sha256sum); change
+# both together.
+composer_version: "2.11.2"
+composer_sha256: dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
+
+# Composer 1 next to Composer 2, as /usr/local/bin/composer1, for projects
+# that are not ready for 2. Disabled, the binary is removed.
+composer1_enabled: false # noqa: var-naming[no-role-prefix]
+composer1_version: "1.10.27" # noqa: var-naming[no-role-prefix]
+composer1_sha256: 230d28fb29f3c6c07ab2382390bef313e36de17868b2bd23b2e070554cae23d2 # noqa: var-naming[no-role-prefix]
+
+composer_download_url: https://getcomposer.org/download
+
+# ~/.config/composer/auth.json of users (0600, written as that user):
+#   - user: deploy
+#     auth:
+#       http-basic:
+#         repo.example.test: {username: u, password: p}
+#   - user: olduser
+#     state: absent
+composer_auth: []
+
+composer_auth_users: "{{ composer_auth | map(attribute='user', default='') | list }}"

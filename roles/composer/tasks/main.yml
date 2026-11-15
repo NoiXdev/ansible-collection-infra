@@ -1,0 +1,92 @@
+---
+- name: Find php
+  ansible.builtin.command:
+    argv: [sh, -c, command -v php]
+  register: composer_php
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Refuse a host without php
+  ansible.builtin.fail:
+    msg: "composer: no php on this host; install PHP first"
+  when: composer_php.rc != 0
+
+# The auth values are secret and a loop prints its item: nothing below loops
+# over composer_auth itself, only over the user names.
+- name: Check the auth entries
+  ansible.builtin.assert:
+    that:
+      - composer_auth_bad | length == 0
+      - composer_auth_users | unique | length == composer_auth_users | length
+    fail_msg: >-
+      composer: composer_auth needs, per entry, a unique user, a state of present or absent,
+      and for present an auth mapping; faulty entries: {{ composer_auth_bad | join(', ') }}
+    quiet: true
+  vars:
+    composer_auth_bad: >-
+      {% set bad = [] %}{% for e in composer_auth %}{% set st = e.state | default('present') %}
+      {%- if e.user is not string or e.user | length == 0 or st not in ['present', 'absent']
+             or (st == 'present' and e.auth is not mapping) %}{% set _ = bad.append(e.user | default('?') | string) %}{% endif %}
+      {%- endfor %}{{ bad }}
+
+- name: Look up the users
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
+    fail_key: false
+  register: composer_users
+  loop: "{{ composer_auth_users }}"
+
+- name: Refuse an unknown user
+  ansible.builtin.fail:
+    msg: "composer: composer_auth names the user {{ item.item }}, who does not exist; the role does not create users"
+  when: item.ansible_facts.getent_passwd[item.item] is none
+  loop: "{{ composer_users.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Install ca-certificates
+  ansible.builtin.apt:
+    name: ca-certificates
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# get_url downloads to a temporary file, checks the checksum, and only then
+# moves the file over dest: a wrong checksum fails and leaves the installed
+# binary alone. A matching dest is not downloaded again.
+- name: Install composer
+  ansible.builtin.get_url:
+    url: "{{ composer_download_url }}/{{ composer_version }}/composer.phar"
+    dest: /usr/local/bin/composer
+    checksum: "sha256:{{ composer_sha256 }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install composer1
+  ansible.builtin.get_url:
+    url: "{{ composer_download_url }}/{{ composer1_version }}/composer.phar"
+    dest: /usr/local/bin/composer1
+    checksum: "sha256:{{ composer1_sha256 }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: composer1_enabled | bool
+
+- name: Remove composer1
+  ansible.builtin.file:
+    path: /usr/local/bin/composer1
+    state: absent
+  when: not composer1_enabled | bool
+
+- name: Write the auth files
+  ansible.builtin.include_tasks: auth.yml
+  vars:
+    composer_auth_home: >-
+      {{ (composer_users.results | selectattr('item', 'equalto', composer_user) | first)
+         .ansible_facts.getent_passwd[composer_user][4] }}
+  loop: "{{ composer_auth_users }}"
+  loop_control:
+    loop_var: composer_user

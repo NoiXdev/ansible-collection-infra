@@ -1,0 +1,66 @@
+---
+# -e composer_test_auth=false when the auth file is gone (state absent).
+- name: Verify the composer role
+  hosts: testhost
+  vars:
+    composer_test_auth: true
+  tasks:
+    - name: Read the versions and the binaries
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          composer --version --no-ansi 2>&1
+          composer1 --version --no-ansi 2>&1
+          stat -c '%n %U:%G %a' /usr/local/bin/composer /usr/local/bin/composer1
+        executable: /bin/bash
+      register: composer_verify
+      changed_when: false
+
+    - name: Check the versions and the binaries
+      ansible.builtin.assert:
+        that:
+          - composer_verify.stdout is search('Composer version 2\.11\.2 ')
+          - composer_verify.stdout is search('Composer version 1\.10\.27 ')
+          - composer_verify.stdout is search('/usr/local/bin/composer root:root 755')
+          - composer_verify.stdout is search('/usr/local/bin/composer1 root:root 755')
+
+    - name: Read deploy's auth file
+      ansible.builtin.command:
+        argv: [stat, -c, '%U %a', /home/deploy/.config/composer/auth.json]
+      register: composer_verify_stat
+      changed_when: false
+      failed_when: false
+
+    - name: Check that the file is absent
+      ansible.builtin.assert:
+        that: composer_verify_stat.rc != 0
+      when: not composer_test_auth | bool
+
+    - name: Check deploy's auth file
+      when: composer_test_auth | bool
+      block:
+        - name: Read the file and ask composer
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              cat /home/deploy/.config/composer/auth.json
+              echo '#####'
+              su deploy -c 'composer config --global http-basic.repo.example.test'
+              echo '#####'
+              stat -c '%U:%G %a' /home/deploy/.config /home/deploy/.config/composer
+            executable: /bin/bash
+          register: composer_verify_auth
+          changed_when: false
+          no_log: true
+
+        - name: Check mode, owner, content and composer's view
+          ansible.builtin.assert:
+            that:
+              - composer_verify_stat.stdout == 'deploy 600'
+              - "composer_verify_parts[0] | from_json == {'http-basic': {'repo.example.test': {'username': 'u', 'password': 's3cr3t-$x'}}}"
+              - composer_verify_parts[1] is search('s3cr3t-\$x')
+              - composer_verify_parts[2] | trim == 'deploy:deploy 700\ndeploy:deploy 700'
+            fail_msg: "deploy's auth file or composer's view of it is wrong"
+          vars:
+            composer_verify_parts: "{{ composer_verify_auth.stdout.split('#####\n') }}"
+          no_log: true
