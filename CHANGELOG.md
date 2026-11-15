@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- `php`: new role that installs PHP versions from the ondrej/php PPA (Ubuntu 24.04 only for now; any
+  other release is refused before any change) and runs every pool in `php_pools` as a PHP-FPM
+  master of its own (`php-fpm@<name>`, socket `/run/php/<name>.sock` without a version in it,
+  owned by the pool user and `php_fpm_listen_group`). A config change reloads only that pool, a
+  version change restarts only that pool. Each pool has `/php-fpm-ping` (`pong`) and
+  `/php-fpm-status`. `php_pools` is the complete list: a pool that leaves it is stopped and its
+  config removed; its `tmp_dir` and log stay. Versions that leave `php_versions` stay installed,
+  with their `php<v>-fpm` service stopped. With `php_fpm_per_pool_service: false` (classic mode)
+  the pools run in the packages' `php<v>-fpm` services instead, and switching moves every pool.
+  Pool `env` values starting with `$` are refused (FPM would expand them), a changed socket owner
+  or listen group restarts the pool, and a config FPM rejects never replaces a running one: it is
+  tested before anything is switched. Ubuntu's `php<v>-*` packages are pinned to -1 and the PPA
+  preferred, so a run that cannot reach the PPA never installs Ubuntu's PHP. The PPA joins
+  unattended-upgrades in both modes; with one master per pool an apt hook restarts the pools of
+  each version with an upgraded `php<v>-*` package (extensions too) one at a time
+  (`/usr/local/sbin/php-fpm-rolling-restart`). Each restart is bounded by
+  `php_fpm_restart_timeout`; a pool that does not come back stops the rolling restart (see
+  `journalctl -t php-fpm-rolling-restart`) while apt still succeeds. In classic mode the package's
+  own restart applies.
+- `composer`: new role that installs Composer as `/usr/local/bin/composer` from the official phar
+  at an exact version (`composer_version`) checked against a pinned SHA-256 (`composer_sha256`,
+  from getcomposer.org's `.sha256sum`; a wrong checksum leaves the installed Composer alone),
+  Composer 1 as `/usr/local/bin/composer1` with `composer1_enabled`, and `~/.config/composer/auth.json`
+  for the users in `composer_auth` (mode 0600, written as the user, content never printed). The role
+  owns the whole file; `state: absent` removes it. A user listed twice, an unknown user and a
+  `present` entry without `auth` are refused. It needs a `php` on the host and installs
+  `ca-certificates`.
 - `portainer`, `traefik`, `dashy`, `pulsix_manager`, `pulsix_worker`, `dns`, `harbor`, `listmonk`,
   `anubis` and `mailcow` check for Docker first, before they change anything: the `docker` CLI,
   the compose plugin (`docker compose version`) and a daemon that answers (`docker version`).
