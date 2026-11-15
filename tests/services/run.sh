@@ -1449,6 +1449,160 @@ nginx_links() {
   hx nginx rm -f /srv/static/foreign.txt /srv/static/own.txt /srv/static/root-owned.txt
 }
 
+# nginx_code [curl args]: the status of prod's front page over HTTPS from
+# 127.0.0.1 (curl's --interface and -H, -u go in the args).
+nginx_code() {
+  hx nginx curl -sk -o /dev/null -w '%{http_code}' --max-time 10 --resolve prod.example.test:443:127.0.0.1 "$@" https://prod.example.test/ || true
+}
+
+# expect_code WANT NAME [curl args]: prod answers WANT.
+expect_code() {
+  local want="$1" name="$2" got; shift 2
+  got="$(nginx_code "$@")"
+  [ "$got" = "$want" ] || fail "nginx/auth: $name answered $got, not $want"
+}
+
+# nginx_auth: Basic auth with an allowlist on prod, the real client address
+# behind a proxy, and the rate limit of static. 192.0.2.10 is RFC 5737.
+nginx_auth() {
+  local dir="$here/nginx" fast=(-e nginx_test_prepare=false) auth=(-e nginx_test_auth=true)
+  local alice='alice:p$a:s"s\ w' log answer before after
+  local secrets=('p$a:s' 'b0b-s3cret' '$6$')
+  local changed='n3w pa$$ w0rd'
+  local acme=/var/lib/noixdev/acme/.well-known/acme-challenge
+  local htpasswd=/etc/nginx/noixdev/htpasswd/prod
+
+  echo "== nginx: Basic auth on prod, the first run with --diff -v, no password in the logs"
+  converge nginx auth "$dir/converge.yml" "${fast[@]}" "${auth[@]}" --diff -v
+  for log in auth auth-idempotence; do no_secret "$out/nginx-$log.log" "${secrets[@]}"; done
+  answer="$(hx nginx stat -c '%U:%G %a' "$htpasswd")"
+  [ "$answer" = "root:www-data 640" ] || fail "nginx/auth: the htpasswd file is $answer, not root:www-data 640"
+  answer="$(hx nginx cat "$htpasswd")"
+  [ "$(grep -c '^\(alice\|bob\):\$6\$' <<<"$answer")" = 2 ] || fail "nginx/auth: the htpasswd file has no SHA-512 hashes for alice and bob"
+  if grep -qF 's3cret' <<<"$answer"; then fail "nginx/auth: the htpasswd file has a clear password"; fi
+  answer="$(hx nginx grep -c 'auth_basic_user_file /etc/nginx/noixdev/htpasswd/prod;' /etc/nginx/sites/prod.conf)"
+  [ "$answer" = 1 ] || fail "nginx/auth: prod.conf names the htpasswd file $answer times, not once"
+  hx nginx grep -qx '    satisfy any;' /etc/nginx/sites/prod.conf || fail "nginx/auth: prod.conf lacks satisfy any"
+  answer="$( (hx nginx grep -c 'auth_basic' /etc/nginx/sites/node.conf /etc/nginx/sites/static.conf || true) | tr '\n' ' ')"
+  [ "$answer" = "/etc/nginx/sites/node.conf:0 /etc/nginx/sites/static.conf:0 " ] || fail "nginx/auth: another site has auth_basic: $answer"
+
+  echo "== nginx: credentials, the allowlist and the challenge path"
+  expect_code 401 "prod without credentials"
+  expect_code 200 "alice with her password" -u "$alice"
+  expect_code 401 "alice with a wrong password" -u 'alice:p$a:s"s\ x'
+  expect_code 401 "alice with a prefix of her password" -u 'alice:p$a'
+  expect_code 401 "an unknown user" -u 'carol:b0b-s3cret'
+  expect_code 200 "bob with his password" -u 'bob:b0b-s3cret'
+  expect_code 401 "bob with alice's password" -u 'bob:p$a:s"s\ w'
+  answer="$(ncurl https://node.example.test/app | head -n 1 | tr -d '\r')"
+  [ "$answer" = 'HTTP/1.1 200 OK' ] || fail "nginx/auth: node answered $answer without credentials"
+  hx nginx ip addr replace 192.0.2.10/32 dev lo
+  expect_code 200 "the allowlisted address without credentials" --interface 192.0.2.10
+  hx nginx ip addr replace 192.0.2.11/32 dev lo
+  expect_code 401 "another local address without credentials" --interface 192.0.2.11
+  hx nginx sh -c "mkdir -p $acme && echo 'noixdev challenge' > $acme/noixdev-auth"
+  for answer in prod.example.test www.prod.example.test; do
+    log="$(ncurl "http://$answer/.well-known/acme-challenge/noixdev-auth" | tr -d '\r')"
+    if ! grep -qx 'HTTP/1.1 200 OK' <<<"$log" || ! grep -qx 'noixdev challenge' <<<"$log"; then
+      fail "nginx/auth: the challenge on $answer is not served without credentials: $log"
+    fi
+    log="$(ncurl "http://$answer/.well-known/acme-challenge/missing" | head -n 1)"
+    case "$log" in *" 404 "*) ;; *) fail "nginx/auth: a missing challenge on $answer answered $log, not 404" ;; esac
+  done
+  hx nginx rm -f "$acme/noixdev-auth"
+
+  echo "== nginx: the real client address behind a proxy"
+  expect_code 401 "a forwarded allowlisted address without nginx_real_ip_from" -H 'X-Forwarded-For: 192.0.2.10'
+  converge nginx auth-real-ip "$dir/converge.yml" "${fast[@]}" "${auth[@]}" -e '{"nginx_real_ip_from": ["127.0.0.1"]}'
+  hx nginx grep -qx '    set_real_ip_from 127.0.0.1;' /etc/nginx/nginx.conf || fail "nginx/auth: nginx.conf lacks set_real_ip_from"
+  expect_code 200 "a forwarded allowlisted address from a trusted proxy" -H 'X-Forwarded-For: 192.0.2.10'
+  # The client is the last address the trusted proxy did not add: the right-most.
+  expect_code 200 "an allowlisted client behind an earlier hop" -H 'X-Forwarded-For: 192.0.2.99, 192.0.2.10'
+  expect_code 401 "a forged allowlisted address ahead of the real client" -H 'X-Forwarded-For: 192.0.2.10, 192.0.2.99'
+  expect_code 401 "a forwarded address that is not listed" -H 'X-Forwarded-For: 192.0.2.99'
+  expect_code 401 "no forwarded address"
+  expect_code 200 "alice behind the proxy" -u "$alice"
+
+  echo "== nginx: a changed password, with --diff -vvv"
+  hx nginx cp "$htpasswd" /root/htpasswd-before
+  converge nginx auth-changed "$dir/converge.yml" "${fast[@]}" "${auth[@]}" -e "{\"nginx_test_auth_alice\": \"$changed\"}" --diff -vvv
+  for log in auth-changed auth-changed-idempotence; do no_secret "$out/nginx-$log.log" "${secrets[@]}" 'n3w pa' 'w0rd'; done
+  expect_code 401 "alice with her old password" -u "$alice"
+  expect_code 200 "alice with her new password" -u "alice:$changed"
+  expect_code 200 "bob after alice's change" -u 'bob:b0b-s3cret'
+  # The salt comes from the site and the user: bob's line stays as it was.
+  [ "$(hx nginx grep '^bob:' /root/htpasswd-before)" = "$(hx nginx grep '^bob:' "$htpasswd")" ] || fail "nginx/auth: bob's hash changed with alice's password"
+  [ "$(hx nginx grep '^alice:' /root/htpasswd-before)" != "$(hx nginx grep '^alice:' "$htpasswd")" ] || fail "nginx/auth: alice's hash did not change with her password"
+  hx nginx rm -f /root/htpasswd-before
+
+  echo "== nginx: bob leaves the list, his login fails"
+  converge nginx auth-no-bob "$dir/converge.yml" "${fast[@]}" "${auth[@]}" -e nginx_test_auth_bob=false
+  expect_code 401 "bob after he left" -u 'bob:b0b-s3cret'
+  expect_code 200 "alice after bob left" -u "$alice"
+  [ "$(hx nginx grep -c '^bob:' "$htpasswd" || true)" = 0 ] || fail "nginx/auth: bob is still in the htpasswd file"
+
+  echo "== nginx: an empty allowlist means a password for every address"
+  converge nginx auth-no-allow "$dir/converge.yml" "${fast[@]}" "${auth[@]}" -e '{"nginx_test_auth_allow": []}'
+  expect_code 401 "the formerly allowlisted address without an allowlist" --interface 192.0.2.10
+  expect_code 200 "alice without an allowlist" -u "$alice"
+  hx nginx sh -c '! grep -q "satisfy any" /etc/nginx/sites/prod.conf' || fail "nginx/auth: prod.conf has satisfy any without an allowlist"
+
+  echo "== nginx: a site without basic_auth loses its htpasswd file"
+  converge nginx auth-off "$dir/converge.yml" "${fast[@]}"
+  hx nginx test ! -e "$htpasswd" || fail "nginx/auth: the htpasswd file is still there"
+  [ -z "$(hx nginx sh -c 'ls -A /etc/nginx/noixdev/htpasswd')" ] || fail "nginx/auth: the htpasswd directory still has files"
+  expect_code 200 "prod after basic_auth went"
+  hx nginx ip addr del 192.0.2.10/32 dev lo
+  hx nginx ip addr del 192.0.2.11/32 dev lo
+
+  echo "== nginx: rate limit: a burst gets 503, the challenge is never limited, the zone cools down"
+  converge nginx rate "$dir/converge.yml" "${fast[@]}" -e nginx_test_static_rate_limit=default
+  hx nginx grep -qx '    limit_req zone=default burst=20 nodelay;' /etc/nginx/sites/static.conf || fail "nginx/auth: static.conf lacks limit_req"
+  [ "$(hx nginx grep -c 'limit_req ' /etc/nginx/sites/static.conf)" = 1 ] || fail "nginx/auth: static.conf has limit_req outside its server block"
+  hx nginx grep -qx '    limit_req_zone $binary_remote_addr zone=default:10m rate=10r/s;' /etc/nginx/nginx.conf || fail "nginx/auth: nginx.conf lacks the zone"
+  hx nginx sh -c "mkdir -p $acme && echo 'noixdev challenge' > $acme/noixdev-rate"
+  answer="$(hx nginx bash -c 'for i in $(seq 50); do curl -sk -o /dev/null -w "%{http_code}\n" --max-time 20 --resolve static.example.test:443:127.0.0.1 https://static.example.test/ & done; wait')"
+  echo "   50 parallel requests: $(sort <<<"$answer" | uniq -c | tr -s ' ' | paste -sd, -)"
+  grep -qx 503 <<<"$answer" || fail "nginx/auth: 50 parallel requests gave no 503"
+  grep -qx 200 <<<"$answer" || fail "nginx/auth: 50 parallel requests gave no 200"
+  answer="$(ncurl http://static.example.test/.well-known/acme-challenge/noixdev-rate | head -n 1 | tr -d '\r')"
+  [ "$answer" = 'HTTP/1.1 200 OK' ] || fail "nginx/auth: the challenge on a rate limited site answered $answer"
+  hx nginx rm -f "$acme/noixdev-rate"
+  sleep 4
+  answer="$(ncurl https://static.example.test/ | head -n 1 | tr -d '\r')"
+  [ "$answer" = 'HTTP/1.1 200 OK' ] || fail "nginx/auth: static still answers $answer after the zone cooled down"
+  converge nginx rate-off "$dir/converge.yml" "${fast[@]}"
+  hx nginx sh -c '! grep -q limit_req /etc/nginx/sites/static.conf' || fail "nginx/auth: static.conf still has limit_req"
+
+  echo "== nginx: invalid basic_auth is refused before any change, with no password in the log"
+  local site='"name": "ba", "domains": ["ba.example.test"], "user": "app_prod", "root": "/srv/prod/public", "tls": "off"'
+  before="$(nginx_state)"
+  refused nginx auth-colon "nginx: nginx_sites entry ba has an invalid basic_auth: user #1 has no name, or a name with" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"a:b\", \"password\": \"pw-colon-secret\"}]}}]}"
+  refused nginx auth-newline-name "nginx: nginx_sites entry ba has an invalid basic_auth: user #1 has no name, or a name with" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"a\\nb\", \"password\": \"pw-nlname-secret\"}]}}]}"
+  refused nginx auth-duplicate "nginx: nginx_sites entry ba has an invalid basic_auth: user ann is listed twice" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": \"pw-dup-secret1\"}, {\"name\": \"ann\", \"password\": \"pw-dup-secret2\"}]}}]}"
+  refused nginx auth-newline-password "nginx: nginx_sites entry ba has an invalid basic_auth: user ann has no password, or a password that is not a one-line string" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": \"pw-nlpass-secret\\nline2\"}]}}]}"
+  refused nginx auth-number-password "nginx: nginx_sites entry ba has an invalid basic_auth: user ann has no password, or a password that is not a one-line string" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": 123456}]}}]}"
+  refused nginx auth-no-users "nginx: nginx_sites entry ba has an invalid basic_auth: users is a list of at least one" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"allow\": [\"192.0.2.10\"]}}]}"
+  refused nginx auth-bad-allow "nginx: nginx_sites entry ba has an invalid basic_auth: allow has an entry that is not an address or CIDR" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": \"pw-allow-secret\"}], \"allow\": [\"1.2.3.4; deny all\"]}}]}"
+  refused nginx auth-unknown-key "nginx: nginx_sites entry ba has an invalid basic_auth: user #1 has unknown keys (pasword)" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"pasword\": \"pw-typo-secret\"}]}}]}"
+  refused nginx auth-anubis "sets anubis, which this version of the role does not support yet" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{$site, \"anubis\": true}]}"
+  for log in colon newline-name duplicate newline-password number-password no-users bad-allow unknown-key; do
+    no_secret "$out/nginx-auth-$log.log" pw-colon-secret pw-nlname-secret pw-dup-secret pw-nlpass-secret 123456 pw-allow-secret pw-typo-secret
+  done
+  after="$(nginx_state)"
+  [ "$after" = "$before" ] || fail "nginx/auth: a refused run changed the host: $(diff <(echo "$before") <(echo "$after") || true)"
+  prod_answers auth
+}
+
 # nginx_failed_join: a run that fails after www-data joined a new site's
 # group still records it, so www-data leaves the group when the site goes.
 nginx_failed_join() {
@@ -1688,6 +1842,7 @@ suite_nginx() {
   [ "$answer" = 0 ] || fail "nginx: prod (Let's Encrypt) has a resolver ($answer)"
   nginx_links
   nginx_acme
+  nginx_auth
 
   echo "== nginx: hardening false on static: no security headers, /.env is served"
   converge nginx no-hardening "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_hardening": false}'

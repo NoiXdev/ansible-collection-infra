@@ -47,6 +47,40 @@
     file_type: any
   register: nginx_site_files
 
+# The Basic auth users: root's files in a directory of the role, never in a
+# site user's reach. They are written before the site configs that name them
+# and, for a site that no longer has basic_auth, removed after the configs
+# stopped naming them.
+- name: Create the directory of the Basic auth users
+  ansible.builtin.file:
+    path: "{{ nginx_htpasswd_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Find the files of Basic auth users
+  ansible.builtin.find:
+    paths: "{{ nginx_htpasswd_dir }}"
+    patterns: '^[a-z0-9_-]+$'
+    use_regex: true
+    file_type: any
+  register: nginx_htpasswd_files
+
+# no_log: the template hashes the passwords.
+- name: Write the Basic auth users
+  ansible.builtin.include_tasks: apply.yml
+  vars:
+    nginx_apply_no_log: true
+    nginx_apply_files: >-
+      {%- set files = [] -%}
+      {%- for site in nginx_sites_public if site.basic_auth_on -%}
+      {%- set _ = files.append({'src': 'htpasswd.j2', 'dest': nginx_htpasswd_dir ~ '/' ~ site.name, 'mode': '0640',
+                                'group': 'www-data', 'site': site}) -%}
+      {%- endfor -%}
+      {{ files }}
+  when: nginx_sites_public | selectattr('basic_auth_on') | list | length > 0
+
 - name: Apply the site configs
   ansible.builtin.include_tasks: apply.yml
   vars:
@@ -71,6 +105,13 @@
       {{ nginx_site_files.files | map(attribute='path')
          | reject('in', nginx_site_names | map('regex_replace', '^(.*)$', nginx_sites_dir ~ '/\1.conf') | list)
          | sort }}
+
+- name: Remove the Basic auth users of the sites without basic_auth
+  ansible.builtin.include_tasks: apply.yml
+  vars:
+    nginx_apply_files: []
+    nginx_apply_remove: "{{ nginx_htpasswd_stale }}"
+  when: nginx_htpasswd_stale | length > 0
 
 - name: Let www-data leave the groups no site uses any more
   ansible.builtin.command:

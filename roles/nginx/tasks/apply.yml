@@ -1,7 +1,8 @@
 ---
 # Every config file the role writes goes through here:
 #   nginx_apply_files: [{src: <template>, dest: <path>, mode: "0644", site: {...}}]
-#     (site is optional; the template sees it as nginx_site)
+#     (site is optional; the template sees it as nginx_site; group is
+#     optional, root by default)
 #   nginx_apply_remove: [<path>, ...]  (optional; files to remove)
 #   nginx_apply_no_log: true           (optional; for files that hold secrets)
 # Each file is written with a backup and each removed one set aside; then
@@ -23,7 +24,7 @@
         src: "{{ nginx_apply_file.src }}"
         dest: "{{ nginx_apply_file.dest }}"
         owner: root
-        group: root
+        group: "{{ nginx_apply_file.group | default('root') }}"
         mode: "{{ nginx_apply_file.mode }}"
         backup: true
       vars:

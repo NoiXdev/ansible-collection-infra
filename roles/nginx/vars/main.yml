@@ -29,6 +29,9 @@ nginx_role_dir: /etc/nginx/noixdev
 # The groups www-data joined for the sites, so the next run can leave the
 # ones no listed site uses any more.
 nginx_groups_state: /etc/nginx/noixdev/site-groups
+# The Basic auth users of each site with basic_auth (one file per site, named
+# after it): root's, and readable by the workers (www-data) through the group.
+nginx_htpasswd_dir: /etc/nginx/noixdev/htpasswd
 
 # Where certbot keeps a tls letsencrypt site's certificate (cert name: the
 # site's name).
@@ -106,16 +109,20 @@ nginx_site_defaults:
   extra: ""
 
 # The sites with their defaults and only the keys the role knows, without
-# basic_auth (it may hold passwords): every loop and template uses these. A
-# loop prints its items with -v, also with a label. The key names of each
-# entry, in list order, are nginx_sites_key_names.
+# basic_auth (it holds passwords): every loop and template uses these. A loop
+# prints its items with -v, also with a label. Instead of basic_auth an entry
+# has basic_auth_on and basic_auth_allow (the allowlist, no passwords); the
+# htpasswd template alone reads the users, in a no_log task. The key names of
+# each entry, in list order, are nginx_sites_key_names.
 nginx_sites_key_names: "{{ nginx_sites | map('dict2items') | map('map', attribute='key') | map('list') | list }}"
 # YAML reads an unquoted tls: off as false; both mean off here.
 nginx_sites_public: >-
   {%- set sites = [] -%}
   {%- for site in nginx_sites -%}
   {%- set known = site | dict2items | selectattr('key', 'in', nginx_site_keys | difference(['basic_auth'])) | items2dict -%}
-  {%- set entry = nginx_site_defaults | combine(known) -%}
+  {%- set auth = {'basic_auth_on': 'basic_auth' in site,
+                  'basic_auth_allow': (site.basic_auth.allow | default([])) if site.get('basic_auth') is mapping else []} -%}
+  {%- set entry = nginx_site_defaults | combine(known, auth) -%}
   {%- set _ = sites.append(entry | combine({'tls': 'off'}) if entry.tls is sameas false else entry) -%}
   {%- endfor -%}
   {{ sites }}
@@ -130,6 +137,13 @@ nginx_site_groups: >-
        | map('extract', ansible_facts.getent_passwd) | map(attribute=2) | map('extract', nginx_gid_names)))
      | combine(dict(nginx_sites_public | selectattr('group', 'defined') | map(attribute='name')
        | zip(nginx_sites_public | selectattr('group', 'defined') | map(attribute='group')))) }}
+
+# The Basic auth files no listed site has basic_auth for.
+nginx_htpasswd_stale: >-
+  {{ nginx_htpasswd_files.files | map(attribute='path')
+     | reject('in', nginx_sites_public | selectattr('basic_auth_on') | map(attribute='name')
+              | map('regex_replace', '^(.*)$', nginx_htpasswd_dir ~ '/\1') | list)
+     | sort }}
 
 # The groups www-data joins (each site's), the ones it was in before this run
 # (the getent facts of tasks/validate.yml), and the ones it joined for the

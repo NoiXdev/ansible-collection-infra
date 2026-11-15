@@ -107,6 +107,19 @@ server {
 {% set zone = nginx_rate_limit_zones | selectattr('name', 'eq', site.rate_limit) | first %}
     limit_req zone={{ zone.name }} burst={{ zone.burst | default(0) }} nodelay;
 {% endif %}
+{% if site.basic_auth_on %}
+    # Basic auth. Only this server block has it: the ACME challenges are
+    # answered by the port 80 blocks above.
+    auth_basic "Restricted";
+    auth_basic_user_file {{ nginx_htpasswd_dir }}/{{ site.name }};
+{% if site.basic_auth_allow | length > 0 %}
+    satisfy any;
+{% for address in site.basic_auth_allow %}
+    allow {{ address }};
+{% endfor %}
+    deny all;
+{% endif %}
+{% endif %}
 {% for header in ns.headers %}
     add_header {{ header[0] }} "{{ header[1] | replace('\\', '\\\\') | replace('"', '\\"') }}" always;
 {% endfor %}

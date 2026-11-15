@@ -89,10 +89,20 @@ argument_specs:
             and dot-dirs except /.well-known/, composer.json, composer.lock, *.sql, *.bak, *.swp
             and *~.
           - headers, a dict of headers to add or replace; an empty value removes one.
-          - rate_limit, the name of a zone of nginx_rate_limit_zones.
+          - rate_limit, the name of a zone of nginx_rate_limit_zones; a request over the rate and burst gets 503.
           - client_max_body_size, 64m by default.
           - user_includes, true by default (deploy snippets).
-          - basic_auth and anubis (false by default) are not supported yet by this version.
+          - >-
+            basic_auth, {users: [{name, password}], allow: [address or CIDR]}: Basic auth for the
+            whole site, except the ACME challenges (answered on port 80). The role hashes the
+            passwords (SHA-512 crypt, with a salt taken from the site and the user name, so a
+            rerun changes nothing; the controller needs passlib) into
+            /etc/nginx/noixdev/htpasswd/<site>, root:www-data 0640; a site that drops basic_auth
+            or leaves the list loses its file. User names have no ":" and no control characters
+            and are listed once; passwords are one-line strings. With allow, those addresses pass
+            without a password (satisfy any) and everyone else needs one; without it every
+            address needs one. The passwords are handled in no_log tasks only.
+          - anubis (false by default) is not supported yet by this version.
           - extra, raw config inside the site's server block.
       nginx_http_extra:
         type: str

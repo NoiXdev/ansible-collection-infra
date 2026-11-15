@@ -309,18 +309,86 @@
   loop_control:
     label: "{{ item.name }}"
 
-# Basic auth and Anubis come with later versions of the role; until then a
-# site that asks for them is refused rather than served without them.
+# basic_auth holds passwords: the checks run in no_log tasks and a message
+# names the site and the user, never a password (or a hash). The problems are
+# collected first, so one message lists them all.
+- name: Check the Basic auth settings
+  ansible.builtin.assert:
+    that: nginx_auth_problems | length == 0
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name | default('#' ~ (nginx_index + 1)) }} has an invalid
+      basic_auth: {{ nginx_auth_problems | join('; ') }}. It is {users: [{name, password}], allow:
+      [address or CIDR]}: at least one user, names without ":" or control characters and listed
+      once, one-line string passwords (quote a number), and allow entries such as 192.0.2.10 or
+      192.0.2.0/24
+    quiet: true
+  vars:
+    nginx_auth_address: '^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$'
+    nginx_auth_problems: >-
+      {%- set problems = [] -%}
+      {%- set auth = item.basic_auth -%}
+      {%- if auth is not mapping -%}
+      {%-   set _ = problems.append('basic_auth is not a mapping') -%}
+      {%- else -%}
+      {%-   set unknown = auth.keys() | difference(['users', 'allow']) | sort -%}
+      {%-   if unknown | length > 0 -%}
+      {%-     set _ = problems.append('unknown keys (' ~ unknown | join(', ') ~ ')') -%}
+      {%-   endif -%}
+      {%-   set users = auth.users | default(none) -%}
+      {%-   if users is not sequence or users is string or users is mapping or users | length == 0 -%}
+      {%-     set _ = problems.append('users is a list of at least one user') -%}
+      {%-   else -%}
+      {%-     set names = [] -%}
+      {%-     for user in users -%}
+      {%-       set position = loop.index -%}
+      {%-       if user is not mapping -%}
+      {%-         set _ = problems.append('user #' ~ position ~ ' is not a mapping with name and password') -%}
+      {%-       else -%}
+      {%-         set extra = user.keys() | difference(['name', 'password']) | sort -%}
+      {%-         if extra | length > 0 -%}
+      {%-           set _ = problems.append('user #' ~ position ~ ' has unknown keys (' ~ extra | join(', ') ~ ')') -%}
+      {%-         endif -%}
+      {%-         set name = user.name | default(none) -%}
+      {%-         set name_ok = name is string and name | length > 0 and name is not search('[:\\x00-\\x1f\\x7f]') -%}
+      {%-         if not name_ok -%}
+      {%-           set _ = problems.append('user #' ~ position ~ ' has no name, or a name with ":" or a control character') -%}
+      {%-         else -%}
+      {%-           if name in names -%}
+      {%-             set _ = problems.append('user ' ~ name ~ ' is listed twice') -%}
+      {%-           endif -%}
+      {%-           set _ = names.append(name) -%}
+      {%-         endif -%}
+      {%-         set label = ('user ' ~ name) if name_ok else 'user #' ~ position -%}
+      {%-         set password = user.password | default(none) -%}
+      {%-         if password is not string or password | length == 0 or password is search('[\\r\\n\\x00]') -%}
+      {%-           set _ = problems.append(label ~ ' has no password, or a password that is not a one-line string') -%}
+      {%-         endif -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-   endif -%}
+      {%-   set allow = auth.allow | default([]) -%}
+      {%-   if allow is not sequence or allow is string or allow is mapping -%}
+      {%-     set _ = problems.append('allow is a list of addresses or CIDRs') -%}
+      {%-   elif allow | reject('string') | list | length > 0 or allow | reject('match', nginx_auth_address) | list | length > 0 -%}
+      {%-     set _ = problems.append('allow has an entry that is not an address or CIDR') -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ problems }}
+  loop: "{{ nginx_sites | selectattr('basic_auth', 'defined') }}"
+  loop_control:
+    index_var: nginx_index
+    label: "{{ item.name | default('#' ~ (nginx_index + 1)) }}"
+  no_log: true
+
+# Anubis comes with a later version of the role; until then a site that asks
+# for it is refused rather than served without it.
 - name: Check for settings this version does not support yet
   ansible.builtin.assert:
-    that:
-      - "'basic_auth' not in nginx_sites_key_names[nginx_index]"
-      - not item.anubis
+    that: not item.anubis
     fail_msg: >-
-      nginx: nginx_sites entry {{ item.name }} sets basic_auth or anubis, which this version of
-      the role does not support yet
+      nginx: nginx_sites entry {{ item.name }} sets anubis, which this version of the role does
+      not support yet
     quiet: true
   loop: "{{ nginx_sites_public }}"
   loop_control:
-    index_var: nginx_index
     label: "{{ item.name }}"

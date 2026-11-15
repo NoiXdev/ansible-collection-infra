@@ -210,6 +210,15 @@
     nginx_test_static_hsts: true
     nginx_test_static_headers: {}
     nginx_test_prod_extra: ""
+    # Basic auth on prod: off by default (the other checks ask prod without
+    # credentials). alice's password has $, :, ", \ and a space; bob's is
+    # plain, and bob can be left out. The address in the allowlist is from
+    # RFC 5737.
+    nginx_test_auth: false
+    nginx_test_auth_alice: 'p$a:s"s\ w'
+    nginx_test_auth_bob: true
+    nginx_test_auth_allow: [192.0.2.10]
+    nginx_test_static_rate_limit: ""
     nginx_test_prod_redirects: [www.prod.example.test]
     # Pebble (pebble.yml), whose listener and roots the trust store has.
     nginx_acme_email: hostmaster@example.test
@@ -227,6 +236,13 @@
       php_scripts: [setup/install.php]
       tls: letsencrypt
       extra: "{{ nginx_test_prod_extra }}"
+    nginx_test_prod_site: >-
+      {{ nginx_test_prod | combine({'basic_auth': nginx_test_basic_auth} if nginx_test_auth | bool else {}) }}
+    nginx_test_basic_auth:
+      users: >-
+        {{ [{'name': 'alice', 'password': nginx_test_auth_alice}]
+           + ([{'name': 'bob', 'password': 'b0b-s3cret'}] if nginx_test_auth_bob | bool else []) }}
+      allow: "{{ nginx_test_auth_allow }}"
     nginx_test_node:
       name: node
       domains: [node.example.test]
@@ -237,7 +253,8 @@
     nginx_test_static_group: ""
     nginx_test_static_site: >-
       {{ nginx_test_static_base
-         | combine({'group': nginx_test_static_group} if nginx_test_static_group | length > 0 else {}) }}
+         | combine({'group': nginx_test_static_group} if nginx_test_static_group | length > 0 else {})
+         | combine({'rate_limit': nginx_test_static_rate_limit} if nginx_test_static_rate_limit | length > 0 else {}) }}
     nginx_test_static_base:
       name: static
       domains: [static.example.test]
@@ -250,7 +267,7 @@
     # More sites, as given.
     nginx_test_extra_sites: []
     nginx_sites: >-
-      {{ [nginx_test_prod, nginx_test_node]
+      {{ [nginx_test_prod_site, nginx_test_node]
          + ([nginx_test_static_site] if nginx_test_static | bool else [])
          + nginx_test_extra_sites }}
   roles:
