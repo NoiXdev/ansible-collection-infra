@@ -763,6 +763,14 @@ test_refusals() {
   grep -q "reconfigure.yml" "$out/converge.log" || fail "the new password was not a reconfigure"
   [ "$(web)" = "${images[0]} running healthy" ] || fail "web after the new password: $(web)"
   [ "$(db_id)" != "$db_before" ] || fail "the database container still has the old password in its environment"
+  # Tandoor's health check does not need the database; a login does. Once
+  # Traefik routes to the new container (Tandoor's own 403).
+  for _ in $(seq 30); do
+    [ "$(request /api/recipe/ -o /dev/null)" = $'\n403' ] && break
+    sleep 1
+  done
+  token="$(app_token)" || fail "the app login failed after the new password"
+  expect_answer 200 '"results"' /api/recipe/ -H "X-Session-Token: $token"
   expect_idempotent -e "tandoor_db_password=$rotated_db_password"
 }
 
