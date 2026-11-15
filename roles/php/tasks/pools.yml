@@ -71,7 +71,9 @@
 # PHP code running as the user) can swap any part of it for a link. Root
 # therefore opens every part of the path without following a link (a link
 # stops the run, naming it) and changes only the directory it holds open;
-# missing parents are created root-owned (0755).
+# missing parents are created root-owned (0755). An existing session, upload
+# or sys dir of another owner (the pool's user changed) is handed over the
+# same way; the next task creates the missing ones as the pool user.
 - name: Create the temp dirs
   ansible.builtin.command:
     argv:
@@ -106,6 +108,18 @@
         if stat.S_IMODE(st.st_mode) != 0o770:
             os.fchmod(fd, 0o770)
             changed = True
+        for sub in ('session', 'upload', 'sys'):
+            try:
+                sub_fd = os.open(sub, flags, dir_fd=fd)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                sys.exit(f'php: php_pools entry {name}: {path}/{sub} is a link or not a directory; '
+                         'the role follows no link in tmp_dir')
+            if os.fstat(sub_fd).st_uid != uid:
+                os.fchown(sub_fd, uid, gid)
+                changed = True
+            os.close(sub_fd)
         print('changed' if changed else 'ok')
       - "{{ item.name }}"
       - "{{ item.tmp_dir | regex_replace('/+$', '') }}"
