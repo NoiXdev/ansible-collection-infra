@@ -52,9 +52,44 @@
     signed_by: /etc/apt/keyrings/nodesource.asc
   register: nodejs_apt_repository
 
-# Without it the package comes from the distro whenever the package lists are
-# newer than the repository.
-- name: Refresh the package lists for the new repository
+# apt takes the first stanza that matches a version:
+# - the distro's nodejs is never installed (24.04 ships 18, 26.04 ships 22);
+# - the series wins; NodeSource's versions look like 24.22.3-1nodesource1
+#   (no epoch), the regex takes one with or without;
+# - any other version is never installed.
+# Without NodeSource's package lists there is no candidate, and the install
+# fails instead of falling back to the distro's nodejs.
+- name: Pin the series
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/nodesource
+    content: |
+      Package: nodejs
+      Pin: release o=Ubuntu
+      Pin-Priority: -1
+
+      Package: nodejs
+      Pin: version /^([0-9]+:)?{{ nodejs_version | regex_escape }}\./
+      Pin-Priority: 990
+
+      Package: nodejs
+      Pin: version *
+      Pin-Priority: -1
+    owner: root
+    group: root
+    mode: "0644"
+
+# A refresh that failed in an earlier run leaves the source in place but its
+# packages out of the lists; the next run refreshes then too.
+- name: Read where nodejs can come from
+  ansible.builtin.command:
+    cmd: apt-cache policy nodejs
+  register: nodejs_apt_policy
+  changed_when: false
+  check_mode: false
+
+- name: Refresh the package lists for the repository
   ansible.builtin.apt:
     update_cache: true
-  when: nodejs_apt_repository is changed # noqa: no-handler (the install follows at once)
+  when: >-
+    nodejs_apt_repository is changed
+    or (nodejs_apt_url | regex_replace('/+$', '')) not in nodejs_apt_policy.stdout

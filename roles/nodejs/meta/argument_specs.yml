@@ -3,7 +3,9 @@ argument_specs:
   main:
     short_description: Node.js from NodeSource, with pinned global npm packages
     description:
-      - Installs the nodejs package of one major series from the NodeSource apt repository.
+      - >-
+        Installs the nodejs package of one major series from the NodeSource apt repository,
+        pinned to that series; the distro's nodejs is never installed.
       - >-
         A nodejs of another series that is installed already (the distro's, for example)
         is refused before any change; a series change is a separate, deliberate step.

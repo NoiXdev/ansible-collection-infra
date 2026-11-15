@@ -113,7 +113,7 @@ refused() {
 }
 
 suite_nodejs() {
-  local dir="$here/nodejs" distro before pkgs='{"nodejs_npm_packages": [{"name": "semver", "version": "7.7.2"}]}'
+  local dir="$here/nodejs" distro before version policy pkgs='{"nodejs_npm_packages": [{"name": "semver", "version": "7.7.2"}]}'
   start nodejs
   hx nodejs apt-get update -q >/dev/null
 
@@ -133,9 +133,34 @@ suite_nodejs() {
   esac
   hx nodejs sh -c '! ls /etc/apt/sources.list.d/ | grep -qi nodesource' || fail "nodejs: the refused run left a NodeSource file"
   hx nodejs sh -c 'test ! -e /etc/apt/keyrings/nodesource.asc' || fail "nodejs: the refused run left the key"
-
-  echo "== nodejs: converge and idempotence"
+  hx nodejs sh -c 'test ! -e /etc/apt/preferences.d/nodesource' || fail "nodejs: the refused run left the pin"
   hx nodejs env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q nodejs >/dev/null
+
+  echo "== nodejs: a run whose repository refresh failed is not followed by the distro's nodejs"
+  # The first run adds the source and the pin, then its refresh fails: the
+  # package lists stay without NodeSource's packages. The key comes from the
+  # same host as the packages, so apt alone is cut off.
+  hx nodejs sh -c 'echo "Acquire::https::Proxy::deb.nodesource.com \"http://127.0.0.1:9\";" > /etc/apt/apt.conf.d/99-block-nodesource'
+  if play nodejs "$dir/converge.yml" >"$out/nodejs-blocked.log" 2>&1; then
+    fail "nodejs: the run with deb.nodesource.com unreachable did not fail"
+  fi
+  hx nodejs rm -f /etc/apt/apt.conf.d/99-block-nodesource
+  hx nodejs test -e /etc/apt/sources.list.d/nodesource.sources || fail "nodejs: the blocked run did not add the source"
+  hx nodejs sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}" nodejs 2>/dev/null | grep -q "^.i"' \
+    || fail "nodejs: the blocked run installed nodejs"
+  converge nodejs stale-lists "$dir/converge.yml"
+  version="$(hx nodejs dpkg-query -W -f='${Version}' nodejs)"
+  case "$version" in
+    24.*nodesource*) echo "   installed NodeSource's $version" ;;
+    *) fail "nodejs: after a failed refresh the role installed $version, not NodeSource's" ;;
+  esac
+  # NodeSource's versions win by origin; the distro's nodejs is never installed.
+  policy="$(hx nodejs apt-cache policy nodejs)"
+  awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
+         if ((v ~ /nodesource/ && p != 990) || (v !~ /nodesource/ && p != -1)) { print v, p; bad = 1 } }
+       END { exit bad }' <<<"$policy" || fail "nodejs: the pin gives the wrong priorities: $policy"
+
+  echo "== nodejs: converge with npm packages and idempotence"
   converge nodejs install "$dir/converge.yml" -e "$pkgs"
   play nodejs "$dir/verify.yml" -e "$pkgs"
 

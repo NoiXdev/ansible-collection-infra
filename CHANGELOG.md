@@ -73,6 +73,7 @@
   default `"24"`) and global npm packages at exact versions (`nodejs_npm_packages`, each with
   `name` and `version`; ranges and tags are refused). A `nodejs` of another series (Ubuntu's own,
   another NodeSource series) is refused before any change: a series change is a separate step.
+  Ubuntu's `nodejs` is pinned to -1, so a run that cannot reach NodeSource never installs it.
 - `redis`: new role that installs Redis from packages.redis.io, pinned to `redis_version`
   (default `"8"`). Without `redis_instances` the package's `redis-server` runs on
   `redis_bind_address:6379` (`redis_password`, `redis_maxmemory`, `redis_maxmemory_policy`,
