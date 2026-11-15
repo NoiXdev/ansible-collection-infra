@@ -39,7 +39,7 @@
 # package); the distro's is mysql-server-8.0 or mysql-server-8.4.
 - name: Read the installed MySQL servers
   ansible.builtin.command:
-    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Package}|${Version}\n' mysql-community-server mysql-server mysql-server-*
+    cmd: dpkg-query -W -f '${db:Status-Abbrev}|${Package}|${Version}|${Maintainer}\n' mysql-community-server mysql-server mysql-server-*
   register: mysql_installed
   changed_when: false
   failed_when: false
@@ -62,6 +62,23 @@
          | list }}
   when: mysql_other | length > 0
 
+# The distro's packages carry the same names and, on 26.04, the pinned series
+# (mysql-server 8.4); apt would swap them for the vendor's in place. dpkg keeps
+# the Maintainer field of what is installed, whatever the package lists say
+# (the version strings of the two vendors' packages overlap, a package's origin
+# needs the lists).
+- name: Refuse a server that is not from the MySQL repository
+  ansible.builtin.fail:
+    msg: >-
+      mysql: installed {{ mysql_foreign[0].split('|')[1] }} {{ mysql_foreign[0].split('|')[2] }}
+      is not from {{ mysql_apt_url | urlsplit('hostname') }}; the role manages MySQL's own
+      packages only
+  vars:
+    mysql_foreign: >-
+      {{ mysql_installed.stdout_lines | select('match', '^.i')
+         | reject('search', '[|]' ~ (mysql_vendor_maintainer | regex_escape) ) | list }}
+  when: mysql_foreign | length > 0
+
 - name: Add the MySQL repository
   ansible.builtin.include_tasks: repository.yml
 
@@ -74,7 +91,7 @@
     vtype: password
     value: ""
   loop: [root-pass, re-root-pass]
-  when: mysql_installed.stdout_lines | select('match', '^.i[|]mysql-community-server[|]') | list | length == 0
+  when: mysql_installed.stdout_lines | select('match', '^.i +[|]mysql-community-server[|]') | list | length == 0
 
 # python3-pymysql is what the mysql_db and mysql_user modules connect with;
 # the server's start script calls apparmor's profile loader.

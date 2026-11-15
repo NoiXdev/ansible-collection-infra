@@ -40,3 +40,7 @@ mysql_users_key_names: "{{ mysql_users | map('dict2items') | map('map', attribut
 mysql_users_password_set: >-
   {{ mysql_users | map(attribute='password', default='') | map('default', '', true)
      | map('string') | map('regex_replace', '(?s)^.+$', 'set') | list }}
+
+# The Maintainer field of the vendor's packages (what dpkg keeps of an installed
+# package); the distro's say "Ubuntu Developers".
+mysql_vendor_maintainer: MySQL Release Engineering

@@ -34,3 +34,7 @@ mariadb_users_key_names: "{{ mariadb_users | map('dict2items') | map('map', attr
 mariadb_users_password_set: >-
   {{ mariadb_users | map(attribute='password', default='') | map('default', '', true)
      | map('string') | map('regex_replace', '(?s)^.+$', 'set') | list }}
+
+# The Maintainer field of the vendor's packages (what dpkg keeps of an installed
+# package); the distro's say "Ubuntu Developers".
+mariadb_vendor_maintainer: MariaDB Developers
