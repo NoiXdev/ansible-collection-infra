@@ -1644,6 +1644,8 @@ suite_nginx() {
     "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "x", "domains": ["x.example.test"], "user": "nosuchuser", "root": "/srv/x", "tls": "off"}]}'
   refused nginx root-user "nginx: nginx_sites entry x has the user root; a site belongs to an unprivileged user" \
     "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "x", "domains": ["x.example.test"], "user": "root", "root": "/srv/x", "tls": "off"}]}'
+  refused nginx root-group "nginx: nginx_sites entry x has the group root (gid 0); www-data joins a site's group, which must not be root" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], $tls_off, \"group\": \"root\"}]}"
   refused nginx bad-name "nginx: nginx_sites entry 'Bad Name' has an invalid name; it must match ^[a-z0-9_-]+$" \
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"Bad Name\", \"domains\": [\"x.example.test\"], $tls_off}]}"
   refused nginx no-acme-email "nginx: nginx_sites entry le uses tls letsencrypt, and nginx_acme_email is empty" \

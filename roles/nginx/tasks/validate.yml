@@ -180,10 +180,13 @@
 # www-data joins each site's group.
 - name: Check that no site has the root group
   ansible.builtin.assert:
-    that: ansible_facts.getent_group[nginx_site_groups[item.name]][1] | int != 0
+    that:
+      - nginx_site_groups[item.name] != 'root'
+      - ansible_facts.getent_group[nginx_site_groups[item.name]][1] | int != 0
     fail_msg: >-
       nginx: nginx_sites entry {{ item.name }} has the group {{ nginx_site_groups[item.name] }}
-      (gid 0); www-data joins a site's group, which must be unprivileged
+      (gid {{ ansible_facts.getent_group[nginx_site_groups[item.name]][1] }}); www-data joins a
+      site's group, which must not be root
     quiet: true
   loop: "{{ nginx_sites_public }}"
   loop_control:
