@@ -49,27 +49,30 @@
   and `paperless_db_password` are required, the first admin only for a fresh install. The data lives
   in `paperless_data_dir`, which can be a `base_mounts` volume (`paperless_data_dir_mountpoint`
   fails every run unless it is a mountpoint). Only an install or an import creates the data
-  subdirectories and the containers bind them without creating them, so a volume that is not
-  mounted keeps the containers from starting, and a run that finds the compose file without the
+  subdirectories and the containers bind them without creating them, so a volume that is not mounted
+  keeps the containers from starting, and a run that finds the compose file without the
   subdirectories fails in every state. More `PAPERLESS_*` settings go through `paperless_env`; the
   ones the role sets itself are refused. The share offers SMB2 or newer only
   (`paperless_samba_min_protocol`, never `NT1`), and `paperless_samba_bind` is required, with no
   `0.0.0.0` default, because Docker bypasses the host firewall. An export of an old installation is
   imported once with `paperless_import_dir` (below `paperless_data_dir/export`, made by the exact
   pinned version, into an empty installation; later runs ignore it through `imported.yml`). Before
-  an update the role takes a backup in `backups/`: `paperless.dump`, a copy of `data/` and `media/` as
-  hard links; the newest `paperless_dumps_keep` are kept. A failed update is rolled back, writes
-  `update-failed`, which blocks that version (after a rollback that failed too, every version
-  until the backup is restored by hand), and leaves `<backup>-failed`, which is never pruned;
-  Samba starts only once the new version is healthy; a Samba that does not start then fails the
-  run without a rollback. A failed install or import stops the stack, Samba included. Refused
-  before any change: a PostgreSQL image older than 18 (older images keep the database on a volume
-  of their own, outside `paperless_data_dir`), a downgrade, a PostgreSQL major other than the
-  database's, more than one PostgreSQL cluster, an import into an existing installation, of
-  another version or of an export that `paperless_uid` cannot read, and a leftover
-  `install-incomplete` marker (beside `imported.yml` with a message to remove only the marker).
-  The admin password and the import passphrase reach the container through stdin, so they are
-  not in the output even at `-vvv`. See the role's guide in the docs.
+  an update the role takes a backup in `backups/`: `paperless.dump`, a copy of `data/` and `media/`
+  as hard links; the newest `paperless_dumps_keep` are kept. A failed update is rolled back, writes
+  `update-failed`, which blocks that version (after a rollback that failed too, every version until
+  the backup is restored by hand), and leaves `<backup>-failed`, which is never pruned; Samba starts
+  only once the new version is healthy; a Samba that does not start then fails the run without a
+  rollback. A failed install or import stops the stack, Samba included. Refused before any change: a
+  PostgreSQL image older than 18 (older images keep the database on a volume of their own, outside
+  `paperless_data_dir`), a downgrade, a PostgreSQL major other than the database's, more than one
+  PostgreSQL cluster, a `paperless_db_password` that the database does not take (PostgreSQL takes
+  the password only when it creates the database: set a new one in the database first, as the
+  message says), a compose file that is not YAML (the parser's error, which could quote a line with
+  a secret, is not shown), an import into an existing installation, of another version or of an
+  export that `paperless_uid` cannot read, and a leftover `install-incomplete` marker (beside
+  `imported.yml` with a message to remove only the marker). The admin password and the import
+  passphrase reach the container through stdin, so they are not in the output even at `-vvv`. See
+  the role's guide in the docs.
 - `nodejs`: new role that installs one Node.js major series from NodeSource (`nodejs_version`,
   default `"24"`) and global npm packages at exact versions (`nodejs_npm_packages`, each with
   `name` and `version`; ranges and tags are refused). A `nodejs` of another series (Ubuntu's own,
@@ -113,28 +116,32 @@
   `tandoor_email` (SMTP) sends invites and password resets. The data lives in `tandoor_data_dir`,
   which can be a `base_mounts` volume (`tandoor_data_dir_mountpoint` fails every run unless it is a
   mountpoint); a run that finds the compose file without its data subdirectories fails in every
-  state. Two Traefik routers share `tandoor_hostname`: the pages (`tandoor_traefik_middlewares`)
-  and the paths the web UI and apps call without a page, `/api/`, `/_allauth/` and, with local
-  media, `/media/` (`tandoor_traefik_api_middlewares`), one priority above. They answer 401 or 403
-  without a session, so a challenge such as Anubis belongs on the pages router only.
+  state. Two Traefik routers share `tandoor_hostname`: the pages (`tandoor_traefik_middlewares`) and
+  the paths the web UI and apps call without a page, `/api/`, `/_allauth/` and, with local media,
+  `/media/` (`tandoor_traefik_api_middlewares`), one priority above. They answer 401 or 403 without
+  a session, so a challenge such as Anubis belongs on the pages router only.
   `tandoor_trusted_proxy_count` (default 1) is the number of proxies in front of Tandoor; the role
   adds the image's own nginx for `ALLAUTH_TRUSTED_PROXY_COUNT`, without which every visitor shares
   one login rate limit. Media go to `tandoor_data_dir/mediafiles`, or to an S3 bucket with
   `tandoor_s3` (the secret key in a `0600` file that the container reads, not in the compose file or
-  `docker inspect`; a new secret key recreates the whole stack, the database included). The media
-  mode is fixed at install: a run that switches between local media and S3 is refused. More
-  settings go through `tandoor_env`; the ones the role sets itself, `DATABASE_URL` and
-  `SECRET_KEY_FILE` among them, are refused. Before an update the role takes a backup in
-  `<tandoor_data_dir>/backups/` (`tandoor.dump`, a hard-link copy of local media and the compose
-  file; the S3 secret file is not in it); the newest `tandoor_dumps_keep` complete backups are kept,
-  while leftover `.partial` and `-failed` directories are not pruned. A failed update is rolled
-  back (`tandoor_rollback_timeout` bounds the wait for the previous version) and writes
-  `update-failed`, which blocks that version; after a rollback that failed too it blocks every
-  version until the backup is restored by hand. A failed install stops the stack and leaves
-  `install-incomplete`, which makes every later run refuse. Refused before any change: a
-  PostgreSQL image older than 18, a downgrade, a PostgreSQL major other than the database's and
-  left-over data without a compose file. The admin password reaches the container through stdin,
-  so it is not in the output even at `-vvv`. See the role's guide in the docs.
+  `docker inspect`; a new secret key recreates the Tandoor container, not the database; the
+  container carries a salted hash of the key as a label, so a run after a failed start recreates it
+  too). The media mode is fixed at install: a run that switches between local media and S3 is
+  refused. More settings go through `tandoor_env`; the ones the role sets itself, `DATABASE_URL` and
+  `SECRET_KEY_FILE` among them, and keys without a value are refused. Before an update the role
+  takes a backup in `<tandoor_data_dir>/backups/` (`tandoor.dump`, a hard-link copy of local media
+  and the compose file; the S3 secret file is not in it); the newest `tandoor_dumps_keep` complete
+  backups are kept, while leftover `.partial` and `-failed` directories are not pruned. A failed
+  update is rolled back (`tandoor_rollback_timeout` bounds the wait for the previous version) and
+  writes `update-failed`, which blocks that version; after a rollback that failed too it blocks
+  every version, older ones too, until the backup is restored by hand. A failed install stops the
+  stack and leaves `install-incomplete`, which makes every later run refuse. Refused before any
+  change: a PostgreSQL image older than 18, a downgrade, a PostgreSQL major other than the
+  database's, left-over data without a compose file, a `tandoor_db_password` that the database does
+  not take (PostgreSQL takes the password only when it creates the database: set a new one in the
+  database first, as the message says) and a compose file that is not YAML (the parser's error,
+  which could quote a line with a secret, is not shown). The admin password reaches the container
+  through stdin, so it is not in the output even at `-vvv`. See the role's guide in the docs.
 
 ## 0.5.0 — 2026-11-14
 
