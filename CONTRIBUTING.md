@@ -19,8 +19,9 @@ in CI:
 ```bash
 ansible-lint                     # configured in .ansible-lint (production profile)
 shellcheck tests/**/*.sh         # the test scripts; CI also checks the stubs (ci.yml)
-tests/all.sh                     # every Docker test suite, one after the other
+tests/all.sh                     # the Docker test suites, one after the other
 tests/all.sh mailcow listmonk    # only the named suites
+UBUNTU=24.04 tests/services/run.sh  # the service roles, on their own (also UBUNTU=26.04)
 ```
 
 `tests/all.sh` runs `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
@@ -36,6 +37,8 @@ Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tes
 check this first. The `mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
 (`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `cloudpanel` runs CloudPanel's real installer.
+`tests/services/run.sh` (nodejs, redis, mariadb, mysql) is not part of `tests/all.sh` or
+the signed test run yet: run it on its own, with `UBUNTU=24.04` and `UBUNTU=26.04`.
 
 Each test converges the roles, converges again (the second run must change nothing),
 and then verifies the result. `KEEP=1` leaves the test container running for
