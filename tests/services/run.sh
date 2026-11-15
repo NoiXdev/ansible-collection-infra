@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host service roles (nodejs, redis, mariadb, mysql) on a systemd Ubuntu
+# Host service roles (nodejs, redis, mariadb, mysql, php) on a systemd Ubuntu
 # container, one fresh container per role:
 #
 #   NOIXDEV_INFRA_SERVICES="nodejs redis" UBUNTU=26.04 tests/services/run.sh
@@ -18,7 +18,7 @@ root="$(dirname "$tests")"
 ubuntu="${UBUNTU:-26.04}"
 prefix="${NOIXDEV_INFRA_TEST_HOST:-noixdev-infra-services-$ubuntu}"
 out="$tests/output/services-$ubuntu"
-services="${NOIXDEV_INFRA_SERVICES:-nodejs redis mariadb mysql}"
+services="${NOIXDEV_INFRA_SERVICES:-nodejs redis mariadb mysql php}"
 
 started=()
 cleanup() {
@@ -697,6 +697,145 @@ suite_mysql() {
   [ "$(hx mysql dpkg -l | md5sum)" = "$before" ] || fail "mysql: the refused mariadb run changed the packages"
   hx mysql sh -c 'test ! -e /etc/apt/sources.list.d/mariadb.sources' || fail "mysql: the refused mariadb run added its repository"
   [ "$(hx mysql systemctl is-active mysql || true)" = active ] || fail "mysql: the server stopped after the refused mariadb run"
+}
+
+# ask POOL ROOT: what ROOT/app.php reports through the pool's socket (nothing
+# when the pool does not answer).
+ask() {
+  hx php env SCRIPT_FILENAME="$2/app.php" REQUEST_METHOD=GET cgi-fcgi -bind -connect "/run/php/$1.sock" 2>/dev/null || true
+}
+
+# php_running: production and staging still run as PROD and STAGING after a
+# failed or refused run ($1 names it).
+php_running() {
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php/$1: production restarted"
+  [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php/$1: staging restarted"
+}
+
+suite_php() {
+  local dir="$here/php" codename version policy prod staging tries rotate name
+  local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
+  # Parts of staging's env values that their raw and JSON-escaped forms share,
+  # and the key (no log prints the env at all).
+  local secrets=('; c=$d e' 'APP_ENV')
+  start php
+
+  if [ "$ubuntu" != 24.04 ]; then
+    echo "== php: Ubuntu $ubuntu is refused before any change"
+    codename="$(hx php sh -c '. /etc/os-release && echo "$VERSION_CODENAME"')"
+    refused php release "php: Ubuntu $ubuntu is not supported yet: the ondrej/php PPA has no packages for $codename" \
+      "$dir/converge.yml" -e php_test_prepare=false
+    hx php sh -c 'test ! -e /etc/apt/sources.list.d/ondrej-php.sources && test ! -e /etc/apt/keyrings/ondrej-php.asc && test ! -e /etc/apt/preferences.d/ondrej-php' \
+      || fail "php: the refused run left repository files"
+    return 0
+  fi
+
+  echo "== php: a run whose PPA refresh failed is not followed by Ubuntu's php"
+  # The first run adds the source and the pin, then its refresh fails: the
+  # package lists stay without the PPA's packages. The key comes from
+  # keyserver.ubuntu.com, so only apt's way to the PPA is cut off.
+  hx php sh -c 'echo "Acquire::https::Proxy::ppa.launchpadcontent.net \"http://127.0.0.1:9\";" > /etc/apt/apt.conf.d/99-block-ppa'
+  if play php "$dir/converge.yml" >"$out/php-blocked.log" 2>&1; then
+    fail "php: the run with ppa.launchpadcontent.net unreachable did not fail"
+  fi
+  hx php test -e /etc/apt/sources.list.d/ondrej-php.sources || fail "php: the blocked run did not add the source"
+  hx php sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}\n" php8.3-cli php8.3-fpm 2>/dev/null | grep -q "^.i"' \
+    || fail "php: the blocked run installed php"
+  # Ubuntu 24.04 ships php8.3 too; the pin leaves it no candidate.
+  policy="$(hx php apt-cache policy php8.3-cli)"
+  grep -qF 'Candidate: (none)' <<<"$policy" || fail "php: without the PPA's lists Ubuntu's php8.3-cli is a candidate: $policy"
+  hx php rm -f /etc/apt/apt.conf.d/99-block-ppa
+
+  echo "== php: converge (the first run with --diff -v, on the stale lists) and idempotence"
+  converge php install "$dir/converge.yml" --diff -v
+  version="$(hx php dpkg-query -W -f='${Version}' php8.3-fpm)"
+  case "$version" in
+    *deb.sury.org*) echo "   installed the PPA's php8.3-fpm $version" ;;
+    *) fail "php: after a failed refresh the role installed php8.3-fpm $version, not the PPA's" ;;
+  esac
+  # The PPA's versions win by origin; Ubuntu's php8.3 is never installed.
+  policy="$(hx php apt-cache policy php8.3-cli php8.3-fpm php8.3-common php8.3-intl php8.3-mbstring php8.4-cli php8.4-fpm php8.4-intl php8.4-mbstring)"
+  awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
+         if ((v ~ /deb\.sury\.org/ && p != 990) || (v !~ /deb\.sury\.org/ && p != -1)) { print v, p; bad = 1 } }
+       END { exit bad }' <<<"$policy" || fail "php: the pin gives the wrong priorities: $policy"
+  play php "$dir/verify.yml"
+  rotate="$(hx php logrotate -d /etc/logrotate.d/php-pools 2>&1)"
+  for name in production staging; do
+    grep -qF "/var/log/php/$name.log" <<<"$rotate" || fail "php: logrotate does not consider $name's log: $rotate"
+  done
+
+  echo "== php: kill -9 of staging's master leaves production serving, systemd restarts staging"
+  prod="$(pid php php-fpm@production)"
+  staging="$(pid php php-fpm@staging)"
+  hx php kill -9 "$staging"
+  ask production /srv/prod | grep -qF '"user":"app_prod"' || fail "php: production does not answer after staging's kill"
+  tries=0
+  until [ "$(hx php systemctl is-active php-fpm@staging || true)" = active ] \
+      && [ "$(pid php php-fpm@staging)" != "$staging" ] && [ "$(pid php php-fpm@staging)" != 0 ] \
+      && ask staging /srv/staging | grep -qF '"user":"app_staging"'; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 10 ] || fail "php: staging was not active again within 10 seconds of the kill"
+    sleep 1
+  done
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted on staging's kill"
+
+  echo "== php: a changed ini of staging reloads staging only (with --diff -vvv)"
+  staging="$(pid php php-fpm@staging)"
+  converge php memory "$dir/converge.yml" --diff -vvv -e php_test_staging_memory_limit=160M
+  play php "$dir/verify.yml" -e php_test_staging_memory_limit=160M
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted on staging's change"
+  # A reload re-executes the master in its process.
+  [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php: staging restarted instead of a reload"
+
+  echo "== php: the --diff logs have no env value"
+  for log in install install-idempotence memory memory-idempotence; do
+    no_secret "$out/php-$log.log" "${secrets[@]}"
+  done
+
+  echo "== php: staging moves to 8.3 on the same socket, production keeps running"
+  converge php upgrade "$dir/converge.yml" -e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3
+  play php "$dir/verify.yml" -e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted on staging's upgrade"
+  [ "$(pid php php-fpm@staging)" != "$staging" ] || fail "php: staging did not restart on its version change"
+  staging="$(pid php php-fpm@staging)"
+
+  echo "== php: an extension with a typo fails naming the package, the pools keep running"
+  refused php typo "php8.3-intll" "$dir/converge.yml" -e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3 \
+    -e '{"php_versions": [{"version": "8.3", "extensions": ["intll"]}, {"version": "8.4", "extensions": ["intl", "mbstring"]}]}'
+  php_running typo
+
+  echo "== php: invalid pools are refused before any change"
+  refused php unknown-user "php: php_pools entry production runs as nosuchuser, which does not exist; the role does not create users" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "nosuchuser"}]}'
+  refused php root-user "php: php_pools entry production runs as root; a pool runs as an unprivileged user" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "root"}]}'
+  refused php unlisted-version "php: php_pools entry production uses PHP 8.2, which php_versions does not list (8.3, 8.4)" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.2", "user": "app_prod"}]}'
+  refused php role-owned-ini "php: php_pools entry production sets open_basedir in ini; open_basedir, error_log, session.save_path, upload_tmp_dir and sys_temp_dir belong to the role (it sets them from open_basedir and tmp_dir)" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "ini": {"open_basedir": "/"}}]}'
+  refused php duplicate-name "php: php_pools has more than one entry named production" \
+    "$dir/converge.yml" -e "{\"php_pools\": [$pool, $pool]}"
+  refused php www-name "php: php_pools entry 'www' has an invalid name; it must match ^[a-z0-9_-]+$ and must not be www, the packages' own pool" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "www", "version": "8.3", "user": "app_prod"}]}'
+  refused php start-servers "php: php_pools entry production has pm.start_servers 10 above pm.max_children 5" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "pm": {"start_servers": 10, "max_children": 5}}]}'
+  refused php spare-servers "php: php_pools entry production has pm.min_spare_servers 4 above pm.max_spare_servers 3" \
+    "$dir/converge.yml" -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "pm": {"min_spare_servers": 4, "max_spare_servers": 3}}]}'
+  # Each env value is refused without being printed.
+  refused php env-values "php: php_pools entry production has env DOLLAR, LINE that FPM cannot pass on as given" \
+    "$dir/converge.yml" -v \
+    -e '{"php_pools": [{"name": "production", "version": "8.3", "user": "app_prod", "env": {"LINE": "s3cr3t-line\nnext", "DOLLAR": "$s3cr3t-dollar", "FINE": "s3cr3t-fine"}}]}'
+  no_secret "$out/php-env-values.log" s3cr3t-line s3cr3t-dollar s3cr3t-fine
+  php_running refusals
+
+  echo "== php: a pool that leaves the list stops, its tmp_dir stays"
+  converge php no-staging "$dir/converge.yml" -e php_test_staging=false
+  play php "$dir/verify.yml" -e php_test_staging=false
+  [ "$(hx php systemctl is-active php-fpm@staging || true)" = inactive ] || fail "php: staging still runs"
+  [ "$(hx php systemctl is-enabled php-fpm@staging || true)" = disabled ] || fail "php: staging is still enabled"
+  hx php test ! -e /etc/php-fpm/staging || fail "php: staging's config is still there"
+  hx php test -d /srv/staging/tmp/session || fail "php: staging's tmp_dir is gone"
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production restarted when staging left"
 }
 
 

@@ -1,0 +1,100 @@
+---
+- name: Install what the repository needs
+  ansible.builtin.apt:
+    name: [ca-certificates, gnupg, python3-debian]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Look for the PPA's apt key
+  ansible.builtin.stat:
+    path: /etc/apt/keyrings/ondrej-php.asc
+  register: php_apt_key_file
+
+# The keyserver serves the key with its armor headers in a different order on
+# every request, so a key in place is kept (and checked below on every run).
+- name: Install the PPA's apt key
+  when: not php_apt_key_file.stat.exists
+  ansible.builtin.get_url:
+    url: "{{ php_apt_key_url }}"
+    dest: /etc/apt/keyrings/ondrej-php.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the key fingerprints
+  ansible.builtin.command:
+    cmd: gpg --batch --show-keys --with-colons /etc/apt/keyrings/ondrej-php.asc
+  register: php_apt_key
+  changed_when: false
+
+- name: Reject an unexpected key
+  when: php_apt_key.stdout is not search('^fpr:+' ~ php_apt_key_fingerprint | upper ~ ':', multiline=True)
+  block:
+    - name: Remove the key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/ondrej-php.asc
+        state: absent
+
+    - name: Stop
+      ansible.builtin.fail:
+        msg: >-
+          {{ php_apt_key_url }} does not carry the key
+          {{ php_apt_key_fingerprint }}; the key file was removed.
+
+- name: Add the PPA
+  ansible.builtin.deb822_repository:
+    name: ondrej-php
+    types: [deb]
+    uris: "{{ php_apt_url }}"
+    suites: ["{{ php_apt_suite }}"]
+    components: [main]
+    signed_by: /etc/apt/keyrings/ondrej-php.asc
+  register: php_apt_repository
+
+# Ubuntu 24.04 ships php8.3 too. apt takes the first stanza that matches:
+# - Ubuntu's packages of the listed versions are never installed;
+# - the PPA's win.
+# Without the PPA's package lists there is no candidate, and the install fails
+# instead of falling back to Ubuntu's php8.3.
+- name: Pin the PHP packages to the PPA
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/ondrej-php
+    content: |
+      Explanation: Managed by noixdev.infra (php role). Changes here are overwritten.
+      Package: {{ php_apt_packages }}
+      Pin: release o=Ubuntu
+      Pin-Priority: -1
+
+      Package: {{ php_apt_packages }}
+      Pin: release o={{ php_apt_origin }}
+      Pin-Priority: 990
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    php_apt_packages: "{{ php_version_names | map('regex_replace', '^', 'php') | map('regex_replace', '$', '-*') | join(' ') }}"
+
+# A refresh that failed in an earlier run leaves the source in place but its
+# packages out of the lists; the next run refreshes then too.
+- name: Read where the PHP packages can come from
+  ansible.builtin.command:
+    argv: "{{ ['apt-cache', 'policy'] + php_version_names | map('regex_replace', '^', 'php') | map('regex_replace', '$', '-fpm') | list }}"
+  register: php_apt_policy
+  changed_when: false
+  check_mode: false
+
+- name: Refresh the package lists for the PPA
+  ansible.builtin.apt:
+    update_cache: true
+  when: >-
+    php_apt_repository is changed
+    or (php_apt_url | regex_replace('/+$', '')) not in php_apt_policy.stdout

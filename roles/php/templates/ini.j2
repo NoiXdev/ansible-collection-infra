@@ -1,0 +1,12 @@
+{#- Values in the syntax of php.ini and FPM's config, which share one parser.
+    quoted: between double quotes, with \ " and $ escaped (an unescaped ${...}
+    would be expanded), so the value arrives as given.
+    setting: On or Off for a boolean, a number as is, a constant expression such
+    as E_ALL & ~E_DEPRECATED as is (quotes would make it a plain string), and
+    anything else quoted. -#}
+{% macro quoted(value) -%}
+"{{ value | string | replace('\\', '\\\\') | replace('"', '\\"') | replace('$', '\\$') }}"
+{%- endmacro %}
+{% macro setting(value) -%}
+{% if value is sameas true %}On{% elif value is sameas false %}Off{% elif value is number %}{{ value }}{% elif value is match('^~?E_[A-Z_]+(\\s*[&|^]\\s*~?E_[A-Z_]+)*$') %}{{ value }}{% else %}{{ quoted(value) }}{% endif %}
+{%- endmacro %}

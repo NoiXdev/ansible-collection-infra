@@ -1,0 +1,25 @@
+---
+# One master per pool. A pool whose version or the unit changed restarts; one
+# whose config, php_ini or packages changed reloads (USR2: the master
+# re-executes in its process and keeps the socket). Every such pool's config is
+# tested first.
+- name: Test the changed php pool configs
+  ansible.builtin.command:
+    argv: ["php-fpm{{ php_pool_versions[item] }}", -t, -y, "/etc/php-fpm/{{ item }}/php-fpm.conf"]
+  loop: "{{ php_restart_pools + php_reload_pools }}"
+  changed_when: false
+  listen: php pools changed
+
+- name: Restart the php pools whose version changed
+  ansible.builtin.systemd_service:
+    name: "php-fpm@{{ item }}"
+    state: restarted
+  loop: "{{ php_restart_pools }}"
+  listen: php pools changed
+
+- name: Reload the changed php pools
+  ansible.builtin.systemd_service:
+    name: "php-fpm@{{ item }}"
+    state: reloaded
+  loop: "{{ php_reload_pools }}"
+  listen: php pools changed

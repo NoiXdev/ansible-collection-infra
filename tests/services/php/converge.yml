@@ -1,0 +1,60 @@
+---
+# Two versions and two pools. The knobs below change staging between runs;
+# -e php_pools=[...] (or php_versions) replaces a whole list for the invalid
+# cases.
+- name: Converge the php role
+  hosts: testhost
+  vars:
+    # false skips the pre_tasks (the release refusal on 26.04 changes nothing).
+    php_test_prepare: true
+    php_test_staging: true
+    php_test_staging_version: "8.4"
+    php_test_staging_memory_limit: 192M
+    php_versions:
+      - version: "8.3"
+        extensions: [intl, mbstring]
+      - version: "8.4"
+        extensions: [intl, mbstring]
+    # A constant expression, which PHP evaluates only when it is not quoted.
+    php_ini:
+      error_reporting: E_ALL & ~E_DEPRECATED
+    php_test_production:
+      name: production
+      version: "8.3"
+      user: app_prod
+    php_test_staging_pool:
+      name: staging
+      version: "{{ php_test_staging_version }}"
+      user: app_staging
+      # Characters that FPM's config parser treats specially: " ; = $ space
+      env:
+        APP_ENV: staging
+        NOTE: 'a "b"; c=$d e'
+      tmp_dir: /srv/staging/tmp
+      open_basedir: [/srv/staging]
+      ini:
+        memory_limit: "{{ php_test_staging_memory_limit }}"
+    php_pools: >-
+      {{ [php_test_production]
+         + ([php_test_staging_pool] if php_test_staging | bool else []) }}
+  pre_tasks:
+    - name: Create the app users
+      ansible.builtin.user:
+        name: "{{ item }}"
+        shell: /bin/bash
+      loop: [app_prod, app_staging, outsider]
+      when: php_test_prepare | bool
+
+    - name: Create the web roots
+      ansible.builtin.file:
+        path: "/srv/{{ item.dir }}"
+        state: directory
+        owner: "{{ item.user }}"
+        group: "{{ item.user }}"
+        mode: "0755"
+      loop:
+        - {dir: prod, user: app_prod}
+        - {dir: staging, user: app_staging}
+      when: php_test_prepare | bool
+  roles:
+    - noixdev.infra.php

@@ -1,0 +1,55 @@
+---
+- name: Create the log directory
+  ansible.builtin.file:
+    path: /var/log/php
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# PHP writes a pool's errors as the pool user, opening the file per message;
+# logrotate creates the next one. A log stays when its pool leaves the list.
+- name: Create the pool logs
+  ansible.builtin.file:
+    path: "/var/log/php/{{ item.name }}.log"
+    state: touch
+    owner: "{{ item.user }}"
+    group: "{{ php_pool_groups[item.name] }}"
+    mode: "0640"
+    access_time: preserve
+    modification_time: preserve
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Rotate the pool logs
+  ansible.builtin.template:
+    src: logrotate.j2
+    dest: /etc/logrotate.d/php-pools
+    owner: root
+    group: root
+    mode: "0644"
+
+# tmp_dir and its session, upload and sys dirs; they stay when the pool leaves.
+- name: Create the temp dirs
+  ansible.builtin.file:
+    path: "{{ item.0.tmp_dir | regex_replace('/+$', '') }}{{ ('/' ~ item.1) if item.1 else '' }}"
+    state: directory
+    owner: "{{ item.0.user }}"
+    group: "{{ php_pool_groups[item.0.name] }}"
+    mode: "0770"
+  loop: "{{ php_pools_public | selectattr('tmp_dir', 'defined') | product(['', 'session', 'upload', 'sys']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 or 'tmp_dir' }}"
+
+- name: Remove the packages' www pools
+  ansible.builtin.file:
+    path: "/etc/php/{{ item.version }}/fpm/pool.d/www.conf"
+    state: absent
+  loop: "{{ php_versions }}"
+  loop_control:
+    label: "{{ item.version }}"
+
+- name: Run one master per pool
+  ansible.builtin.include_tasks: per_pool.yml
+  when: php_fpm_per_pool_service | bool

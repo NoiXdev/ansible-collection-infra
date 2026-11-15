@@ -1,0 +1,50 @@
+---
+# The pools without their env, for every loop that does not write a pool
+# config: a loop prints its items with -v.
+php_pools_public: >-
+  {{ php_pools | map('dict2items') | map('rejectattr', 'key', 'eq', 'env') | map('list')
+     | map('items2dict') | list }}
+php_pool_names: "{{ php_pools_public | map(attribute='name') | list }}"
+php_version_names: "{{ php_versions | map(attribute='version') | list }}"
+php_pool_versions: "{{ dict(php_pool_names | zip(php_pools_public | map(attribute='version'))) }}"
+
+php_pm_defaults:
+  mode: dynamic
+  max_children: 5
+  start_servers: 2
+  min_spare_servers: 1
+  max_spare_servers: 3
+
+# Pool ini keys the role sets itself.
+php_role_ini_keys: [open_basedir, error_log, session.save_path, upload_tmp_dir, sys_temp_dir]
+
+# The releases the PPA has packages for, and the origin its Release file names.
+php_supported_releases: [noble]
+php_apt_origin: LP-PPA-ondrej-php
+
+# Each pool's group: the one it names, or its user's primary group. Needs the
+# getent facts of tasks/validate.yml.
+php_gid_names: >-
+  {{ dict(ansible_facts.getent_group.values() | map(attribute=1) | zip(ansible_facts.getent_group.keys())) }}
+php_pool_groups: >-
+  {{ dict(php_pool_names | zip(php_pools_public | map(attribute='user')
+       | map('extract', ansible_facts.getent_passwd) | map(attribute=2) | map('extract', php_gid_names)))
+     | combine(dict(php_pools_public | selectattr('group', 'defined') | map(attribute='name')
+       | zip(php_pools_public | selectattr('group', 'defined') | map(attribute='group')))) }}
+
+# The pools to restart (version or unit changed) and to reload (config, php_ini
+# or packages of their version changed) in this run, by name only. They come
+# from the registered results of tasks/versions.yml and tasks/per_pool.yml.
+php_restart_pools: >-
+  {{ ((php_pool_names if php_unit is defined and php_unit is changed else [])
+      + (php_env_files.results | default([]) | selectattr('changed') | map(attribute='item.name') | list))
+     | unique | list }}
+php_reload_versions: >-
+  {{ (php_packages.results | default([]) | selectattr('changed') | map(attribute='item.version') | list)
+     + (php_ini_files.results | default([]) | selectattr('changed') | selectattr('item.1', 'eq', 'fpm')
+        | map(attribute='item.0.version') | list) }}
+php_reload_pools: >-
+  {{ ((php_fpm_files.results | default([]) | selectattr('changed') | map(attribute='item.name') | list)
+      + (php_pool_files.results | default([]) | selectattr('changed') | map(attribute='item.name') | list)
+      + (php_pools_public | selectattr('version', 'in', php_reload_versions) | map(attribute='name') | list))
+     | unique | difference(php_restart_pools) | list }}

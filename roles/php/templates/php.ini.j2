@@ -1,0 +1,6 @@
+; Managed by noixdev.infra (php role). Changes here are overwritten.
+; php_ini, for the CLI and FPM of every version.
+{% import 'ini.j2' as ini %}
+{% for key, value in php_ini | dictsort %}
+{{ key }} = {{ ini.setting(value) }}
+{% endfor %}

@@ -1,0 +1,29 @@
+---
+- name: Check the release
+  ansible.builtin.fail:
+    msg: >-
+      php: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} is not
+      supported yet: the ondrej/php PPA has no packages for {{ ansible_facts['distribution_release'] }}
+  when: >-
+    ansible_facts['distribution'] != 'Ubuntu'
+    or ansible_facts['distribution_release'] not in php_supported_releases
+
+- name: Check the mode
+  ansible.builtin.assert:
+    that: php_fpm_per_pool_service | bool
+    fail_msg: "php: php_fpm_per_pool_service false (the packages' services) is not available yet"
+    quiet: true
+
+- name: Check the versions, php_ini and the pools
+  ansible.builtin.include_tasks: validate.yml
+
+- name: Add the PPA
+  ansible.builtin.include_tasks: repository.yml
+  when: php_versions | length > 0
+
+- name: Install the versions
+  ansible.builtin.include_tasks: versions.yml
+  when: php_versions | length > 0
+
+- name: Configure the pools
+  ansible.builtin.include_tasks: pools.yml

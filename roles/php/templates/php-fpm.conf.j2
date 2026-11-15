@@ -1,0 +1,10 @@
+; Managed by noixdev.infra (php role). Changes here are overwritten.
+; The master of the pool {{ item.name }} (php-fpm@{{ item.name }}); its own
+; messages go to the journal.
+[global]
+pid = /run/php-fpm/{{ item.name }}.pid
+error_log = syslog
+syslog.ident = php-fpm@{{ item.name }}
+; A reload gives the workers up to 10 seconds to finish their requests.
+process_control_timeout = 10s
+include = /etc/php-fpm/{{ item.name }}/pool.conf

@@ -1,0 +1,251 @@
+---
+# Every message names the entry. The loops use the pools without their env;
+# the env check alone sees it, under no_log, and names keys only.
+- name: Check the versions
+  ansible.builtin.assert:
+    that:
+      - item.version is string and item.version is match('^[0-9]+[.][0-9]+$')
+      - php_version_names | select('eq', item.version) | list | length == 1
+      - item.extensions | default([]) | reject('string') | list | length == 0
+      - item.extensions | default([]) | reject('match', '^[a-z0-9][a-z0-9.+-]*$') | list | length == 0
+    fail_msg: >-
+      php: php_versions entry {{ item.version }} is invalid; the version must be a
+      "major.minor" string such as "8.3", listed once, and the extensions package
+      suffixes such as intl (for php{{ item.version }}-intl)
+    quiet: true
+  loop: "{{ php_versions }}"
+  loop_control:
+    label: "{{ item.version }}"
+
+- name: Check the CLI version
+  ansible.builtin.assert:
+    that: php_cli_version in php_version_names
+    fail_msg: "php: php_cli_version {{ php_cli_version }} is not in php_versions ({{ php_version_names | join(', ') }})"
+    quiet: true
+  when: php_versions | length > 0
+
+- name: Check php_ini
+  ansible.builtin.assert:
+    that: php_bad_ini | length == 0
+    fail_msg: >-
+      php: php_ini has {{ php_bad_ini | join(', ') }} that cannot be written as given: a key
+      must match ^[A-Za-z0-9_.-]+$, and a value be a string, number or boolean on one line
+    quiet: true
+  vars:
+    php_ini_items: "{{ php_ini | dict2items }}"
+    php_bad_ini: &php_bad_ini >-
+      {{ ((php_ini_items | rejectattr('key', 'match', '^[A-Za-z0-9_.-]+$') | map(attribute='key') | list)
+          + (php_ini_items | rejectattr('value', 'string') | rejectattr('value', 'number') | map(attribute='key') | list)
+          + (php_ini_items | selectattr('value', 'search', '[\r\n\x00]') | map(attribute='key') | list))
+         | unique | sort }}
+
+- name: Check the pool names
+  ansible.builtin.assert:
+    that:
+      - item.name is string and item.name is match('^[a-z0-9_-]+$')
+      - item.name != 'www'
+    fail_msg: "php: php_pools entry '{{ item.name }}' has an invalid name; it must match ^[a-z0-9_-]+$ and must not be www, the packages' own pool"
+    quiet: true
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that every name is used once
+  ansible.builtin.assert:
+    that: php_pool_names | select('eq', item.name) | list | length == 1
+    fail_msg: "php: php_pools has more than one entry named {{ item.name }}"
+    quiet: true
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the pool versions
+  ansible.builtin.assert:
+    that: item.version is string and item.version in php_version_names
+    fail_msg: "php: php_pools entry {{ item.name }} uses PHP {{ item.version }}, which php_versions does not list ({{ php_version_names | join(', ') }})"
+    quiet: true
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Read the system users
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Read the system groups
+  ansible.builtin.getent:
+    database: group
+
+- name: Check the listen group
+  ansible.builtin.assert:
+    that: php_fpm_listen_group in ansible_facts.getent_group
+    fail_msg: "php: php_fpm_listen_group {{ php_fpm_listen_group }} does not exist"
+    quiet: true
+
+- name: Check that every pool user exists
+  ansible.builtin.assert:
+    that: item.user in ansible_facts.getent_passwd
+    fail_msg: "php: php_pools entry {{ item.name }} runs as {{ item.user }}, which does not exist; the role does not create users"
+    quiet: true
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that no pool runs as root
+  ansible.builtin.assert:
+    that:
+      - item.user != 'root'
+      - ansible_facts.getent_passwd[item.user][1] | int != 0
+    fail_msg: "php: php_pools entry {{ item.name }} runs as {{ item.user }}; a pool runs as an unprivileged user"
+    quiet: true
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the pool groups
+  ansible.builtin.assert:
+    that: item.group in ansible_facts.getent_group
+    fail_msg: "php: php_pools entry {{ item.name }} has the group {{ item.group }}, which does not exist"
+    quiet: true
+  loop: "{{ php_pools_public | selectattr('group', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the process manager settings
+  ansible.builtin.assert:
+    that:
+      - php_pm.mode in ['dynamic', 'ondemand', 'static']
+      - php_pm_numbers | map('string') | reject('match', '^[0-9]+$') | list | length == 0
+      - php_pm.max_children | int >= 1
+      - php_pm.min_spare_servers | int >= 1
+      - php_pm.max_spare_servers | int >= 1
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} has pm {{ php_pm }}; mode must be dynamic,
+      ondemand or static, and max_children, min_spare_servers and max_spare_servers whole
+      numbers of at least 1
+    quiet: true
+  vars: &php_pm
+    php_pm: "{{ php_pm_defaults | combine(item.pm | default({})) }}"
+    php_pm_numbers: "{{ php_pm | dict2items | rejectattr('key', 'eq', 'mode') | map(attribute='value') | list }}"
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# FPM's own rules for pm = dynamic; ondemand and static use max_children only.
+- name: Check the start servers against the maximum
+  ansible.builtin.assert:
+    that: php_pm.start_servers | int <= php_pm.max_children | int
+    fail_msg: "php: php_pools entry {{ item.name }} has pm.start_servers {{ php_pm.start_servers }} above pm.max_children {{ php_pm.max_children }}"
+    quiet: true
+  vars: *php_pm
+  when: php_pm.mode == 'dynamic'
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the spare servers
+  ansible.builtin.assert:
+    that: php_pm.min_spare_servers | int <= php_pm.max_spare_servers | int
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} has pm.min_spare_servers {{ php_pm.min_spare_servers }}
+      above pm.max_spare_servers {{ php_pm.max_spare_servers }}
+    quiet: true
+  vars: *php_pm
+  when: php_pm.mode == 'dynamic'
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the spare servers against the maximum
+  ansible.builtin.assert:
+    that: php_pm.max_spare_servers | int <= php_pm.max_children | int
+    fail_msg: "php: php_pools entry {{ item.name }} has pm.max_spare_servers {{ php_pm.max_spare_servers }} above pm.max_children {{ php_pm.max_children }}"
+    quiet: true
+  vars: *php_pm
+  when: php_pm.mode == 'dynamic'
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the start servers against the spare servers
+  ansible.builtin.assert:
+    that:
+      - php_pm.start_servers | int >= php_pm.min_spare_servers | int
+      - php_pm.start_servers | int <= php_pm.max_spare_servers | int
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} has pm.start_servers {{ php_pm.start_servers }}
+      outside pm.min_spare_servers {{ php_pm.min_spare_servers }} to pm.max_spare_servers
+      {{ php_pm.max_spare_servers }}
+    quiet: true
+  vars: *php_pm
+  when: php_pm.mode == 'dynamic'
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check that the pool ini leaves the role's keys alone
+  ansible.builtin.assert:
+    that: php_owned | length == 0
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} sets {{ php_owned | join(', ') }} in ini;
+      {{ php_role_ini_keys[:-1] | join(', ') }} and {{ php_role_ini_keys[-1] }} belong to the
+      role (it sets them from open_basedir and tmp_dir)
+    quiet: true
+  vars:
+    php_owned: "{{ item.ini | default({}) | dict2items | map(attribute='key') | select('in', php_role_ini_keys) | list }}"
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the pool ini
+  ansible.builtin.assert:
+    that: php_bad_ini | length == 0
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} has ini {{ php_bad_ini | join(', ') }} that cannot be
+      written as given: a key must match ^[A-Za-z0-9_.-]+$, and a value be a string, number or
+      boolean on one line
+    quiet: true
+  vars:
+    php_ini_items: "{{ item.ini | default({}) | dict2items }}"
+    php_bad_ini: *php_bad_ini
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the pool paths
+  ansible.builtin.assert:
+    that:
+      - item.open_basedir | default([]) | reject('string') | list | length == 0
+      - item.open_basedir | default([]) | reject('match', '^/[^:\r\n\x00]*$') | list | length == 0
+      - item.tmp_dir | default('/') is string and item.tmp_dir | default('/') is match('^/[^:\r\n\x00]*$')
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} has an invalid open_basedir or tmp_dir; each must be
+      an absolute path without a colon
+    quiet: true
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# FPM reads a value that starts with $ as a variable of the master's own
+# environment.
+- name: Check the pool environments
+  ansible.builtin.assert:
+    that: php_bad_env | length == 0
+    fail_msg: >-
+      php: php_pools entry {{ item.name }} has env {{ php_bad_env | join(', ') }} that FPM cannot
+      pass on as given: a key must match ^[A-Za-z_][A-Za-z0-9_]*$, and a value be a string or
+      number on one line that does not start with $
+    quiet: true
+  vars:
+    php_env_items: "{{ item.env | default({}) | dict2items }}"
+    php_bad_env: >-
+      {{ ((php_env_items | rejectattr('key', 'match', '^[A-Za-z_][A-Za-z0-9_]*$') | map(attribute='key') | list)
+          + (php_env_items | rejectattr('value', 'string') | rejectattr('value', 'number') | map(attribute='key') | list)
+          + (php_env_items | selectattr('value', 'boolean') | map(attribute='key') | list)
+          + (php_env_items | selectattr('value', 'search', '[\r\n\x00]') | map(attribute='key') | list)
+          + (php_env_items | selectattr('value', 'match', '[$]') | map(attribute='key') | list))
+         | unique | sort }}
+  loop: "{{ php_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true

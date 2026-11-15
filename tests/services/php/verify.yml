@@ -1,0 +1,143 @@
+---
+# The knobs are converge.yml's: pass the same -e to both.
+- name: Verify the php pools
+  hosts: testhost
+  vars:
+    php_test_staging: true
+    php_test_staging_version: "8.4"
+    php_test_staging_memory_limit: 192M
+    php_test_request:
+      REQUEST_METHOD: GET
+      SCRIPT_NAME: /app.php
+    # The response body, one line of JSON after the headers.
+    php_test_production_report: "{{ php_verify_production.stdout_lines | last | from_json }}"
+    php_test_staging_report: "{{ php_verify_staging.stdout_lines | last | from_json }}"
+  tasks:
+    - name: Install the test script
+      ansible.builtin.copy:
+        src: app.php
+        dest: "/srv/{{ item.dir }}/app.php"
+        owner: "{{ item.user }}"
+        group: "{{ item.user }}"
+        mode: "0644"
+      loop:
+        - {dir: prod, user: app_prod}
+        - {dir: staging, user: app_staging}
+
+    - name: Read the error_reporting value of E_ALL & ~E_DEPRECATED
+      ansible.builtin.command:
+        argv: [php8.3, -n, -r, "echo E_ALL & ~E_DEPRECATED;"]
+      register: php_verify_error_reporting
+      changed_when: false
+
+    - name: Ask production
+      ansible.builtin.command:
+        argv: [cgi-fcgi, -bind, -connect, /run/php/production.sock]
+      environment: "{{ php_test_request | combine({'SCRIPT_FILENAME': '/srv/prod/app.php'}) }}"
+      register: php_verify_production
+      changed_when: false
+
+    - name: Check production
+      ansible.builtin.assert:
+        that:
+          - php_test_production_report.version is match('8\.3\.')
+          - php_test_production_report.user == 'app_prod'
+          - php_test_production_report.app_env is false
+          - php_test_production_report.open_basedir in ['', none]
+          - php_test_production_report.error_reporting == php_verify_error_reporting.stdout
+        fail_msg: "production reports {{ php_test_production_report }}"
+
+    # A reload is a signal: the new config may need a moment.
+    - name: Ask staging
+      ansible.builtin.command:
+        argv: [cgi-fcgi, -bind, -connect, /run/php/staging.sock]
+      environment: "{{ php_test_request | combine({'SCRIPT_FILENAME': '/srv/staging/app.php'}) }}"
+      register: php_verify_staging
+      changed_when: false
+      until: php_test_staging_report.memory_limit == php_test_staging_memory_limit
+      retries: 10
+      delay: 1
+      when: php_test_staging | bool
+
+    - name: Check staging
+      ansible.builtin.assert:
+        that:
+          - php_test_staging_report.version is match(php_test_staging_version | regex_escape ~ '\.')
+          - php_test_staging_report.user == 'app_staging'
+          - php_test_staging_report.app_env == 'staging'
+          - php_test_staging_report.note == 'a "b"; c=$d e'
+          - "'/srv/staging' in php_test_staging_report.open_basedir.split(':')"
+          - "'/srv/staging/tmp' in php_test_staging_report.open_basedir.split(':')"
+          - php_test_staging_report.memory_limit == php_test_staging_memory_limit
+          - php_test_staging_report.session_save_path == '/srv/staging/tmp/session'
+          - php_test_staging_report.upload_tmp_dir == '/srv/staging/tmp/upload'
+          - php_test_staging_report.sys_temp_dir == '/srv/staging/tmp/sys'
+        fail_msg: "staging reports {{ php_test_staging_report }}"
+      when: php_test_staging | bool
+
+    - name: Read the sockets
+      ansible.builtin.command:
+        argv: [stat, -c, "%a %U %G", "/run/php/{{ item }}.sock"]
+      loop: "{{ ['production'] + (['staging'] if php_test_staging | bool else []) }}"
+      register: php_verify_sockets
+      changed_when: false
+
+    - name: Check the sockets
+      ansible.builtin.assert:
+        that: php_verify_sockets.results[0].stdout == '660 app_prod www-data'
+            and (not php_test_staging | bool or php_verify_sockets.results[1].stdout == '660 app_staging www-data')
+        fail_msg: "{{ php_verify_sockets.results | map(attribute='stdout') | list }}"
+
+    - name: Answer the ping
+      ansible.builtin.command:
+        argv: [cgi-fcgi, -bind, -connect, /run/php/production.sock]
+      environment:
+        REQUEST_METHOD: GET
+        SCRIPT_NAME: /php-fpm-ping
+        SCRIPT_FILENAME: /php-fpm-ping
+      register: php_verify_ping
+      changed_when: false
+      failed_when: php_verify_ping.stdout_lines | last != 'pong'
+
+    - name: Connect to production as www-data
+      ansible.builtin.command:
+        cmd: su www-data -s /bin/sh -c 'SCRIPT_FILENAME=/srv/prod/app.php REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php/production.sock'
+      register: php_verify_www_data
+      changed_when: false
+      failed_when: php_verify_www_data.stdout is not search('"user":"app_prod"')
+
+    # cgi-fcgi exits with the errno of the failed connect: 13 is EACCES.
+    - name: Connect to production as a user outside www-data
+      ansible.builtin.command:
+        cmd: su outsider -s /bin/sh -c 'SCRIPT_FILENAME=/srv/prod/app.php REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php/production.sock'
+      register: php_verify_outsider
+      changed_when: false
+      failed_when: php_verify_outsider.rc != 13 or php_verify_outsider.stderr is not search('Could not connect')
+
+    - name: Read the package services and the CLI
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          for v in 8.3 8.4; do
+            echo "$v active=$(systemctl is-active php$v-fpm)"
+            echo "$v enabled=$(systemctl is-enabled php$v-fpm)"
+            echo "$v www=$(test -e /etc/php/$v/fpm/pool.d/www.conf && echo present || echo absent)"
+          done
+          echo "cli=$(php --version | head -1)"
+          echo "cli_error_reporting=$(php -r 'echo ini_get("error_reporting");')"
+        executable: /bin/bash
+      register: php_verify_packages
+      changed_when: false
+
+    - name: Check the package services and the CLI
+      ansible.builtin.assert:
+        that:
+          - "'8.3 active=inactive' in php_verify_packages.stdout_lines"
+          - "'8.3 enabled=disabled' in php_verify_packages.stdout_lines"
+          - "'8.3 www=absent' in php_verify_packages.stdout_lines"
+          - "'8.4 active=inactive' in php_verify_packages.stdout_lines"
+          - "'8.4 enabled=disabled' in php_verify_packages.stdout_lines"
+          - "'8.4 www=absent' in php_verify_packages.stdout_lines"
+          - php_verify_packages.stdout is search('^cli=PHP 8\.3\.', multiline=True)
+          - ('cli_error_reporting=' ~ php_verify_error_reporting.stdout) in php_verify_packages.stdout_lines
+        fail_msg: "{{ php_verify_packages.stdout_lines }}"

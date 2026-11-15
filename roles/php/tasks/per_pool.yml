@@ -1,0 +1,117 @@
+---
+- name: Stop the packages' FPM services
+  ansible.builtin.systemd_service:
+    name: "php{{ item.version }}-fpm"
+    state: stopped
+    enabled: false
+  loop: "{{ php_versions }}"
+  loop_control:
+    label: "{{ item.version }}"
+
+- name: Create the instance config directory
+  ansible.builtin.file:
+    path: /etc/php-fpm
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Find the instance configs
+  ansible.builtin.find:
+    paths: /etc/php-fpm
+    file_type: directory
+  register: php_instance_dirs
+
+- name: Stop the pools that left the list
+  ansible.builtin.systemd_service:
+    name: "php-fpm@{{ item }}"
+    state: stopped
+    enabled: false
+  loop: &php_left >-
+    {{ php_instance_dirs.files | map(attribute='path') | map('basename')
+       | difference(php_pool_names) | sort }}
+
+- name: Remove the configs of the pools that left the list
+  ansible.builtin.file:
+    path: "/etc/php-fpm/{{ item }}"
+    state: absent
+  loop: *php_left
+
+- name: Install the instance unit
+  ansible.builtin.template:
+    src: php-fpm@.service.j2
+    dest: /etc/systemd/system/php-fpm@.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: php_unit
+  notify: php pools changed
+
+- name: Create the pool config dirs
+  ansible.builtin.file:
+    path: "/etc/php-fpm/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ php_pool_names }}"
+
+# The version: a change restarts the pool.
+- name: Write the instance environments
+  ansible.builtin.template:
+    src: instance.env.j2
+    dest: "/etc/php-fpm/{{ item.name }}/env"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: php_env_files
+  notify: php pools changed
+
+# The pool configs carry the env: no_log, and only root reads them. FPM tests
+# each one before it replaces the old.
+- name: Write the pool configs
+  ansible.builtin.template:
+    src: pool.conf.j2
+    dest: "/etc/php-fpm/{{ item.name }}/pool.conf"
+    owner: root
+    group: root
+    mode: "0640"
+    validate: "php-fpm{{ item.version }} -t -y %s"
+  loop: "{{ php_pools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  register: php_pool_files
+  notify: php pools changed
+
+- name: Write the master configs
+  ansible.builtin.template:
+    src: php-fpm.conf.j2
+    dest: "/etc/php-fpm/{{ item.name }}/php-fpm.conf"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "php-fpm{{ item.version }} -t -y %s"
+  loop: "{{ php_pools_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: php_fpm_files
+  notify: php pools changed
+
+- name: Reload systemd for the changed unit
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: php_unit is changed # noqa: no-handler
+
+- name: Restart or reload the changed pools
+  ansible.builtin.meta: flush_handlers
+
+- name: Start the pools
+  ansible.builtin.systemd_service:
+    name: "php-fpm@{{ item }}"
+    state: started
+    enabled: true
+  loop: "{{ php_pool_names }}"

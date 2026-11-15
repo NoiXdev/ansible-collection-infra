@@ -1,0 +1,48 @@
+---
+# PHP versions from Ondřej Surý's PPA (Ubuntu 24.04 only for now). Each entry
+# installs php<v>-cli, php<v>-fpm and php<v>-<extension> per extension:
+#   - version: "8.3"
+#     extensions: [intl, mbstring, mysql, xml, curl, zip]
+# A version that leaves the list stays installed.
+php_versions: []
+
+# The version `php` on the shell runs; the first entry by default.
+php_cli_version: "{{ (php_versions | first).version if php_versions | length > 0 else '' }}"
+
+# Settings for every version's CLI and FPM (conf.d/90-noixdev.ini):
+#   memory_limit: 256M
+#   error_reporting: E_ALL & ~E_DEPRECATED
+php_ini: {}
+
+# The complete list of pools on the host: a pool that is not listed is
+# stopped and its config removed (its tmp_dir and log stay). Each pool runs as
+# php-fpm@<name> with its own master and listens on /run/php/<name>.sock:
+#   - name: production
+#     version: "8.3"
+#     user: app_prod                # must exist, never root
+#     group: app_prod               # the user's primary group by default
+#     pm:                           # the defaults:
+#       mode: dynamic               # or ondemand, static
+#       max_children: 5
+#       start_servers: 2
+#       min_spare_servers: 1
+#       max_spare_servers: 3
+#     open_basedir: [/srv/prod]     # empty: no restriction
+#     tmp_dir: /srv/prod/tmp        # session, upload and sys dirs inside
+#     ini:                          # php_admin_value
+#       memory_limit: 256M
+#     env:                          # environment variables
+#       TYPO3_CONTEXT: Production
+php_pools: []
+
+# One FPM master per pool (php-fpm@<name>); the packages' services are stopped
+# and disabled.
+php_fpm_per_pool_service: true
+
+# The group of every pool socket (nginx's), besides the pool user.
+php_fpm_listen_group: www-data
+
+php_apt_url: https://ppa.launchpadcontent.net/ondrej/php/ubuntu
+php_apt_suite: "{{ ansible_facts['distribution_release'] }}"
+php_apt_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x{{ php_apt_key_fingerprint }}"
+php_apt_key_fingerprint: B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6

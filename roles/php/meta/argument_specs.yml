@@ -1,0 +1,113 @@
+---
+argument_specs:
+  main:
+    short_description: PHP versions from the ondrej/php PPA, with one PHP-FPM master per pool
+    description:
+      - >-
+        Installs PHP versions from Ondřej Surý's PPA (Ubuntu 24.04 only for now; any other
+        release is refused before any change). Ubuntu's own packages of the listed versions
+        are pinned out.
+      - >-
+        Each pool runs as php-fpm@<name>, an FPM master of its own with the pool's version,
+        listening on /run/php/<name>.sock. A config change reloads only that pool, a version
+        change restarts only that pool. The packages' php<v>-fpm services are stopped and
+        disabled, and their www pools removed.
+      - >-
+        php_pools is the complete list: a pool that leaves it is stopped and disabled and its
+        config removed; its tmp_dir and log stay.
+    options:
+      php_versions:
+        type: list
+        elements: dict
+        description: The versions to install; one that leaves the list stays installed.
+        options:
+          version:
+            type: str
+            required: true
+            description: A "major.minor" string such as "8.3".
+          extensions:
+            type: list
+            elements: str
+            description: Package suffixes, for example intl for php<v>-intl.
+      php_cli_version:
+        type: str
+        description: The version php on the shell runs; the first entry of php_versions by default.
+      php_ini:
+        type: dict
+        description: Settings for every version's CLI and FPM, written to conf.d/90-noixdev.ini.
+      php_pools:
+        type: list
+        elements: dict
+        description: The complete list of pools on the host.
+        options:
+          name:
+            type: str
+            required: true
+            description: Pool name (^[a-z0-9_-]+$, unique, not www); the unit is php-fpm@<name>.
+          version:
+            type: str
+            required: true
+            description: One of the versions in php_versions.
+          user:
+            type: str
+            required: true
+            description: The user the workers run as; it must exist and must not be root.
+          group:
+            type: str
+            description: The workers' group; the user's primary group by default.
+          pm:
+            type: dict
+            description: The process manager.
+            options:
+              mode:
+                type: str
+                choices: [dynamic, ondemand, static]
+                description: dynamic by default.
+              max_children:
+                type: int
+                description: 5 by default.
+              start_servers:
+                type: int
+                description: 2 by default (dynamic only).
+              min_spare_servers:
+                type: int
+                description: 1 by default (dynamic only).
+              max_spare_servers:
+                type: int
+                description: 3 by default (dynamic only).
+          open_basedir:
+            type: list
+            elements: str
+            description: Absolute paths the pool may open; empty for no restriction. tmp_dir is added.
+          tmp_dir:
+            type: str
+            description: >-
+              An absolute path; the role creates session, upload and sys in it (owned by the pool
+              user, mode 0770) and points session.save_path, upload_tmp_dir and sys_temp_dir there.
+          ini:
+            type: dict
+            description: >-
+              php_admin_value settings. open_basedir, error_log, session.save_path, upload_tmp_dir
+              and sys_temp_dir belong to the role and are refused.
+          env:
+            type: dict
+            no_log: true
+            description: Environment variables of the pool's workers; never printed.
+      php_fpm_per_pool_service:
+        type: bool
+        description: One master per pool (php-fpm@<name>); true is the only mode for now.
+      php_fpm_listen_group:
+        type: str
+        description: The group of every pool socket besides the pool user (nginx's).
+      php_apt_url:
+        type: str
+        description: The PPA's URL.
+      php_apt_suite:
+        type: str
+        description: Suite of the PPA; the host's release codename by default.
+      php_apt_key_url:
+        type: str
+        description: Where the PPA's key is downloaded from.
+      php_apt_key_fingerprint:
+        type: str
+        description: Fingerprint the key must carry; any other key is removed and the run fails.
