@@ -126,11 +126,13 @@
       when: verify_s3
 
     # A task of its own: its failure message must not show what it found.
+    # The compose file would hold it with $ doubled.
     - name: Check that the S3 secret key is in neither the compose file nor docker inspect
       ansible.builtin.assert:
         that:
           - tandoor_s3.secret_key not in verify_inspect.stdout
           - tandoor_s3.secret_key not in (verify_compose_content.content | b64decode)
+          - (tandoor_s3.secret_key | replace('$', '$$')) not in (verify_compose_content.content | b64decode)
         fail_msg: The S3 secret key is in the compose file or in docker inspect.
         quiet: true
       when: verify_s3

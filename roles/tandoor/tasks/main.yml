@@ -107,6 +107,23 @@
       a line break.
     quiet: true
 
+# A half-written tandoor_s3 would leave the media local, and the
+# installation would then be held to local media.
+- name: Check that tandoor_s3 has an access_key with its other settings
+  ansible.builtin.assert:
+    that: tandoor_s3_enabled | bool or tandoor_s3_without_access_key | length == 0
+    fail_msg: >-
+      tandoor_s3 sets {{ tandoor_s3_without_access_key | join(', ') }}
+      without access_key, which turns S3 on; without it the media would stay
+      local, and an installation keeps its media where it was made. Set
+      access_key, or remove them.
+    quiet: true
+  vars:
+    tandoor_s3_without_access_key: >-
+      {{ ['secret_key', 'bucket', 'endpoint', 'region', 'custom_domain']
+         | select('in', tandoor_s3_settings | dict2items | selectattr('value') | map(attribute='key') | list)
+         | list }}
+
 - name: Check tandoor_env
   ansible.builtin.assert:
     that:

@@ -60,7 +60,8 @@ s3_images=(
   "$(value_of "$here/s3.yml" s3_rustfs_image)"
   "$(value_of "$here/s3.yml" s3_aws_cli_image)"
 )
-s3_secret="$(sed -n 's/^  secret_key: *//p' "$here/s3.yml")"
+s3_secret="$(value_of "$here/s3.yml" s3_secret_key)"
+s3_rotated_secret="$(value_of "$here/s3.yml" s3_rotated_secret_key)"
 admin_password="$(value_of "$here/vars.yml" tandoor_admin_password)"
 # The test secrets, which no run's output may hold.
 secrets=(
@@ -68,6 +69,7 @@ secrets=(
   "$(value_of "$here/vars.yml" tandoor_db_password)"
   "$admin_password"
   "$s3_secret"
+  "$s3_rotated_secret"
 )
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
@@ -168,6 +170,12 @@ load_images() {
   done
   load_set "${images[@]}"
 }
+# Fails unless the web container reads the S3 secret key from its file
+# (without printing it): expect_container_secret <key> <what>.
+expect_container_secret() {
+  [ "$(hx sh -c "cd $dir && docker compose exec -T web cat /run/secrets/s3-secret")" = "$1" ] \
+    || fail "the web container does not see $2 in /run/secrets/s3-secret"
+}
 # A request through Traefik: prints the body, then the status on a line of
 # its own. request <path> [curl options...].
 request() {
@@ -243,6 +251,8 @@ test_settings() {
   role_fails s3-no-secret -e '{"tandoor_s3": {"access_key": "test-access", "bucket": "recipes"}}'
   expect_in_log s3-no-secret tandoor_s3
   expect_in_log s3-no-secret secret_key
+  role_fails s3-no-access-key -e '{"tandoor_s3": {"bucket": "recipes", "region": "us-east-1"}}'
+  expect_in_log s3-no-access-key "tandoor_s3 sets bucket, region without access_key"
   role_fails v1 -e tandoor_version=1.5.0
   expect_in_log v1 tandoor_version
   role_fails v-prefix -e tandoor_version=v2.7.2
@@ -375,13 +385,18 @@ test_s3() {
   play "$here/verify.yml" -e "@$here/s3.yml"
 
   echo "== a new S3 secret key must recreate Tandoor"
+  expect_container_secret "$s3_secret" "the secret key"
   web_before="$(hx sh -c "cd $dir && docker compose ps --quiet web")"
-  converge -e '{"tandoor_s3": {"access_key": "test-s3-access-key", "secret_key": "test-s3-other-key-0", "bucket": "recipes", "endpoint": "http://s3.test:9000", "region": "us-east-1"}}'
+  # s3.yml's tandoor_s3 with the rotated key; RustFS keeps its own.
+  converge -v -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret"
+  expect_no_secrets converge
   grep -q "reconfigure.yml" "$out/converge.log" || fail "the new secret key was not a reconfigure"
-  [ "$(hx cat "$dir/s3-secret")" = test-s3-other-key-0 ] || fail "$dir/s3-secret does not hold the new secret key"
+  [ "$(hx cat "$dir/s3-secret")" = "$s3_rotated_secret" ] || fail "$dir/s3-secret does not hold the new secret key"
   [ "$(hx sh -c "cd $dir && docker compose ps --quiet web")" != "$web_before" ] || fail "the new secret key did not recreate web"
+  expect_container_secret "$s3_rotated_secret" "the new secret key"
   converge -v -e "@$here/s3.yml"
   expect_no_secrets converge
+  expect_container_secret "$s3_secret" "the secret key again"
   expect_idempotent -e "@$here/s3.yml"
 
   echo "== a run without tandoor_s3 on an S3 installation must be refused before any change"
