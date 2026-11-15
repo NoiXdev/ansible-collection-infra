@@ -114,6 +114,8 @@
   block:
     - name: Parse the marker
       ansible.builtin.set_fact:
+        paperless_marker: "{{ paperless_marker_yaml if paperless_marker_yaml is mapping else {} }}"
+      vars:
         paperless_marker_yaml: "{{ paperless_marker_read.content | b64decode | from_yaml }}"
   rescue:
     - name: Fail on a marker that is not YAML
@@ -123,22 +125,41 @@
           cannot tell which Paperless update failed and changes nothing. Check
           Paperless, then remove the file (rm {{ paperless_marker_file }}).
 
+# The rollback failed (or the marker does not say it worked): the database
+# and the files may be empty or half restored, and the backup holds the
+# data. Any version would take a backup of that state, come up healthy and
+# remove the marker, the last pointer to the real backup, so every version
+# is refused.
+- name: Refuse every version after a failed rollback
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_marker_file }} exists: the Paperless update to
+      {{ paperless_marker.failed_version | default('?') }} failed on
+      {{ paperless_marker.time | default('?') }}, and rolling back failed too
+      ({{ paperless_marker.restore_error | default('?') }}). The database and
+      the files may be empty or half restored; the data is in the backup
+      {{ paperless_backup }}. The role refuses every version and changes
+      nothing until Paperless is restored. {{ paperless_restore_hint }} Then
+      check Paperless (its documents) and remove the marker (rm
+      {{ paperless_marker_file }}).
+  vars:
+    paperless_backup: "{{ paperless_marker.backup | default('?', true) }}"
+  when:
+    - paperless_marker_read.content is defined
+    - not paperless_marker.rolled_back_to | default(none)
+
 # A marker that names no version blocks every version.
 - name: Refuse the version of a failed update
   ansible.builtin.fail:
     msg: >-
       {{ paperless_marker_file }} exists: the Paperless update to
       {{ paperless_version }} failed on {{ paperless_marker.time | default('?') }}
-      ({{ paperless_marker_outcome }}; backup {{ paperless_marker.backup | default('?') }}).
-      The role does not try {{ paperless_version }} again and changes nothing
-      while the marker names it. To try again, remove it (rm
-      {{ paperless_marker_file }}); or set paperless_version to another
-      version, and the marker is removed once a run with it succeeds.
-  vars:
-    paperless_marker: "{{ paperless_marker_yaml if paperless_marker_yaml is mapping else {} }}"
-    paperless_marker_outcome: >-
-      {{ ('rolled back to ' ~ paperless_marker.rolled_back_to) if paperless_marker.rolled_back_to | default(none)
-         else 'the rollback failed too' }}
+      (rolled back to {{ paperless_marker.rolled_back_to }}; backup
+      {{ paperless_marker.backup | default('?') }}). The role does not try
+      {{ paperless_version }} again and changes nothing while the marker
+      names it. To try again, remove it (rm {{ paperless_marker_file }}); or
+      set paperless_version to another version, and the marker is removed
+      once a run with it succeeds.
   when:
     - paperless_marker_read.content is defined
     - (paperless_marker.failed_version | default(paperless_version) | string) == paperless_version
@@ -199,7 +220,8 @@
           in {{ paperless_dir }}.
       when: not paperless_healthy
 
-# Reached only by a run that succeeded, so the marker names another version.
+# Reached only by a run that succeeded, so the marker names another version
+# and records a rollback that worked.
 - name: Remove the marker of a failed update of another version
   ansible.builtin.file:
     path: "{{ paperless_marker_file }}"

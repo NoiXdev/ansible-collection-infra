@@ -59,16 +59,17 @@
   pinned version, into an empty installation; later runs ignore it through `imported.yml`). Before
   an update the role takes a backup in `backups/`: `paperless.dump`, a copy of `data/` and `media/` as
   hard links; the newest `paperless_dumps_keep` are kept. A failed update is rolled back, writes
-  `update-failed` and leaves `<backup>-failed`, which is never pruned; Samba starts only once the
-  new version is healthy; a Samba that does not start then fails the run without a rollback. A
-  failed install or import stops the stack, Samba included. Refused before any change: a
-  PostgreSQL image older than 18 (older images keep the database on a volume of their own, outside
-  `paperless_data_dir`), a downgrade, a PostgreSQL major other than the database's, more than one
-  PostgreSQL cluster, an import into an existing installation, of another version or of an export
-  that `paperless_uid` cannot read, and a leftover `install-incomplete` marker (beside
-  `imported.yml` with a message to remove only the marker). The admin password and the import
-  passphrase reach the container through stdin, so they are not in the output even at `-vvv`. See
-  the role's guide in the docs.
+  `update-failed`, which blocks that version (after a rollback that failed too, every version
+  until the backup is restored by hand), and leaves `<backup>-failed`, which is never pruned;
+  Samba starts only once the new version is healthy; a Samba that does not start then fails the
+  run without a rollback. A failed install or import stops the stack, Samba included. Refused
+  before any change: a PostgreSQL image older than 18 (older images keep the database on a volume
+  of their own, outside `paperless_data_dir`), a downgrade, a PostgreSQL major other than the
+  database's, more than one PostgreSQL cluster, an import into an existing installation, of
+  another version or of an export that `paperless_uid` cannot read, and a leftover
+  `install-incomplete` marker (beside `imported.yml` with a message to remove only the marker).
+  The admin password and the import passphrase reach the container through stdin, so they are
+  not in the output even at `-vvv`. See the role's guide in the docs.
 - `nodejs`: new role that installs one Node.js major series from NodeSource (`nodejs_version`,
   default `"24"`) and global npm packages at exact versions (`nodejs_npm_packages`, each with
   `name` and `version`; ranges and tags are refused). A `nodejs` of another series (Ubuntu's own,

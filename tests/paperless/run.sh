@@ -23,7 +23,8 @@
 # data, media) taken and the oldest pruned, the document unchanged, a
 # downgrade and another PostgreSQL major refused; and an update to an image
 # that exits at once: rolled back with the document, the marker that blocks
-# the failed version, and the update once the marker is removed. The install,
+# the failed version, and the update once the marker is removed; a marker of
+# a rollback that failed too refuses every version. The install,
 # the import with a passphrase and the failed update run at -vvv, and their
 # output must not hold a test secret.
 # Then the data: left-over data without a compose file refused, and an
@@ -570,6 +571,26 @@ test_failed_update() {
   [ "$(original_sum)" = "$sample_sum" ] || fail "the original of the document changed in the update"
   hx test ! -e "$marker" || fail "the update wrote a marker"
   expect_idempotent
+
+  echo "== the marker of a failed rollback must refuse every version"
+  # As update.yml writes it when the rollback failed too.
+  hx sh -c "printf 'failed_version: 3.98.0\nrolled_back_to: null\nbackup: $backups/20200101T000000Z-$version\ntime: 2020-01-01T00:00:00Z\nrestore_error: test\n' >$marker"
+  compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  containers_before="$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)"
+  # A newer release than the failed one: it would back up what the failed
+  # rollback left and remove the marker.
+  play_fails rollback-blocked "$here/converge.yml" -e paperless_version=3.99.0
+  expect_in_log rollback-blocked "$marker exists: the Paperless update to 3.98.0 failed"
+  expect_in_log rollback-blocked "the data is in the backup $backups/20200101T000000Z-$version"
+  expect_in_log rollback-blocked "The role refuses every version"
+  if grep -qF -- "set paperless_version to another version" "$out/rollback-blocked.log"; then
+    fail "the refusal after a failed rollback suggests another version"
+  fi
+  expect_unchanged rollback-blocked
+  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run changed the compose file"
+  [ "$(hx docker ps -aq --filter label=com.docker.compose.project=paperless)" = "$containers_before" ] \
+    || fail "the refused run created or removed containers"
+  hx test -e "$marker" || fail "the refused run removed the marker"
 }
 
 test_missing_data() {
