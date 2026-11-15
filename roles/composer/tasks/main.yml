@@ -38,9 +38,8 @@
     quiet: true
   vars:
     composer_auth_dupes: >-
-      {% set d = [] %}{% for u in composer_auth_users | unique %}
-      {%- if composer_auth_users.count(u) > 1 %}{% set _ = d.append(u) %}{% endif %}
-      {%- endfor %}{{ d }}
+      {{ composer_auth_users | community.general.counter | dict2items
+         | selectattr('value', 'gt', 1) | map(attribute='key') | list }}
 
 - name: Look up the users
   ansible.builtin.getent:
