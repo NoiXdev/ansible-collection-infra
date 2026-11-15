@@ -129,10 +129,21 @@
           creates it, or name another one.
         quiet: true
 
+- name: Check the host mode settings
+  ansible.builtin.assert:
+    that:
+      - anubis_host_port | string is match('^[0-9]+$')
+      - anubis_host_port | int >= 1 and anubis_host_port | int <= 65535
+    fail_msg: >-
+      host mode publishes Anubis on 127.0.0.1:anubis_host_port; anubis_host_port
+      must be a port number (1 to 65535), not {{ anubis_host_port }}.
+    quiet: true
+  when: anubis_mode == 'host'
+
 - name: Check that the networks exist
   ansible.builtin.command:
     argv: [docker, network, inspect, --format, "{{ '{{.Name}}' }}", "{{ item }}"]
-  loop: "{{ [anubis_traefik_network] if anubis_mode == 'traefik' else anubis_networks }}"
+  loop: "{{ [anubis_traefik_network] if anubis_mode == 'traefik' else anubis_networks if anubis_mode == 'nginx' else [] }}"
   register: anubis_network_inspect
   changed_when: false
   failed_when: false
@@ -397,18 +408,18 @@
 # Left by traefik mode, it would route /.within.website/ to an Anubis that is
 # no longer on Traefik's network. Only the role's own file (its marker line):
 # a file of that name from elsewhere stays.
-- name: Look for the role's Traefik objects in nginx mode
+- name: Look for the role's Traefik objects in nginx and host mode
   ansible.builtin.command:
     argv: [grep, -qxF, -e, "{{ anubis_traefik_marker }}", --, "{{ anubis_traefik_file }}"]
   register: anubis_traefik_own
   changed_when: false
   failed_when: false
-  when: anubis_mode == 'nginx'
+  when: anubis_mode in ['nginx', 'host']
 
-- name: Remove the role's Traefik objects in nginx mode
+- name: Remove the role's Traefik objects in nginx and host mode
   ansible.builtin.file:
     path: "{{ anubis_traefik_file }}"
     state: absent
   when:
-    - anubis_mode == 'nginx'
+    - anubis_mode in ['nginx', 'host']
     - anubis_traefik_own.rc == 0

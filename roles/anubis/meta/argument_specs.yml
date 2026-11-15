@@ -30,6 +30,13 @@ argument_specs:
         with mailcow_anubis_url), and anubis_networks; it removes the role's
         own anubis.yml left by traefik mode. While Anubis is down, every
         request that nginx checks with it fails closed.
+      - >-
+        host mode, for an nginx on the host (the nginx role's sites with
+        anubis true): the container publishes 127.0.0.1:anubis_host_port only
+        and joins none of the other modes' networks (compose's own project
+        network only); it removes the role's own anubis.yml left by traefik
+        mode. While Anubis is down, every request that nginx checks with it
+        fails closed.
     options:
       anubis_image:
         type: str
@@ -41,11 +48,13 @@ argument_specs:
           anubis_env; policy.yaml; ed25519.key).
       anubis_mode:
         type: str
-        choices: [traefik, nginx]
+        choices: [traefik, nginx, host]
         description: >-
           traefik writes the Traefik objects and joins anubis_traefik_network;
           nginx joins anubis_nginx_network and anubis_networks and writes no
-          Traefik objects. One mode per host: Traefik routers and an nginx
+          Traefik objects; host publishes 127.0.0.1:anubis_host_port only, for
+          the host's own nginx, and writes no Traefik objects. One mode per
+          host: Traefik routers, an nginx in a container and the host's nginx
           cannot share one host's Anubis.
       anubis_traefik_network:
         type: str
@@ -83,6 +92,11 @@ argument_specs:
         type: list
         elements: str
         description: Further Docker networks the container joins in nginx mode; they must exist.
+      anubis_host_port:
+        type: int
+        description: >-
+          host mode: the port on 127.0.0.1 Anubis is published on (8923 by
+          default; the nginx role's nginx_anubis_port).
       # Not required here: the role's own check names it when it is missing.
       anubis_redirect_domains:
         type: list

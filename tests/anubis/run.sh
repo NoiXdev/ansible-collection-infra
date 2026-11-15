@@ -437,4 +437,37 @@ fails nginx-plain role -e anubis_mode=nginx -e anubis_nginx_network=plainnet
 expect_in_log nginx-plain "plainnet (anubis_nginx_network) exists but is not internal"
 [ "$(hx docker inspect -f '{{.State.Health.Status}}' "$anubis")" = healthy ] || fail "a refused run touched Anubis"
 
+echo "== host mode: 127.0.0.1:<anubis_host_port> only, no networks of the other modes, no Traefik objects"
+for port in 0 65536 x; do
+  fails host-port role -e anubis_mode=host -e "anubis_host_port=$port"
+  expect_in_log host-port "anubis_host_port"
+done
+[ -z "$(hx docker port "$anubis")" ] || fail "a refused host mode run published a port"
+hx sh -c 'printf "# managed\n# Written by the noixdev.infra.anubis role (traefik mode).\nhttp: {}\n" >/opt/traefik/dynamic/anubis.yml'
+role -e anubis_mode=host >"$out/host.log" || { cat "$out/host.log" >&2; fail "the host mode run failed"; }
+wait_healthy
+[ "$(hx docker port "$anubis")" = "8923/tcp -> 127.0.0.1:8923" ] \
+  || fail "anubis in host mode publishes '$(hx docker port "$anubis")', not 8923/tcp -> 127.0.0.1:8923"
+# Compose's own project network only: neither noixdev-anubis nor Traefik's.
+# shellcheck disable=SC2016
+[ "$(hx docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$anubis")" = "anubis_default " ] \
+  || fail "anubis in host mode is on other networks"
+listen="$(hx netstat -ltn | awk '$4 ~ /:8923$/ { print $4 }' | sort -u | paste -sd' ' -)"
+[ "$listen" = "127.0.0.1:8923" ] || fail "port 8923 listens on '$listen', not 127.0.0.1:8923 only"
+hx python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8923/.within.website/x/xess/xess.min.css", timeout=5)' \
+  || fail "anubis does not answer on 127.0.0.1:8923"
+hx test ! -e /opt/traefik/dynamic/anubis.yml || fail "host mode left the role's Traefik file"
+role -e anubis_mode=host | tee "$out/host-rerun.log"
+if grep -Eq 'CHANGED|changed": true' "$out/host-rerun.log"; then fail "a repeated host mode run changed something"; fi
+role -e anubis_mode=host -e anubis_host_port=18923 >"$out/host-port-change.log"
+wait_healthy
+[ "$(hx docker port "$anubis")" = "8923/tcp -> 127.0.0.1:18923" ] || fail "anubis did not move to 127.0.0.1:18923"
+# One mode per host: back in nginx mode, the port is gone.
+role -e anubis_mode=nginx >"$out/host-to-nginx.log"
+wait_healthy
+[ -z "$(hx docker port "$anubis")" ] || fail "anubis still publishes a port in nginx mode"
+# shellcheck disable=SC2016
+[ "$(hx docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$anubis")" = "noixdev-anubis " ] \
+  || fail "anubis is not back on noixdev-anubis only"
+
 echo "== all anubis tests passed"

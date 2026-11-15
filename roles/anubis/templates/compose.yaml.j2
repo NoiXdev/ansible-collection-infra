@@ -35,13 +35,21 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+{% if anubis_mode == 'host' %}
+    # Host mode: the host's loopback only (nginx on the host asks it there);
+    # compose's own project network, no network of the other modes.
+    ports:
+      - {{ q('127.0.0.1:' ~ anubis_host_port ~ ':8923') }}
+{% else %}
     networks:
 {% for net in anubis_networks_joined %}
       {{ q(net) }}: {}
 {% endfor %}
+{% endif %}
     cpus: {{ q(anubis_cpus) }}
     mem_limit: {{ q(anubis_memory) }}
     restart: unless-stopped
+{% if anubis_networks_joined | length > 0 %}
 
 networks:
 {% for net in anubis_networks_joined %}
@@ -49,3 +57,4 @@ networks:
     name: {{ q(net) }}
     external: true
 {% endfor %}
+{% endif %}

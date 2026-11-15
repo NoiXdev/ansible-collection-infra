@@ -1,7 +1,8 @@
 ---
 # Compose service, container and the only DNS name of Anubis on its networks;
 # unique, so another stack's "anubis" on a shared network cannot answer the
-# checks. Traefik and nginx's auth_request use anubis_url.
+# checks. Traefik and nginx mode's auth_request use anubis_url; host mode's
+# nginx asks http://127.0.0.1:<anubis_host_port>.
 anubis_name: noixdev-anubis
 anubis_url: "http://{{ anubis_name }}:8923"
 # The throwaway container that tries new settings before the running Anubis
@@ -20,8 +21,12 @@ anubis_traefik_file: "{{ anubis_traefik_dynamic_dir }}/anubis.yml"
 # A line of the role's anubis.yml: nginx mode removes the file only when it
 # carries it.
 anubis_traefik_marker: "# Written by the noixdev.infra.anubis role (traefik mode)."
-# The networks the container joins.
-anubis_networks_joined: "{{ [anubis_traefik_network] if anubis_mode == 'traefik' else [anubis_nginx_network] + anubis_networks }}"
+# The networks the container joins (host mode: none of its own; compose
+# puts it on the project's default network for the published port).
+anubis_networks_joined: >-
+  {{ [anubis_traefik_network] if anubis_mode == 'traefik'
+     else [anubis_nginx_network] + anubis_networks if anubis_mode == 'nginx'
+     else [] }}
 # Environment the role sets for the checks, the redirects and the key;
 # anubis_env cannot set these (the difficulty has its own variable).
 anubis_env_reserved:

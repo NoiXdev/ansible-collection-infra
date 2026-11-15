@@ -35,10 +35,16 @@ anubis_dir: /opt/anubis
 # mode is removed). nginx's auth_request asks http://noixdev-anubis:8923:
 # the nginx container joins anubis_nginx_network (the mailcow role does that
 # for nginx-mailcow).
+# host: for an nginx on the host itself (the nginx role's sites with anubis:
+# true). The container publishes 127.0.0.1:anubis_host_port (its 8923) and
+# nothing else, joins none of the other modes' networks (only compose's own
+# project network, which the published port needs) and writes no Traefik
+# objects (the role's own anubis.yml of traefik mode is removed). nginx's
+# auth_request asks http://127.0.0.1:<anubis_host_port>.
 #
-# One mode per host: the container is noixdev-anubis in both, and
-# anubis_networks applies to nginx mode only, so Traefik routers and an nginx
-# (mailcow's) cannot share one host's Anubis.
+# One mode per host: the container is noixdev-anubis in every mode, and
+# anubis_networks applies to nginx mode only, so Traefik routers, an nginx in
+# a container (mailcow's) and the host's nginx cannot share one host's Anubis.
 anubis_mode: traefik
 # The traefik role's network and file provider directory when it set them.
 anubis_traefik_network: "{{ traefik_network | default('proxy') }}"
@@ -60,6 +66,9 @@ anubis_traefik_entrypoints: []
 # mailcow's nginx believes). Anubis itself never connects to nginx.
 anubis_nginx_network: noixdev-anubis
 anubis_networks: []
+# host mode: the loopback port Anubis is published on (the nginx role's
+# nginx_anubis_port).
+anubis_host_port: 8923
 
 # Host names pass-challenge may redirect to after a solved challenge, each
 # with at least one dot; *.example.com covers its subdomains (a bare * or
