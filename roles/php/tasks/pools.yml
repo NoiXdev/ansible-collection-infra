@@ -1,4 +1,40 @@
 ---
+# Every new pool config passes FPM's test before anything stops or goes: a
+# mode switch or a version move stops the old masters and removes their
+# configs before it writes the new ones. The files carry the env: no_log, in
+# a directory only root reads, removed again.
+- name: Test the new pool configs
+  when: php_pools | length > 0
+  block:
+    - name: Create a directory for the pool config tests
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .php-pools
+      register: php_pool_test_dir
+      changed_when: false
+
+    - name: Test each pool config with FPM
+      ansible.builtin.template:
+        src: pool.conf.j2
+        dest: "{{ php_pool_test_dir.path }}/{{ item.name }}.conf"
+        owner: root
+        group: root
+        mode: "0600"
+        validate: "php-fpm{{ item.version }} -t -y %s"
+      loop: "{{ php_pools }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+      diff: false
+      changed_when: false
+  always:
+    - name: Remove the directory for the pool config tests
+      ansible.builtin.file:
+        path: "{{ php_pool_test_dir.path }}"
+        state: absent
+      when: php_pool_test_dir.path is defined
+      changed_when: false
+
 - name: Create the log directory
   ansible.builtin.file:
     path: /var/log/php

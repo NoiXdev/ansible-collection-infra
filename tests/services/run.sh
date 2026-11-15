@@ -712,6 +712,17 @@ php_running() {
   [ "$(pid php php-fpm@staging)" = "$staging" ] || fail "php/$1: staging restarted"
 }
 
+# fpm_rejected NAME: the refused run NAME stopped at the role's up-front test of
+# the new pool configs (tasks/pools.yml), before any master stopped. The line
+# is the template module's own message, which Ansible prints in the error
+# header although the task is no_log; the next line names the task's file.
+fpm_rejected() {
+  local log="$out/php-$1.log" origin
+  origin="$(grep -A1 -F '[ERROR]: Task failed: Module failed: failed to validate' "$log" || true)"
+  grep -q 'roles/php/tasks/pools.yml:' <<<"$origin" \
+    || { cat "$log" >&2; fail "php/$1: the run did not stop at the test of the new pool configs"; }
+}
+
 suite_php() {
   local dir="$here/php" codename version policy prod staging tries rotate name conf
   local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
@@ -841,6 +852,7 @@ suite_php() {
   conf="$(hx php md5sum /etc/php-fpm/staging/pool.conf)"
   refused php fpm-rejects "failed to validate" "$dir/converge.yml" -v "${upgraded[@]}" \
     -e '{"php_test_staging_pm": {"mode": "static", "max_children": 2147483648}}'
+  fpm_rejected fpm-rejects
   no_secret "$out/php-fpm-rejects.log" "${secrets[@]}"
   [ "$(hx php md5sum /etc/php-fpm/staging/pool.conf)" = "$conf" ] || fail "php: the rejected config replaced staging's"
   php_running fpm-rejects
@@ -878,6 +890,17 @@ suite_php_classic() {
   local classic=(-e php_fpm_per_pool_service=false)
   local memory=(-e php_test_staging_memory_limit=160M)
   local secrets=('$d e' 'APP_ENV')
+  # The role's checks let this number through; FPM's test refuses it.
+  local bad_pm=(-e '{"php_test_staging_pm": {"mode": "static", "max_children": 2147483648}}')
+
+  echo "== php: a switch to classic mode with a config FPM rejects leaves the instances running"
+  prod="$(pid php php-fpm@production)"
+  conf="$(hx php md5sum /etc/php-fpm/production/pool.conf)"
+  refused php classic-switch-rejects "failed to validate" "$dir/converge.yml" -v "${classic[@]}" "${bad_pm[@]}"
+  fpm_rejected classic-switch-rejects
+  [ "$(pid php php-fpm@production)" = "$prod" ] || fail "php: production stopped on the rejected switch"
+  [ "$(hx php md5sum /etc/php-fpm/production/pool.conf)" = "$conf" ] || fail "php: the rejected switch changed production's config"
+  ask production /srv/prod | grep -qF '"user":"app_prod"' || fail "php: production does not answer after the rejected switch"
 
   echo "== php: classic mode moves the pools into the package services (with --diff -v)"
   # A pool the role does not manage, and one with its header that is not listed.
@@ -897,14 +920,14 @@ suite_php_classic() {
 
   echo "== php: classic mode: a pool config FPM rejects never replaces the running one"
   conf="$(hx php md5sum /etc/php/8.4/fpm/pool.d/staging.conf)"
-  refused php classic-fpm-rejects "failed to validate" "$dir/converge.yml" -v "${classic[@]}" "${memory[@]}" \
-    -e '{"php_test_staging_pm": {"mode": "static", "max_children": 2147483648}}'
+  refused php classic-fpm-rejects "failed to validate" "$dir/converge.yml" -v "${classic[@]}" "${memory[@]}" "${bad_pm[@]}"
+  fpm_rejected classic-fpm-rejects
   [ "$(hx php md5sum /etc/php/8.4/fpm/pool.d/staging.conf)" = "$conf" ] || fail "php: the rejected config replaced staging's"
   php_classic_running classic-fpm-rejects
   ask staging /srv/staging | grep -qF '"user":"app_staging"' || fail "php: staging does not answer after the rejected config"
 
   echo "== php: classic mode: the --diff logs have no env value"
-  for log in classic classic-idempotence classic-memory classic-memory-idempotence classic-fpm-rejects; do
+  for log in classic-switch-rejects classic classic-idempotence classic-memory classic-memory-idempotence classic-fpm-rejects; do
     no_secret "$out/php-$log.log" "${secrets[@]}"
   done
 
@@ -913,6 +936,26 @@ suite_php_classic() {
   play php "$dir/verify.yml" "${classic[@]}" "${memory[@]}" -e php_test_staging_user=app_staging2
   [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php: php8.3-fpm restarted on staging's new socket owner"
   [ "$(pid php php8.4-fpm)" != "$staging" ] || fail "php: php8.4-fpm did not restart on staging's new socket owner"
+
+  echo "== php: classic mode: a socket whose owner has no name restarts php8.4-fpm on the next change"
+  hx php chown 4243:4243 /run/php/staging.sock
+  staging="$(pid php php8.4-fpm)"
+  converge php classic-nameless "$dir/converge.yml" "${classic[@]}" -e php_test_staging_user=app_staging2
+  play php "$dir/verify.yml" "${classic[@]}" -e php_test_staging_user=app_staging2
+  [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php: php8.3-fpm restarted on staging's nameless socket owner"
+  [ "$(pid php php8.4-fpm)" != "$staging" ] || fail "php: php8.4-fpm did not restart on staging's nameless socket owner"
+
+  echo "== php: classic mode: a version move with a config FPM rejects leaves php8.4-fpm serving staging"
+  staging="$(pid php php8.4-fpm)"
+  conf="$(hx php md5sum /etc/php/8.4/fpm/pool.d/staging.conf)"
+  refused php classic-move-rejects "failed to validate" "$dir/converge.yml" -v "${classic[@]}" \
+    -e php_test_staging_user=app_staging2 -e php_test_staging_version=8.3 "${bad_pm[@]}"
+  fpm_rejected classic-move-rejects
+  no_secret "$out/php-classic-move-rejects.log" "${secrets[@]}"
+  php_classic_running classic-move-rejects
+  [ "$(hx php md5sum /etc/php/8.4/fpm/pool.d/staging.conf)" = "$conf" ] || fail "php: the rejected move changed staging's config"
+  hx php test ! -e /etc/php/8.3/fpm/pool.d/staging.conf || fail "php: the rejected move wrote staging's config for 8.3"
+  ask staging /srv/staging | grep -qF '"user":"app_staging2"' || fail "php: staging does not answer after the rejected move"
 
   echo "== php: classic mode: staging moves to 8.3 while extra keeps php8.4-fpm"
   # php8.4-fpm stops before php8.3-fpm takes over staging's socket.
@@ -932,6 +975,17 @@ suite_php_classic() {
   converge php classic-no-extra "$dir/converge.yml" "${owner[@]}" -e php_test_staging_version=8.3
   play php "$dir/verify.yml" "${owner[@]}" -e php_test_staging_version=8.3
   [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php: php8.3-fpm restarted when extra left php8.4-fpm"
+
+  echo "== php: a switch back with a config FPM rejects leaves php8.3-fpm serving both pools"
+  prod="$(pid php php8.3-fpm)"
+  conf="$(hx php sh -c 'md5sum /etc/php/8.3/fpm/pool.d/*.conf')"
+  refused php per-pool-rejects "failed to validate" "$dir/converge.yml" -v "${bad_pm[@]}"
+  fpm_rejected per-pool-rejects
+  no_secret "$out/php-per-pool-rejects.log" "${secrets[@]}"
+  [ "$(pid php php8.3-fpm)" = "$prod" ] || fail "php: php8.3-fpm stopped on the rejected switch back"
+  [ "$(hx php sh -c 'md5sum /etc/php/8.3/fpm/pool.d/*.conf')" = "$conf" ] || fail "php: the rejected switch back changed pool.d"
+  ask production /srv/prod | grep -qF '"user":"app_prod"' || fail "php: production does not answer after the rejected switch back"
+  ask staging /srv/staging | grep -qF '"user":"app_staging2"' || fail "php: staging does not answer after the rejected switch back"
 
   echo "== php: back to one master per pool, the package services stop"
   converge php per-pool-again "$dir/converge.yml"

@@ -73,14 +73,16 @@ php_classic_moved_versions: >-
      | map('regex_replace', '^/etc/php/([^/]+)/.*$', '\1') | unique | select('in', php_classic_versions) | list }}
 
 # Classic mode, for the handlers: the versions to restart (a pool socket that
-# has another owner or group than its pool wants) and to reload (a pool file
+# has another owner or group than its pool wants, by uid and gid: an owner
+# without a passwd or group entry has no name) and to reload (a pool file
 # added, changed or removed, php_ini or packages changed), each only when it
 # has pools. They come from the registered results of tasks/versions.yml and
-# tasks/classic.yml.
+# tasks/classic.yml, and the getent facts of tasks/validate.yml.
 php_classic_restart_versions: >-
   {%- set versions = [] -%}
   {%- for socket in php_classic_sockets.results | default([]) if socket.stat.exists
-      and (socket.stat.pw_name != socket.item.user or socket.stat.gr_name != php_fpm_listen_group) -%}
+      and (socket.stat.uid | string != ansible_facts.getent_passwd[socket.item.user][1]
+           or socket.stat.gid | string != ansible_facts.getent_group[php_fpm_listen_group][1]) -%}
   {%- set _ = versions.append(socket.item.version) -%}
   {%- endfor -%}
   {{ versions | unique | list }}

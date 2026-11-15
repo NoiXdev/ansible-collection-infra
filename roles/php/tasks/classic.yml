@@ -2,7 +2,8 @@
 # Classic mode: the pools of each version run in its package service
 # php<v>-fpm, from /etc/php/<v>/fpm/pool.d/<name>.conf.
 
-# From one master per pool: the instances stop and their configs go.
+# From one master per pool: the instances stop and their configs go (the new
+# pool configs passed FPM's test in tasks/pools.yml).
 - name: Check for instance configs
   ansible.builtin.stat:
     path: /etc/php-fpm
