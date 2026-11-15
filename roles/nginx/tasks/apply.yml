@@ -9,6 +9,13 @@
 # back (a new one is removed), the reloads notified before run, and the run
 # fails naming nginx's error. When it passes, the backups go and nginx
 # reloads (the handler Reload nginx).
+# A failed write jumps to the rescue before the later steps register: the
+# rescue must not see an earlier call's files.
+- name: Start this call's record of written and removed files
+  ansible.builtin.set_fact:
+    nginx_apply_written: {results: []}
+    nginx_apply_removed: {results: []}
+
 - name: Write and test the nginx config
   block:
     - name: Write the nginx config files
@@ -49,7 +56,7 @@
     - name: Put back the nginx config files nginx rejected
       ansible.builtin.command:
         argv: [mv, -f, --, "{{ item.backup_file }}", "{{ item.nginx_apply_file.dest }}"]
-      loop: "{{ nginx_apply_written.results | default([]) | selectattr('changed') | selectattr('backup_file', 'defined') }}"
+      loop: "{{ nginx_apply_written.results | selectattr('changed') | selectattr('backup_file', 'defined') }}"
       loop_control:
         label: "{{ item.nginx_apply_file.dest }}"
       changed_when: true
@@ -58,14 +65,14 @@
       ansible.builtin.file:
         path: "{{ item.nginx_apply_file.dest }}"
         state: absent
-      loop: "{{ nginx_apply_written.results | default([]) | selectattr('changed') | rejectattr('backup_file', 'defined') }}"
+      loop: "{{ nginx_apply_written.results | selectattr('changed') | rejectattr('backup_file', 'defined') }}"
       loop_control:
         label: "{{ item.nginx_apply_file.dest }}"
 
     - name: Put back the nginx config files set aside
       ansible.builtin.command:
         argv: [mv, -f, --, "{{ item.item }}.noixdev-removed", "{{ item.item }}"]
-      loop: "{{ nginx_apply_removed.results | default([]) | selectattr('changed') }}"
+      loop: "{{ nginx_apply_removed.results | selectattr('changed') }}"
       loop_control:
         label: "{{ item.item }}"
       changed_when: true
