@@ -925,9 +925,39 @@ suite_composer() {
   hx composer sh -c 'rm -rf /home/deploy/.config/composer && ln -s /etc /home/deploy/.config/composer'
   play composer "$dir/converge.yml" >"$out/composer-symlink.log" 2>&1 || true
   hx composer sh -c 'test ! -e /etc/auth.json' || fail "composer: a file was written through the user's symlink"
+  no_secret "$out/composer-symlink.log" s3cr3t
   hx composer sh -c 'rm /home/deploy/.config/composer'
   converge composer after-symlink "$dir/converge.yml"
   play composer "$dir/verify.yml"
+
+  echo "== composer: two users, a duplicate user, present without auth, a changed content"
+  hx composer useradd -m -s /bin/bash second
+  converge composer two-users "$dir/converge.yml" --diff -v \
+    -e '{"composer_auth": [{"user": "deploy", "auth": {"http-basic": {"a.example.test": {"username": "u", "password": "s3cr3t-1"}}}}, {"user": "second", "auth": {"http-basic": {"b.example.test": {"username": "v", "password": "s3cr3t-2"}}}}]}'
+  no_secret "$out/composer-two-users.log" s3cr3t
+  hx composer sh -c '[ "$(stat -c "%U %a" /home/deploy/.config/composer/auth.json)" = "deploy 600" ] \
+    && [ "$(stat -c "%U %a" /home/second/.config/composer/auth.json)" = "second 600" ] \
+    && grep -q a.example.test /home/deploy/.config/composer/auth.json \
+    && grep -q b.example.test /home/second/.config/composer/auth.json \
+    && ! grep -q b.example.test /home/deploy/.config/composer/auth.json' || fail "composer: the two users' files are wrong"
+  refused composer duplicate-user "composer: composer_auth names the user deploy more than once" \
+    "$dir/converge.yml" -v \
+    -e '{"composer_auth": [{"user": "deploy", "auth": {"k": "s3cr3t-1"}}, {"user": "deploy", "auth": {"k": "s3cr3t-2"}}]}'
+  no_secret "$out/composer-duplicate-user.log" s3cr3t
+  refused composer no-auth "faulty entries: deploy" "$dir/converge.yml" -v \
+    -e '{"composer_auth": [{"user": "deploy"}]}'
+  # The same mode, other content: rewritten once, then stable.
+  before="$(hx composer sha256sum /home/second/.config/composer/auth.json)"
+  play composer "$dir/converge.yml" >"$out/composer-content.log" 2>&1 \
+    -e '{"composer_auth": [{"user": "second", "auth": {"http-basic": {"b.example.test": {"username": "v", "password": "s3cr3t-3"}}}}]}' \
+    || fail "composer: the content change failed"
+  grep -Eq 'changed=1 +unreachable=0 +failed=0' "$out/composer-content.log" || { cat "$out/composer-content.log" >&2; fail "composer: the content change did not change exactly one task"; }
+  [ "$(hx composer sha256sum /home/second/.config/composer/auth.json)" != "$before" ] || fail "composer: the content change did not rewrite the file"
+  hx composer grep -q s3cr3t-3 /home/second/.config/composer/auth.json || fail "composer: the new content is not there"
+  hx composer sh -c '[ "$(stat -c "%a" /home/second/.config/composer/auth.json)" = 600 ]' || fail "composer: the rewritten file's mode drifted"
+  converge composer content "$dir/converge.yml" \
+    -e '{"composer_auth": [{"user": "second", "auth": {"http-basic": {"b.example.test": {"username": "v", "password": "s3cr3t-3"}}}}]}'
+  no_secret "$out/composer-content.log" s3cr3t
 
   echo "== composer: Composer 1 off removes it, state absent removes the auth file"
   converge composer absent "$dir/converge.yml" -e composer1_enabled=false \

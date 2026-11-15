@@ -18,17 +18,27 @@
   ansible.builtin.assert:
     that:
       - composer_auth_bad | length == 0
-      - composer_auth_users | unique | length == composer_auth_users | length
     fail_msg: >-
-      composer: composer_auth needs, per entry, a unique user, a state of present or absent,
+      composer: composer_auth needs, per entry, a user, a state of present or absent,
       and for present an auth mapping; faulty entries: {{ composer_auth_bad | join(', ') }}
     quiet: true
   vars:
     composer_auth_bad: >-
       {% set bad = [] %}{% for e in composer_auth %}{% set st = e.state | default('present') %}
       {%- if e.user is not string or e.user | length == 0 or st not in ['present', 'absent']
-             or (st == 'present' and e.auth is not mapping) %}{% set _ = bad.append(e.user | default('?') | string) %}{% endif %}
+             or (st == 'present' and e.auth | default(none) is not mapping) %}{% set _ = bad.append(e.user | default('?') | string) %}{% endif %}
       {%- endfor %}{{ bad }}
+
+- name: Refuse a user listed twice
+  ansible.builtin.assert:
+    that: composer_auth_users | unique | length == composer_auth_users | length
+    fail_msg: >-
+      composer: composer_auth names the user
+      {{ composer_auth_dupes | join(', ') }} more than once
+    quiet: true
+  vars:
+    composer_auth_dupes: >-
+      {% set d = [] %}{% for u in composer_auth_users | unique %}{% if composer_auth_users.count(u) > 1 %}{% set _ = d.append(u) %}{% endif %}{% endfor %}{{ d }}
 
 - name: Look up the users
   ansible.builtin.getent:
