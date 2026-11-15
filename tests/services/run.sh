@@ -231,11 +231,12 @@ suite_redis() {
     *rl[0-9]*~*) echo "   installed the vendor's $version" ;;
     *) fail "redis: after a failed refresh the role installed $version, not the vendor's" ;;
   esac
-  # The vendor's versions win by origin; every other version of the Redis
-  # packages (the distro's 7 on 24.04, its 8 on 26.04) is never installed.
+  # The vendor's versions of the series win by origin; every other version of
+  # the Redis packages (the distro's 7 on 24.04, its 8 on 26.04, the vendor's
+  # 6.2 and 7 on 24.04) is never installed.
   policy="$(hx redis apt-cache policy redis redis-server redis-tools redis-sentinel)"
   awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
-         if ((v ~ /rl[0-9]+~/ && p != 990) || (v !~ /rl[0-9]+~/ && p != -1)) { print v, p; bad = 1 } }
+         if ((v ~ /^([0-9]+:)?8[.].*rl[0-9]+~/ && p != 990) || (v !~ /^([0-9]+:)?8[.].*rl[0-9]+~/ && p != -1)) { print v, p; bad = 1 } }
        END { exit bad }' <<<"$policy" || fail "redis: the pin gives the wrong priorities: $policy"
 
   echo "== redis: the default instance, converge and idempotence"
