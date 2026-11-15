@@ -232,8 +232,11 @@
       hardening: "{{ nginx_test_static_hardening }}"
       hsts: "{{ nginx_test_static_hsts }}"
       headers: "{{ nginx_test_static_headers }}"
+    # More sites, as given.
+    nginx_test_extra_sites: []
     nginx_sites: >-
       {{ [nginx_test_prod, nginx_test_node]
-         + ([nginx_test_static_site] if nginx_test_static | bool else []) }}
+         + ([nginx_test_static_site] if nginx_test_static | bool else [])
+         + nginx_test_extra_sites }}
   roles:
     - noixdev.infra.nginx

@@ -17,7 +17,19 @@
 
 # www-data reads the web roots through each site's group. A group that no
 # listed site uses any more is left below, after the configs changed; only
-# the groups www-data joined for a site (recorded in nginx_groups_state).
+# the groups www-data joined for a site, recorded in nginx_groups_state
+# before it joins them: a run that fails after the join still leaves them
+# when their site goes.
+- name: Record the groups www-data joins for the sites
+  ansible.builtin.copy:
+    content: "{{ nginx_groups_content }}"
+    dest: "{{ nginx_groups_state }}"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    nginx_groups_content: "{{ ([nginx_groups_header] + nginx_groups_recorded) | join('\n') ~ '\n' }}"
+
 - name: Let www-data join the site groups
   ansible.builtin.user:
     name: www-data
@@ -63,14 +75,12 @@
   loop: "{{ nginx_groups_previous | difference(nginx_groups_current) | select('in', nginx_groups_before) | sort }}"
   changed_when: true
 
-- name: Remember the groups www-data joined for the sites
+- name: Forget the groups www-data left
   ansible.builtin.copy:
-    content: |
-      # managed by noixdev.infra (nginx role): the groups www-data joined for the sites.
-      {% for group in nginx_groups_joined %}
-      {{ group }}
-      {% endfor %}
+    content: "{{ nginx_groups_content }}"
     dest: "{{ nginx_groups_state }}"
     owner: root
     group: root
     mode: "0644"
+  vars:
+    nginx_groups_content: "{{ ([nginx_groups_header] + nginx_groups_kept) | join('\n') ~ '\n' }}"

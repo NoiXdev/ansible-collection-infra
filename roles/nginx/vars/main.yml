@@ -96,9 +96,10 @@ nginx_site_groups: >-
        | zip(nginx_sites_public | selectattr('group', 'defined') | map(attribute='group')))) }}
 
 # The groups www-data joins (each site's), the ones it was in before this run
-# (the getent facts of tasks/validate.yml), the ones it joined for the sites
-# in earlier runs (nginx_groups_state, read in tasks/sites.yml), and the ones
-# to remember: those still in use, and those it joins now.
+# (the getent facts of tasks/validate.yml), and the ones it joined for the
+# sites in earlier runs (nginx_groups_state, read in tasks/sites.yml). Before
+# the join the state records the earlier ones and those it joins now; after
+# the leave, only those still in use.
 nginx_groups_current: "{{ nginx_site_groups.values() | unique | sort }}"
 nginx_groups_before: >-
   {{ ansible_facts.getent_group | dict2items | selectattr('value.2', 'search', '(^|,)www-data(,|$)')
@@ -106,9 +107,10 @@ nginx_groups_before: >-
 nginx_groups_previous: >-
   {{ (nginx_groups_state_file.content | default('') | b64decode).splitlines()
      | reject('match', '^#') | reject('eq', '') | list }}
-nginx_groups_joined: >-
-  {{ (nginx_groups_previous | intersect(nginx_groups_current))
-     | union(nginx_groups_current | difference(nginx_groups_before)) | sort }}
+nginx_groups_recorded: >-
+  {{ nginx_groups_previous | union(nginx_groups_current | difference(nginx_groups_before)) | sort }}
+nginx_groups_kept: "{{ nginx_groups_recorded | intersect(nginx_groups_current) | sort }}"
+nginx_groups_header: "# managed by noixdev.infra (nginx role): the groups www-data joined for the sites."
 
 # IPv6 listeners only where the host has IPv6.
 nginx_ipv6: "{{ ansible_facts.all_ipv6_addresses | default([]) | length > 0 }}"

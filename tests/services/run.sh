@@ -1449,6 +1449,28 @@ nginx_links() {
   hx nginx rm -f /srv/static/foreign.txt /srv/static/own.txt /srv/static/root-owned.txt
 }
 
+# nginx_failed_join: a run that fails after www-data joined a new site's
+# group still records it, so www-data leaves the group when the site goes.
+nginx_failed_join() {
+  local dir="$here/nginx" fast=(-e nginx_test_prepare=false) answer
+  local site='{"name": "new", "domains": ["new.example.test"], "user": "app_new", "root": "/srv/static", "tls": "off"'
+  echo "== nginx: a group www-data joined in a failed run is left when its site goes"
+  hx nginx useradd -m -s /bin/bash app_new
+  if play nginx "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_test_extra_sites\": [$site, \"extra\": \"this is not nginx;\"}]}" \
+      >"$out/nginx-failed-join.log" 2>&1; then
+    fail "nginx: the run with the new site's broken extra did not fail"
+  fi
+  answer=" $(hx nginx id -nG www-data) "
+  case "$answer" in *" app_new "*) ;; *) fail "nginx: the failed run did not let www-data join app_new:$answer" ;; esac
+  hx nginx test ! -e /etc/nginx/sites/new.conf || fail "nginx: the failed run left new.conf"
+  converge nginx new-site "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_test_extra_sites\": [$site}]}"
+  converge nginx no-new-site "$dir/converge.yml" "${fast[@]}"
+  answer=" $(hx nginx id -nG www-data) "
+  case "$answer" in *" app_new "*) fail "nginx: www-data is still in app_new's group after its site went:$answer" ;; esac
+  answer="$(hx nginx cat /etc/nginx/noixdev/site-groups)"
+  if grep -qx app_new <<<"$answer"; then fail "nginx: the state still records app_new: $answer"; fi
+}
+
 # nginx_distro_refused: Ubuntu's nginx-common in a fresh container is refused
 # before any change.
 nginx_distro_refused() {
@@ -1572,6 +1594,7 @@ suite_nginx() {
   case "$answer" in *" app_static "*) fail "nginx: www-data is still in app_static's group:$answer" ;; esac
   case "$answer" in *" app_prod "*) ;; *) fail "nginx: www-data left app_prod's group:$answer" ;; esac
   prod_answers removal
+  nginx_failed_join
 
   echo "== nginx: invalid sites are refused before any change"
   local tls_off='"user": "app_prod", "root": "/srv/prod/public", "tls": "off"'
