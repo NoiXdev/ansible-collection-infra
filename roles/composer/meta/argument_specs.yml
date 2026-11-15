@@ -39,6 +39,7 @@ argument_specs:
             description: An existing user; the file is ~/.config/composer/auth.json of its home.
           auth:
             type: dict
+            no_log: true
             description: The file's content (required when state is present).
           state:
             type: str
