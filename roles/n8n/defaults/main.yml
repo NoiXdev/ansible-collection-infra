@@ -1,0 +1,73 @@
+---
+# n8n release (tag of docker.n8n.io/n8nio/n8n, X.Y.Z without a v); the major
+# must be 2, and 2.17.0 or newer, which takes the owner from the
+# environment.
+n8n_version: 2.47.7
+n8n_image: docker.n8n.io/n8nio/n8n
+
+# Directory of the compose project (compose.yaml, markers, the fingerprint of
+# the encryption key). Its basename is the compose project name.
+n8n_dir: /opt/n8n
+# The data: the PostgreSQL data, n8n's home (/home/node/.n8n) and a files
+# directory for workflows (/files), one subdirectory each. It can be a
+# mountpoint of its own (a block volume).
+n8n_data_dir: "{{ n8n_dir }}/data"
+n8n_data_dir_mountpoint: false
+
+# The editor and the public endpoints, only through Traefik: n8n_hostname is
+# required. n8n_url is the origin the browser and webhook callers see
+# (N8N_HOST, N8N_PROTOCOL and WEBHOOK_URL come from it).
+n8n_hostname: ""
+n8n_url: https://{{ n8n_hostname }}
+# Traefik: external network and entrypoints of the routes; empty entrypoints
+# use Traefik's default ones. Two routers on n8n_hostname:
+#   <project>         the editor, the UI's REST API (/rest/) and everything
+#                     else, with n8n_traefik_middlewares (an IP allowlist, for
+#                     example), at n8n_traefik_priority
+#   <project>-public  the endpoints called from outside: /webhook/,
+#                     /webhook-test/, /webhook-waiting/, /form/, /form-test/,
+#                     /form-waiting/, /mcp/, /mcp-test/ and, with
+#                     n8n_traefik_public_api, n8n's public API /api/v1/ (API
+#                     keys), with n8n_traefik_webhook_middlewares, at
+#                     n8n_traefik_priority + 1
+# The priority keeps both above catch-all routers such as the traefik role's
+# error pages routes (priority 1 and 2).
+n8n_traefik_network: proxy
+n8n_traefik_entrypoints: []
+n8n_traefik_priority: 100
+n8n_traefik_middlewares: []
+n8n_traefik_webhook_middlewares: []
+n8n_traefik_public_api: false
+
+# Worker containers: 0 runs n8n in its normal mode.
+n8n_workers: 0
+
+# Required on every run, without a default; keep them in a vault:
+#   n8n_encryption_key    N8N_ENCRYPTION_KEY, which encrypts the credentials
+#                         in the database. Back it up: without it the
+#                         credentials are lost. An installation keeps the key
+#                         it was made with.
+#   n8n_db_password       password of the PostgreSQL user
+# The owner, required on every run: n8n applies them on every start and
+# locks the owner against changes in the UI. The role writes a bcrypt hash of
+# the password, which changes only when the password does.
+#   n8n_owner_email, n8n_owner_first_name, n8n_owner_last_name,
+#   n8n_owner_password
+
+# PostgreSQL 18 or newer: older images keep the database on a volume of their
+# own, outside n8n_data_dir, and are refused.
+n8n_postgres_image: docker.io/library/postgres:18
+# Redis for the queue (n8n_workers 1 or more); it keeps no data on disk.
+n8n_redis_image: docker.io/valkey/valkey:9-alpine
+
+# More settings for the n8n containers (GENERIC_TIMEZONE, execution pruning,
+# SMTP, ...). The settings the role sets itself are refused; true and false
+# become true and false. N8N_PROXY_HOPS defaults to 1 (Traefik); set it here
+# when more proxies add to X-Forwarded-For.
+n8n_env: {}
+
+# Dumps of the database taken before every update, in
+# n8n_data_dir/backups; the newest n8n_dumps_keep are kept.
+n8n_dumps_keep: 3
+# Seconds to wait for n8n and the database to become healthy.
+n8n_health_timeout: 300

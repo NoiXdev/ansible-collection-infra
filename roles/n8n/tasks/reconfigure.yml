@@ -1,0 +1,32 @@
+---
+# Same installation, other settings (an owner variable among them, which n8n
+# applies on its next start): the compose file is written, the stack brought
+# to it, and n8n checked.
+
+- name: Write the compose file
+  ansible.builtin.copy:
+    dest: "{{ n8n_compose_file }}"
+    content: "{{ n8n_compose }}"
+    owner: root
+    group: root
+    mode: "0600"
+  # It holds the encryption key, the passwords and the owner's hash.
+  no_log: true
+
+- name: Start n8n with the new configuration
+  community.docker.docker_compose_v2:
+    project_src: "{{ n8n_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+
+- name: Check that n8n is healthy
+  ansible.builtin.include_tasks: health.yml
+
+- name: Fail when n8n is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      n8n in {{ n8n_dir }} is not healthy within {{ n8n_health_timeout }}
+      seconds after the reconfigure ({{ n8n_health_lines | join('; ') }}); see
+      docker compose logs in {{ n8n_dir }}.
+  when: not n8n_healthy

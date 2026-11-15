@@ -1,0 +1,33 @@
+---
+# Test-only values; nothing here is a real secret. The encryption key, the
+# database password and the owner password hold a $ that compose and a shell
+# must not expand (the database password also quotes, which YAML and compose
+# must keep), and n8n_env a $ that compose must not interpolate.
+traefik_dir: /opt/traefik
+# One plain-HTTP entrypoint: no TLS, so no ACME e-mail.
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+    as_default: true
+# A middleware that denies every client (192.0.2.1 is a documentation
+# address), for the router split scenario.
+traefik_dynamic_files:
+  deny.yml:
+    http:
+      middlewares:
+        deny:
+          ipAllowList:
+            sourceRange: [192.0.2.1/32]
+
+n8n_hostname: n8n.test
+n8n_url: http://n8n.test
+n8n_encryption_key: test-encryption-key-$x-000000000000
+n8n_db_password: test-db-pa$s'w"ord-0
+n8n_owner_email: owner@example.test
+n8n_owner_first_name: Test
+n8n_owner_last_name: Owner
+n8n_owner_password: Test-owner-pa$sword-0
+n8n_env:
+  GENERIC_TIMEZONE: Etc/UTC
+  NOIX_TEST: a$b

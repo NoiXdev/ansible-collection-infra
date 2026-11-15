@@ -1,0 +1,119 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate: the owner's bcrypt hash holds $
+    itself. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+{#- A bind mount that compose must not create: a missing data directory (an
+    unmounted volume) stops the container instead of starting it empty. -#}
+{%- macro bind(source, target) %}
+      - type: bind
+        source: {{ q(source) }}
+        target: {{ q(target) }}
+        bind:
+          create_host_path: false
+{%- endmacro %}
+{%- set url = n8n_url | regex_replace('/+$', '') -%}
+{#- n8n_env over the role's defaults, the settings the role owns over both
+    (main.yml refuses them in n8n_env). -#}
+{%- set env = dict(n8n_env_defaults) -%}
+{%- for key, value in n8n_env | dictsort -%}
+{%-   set _ = env.update({key: (('true' if value else 'false') if value is boolean else value)}) -%}
+{%- endfor -%}
+{%- set _ = env.update({
+  'DB_TYPE': 'postgresdb',
+  'DB_POSTGRESDB_HOST': 'db',
+  'DB_POSTGRESDB_PORT': 5432,
+  'DB_POSTGRESDB_DATABASE': 'n8n',
+  'DB_POSTGRESDB_USER': 'n8n',
+  'DB_POSTGRESDB_PASSWORD': n8n_db_password,
+  'EXECUTIONS_MODE': 'regular',
+  'N8N_ENCRYPTION_KEY': n8n_encryption_key,
+  'N8N_HOST': n8n_hostname,
+  'N8N_PROTOCOL': url.split('://')[0],
+  'N8N_PORT': 5678,
+  'N8N_PATH': '/',
+  'WEBHOOK_URL': url ~ '/',
+  'N8N_USER_FOLDER': n8n_container_dirs.user,
+  'N8N_INSTANCE_OWNER_MANAGED_BY_ENV': 'true',
+  'N8N_INSTANCE_OWNER_EMAIL': n8n_owner_email,
+  'N8N_INSTANCE_OWNER_FIRST_NAME': n8n_owner_first_name,
+  'N8N_INSTANCE_OWNER_LAST_NAME': n8n_owner_last_name,
+  'N8N_INSTANCE_OWNER_PASSWORD_HASH': n8n_owner_password_hash,
+}) -%}
+{%- set router = n8n_project -%}
+{%- set public_router = n8n_project ~ '-public' -%}
+{%- set host_rule = 'Host(`' ~ n8n_hostname ~ '`)' -%}
+# Managed by the noixdev.infra.n8n role; changes are overwritten.
+
+services:
+  db:
+    image: {{ q(n8n_postgres_image) }}
+    environment:
+      POSTGRES_DB: n8n
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: {{ q(n8n_db_password) }}
+    healthcheck:
+      test: [CMD, pg_isready, -U, n8n, -d, n8n]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    # PostgreSQL 18 and newer keep the cluster below /var/lib/postgresql.
+    volumes:
+{{ bind(n8n_data_dir ~ '/postgres', '/var/lib/postgresql') }}
+    restart: unless-stopped
+
+  n8n:
+    image: {{ q(n8n_image ~ ':' ~ n8n_version) }}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+{% for key, value in env | dictsort %}
+      {{ key }}: {{ q(value) }}
+{% endfor %}
+    volumes:
+{{ bind(n8n_data_dir ~ '/home', n8n_container_dirs.home) }}
+{{ bind(n8n_data_dir ~ '/files', n8n_container_dirs.files) }}
+    # Readiness answers 200 only while n8n is connected to its migrated
+    # database, so a database n8n cannot use makes the container unhealthy.
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:5678/healthz/readiness"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+      start_interval: 5s
+    networks: [default, traefik]
+    # No published port: Traefik reaches n8n over its network.
+    labels:
+      - traefik.enable=true
+      - {{ q('traefik.docker.network=' ~ n8n_traefik_network) }}
+      # The editor, the UI's REST API and everything else.
+      - {{ q('traefik.http.routers.' ~ router ~ '.rule=' ~ host_rule) }}
+{% if n8n_traefik_entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.entrypoints=' ~ n8n_traefik_entrypoints | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.priority=' ~ n8n_traefik_priority) }}
+{% if n8n_traefik_middlewares | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.middlewares=' ~ n8n_traefik_middlewares | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.service=' ~ n8n_project) }}
+      # The endpoints called from outside n8n: webhooks, forms, MCP and,
+      # with n8n_traefik_public_api, the public API.
+      - {{ q('traefik.http.routers.' ~ public_router ~ '.rule=' ~ host_rule ~ ' && ('
+             ~ (n8n_public_paths | map('regex_replace', '^(.*)$', 'PathPrefix(`\\1`)') | join(' || ')) ~ ')') }}
+{% if n8n_traefik_entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ public_router ~ '.entrypoints=' ~ n8n_traefik_entrypoints | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ public_router ~ '.priority=' ~ (n8n_traefik_priority | int + 1)) }}
+{% if n8n_traefik_webhook_middlewares | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ public_router ~ '.middlewares=' ~ n8n_traefik_webhook_middlewares | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ public_router ~ '.service=' ~ n8n_project) }}
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - {{ q('traefik.http.services.' ~ n8n_project ~ '.loadbalancer.server.port=5678') }}
+    restart: unless-stopped
+
+networks:
+  traefik:
+    name: {{ q(n8n_traefik_network) }}
+    external: true

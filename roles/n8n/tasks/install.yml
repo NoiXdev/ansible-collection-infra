@@ -1,0 +1,115 @@
+---
+# A fresh install: the directories (the data subdirectories only here), the
+# compose file, the fingerprint of the encryption key, then the stack until
+# it is healthy; n8n sets the owner up from the environment on its first
+# start. The marker n8n_install_marker lives from before the first data
+# directory until n8n is healthy, so a run after a failed install refuses
+# (state.yml) instead of taking the half-made installation for a finished
+# one. A failed install stops the stack and deletes nothing.
+
+- name: Create the n8n directory
+  ansible.builtin.file:
+    path: "{{ n8n_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the marker of an install in progress
+  ansible.builtin.copy:
+    dest: "{{ n8n_install_marker }}"
+    content: |
+      version: {{ n8n_version }}
+      time: {{ now(utc=true).isoformat() }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install n8n
+  block:
+    - name: Create the data directory
+      ansible.builtin.file:
+        path: "{{ n8n_data_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # PostgreSQL chowns its data on start; n8n runs as the image's user node.
+    # The home holds n8n's config with the encryption key.
+    - name: Create the data subdirectories
+      ansible.builtin.file:
+        path: "{{ n8n_data_dir }}/{{ item.name }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {name: postgres, owner: 0, mode: "0755"}
+        - {name: home, owner: "{{ n8n_container_uid }}", mode: "0700"}
+        - {name: files, owner: "{{ n8n_container_uid }}", mode: "0750"}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Write the compose file
+      ansible.builtin.copy:
+        dest: "{{ n8n_compose_file }}"
+        content: "{{ n8n_compose }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the encryption key, the passwords and the owner's hash.
+      no_log: true
+
+    # A plain hash of the key is a quick test of a guessed key, so the file
+    # is root's only and the task no_log.
+    - name: Write the fingerprint of the encryption key
+      ansible.builtin.copy:
+        dest: "{{ n8n_key_fingerprint_file }}"
+        content: "{{ n8n_encryption_key | string | hash('sha256') }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Start n8n
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_dir }}"
+        state: present
+        pull: missing
+
+    - name: Check that n8n is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when n8n is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          n8n is not healthy within {{ n8n_health_timeout }} seconds
+          ({{ n8n_health_lines | join('; ') }}); see docker compose logs in
+          {{ n8n_dir }}
+      when: not n8n_healthy
+
+    - name: Remove the marker of an install in progress
+      ansible.builtin.file:
+        path: "{{ n8n_install_marker }}"
+        state: absent
+
+  rescue:
+    - name: Note why the install failed
+      ansible.builtin.set_fact:
+        n8n_install_failure: "{{ n8n_failure | trim }}"
+
+    # Stopped, not removed: what is left is for the hint's removal, and a
+    # running n8n would take workflows into the installation it says to
+    # remove.
+    - name: Stop n8n after the failed install
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_dir }}"
+        state: stopped
+      failed_when: false
+
+    - name: Fail with what to remove
+      ansible.builtin.fail:
+        msg: >-
+          The install of n8n {{ n8n_version }} in {{ n8n_dir }} failed
+          ({{ n8n_install_failure }}). {{ n8n_install_hint }}

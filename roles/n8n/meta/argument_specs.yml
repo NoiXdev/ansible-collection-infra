@@ -1,0 +1,117 @@
+---
+argument_specs:
+  main:
+    short_description: n8n with PostgreSQL in Docker Compose, behind Traefik
+    # The required settings are not required here: the role's own checks
+    # name them when they are missing.
+    options:
+      n8n_version:
+        type: str
+        description: >-
+          n8n image tag (X.Y.Z, no v); the major must be 2, and 2.17.0 or
+          newer (the owner from the environment).
+      n8n_image:
+        type: str
+        description: n8n image without its tag.
+      n8n_dir:
+        type: path
+        description: >-
+          Directory of the compose project (compose.yaml, markers, the
+          fingerprint of the encryption key). Its basename is the compose
+          project name.
+      n8n_data_dir:
+        type: path
+        description: >-
+          Directory of the data (PostgreSQL data, n8n's home, the files
+          directory); can be a mountpoint of its own.
+      n8n_data_dir_mountpoint:
+        type: bool
+        description: Fail every run unless n8n_data_dir is a mountpoint.
+      n8n_hostname:
+        type: str
+        description: Host name of both Traefik routers (required).
+      n8n_url:
+        type: str
+        description: >-
+          Origin the browser and webhook callers reach n8n at, without a path
+          (N8N_HOST, N8N_PROTOCOL, WEBHOOK_URL).
+      n8n_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      n8n_traefik_entrypoints:
+        type: list
+        elements: str
+        description: Traefik entrypoints of both routers; empty uses Traefik's default ones.
+      n8n_traefik_priority:
+        type: int
+        description: >-
+          Priority of the UI router; the public router gets this plus 1.
+          Keep it above catch-all routers.
+      n8n_traefik_middlewares:
+        type: list
+        elements: str
+        description: >-
+          Traefik middlewares (name@provider) of the UI router: the editor,
+          /rest/ and every path on n8n_hostname except those of the public
+          router (an IP allowlist, for example).
+      n8n_traefik_webhook_middlewares:
+        type: list
+        elements: str
+        description: >-
+          Traefik middlewares (name@provider) of the public router: /webhook/,
+          /webhook-test/, /webhook-waiting/, /form/, /form-test/,
+          /form-waiting/, /mcp/, /mcp-test/ and, with n8n_traefik_public_api,
+          /api/v1/.
+      n8n_traefik_public_api:
+        type: bool
+        description: >-
+          Put n8n's public API (/api/v1/, API keys) on the public router
+          instead of the UI router.
+      n8n_workers:
+        type: int
+        description: Worker containers; 0 runs n8n in its normal mode.
+      n8n_encryption_key:
+        type: str
+        no_log: true
+        description: >-
+          N8N_ENCRYPTION_KEY (required), which encrypts the credentials in the
+          database. Keep it in a vault and back it up.
+      n8n_db_password:
+        type: str
+        no_log: true
+        description: Password of the PostgreSQL user (required). Keep it in a vault.
+      n8n_owner_email:
+        type: str
+        description: E-mail address of the owner (required on every run).
+      n8n_owner_first_name:
+        type: str
+        description: First name of the owner (required on every run).
+      n8n_owner_last_name:
+        type: str
+        description: Last name of the owner (required on every run).
+      n8n_owner_password:
+        type: str
+        no_log: true
+        description: >-
+          Password of the owner (required on every run); the role writes its
+          bcrypt hash. A new one is applied on the next start. Keep it in a
+          vault.
+      n8n_postgres_image:
+        type: str
+        description: >-
+          PostgreSQL image with its tag, major 18 or newer (older images keep
+          the database on a volume of their own, outside n8n_data_dir).
+      n8n_redis_image:
+        type: str
+        description: Redis image with its tag, for the queue (n8n_workers 1 or more).
+      n8n_env:
+        type: dict
+        description: >-
+          More settings for the n8n containers (environment variables); the
+          settings the role sets itself are refused.
+      n8n_dumps_keep:
+        type: int
+        description: Number of dumps kept before updates.
+      n8n_health_timeout:
+        type: int
+        description: Seconds to wait for n8n and the database to become healthy.

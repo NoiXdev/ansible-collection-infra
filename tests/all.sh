@@ -12,6 +12,7 @@
 #   listmonk    tests/listmonk/run.sh
 #   paperless   tests/paperless/run.sh (Paperless-ngx, Traefik and Samba; about 4 GB of images)
 #   tandoor     tests/tandoor/run.sh (Tandoor Recipes, Traefik and Mailpit; about 2 GB of images)
+#   n8n         tests/n8n/run.sh (n8n, PostgreSQL and Traefik; about 3 GB of images)
 #   anubis      tests/anubis/run.sh
 #   mailcow     tests/mailcow/run.sh (real mailcow: network, about 5 GB of images)
 #   cloudpanel  tests/cloudpanel/run.sh (CloudPanel's real installer)
@@ -40,7 +41,7 @@ out="$here/output/all"
 # The required suites and the host suite's default releases. tests/attest.sh
 # and .github/scripts/verify-tests-attestation.sh read both lines (keep each
 # on one line): an attestation needs every suite, host once per release.
-all_suites=(e2e host harbor listmonk paperless tandoor anubis mailcow cloudpanel)
+all_suites=(e2e host harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel)
 host_releases=(24.04 26.04)
 
 usage() {

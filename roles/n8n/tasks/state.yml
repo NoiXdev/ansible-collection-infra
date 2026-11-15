@@ -1,0 +1,203 @@
+---
+# Reads the host and sets n8n_state:
+#   install      no compose file
+#   reconfigure  the compose file the role writes differs from the one on
+#                disk
+#   noop         everything as the role writes it
+# Also sets n8n_installed (a compose file exists), n8n_compose_before (the
+# compose file on disk), n8n_compose_on_disk (it parsed, which
+# n8n_installed_version reads), n8n_owner_password_hash (the owner's bcrypt
+# hash, which the compose file holds) and n8n_down (the expected services
+# that are not running). Refuses, before any change, a compose file that is
+# not YAML, an install that did not complete (its marker), a compose file
+# without an n8n version and an n8n_db_password that the database does not
+# take. The only change it can make is pulling the n8n image, which the
+# owner's hash is made with.
+
+- name: Read the compose file
+  ansible.builtin.slurp:
+    src: "{{ n8n_compose_file }}"
+  register: n8n_compose_read
+  failed_when: false
+  # It holds the encryption key and the passwords.
+  no_log: true
+
+- name: Note what is on the host
+  ansible.builtin.set_fact:
+    n8n_compose_before: "{{ n8n_compose_read.content | default('') | b64decode }}"
+    n8n_installed: "{{ n8n_compose_read.content is defined }}"
+  no_log: true
+
+# Once, in a no_log task: an error of the YAML parser can quote a line of the
+# file, which holds the encryption key and the passwords, so a file that is
+# not YAML gets a message of its own without the error. One that is YAML but
+# not a mapping parses as empty and names no version, which is refused below.
+- name: Check that the compose file is YAML
+  block:
+    - name: Parse the compose file
+      ansible.builtin.set_fact:
+        n8n_compose_on_disk: "{{ n8n_compose_parsed if n8n_compose_parsed is mapping else {} }}"
+      vars:
+        n8n_compose_parsed: "{{ (n8n_compose_before or '{}') | from_yaml }}"
+      no_log: true
+  rescue:
+    - name: Fail on a compose file that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ n8n_compose_file }} is not YAML, so the role cannot tell what is
+          installed and changes nothing. The parser's error is not shown: it
+          can quote a line of the file, which holds the encryption key and
+          the passwords. Put back the compose file the role wrote (docker
+          compose config --quiet in {{ n8n_dir }} shows the error).
+
+- name: Look for the marker of an install in progress
+  ansible.builtin.stat:
+    path: "{{ n8n_install_marker }}"
+    get_checksum: false
+  register: n8n_install_marker_stat
+
+- name: Refuse an install that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ n8n_install_marker }} exists: an install of n8n in {{ n8n_dir }} did
+      not complete, so the database may be half made. The role changes
+      nothing. {{ n8n_install_hint }}
+  when: n8n_install_marker_stat.stat.exists
+
+- name: Check that the compose file names the n8n version
+  ansible.builtin.assert:
+    that: n8n_installed_version is match('^\d+\.\d+\.\d+$')
+    fail_msg: >-
+      The n8n image in {{ n8n_compose_file }} has no tag X.Y.Z, so the role
+      cannot tell which n8n version is installed and changes nothing. Put
+      back the compose file the role wrote.
+    quiet: true
+  when: n8n_installed
+
+# PostgreSQL takes POSTGRES_PASSWORD only when it creates the cluster: on an
+# existing one a new n8n_db_password would reach n8n but not the database,
+# and n8n could not connect. The compose file on disk records the password
+# the role wrote last (with $ doubled, as the template writes it); compared
+# in a no_log task, so that neither password is in the output.
+- name: Compare n8n_db_password with the compose file
+  ansible.builtin.set_fact:
+    n8n_db_password_changed: >-
+      {{ (((n8n_compose_on_disk.services | default({})).db | default({})).environment | default({})).POSTGRES_PASSWORD
+         | default('') | string | replace('$$', '$') != n8n_db_password | string }}
+  no_log: true
+  when: n8n_installed
+
+# A new password may be the database's already, set by hand as the refusal
+# below says. Asked over the network as n8n connects (the local socket and
+# 127.0.0.1 need no password); the password goes through stdin into the
+# environment of psql (the x keeps trailing newlines), and the task is
+# no_log. The next task fails with the error.
+- name: Check that the database takes the new n8n_db_password
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - db
+      - sh
+      - -c
+      - >-
+        PGPASSWORD="$(cat; echo x)"; PGPASSWORD="${PGPASSWORD%x}"; export PGPASSWORD;
+        PGCONNECT_TIMEOUT=10 exec psql --host=db --username=n8n --dbname=n8n
+        --no-psqlrc --tuples-only --command='SELECT 1'
+    chdir: "{{ n8n_dir }}"
+    stdin: "{{ n8n_db_password }}"
+    stdin_add_newline: false
+  register: n8n_hidden
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - n8n_installed
+    - n8n_db_password_changed | bool
+
+- name: Refuse an n8n_db_password the database does not take
+  ansible.builtin.fail:
+    msg: >-
+      n8n_db_password differs from the password in {{ n8n_compose_file }},
+      and the database does not take it ({{ n8n_hidden_error }}). PostgreSQL
+      takes a password only when it creates the database, so n8n could not
+      connect with the new one; the role changes nothing. To change the
+      password, set it in the database first: in {{ n8n_dir }} run docker
+      compose exec db psql -U n8n -d postgres and enter \password n8n (an
+      ALTER USER n8n PASSWORD that keeps the password off the command line),
+      then run the role again with the new n8n_db_password. Or set
+      n8n_db_password back to the old one.
+  when:
+    - n8n_installed
+    - n8n_db_password_changed | bool
+    - n8n_hidden.rc != 0
+
+# The owner's hash is made in the n8n image (n8n_owner_hash_script), which a
+# fresh install or a new version may not have yet.
+- name: Look for the n8n image
+  ansible.builtin.command:
+    argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ n8n_image }}:{{ n8n_version }}"]
+  register: n8n_image_inspect
+  changed_when: false
+  failed_when: false
+
+- name: Pull the n8n image
+  ansible.builtin.command:
+    argv: [docker, pull, --quiet, "{{ n8n_image }}:{{ n8n_version }}"]
+  changed_when: true
+  when: n8n_image_inspect.rc != 0
+
+# The key and the password go through stdin, never a command line, and the
+# task is no_log; the container has no network. The next task fails with the
+# error.
+- name: Make the owner's password hash
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --interactive
+      - --pull=never
+      - --network=none
+      - --entrypoint=node
+      - "{{ n8n_image }}:{{ n8n_version }}"
+      - --eval
+      - "{{ n8n_owner_hash_script }}"
+    stdin: "{{ {'key': n8n_encryption_key | string, 'password': n8n_owner_password | string} | to_json }}"
+    stdin_add_newline: false
+  register: n8n_hidden
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Fail when the owner's password hash was not made
+  ansible.builtin.fail:
+    msg: >-
+      The owner's password hash could not be made in
+      {{ n8n_image }}:{{ n8n_version }} ({{ n8n_hidden_error }}). The role
+      changes nothing.
+  when: n8n_hidden.rc != 0 or n8n_hidden.stdout is not match('^\$2b\$10\$[./A-Za-z0-9]{53}$')
+
+- name: Note the owner's password hash
+  ansible.builtin.set_fact:
+    n8n_owner_password_hash: "{{ n8n_hidden.stdout }}"
+  no_log: true
+
+- name: Read the services that run
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
+    chdir: "{{ n8n_dir }}"
+  register: n8n_ps
+  changed_when: false
+  when: n8n_installed
+
+- name: Decide what to do
+  ansible.builtin.set_fact:
+    n8n_down: "{{ n8n_services | difference(n8n_ps.stdout_lines | default([])) }}"
+    n8n_state: >-
+      {{ 'install' if not n8n_installed
+         else 'reconfigure' if n8n_compose_before != n8n_compose
+         else 'noop' }}
+  no_log: true

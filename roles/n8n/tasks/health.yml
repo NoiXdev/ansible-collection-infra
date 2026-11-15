@@ -1,0 +1,31 @@
+---
+# Waits up to n8n_health_timeout seconds (n8n_health_wait, when the includer
+# sets it) until every container of n8n_services reports the health status
+# healthy, and sets n8n_healthy and n8n_health_lines (service, state and
+# health of each container). n8n's own check asks /healthz/readiness, which
+# needs the database. Never fails by itself.
+
+- name: Note when the health check starts
+  ansible.builtin.set_fact:
+    n8n_health_start: "{{ now().timestamp() }}"
+    n8n_health_expected: "{{ n8n_services | map('regex_replace', '^(.*)$', '\\1 running healthy') | list }}"
+
+# retries is an upper bound (every attempt takes at least the delay); the
+# deadline ends the wait after those seconds.
+- name: Wait until the containers are healthy
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --all, --format, "{{ '{{.Service}} {{.State}} {{.Health}}' }}"]
+    chdir: "{{ n8n_dir }}"
+  register: n8n_health
+  until: >-
+    n8n_health_expected | difference(n8n_health.stdout_lines | default([])) | length == 0
+    or now().timestamp() - n8n_health_start | float >= n8n_health_wait | default(n8n_health_timeout) | int
+  retries: "{{ (n8n_health_wait | default(n8n_health_timeout) | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Note whether n8n is healthy
+  ansible.builtin.set_fact:
+    n8n_health_lines: "{{ n8n_health.stdout_lines | default([]) | sort }}"
+    n8n_healthy: "{{ n8n_health_expected | difference(n8n_health.stdout_lines | default([])) | length == 0 }}"

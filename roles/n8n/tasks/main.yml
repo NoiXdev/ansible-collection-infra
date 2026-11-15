@@ -1,0 +1,178 @@
+---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
+- name: Check that n8n_encryption_key is set
+  ansible.builtin.assert:
+    that: n8n_encryption_key | default('') | string | length > 0
+    fail_msg: >-
+      n8n_encryption_key is required: n8n encrypts the credentials in the
+      database with it. Keep it in a vault and back it up.
+    quiet: true
+
+- name: Check that n8n_db_password is set
+  ansible.builtin.assert:
+    that: n8n_db_password | default('') | string | length > 0
+    fail_msg: n8n_db_password is required.
+    quiet: true
+
+# The owner on every run: n8n applies the variables on every start.
+- name: Check that n8n_owner_email is set
+  ansible.builtin.assert:
+    that: n8n_owner_email | default('') | string is match('^[^@\s]+@[^@\s]+$')
+    fail_msg: n8n_owner_email is required and must be an e-mail address.
+    quiet: true
+
+- name: Check that n8n_owner_first_name is set
+  ansible.builtin.assert:
+    that: n8n_owner_first_name | default('') | string | trim | length > 0
+    fail_msg: n8n_owner_first_name is required.
+    quiet: true
+
+- name: Check that n8n_owner_last_name is set
+  ansible.builtin.assert:
+    that: n8n_owner_last_name | default('') | string | trim | length > 0
+    fail_msg: n8n_owner_last_name is required.
+    quiet: true
+
+- name: Check that n8n_owner_password is set
+  ansible.builtin.assert:
+    that: n8n_owner_password | default('') | string | length > 0
+    fail_msg: n8n_owner_password is required.
+    quiet: true
+
+- name: Check n8n_version
+  ansible.builtin.assert:
+    that:
+      - n8n_version | string is match('^2\.\d+\.\d+$')
+      - n8n_version | string is version(n8n_min_version, '>=')
+    fail_msg: >-
+      n8n_version {{ n8n_version }} is not a release the role runs: it must
+      look like 2.X.Y (major 2, no v) and be {{ n8n_min_version }} or newer,
+      the first release that takes the owner from the environment.
+    quiet: true
+
+# The names end up in compose, Traefik rules and docker filters unquoted.
+- name: Check the n8n settings
+  ansible.builtin.assert:
+    that:
+      - n8n_image | length > 0
+      - n8n_postgres_major | length > 0
+      - n8n_redis_image | length > 0
+      - n8n_dir is match('^/')
+      - n8n_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - n8n_data_dir is match('^/')
+      - n8n_hostname is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+      - n8n_url is match('^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$')
+      - n8n_traefik_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - n8n_traefik_entrypoints | reject('match', '^[A-Za-z0-9][A-Za-z0-9_-]*$') | list | length == 0
+      - (n8n_traefik_middlewares + n8n_traefik_webhook_middlewares) | reject('match', '^[A-Za-z0-9][A-Za-z0-9_.@-]*$') | list | length == 0
+      - n8n_traefik_priority | int >= 1
+      - n8n_workers | int >= 0
+      - n8n_dumps_keep | int >= 1
+      - n8n_health_timeout | int > 0
+    fail_msg: >-
+      n8n_dir and n8n_data_dir must be absolute paths, the basename of n8n_dir
+      (the compose project) only lowercase letters, digits, - and _;
+      n8n_hostname (required) a host name; n8n_url an http(s) origin without a
+      path; n8n_traefik_network a network name, n8n_traefik_entrypoints
+      entrypoint names and n8n_traefik_middlewares and
+      n8n_traefik_webhook_middlewares middleware names (name@provider);
+      n8n_image and n8n_redis_image must be set, n8n_postgres_image with a tag
+      that starts with the PostgreSQL major (postgres:18,
+      postgres:18.1-alpine); n8n_traefik_priority, n8n_dumps_keep and
+      n8n_health_timeout must be positive, n8n_workers not negative.
+    quiet: true
+
+# From 18 on the image keeps its cluster below /var/lib/postgresql (in
+# 18/docker), which compose.yaml binds to n8n_data_dir/postgres. Older images
+# declare the volume /var/lib/postgresql/data, which Docker mounts as an
+# anonymous volume over the bind: the database would live outside
+# n8n_data_dir, and docker compose down -v would take the workflows with it.
+- name: Check the PostgreSQL major
+  ansible.builtin.assert:
+    that: n8n_postgres_major | int >= 18
+    fail_msg: >-
+      n8n_postgres_image {{ n8n_postgres_image }} is PostgreSQL
+      {{ n8n_postgres_major }}; the role needs PostgreSQL 18 or newer. Older
+      images keep the database on a volume of their own
+      (/var/lib/postgresql/data) instead of below /var/lib/postgresql, which
+      the role binds to {{ n8n_data_dir }}/postgres, so it would live outside
+      n8n_data_dir. The role changes nothing.
+    quiet: true
+
+- name: Check n8n_env
+  ansible.builtin.assert:
+    that:
+      - n8n_env is mapping
+      - n8n_env.keys() | reject('match', '^[A-Z][A-Z0-9_]*$') | list | length == 0
+      - n8n_env.values() | select('mapping') | list | length == 0
+      - n8n_env.values() | reject('string') | select('iterable') | list | length == 0
+      - n8n_owned | length == 0
+    fail_msg: >-
+      n8n_env keys must be environment variable names (uppercase letters,
+      digits and _) with plain values, and the role sets these itself:
+      {{ n8n_owned | join(', ') if n8n_owned else 'none' }} (and every
+      {{ n8n_env_owned_prefixes | join('*, ') }}* key). Use the role's
+      variables instead (n8n_encryption_key, n8n_db_password, n8n_owner_*,
+      n8n_hostname, n8n_url, n8n_workers, ...).
+    quiet: true
+  vars:
+    n8n_owned: >-
+      {{ (n8n_env if n8n_env is mapping else {}).keys()
+         | select('in', n8n_env_owned)
+         | union((n8n_env if n8n_env is mapping else {}).keys()
+                 | select('match', '^(' ~ n8n_env_owned_prefixes | join('|') ~ ')'))
+         | sort }}
+
+# A key left empty in YAML (KEY:) is null, which would reach n8n as the text
+# None. The message names the keys, not the values.
+- name: Check that n8n_env has a value for every key
+  ansible.builtin.assert:
+    that: n8n_env_null | length == 0
+    fail_msg: >-
+      n8n_env has no value for {{ n8n_env_null | join(', ') }} (null, as a key
+      left empty in YAML is), which would reach n8n as the text None. Set a
+      value, '' for an empty one, or remove the key.
+    quiet: true
+  vars:
+    n8n_env_null: "{{ n8n_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
+
+- name: Read the installation
+  ansible.builtin.include_tasks: state.yml
+
+- name: Install n8n
+  ansible.builtin.include_tasks: install.yml
+  when: n8n_state == 'install'
+
+- name: Reconfigure n8n
+  ansible.builtin.include_tasks: reconfigure.yml
+  when: n8n_state == 'reconfigure'
+
+# Read-only: a run without changes starts and restarts nothing, but stays red
+# while a container is down.
+- name: Check that n8n runs
+  when: n8n_state == 'noop'
+  block:
+    - name: Fail when a container is not running
+      ansible.builtin.fail:
+        msg: >-
+          n8n in {{ n8n_dir }} is down: the services {{ n8n_down | join(', ') }}
+          are not running. The role starts nothing on a run without changes;
+          start them with docker compose up -d in {{ n8n_dir }}.
+      when: n8n_down | length > 0
+
+    - name: Check that n8n is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when n8n is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          n8n in {{ n8n_dir }} is unhealthy: its containers are not all
+          healthy within {{ n8n_health_timeout }} seconds
+          ({{ n8n_health_lines | join('; ') }}). The role restarts nothing on
+          a run without changes; see docker compose logs in {{ n8n_dir }}.
+      when: not n8n_healthy

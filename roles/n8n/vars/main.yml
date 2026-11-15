@@ -1,0 +1,133 @@
+---
+# The compose project name: compose's default for the directory.
+n8n_project: "{{ n8n_dir | basename }}"
+# Mode 0600: it holds the encryption key, the database password and the
+# owner's password hash.
+n8n_compose_file: "{{ n8n_dir }}/compose.yaml"
+
+# The subdirectories of n8n_data_dir whose absence means the data is missing
+# (an unmounted volume): only install creates them, and the containers bind
+# them with create_host_path false.
+n8n_data_subdirs: [postgres, home, files]
+# Database dumps and copies of the n8n home before an update.
+n8n_backup_dir: "{{ n8n_data_dir }}/backups"
+# Written after a failed update; that version is not tried again while it
+# exists.
+n8n_marker_file: "{{ n8n_dir }}/update-failed"
+# Written before an install creates anything in n8n_data_dir and removed once
+# n8n is healthy; while it exists every run refuses.
+n8n_install_marker: "{{ n8n_dir }}/install-incomplete"
+# The sha256 of the encryption key the installation was made with, written
+# on install (mode 0600).
+n8n_key_fingerprint_file: "{{ n8n_dir }}/encryption-key.sha256"
+
+# n8n_compose_on_disk, the compose file on disk parsed (empty when there is
+# none), is set by state.yml, which parses it in a no_log task.
+# The n8n version of the compose file on disk (the tag of the n8n image),
+# empty when there is none.
+n8n_installed_version: >-
+  {%- set image = ((n8n_compose_on_disk.services | default({})).n8n | default({})).image | default('') | string -%}
+  {{ image.rpartition(':')[2] if ':' in image.rpartition('/')[2] else '' }}
+
+# The PostgreSQL major of n8n_postgres_image: the leading digits of its tag
+# (postgres:18, postgres:18.1-alpine), empty without them.
+n8n_postgres_major: >-
+  {%- set name = (n8n_postgres_image | string).split('@')[0].rpartition('/')[2] -%}
+  {{ (name.rpartition(':')[2] if ':' in name else '') | regex_search('^[0-9]+') | default('', true) }}
+
+# The oldest release that takes the owner from N8N_INSTANCE_OWNER_*.
+n8n_min_version: 2.17.0
+
+# Container paths of the n8n image.
+n8n_container_dirs:
+  user: /home/node
+  home: /home/node/.n8n
+  files: /files
+# The user of the n8n image, who owns its home and the files directory.
+n8n_container_uid: 1000
+
+# The settings the role sets itself; n8n_env must not hold them, nor any key
+# with one of n8n_env_owned_prefixes. N8N_ENDPOINT_* would move the paths the
+# routers and the health check expect.
+n8n_env_owned:
+  - EXECUTIONS_MODE
+  - N8N_ENCRYPTION_KEY
+  - N8N_HOST
+  - N8N_PROTOCOL
+  - N8N_PORT
+  - N8N_PATH
+  - WEBHOOK_URL
+  - N8N_USER_FOLDER
+n8n_env_owned_prefixes: [DB_, QUEUE_, N8N_INSTANCE_OWNER_, N8N_ENDPOINT_]
+# Settings the role sets unless n8n_env does: Traefik adds one hop to
+# X-Forwarded-For, which n8n's rate limits read the client address from.
+n8n_env_defaults:
+  N8N_PROXY_HOPS: 1
+
+# The compose services the configuration runs.
+n8n_services: [db, n8n]
+
+# The compose file as the role writes it; compared with the one on disk. It
+# needs n8n_owner_password_hash, which state.yml sets.
+n8n_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
+
+# The paths of the public router (the UI router takes everything else on
+# n8n_hostname): webhooks, forms and MCP Server Triggers, called from outside
+# n8n, and with n8n_traefik_public_api n8n's public API.
+n8n_public_paths: >-
+  {{ ['/webhook/', '/webhook-test/', '/webhook-waiting/', '/form/', '/form-test/', '/form-waiting/', '/mcp/', '/mcp-test/']
+     + (['/api/v1/'] if n8n_traefik_public_api | bool else []) }}
+
+# The owner's bcrypt hash with a fixed salt, so that the hash, and with it
+# the compose file, changes only when the password does. The salt is an HMAC
+# of a constant keyed with the encryption key: it shows nothing of the key,
+# and nothing of the password either, which a salt made from the password
+# would (the compose file holds the key, so anyone who can read it could test
+# guesses of the password at the speed of a plain hash instead of bcrypt's).
+# Made with the bcryptjs that n8n checks logins with, in the n8n image, so the
+# controller needs no bcrypt library; the key and the password come through
+# stdin as JSON.
+n8n_owner_hash_script: |
+  const crypto = require('crypto');
+  const bcrypt = require(require.resolve('bcryptjs', { paths: ['/usr/local/lib/node_modules/n8n'] }));
+  let input = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => { input += chunk; });
+  process.stdin.on('end', () => {
+    let secrets;
+    try { secrets = JSON.parse(input); } catch (e) { console.error('Error: the input is not JSON'); process.exit(1); }
+    const salt = crypto.createHmac('sha256', String(secrets.key))
+      .update('noixdev.infra.n8n owner password salt').digest().subarray(0, 16);
+    process.stdout.write(bcrypt.hashSync(String(secrets.password), '$2b$10$' + bcrypt.encodeBase64(salt, 16)));
+  });
+
+# In a rescue: the failed task and the first line of its error. For a
+# command that only says it failed, the last line of stderr that names an
+# error, else its last line.
+n8n_failure: >-
+  {%- set stderr = (ansible_failed_result.stderr | default('') | trim).splitlines() -%}
+  {%- set errors = stderr | select('search', 'Error:') | list -%}
+  {{ ansible_failed_task.name }}:
+  {{ (errors or stderr or ['']) | last | trim
+     if ansible_failed_result.msg | default('') is search('non-zero return code')
+     else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
+
+# The error of a command whose task hides its arguments (no_log, failed_when
+# false, registered as n8n_hidden): the last line of stderr that names an
+# error, else its last line, else the exit code. The next task fails with it.
+n8n_hidden_error: >-
+  {%- set stderr = (n8n_hidden.stderr | default('') | trim).splitlines() -%}
+  {{ ((stderr | select('search', 'Error:') | list) or stderr
+      or ['exit code ' ~ n8n_hidden.rc | default('?') | string]) | last | trim }}
+
+# After a failed install: nothing in it should be worth keeping yet, so what
+# it made is removed and the next run installs afresh.
+n8n_install_hint: >-
+  It left a partial installation, which the role does not take for a
+  finished one. To install again, first check that nothing in it is worth
+  keeping (for example workflows in n8n), then run docker compose down in
+  {{ n8n_dir }} (if {{ n8n_compose_file }} exists), remove
+  {{ n8n_compose_file }}, {{ n8n_key_fingerprint_file }},
+  {{ n8n_install_marker }} and the subdirectories
+  {{ n8n_data_subdirs[:-1] | join(', ') }} and {{ n8n_data_subdirs[-1] }} of
+  {{ n8n_data_dir }}, then run the role again.

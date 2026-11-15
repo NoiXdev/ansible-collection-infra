@@ -1,0 +1,248 @@
+---
+# Checks an installation through Traefik: containers, environment, mounts,
+# the compose file and the key's fingerprint; the owner's login (n8n's
+# session cookie), the owner locked against changes through the API, and a
+# workflow with a Webhook node, created and activated through the API once
+# per installation, that answers its production webhook. n8n allows five
+# logins a minute per e-mail address, so this playbook logs in once.
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  vars:
+    n8n_dir: /opt/n8n
+    verify_base: http://127.0.0.1
+    # n8n binds its session to the browser-id header of the login.
+    verify_headers:
+      Host: n8n.test
+      browser-id: noix-test
+    verify_auth: "{{ verify_headers | combine({'Cookie': verify_cookie}) }}"
+    verify_cookie: "{{ verify_login.set_cookie | default('') | regex_search('n8n-auth=[^;]+') }}"
+    verify_workflow:
+      name: noix-test
+      settings: {}
+      nodes:
+        - id: 7b9e2a40-0000-4000-8000-000000000001
+          name: Webhook
+          type: n8n-nodes-base.webhook
+          typeVersion: 2
+          position: [0, 0]
+          webhookId: 7b9e2a40-0000-4000-8000-0000000000a1
+          parameters:
+            httpMethod: POST
+            path: noix-test
+            responseMode: responseNode
+            options: {}
+        - id: 7b9e2a40-0000-4000-8000-000000000002
+          name: Respond
+          type: n8n-nodes-base.respondToWebhook
+          typeVersion: 1.1
+          position: [220, 0]
+          parameters:
+            respondWith: json
+            responseBody: '{"ok": true}'
+            options: {}
+      connections:
+        Webhook:
+          main: [[{node: Respond, type: main, index: 0}]]
+  tasks:
+    - name: Find the containers of the compose project
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, label=com.docker.compose.project=n8n]
+      register: verify_ids
+      changed_when: false
+
+    - name: Inspect the containers
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'inspect'] + verify_ids.stdout_lines }}"
+      register: verify_inspect
+      changed_when: false
+
+    - name: Stat the compose file
+      ansible.builtin.stat:
+        path: "{{ n8n_dir }}/compose.yaml"
+      register: verify_compose
+
+    - name: Stat the fingerprint of the encryption key
+      ansible.builtin.stat:
+        path: "{{ n8n_dir }}/encryption-key.sha256"
+      register: verify_fingerprint
+
+    - name: Read the fingerprint of the encryption key
+      ansible.builtin.slurp:
+        src: "{{ n8n_dir }}/encryption-key.sha256"
+      register: verify_fingerprint_content
+
+    - name: Check the containers, their ports, environment and mounts, the compose file and the fingerprint
+      ansible.builtin.assert:
+        that:
+          - containers | sort == ['db', 'n8n']
+          - containers.values() | map(attribute='State.Running') | select | list | length == 2
+          - n8n.State.Health.Status == 'healthy'
+          - db.State.Health.Status == 'healthy'
+          # No published port: n8n is reached through Traefik only.
+          - containers.values() | map(attribute='HostConfig.PortBindings') | select | list | length == 0
+          - "'NOIX_TEST=a$b' in n8n.Config.Env"
+          - "'GENERIC_TIMEZONE=Etc/UTC' in n8n.Config.Env"
+          - "'N8N_HOST=n8n.test' in n8n.Config.Env"
+          - "'N8N_PROTOCOL=http' in n8n.Config.Env"
+          - "'WEBHOOK_URL=http://n8n.test/' in n8n.Config.Env"
+          - "'EXECUTIONS_MODE=regular' in n8n.Config.Env"
+          - "'DB_TYPE=postgresdb' in n8n.Config.Env"
+          - "'N8N_PROXY_HOPS=1' in n8n.Config.Env"
+          - "'N8N_INSTANCE_OWNER_MANAGED_BY_ENV=true' in n8n.Config.Env"
+          - ('N8N_INSTANCE_OWNER_EMAIL=' ~ n8n_owner_email) in n8n.Config.Env
+          - ('N8N_INSTANCE_OWNER_FIRST_NAME=' ~ n8n_owner_first_name) in n8n.Config.Env
+          - ('N8N_INSTANCE_OWNER_LAST_NAME=' ~ n8n_owner_last_name) in n8n.Config.Env
+          - n8n.Config.Env | select('match', 'N8N_INSTANCE_OWNER_PASSWORD_HASH=\$2b\$10\$[./A-Za-z0-9]{53}$') | list | length == 1
+          - n8n.Config.Env | select('match', 'N8N_INSTANCE_OWNER_PASSWORD=') | list | length == 0
+          - ('N8N_ENCRYPTION_KEY=' ~ n8n_encryption_key) in n8n.Config.Env
+          - ('DB_POSTGRESDB_PASSWORD=' ~ n8n_db_password) in n8n.Config.Env
+          - ('POSTGRES_PASSWORD=' ~ n8n_db_password) in db.Config.Env
+          # The health check needs the database (readiness), not only the
+          # process.
+          - n8n.Config.Healthcheck.Test | join(' ') is search('/healthz/readiness')
+          # The database on the data directory, not on an anonymous volume.
+          - db.Mounts | length == 1
+          - db.Mounts[0].Type == 'bind'
+          - db.Mounts[0].Source == n8n_dir ~ '/data/postgres'
+          - db.Mounts[0].Destination == '/var/lib/postgresql'
+          - n8n.Mounts | map(attribute='Type') | unique | list == ['bind']
+          - >-
+            n8n.Mounts | items2dict(key_name='Destination', value_name='Source')
+            == {'/home/node/.n8n': n8n_dir ~ '/data/home', '/files': n8n_dir ~ '/data/files'}
+          - verify_compose.stat.mode == '0600'
+          - verify_fingerprint.stat.mode == '0600'
+          - (verify_fingerprint_content.content | b64decode | trim) == (n8n_encryption_key | hash('sha256'))
+        fail_msg: >-
+          {{ containers.values() | map(attribute='Config.Env') | flatten
+             | reject('match', '(N8N_ENCRYPTION_KEY|DB_POSTGRESDB_PASSWORD|POSTGRES_PASSWORD)=') | list }}
+          {{ containers.values() | map(attribute='Mounts') | list }}
+          compose {{ verify_compose.stat.mode | default('missing') }}, fingerprint
+          {{ verify_fingerprint.stat.mode | default('missing') }}
+        quiet: true
+      vars:
+        containers: >-
+          {%- set found = {} -%}
+          {%- for c in verify_inspect.stdout | from_json -%}
+          {%-   set _ = found.update({c.Config.Labels['com.docker.compose.service']: c}) -%}
+          {%- endfor -%}
+          {{ found }}
+        n8n: "{{ containers.n8n }}"
+        db: "{{ containers.db }}"
+
+    # Once Traefik routes to the healthy container.
+    - name: Log in as the owner through Traefik
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/rest/login"
+        method: POST
+        headers: "{{ verify_headers }}"
+        body_format: json
+        body:
+          emailOrLdapLoginId: "{{ n8n_owner_email }}"
+          password: "{{ n8n_owner_password }}"
+        status_code: 200
+      register: verify_login
+      until: verify_login.status == 200
+      retries: 30
+      delay: 2
+
+    - name: Check that the login set n8n's session cookie
+      ansible.builtin.assert:
+        that: verify_cookie | length > 0
+        fail_msg: "The login set no n8n-auth cookie: {{ verify_login.set_cookie | default('none') }}"
+        quiet: true
+
+    # n8n locks the owner that N8N_INSTANCE_OWNER_* manage.
+    - name: Try to change the owner's profile through the API
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/rest/me"
+        method: PATCH
+        headers: "{{ verify_auth }}"
+        body_format: json
+        body:
+          email: someone@example.test
+          firstName: Someone
+          lastName: Else
+        status_code: 403
+        return_content: true
+      register: verify_me
+
+    - name: Try to change the owner's password through the API
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/rest/me/password"
+        method: PATCH
+        headers: "{{ verify_auth }}"
+        body_format: json
+        body:
+          currentPassword: "{{ n8n_owner_password }}"
+          newPassword: Changed-pa55word
+        status_code: 403
+        return_content: true
+      register: verify_me_password
+
+    - name: Check that n8n refused both as managed by the environment
+      ansible.builtin.assert:
+        that:
+          - verify_me.json.message is search('managed via environment variables')
+          - verify_me_password.json.message is search('managed via environment variables')
+        fail_msg: "{{ verify_me.json | default(verify_me.content) }} {{ verify_me_password.json | default(verify_me_password.content) }}"
+        quiet: true
+
+    - name: List the workflows
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/rest/workflows"
+        headers: "{{ verify_auth }}"
+        return_content: true
+      register: verify_workflows
+
+    # Once per installation: a second active workflow on the same webhook
+    # path would not activate.
+    - name: Create the webhook workflow
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/rest/workflows"
+        method: POST
+        headers: "{{ verify_auth }}"
+        body_format: json
+        body: "{{ verify_workflow }}"
+      register: verify_created
+      when: verify_workflows.json.data | selectattr('name', 'equalto', 'noix-test') | list | length == 0
+
+    - name: Activate the webhook workflow
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/rest/workflows/{{ verify_created.json.data.id }}/activate"
+        method: POST
+        headers: "{{ verify_auth }}"
+        body_format: json
+        body:
+          versionId: "{{ verify_created.json.data.versionId }}"
+      register: verify_activated
+      when: verify_created is not skipped
+
+    - name: Check that the workflow is active
+      ansible.builtin.assert:
+        that: verify_activated.json.data.active
+        fail_msg: "{{ verify_activated.json | to_json }}"
+        quiet: true
+      when: verify_created is not skipped
+
+    # n8n registers the webhook within seconds of the activation.
+    - name: Call the production webhook through Traefik
+      ansible.builtin.uri:
+        url: "{{ verify_base }}/webhook/noix-test"
+        method: POST
+        headers:
+          Host: n8n.test
+        body_format: json
+        body: {}
+        status_code: [200, 404]
+      register: verify_webhook
+      until: verify_webhook.status == 200
+      retries: 15
+      delay: 2
+
+    - name: Check the webhook's answer
+      ansible.builtin.assert:
+        that: "verify_webhook.json == {'ok': true}"
+        fail_msg: "{{ verify_webhook.json | default(verify_webhook.content | default('')) | to_json }}"
+        quiet: true
