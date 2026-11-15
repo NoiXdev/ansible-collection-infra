@@ -27,6 +27,15 @@
     quiet: true
   loop: "{{ nginx_real_ip_from }}"
 
+- name: Check that no trusted proxy range covers every address
+  ansible.builtin.assert:
+    that: item is not match('.*/0+$')
+    fail_msg: >-
+      nginx: nginx_real_ip_from has {{ item }}, a range of every address; any client could forge
+      the address the allow lists and rate limits see. Only proxies you control belong there
+    quiet: true
+  loop: "{{ nginx_real_ip_from }}"
+
 - name: Check the resolvers
   ansible.builtin.assert:
     that: item is string and item is match('^([0-9.]+|\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+)(:[0-9]+)?$')
@@ -318,7 +327,7 @@
     fail_msg: >-
       nginx: nginx_sites entry {{ item.name | default('#' ~ (nginx_index + 1)) }} has an invalid
       basic_auth: {{ nginx_auth_problems | join('; ') }}. It is {users: [{name, password}], allow:
-      [address or CIDR]}: at least one user, names without ":" or control characters and listed
+      [address or CIDR]}: at least one user, names without ":" or control characters, not starting with # or a space, and listed
       once, one-line string passwords (quote a number), and allow entries such as 192.0.2.10 or
       192.0.2.0/24
     quiet: true
@@ -349,9 +358,9 @@
       {%-           set _ = problems.append('user #' ~ position ~ ' has unknown keys (' ~ extra | join(', ') ~ ')') -%}
       {%-         endif -%}
       {%-         set name = user.name | default(none) -%}
-      {%-         set name_ok = name is string and name | length > 0 and name is not search('[:\\x00-\\x1f\\x7f]') -%}
+      {%-         set name_ok = name is string and name | length > 0 and name is not search('[:\\x00-\\x1f\\x7f]') and name is not search('^[#\\s]') -%}
       {%-         if not name_ok -%}
-      {%-           set _ = problems.append('user #' ~ position ~ ' has no name, or a name with ":" or a control character') -%}
+      {%-           set _ = problems.append('user #' ~ position ~ ' has no name, or a name with ":", a control character or a leading # or space') -%}
       {%-         else -%}
       {%-           if name in names -%}
       {%-             set _ = problems.append('user ' ~ name ~ ' is listed twice') -%}
@@ -392,3 +401,21 @@
   loop: "{{ nginx_sites_public }}"
   loop_control:
     label: "{{ item.name }}"
+
+# The hashes come from password_hash, which needs passlib (or libxcrypt) on the
+# controller; without it the run would fail after earlier changes. The probe
+# hashes a fixed text, not a password.
+- name: Check that the controller can hash the Basic auth passwords
+  ansible.builtin.set_fact:
+    nginx_hash_probe: "{{ 'probe' | password_hash('sha512', 'abcdefghabcdefgh', rounds=5000) }}"
+  when: nginx_sites | selectattr('basic_auth', 'defined') | list | length > 0
+  register: nginx_hash_check
+  ignore_errors: true
+  no_log: true
+
+- name: Refuse basic_auth when the controller cannot hash
+  ansible.builtin.fail:
+    msg: >-
+      nginx: basic_auth needs passlib on the controller (the Python that runs ansible-playbook)
+      to hash the passwords as SHA-512 crypt; install it there (pip install passlib)
+  when: nginx_hash_check is failed

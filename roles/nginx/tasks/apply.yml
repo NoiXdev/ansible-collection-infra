@@ -59,7 +59,12 @@
         nginx_apply_what: >-
           {{ 'nginx -t rejected the new config' if ansible_failed_result.cmd is defined
              else '"' ~ ansible_failed_task.name ~ '" failed' }}
-        nginx_apply_detail: "{{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('')) | trim }}"
+        # A failing no_log task's msg may name what it handled: a fixed text
+        # instead (nginx -t and the file moves are not no_log tasks).
+        nginx_apply_detail: >-
+          {{ 'the output of the task is hidden, it has no_log'
+             if nginx_apply_no_log | default(false) and ansible_failed_result.cmd is not defined
+             else ansible_failed_result.stderr | default(ansible_failed_result.msg | default('')) | trim }}
 
     # Each step goes on when one file fails; the failures are collected below.
     - name: Put back the nginx config files nginx rejected

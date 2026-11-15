@@ -40,6 +40,7 @@ http {
 {% for zone in nginx_rate_limit_zones %}
     limit_req_zone $binary_remote_addr zone={{ zone.name }}:10m rate={{ zone.rate }};
 {% endfor %}
+    limit_req_status 429;
 {% if nginx_real_ip_from | length > 0 %}
 
     # Proxies whose X-Forwarded-For is trusted.

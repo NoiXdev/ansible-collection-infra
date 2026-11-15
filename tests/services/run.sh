@@ -1535,6 +1535,20 @@ nginx_auth() {
   [ "$(hx nginx grep '^alice:' /root/htpasswd-before)" != "$(hx nginx grep '^alice:' "$htpasswd")" ] || fail "nginx/auth: alice's hash did not change with her password"
   hx nginx rm -f /root/htpasswd-before
 
+  echo "== nginx: a failed htpasswd write fails without the task's output, and names no password"
+  # A read-only bind mount: the write fails, whatever its message says.
+  hx nginx mount --bind /etc/nginx/noixdev/htpasswd /etc/nginx/noixdev/htpasswd
+  hx nginx mount -o remount,bind,ro /etc/nginx/noixdev/htpasswd
+  if play nginx "$dir/converge.yml" "${fast[@]}" "${auth[@]}" -e '{"nginx_test_auth_alice": "pw-ro-secret"}' -v >"$out/nginx-auth-ro.log" 2>&1; then
+    hx nginx umount /etc/nginx/noixdev/htpasswd
+    fail "nginx/auth: the run with a read-only htpasswd directory did not fail"
+  fi
+  hx nginx umount /etc/nginx/noixdev/htpasswd
+  grep -qF 'the output of the task is hidden, it has no_log' "$out/nginx-auth-ro.log" \
+    || { cat "$out/nginx-auth-ro.log" >&2; fail "nginx/auth: the failure does not say the task's output is hidden"; }
+  no_secret "$out/nginx-auth-ro.log" pw-ro-secret '$6$'
+  expect_code 200 "alice after the failed write" -u "alice:$changed"
+
   echo "== nginx: bob leaves the list, his login fails"
   converge nginx auth-no-bob "$dir/converge.yml" "${fast[@]}" "${auth[@]}" -e nginx_test_auth_bob=false
   expect_code 401 "bob after he left" -u 'bob:b0b-s3cret'
@@ -1555,7 +1569,7 @@ nginx_auth() {
   hx nginx ip addr del 192.0.2.10/32 dev lo
   hx nginx ip addr del 192.0.2.11/32 dev lo
 
-  echo "== nginx: rate limit: a burst gets 503, the challenge is never limited, the zone cools down"
+  echo "== nginx: rate limit: a burst gets 429, the challenge is never limited, the zone cools down"
   converge nginx rate "$dir/converge.yml" "${fast[@]}" -e nginx_test_static_rate_limit=default
   hx nginx grep -qx '    limit_req zone=default burst=20 nodelay;' /etc/nginx/sites/static.conf || fail "nginx/auth: static.conf lacks limit_req"
   [ "$(hx nginx grep -c 'limit_req ' /etc/nginx/sites/static.conf)" = 1 ] || fail "nginx/auth: static.conf has limit_req outside its server block"
@@ -1563,7 +1577,8 @@ nginx_auth() {
   hx nginx sh -c "mkdir -p $acme && echo 'noixdev challenge' > $acme/noixdev-rate"
   answer="$(hx nginx bash -c 'for i in $(seq 50); do curl -sk -o /dev/null -w "%{http_code}\n" --max-time 20 --resolve static.example.test:443:127.0.0.1 https://static.example.test/ & done; wait')"
   echo "   50 parallel requests: $(sort <<<"$answer" | uniq -c | tr -s ' ' | paste -sd, -)"
-  grep -qx 503 <<<"$answer" || fail "nginx/auth: 50 parallel requests gave no 503"
+  grep -qx 429 <<<"$answer" || fail "nginx/auth: 50 parallel requests gave no 429"
+  if grep -qx 503 <<<"$answer"; then fail "nginx/auth: a rate limited request answered 503, not 429"; fi
   grep -qx 200 <<<"$answer" || fail "nginx/auth: 50 parallel requests gave no 200"
   answer="$(ncurl http://static.example.test/.well-known/acme-challenge/noixdev-rate | head -n 1 | tr -d '\r')"
   [ "$answer" = 'HTTP/1.1 200 OK' ] || fail "nginx/auth: the challenge on a rate limited site answered $answer"
@@ -1593,10 +1608,20 @@ nginx_auth() {
     "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": \"pw-allow-secret\"}], \"allow\": [\"1.2.3.4; deny all\"]}}]}"
   refused nginx auth-unknown-key "nginx: nginx_sites entry ba has an invalid basic_auth: user #1 has unknown keys (pasword)" \
     "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"pasword\": \"pw-typo-secret\"}]}}]}"
+  refused nginx auth-leading-hash "nginx: nginx_sites entry ba has an invalid basic_auth: user #1 has no name, or a name with" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"#bob\", \"password\": \"pw-hash-secret\"}]}}]}"
+  refused nginx auth-leading-space "nginx: nginx_sites entry ba has an invalid basic_auth: user #1 has no name, or a name with" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \" bob\", \"password\": \"pw-space-secret\"}]}}]}"
+  PYTHONPATH="$dir/nopasslib" refused nginx auth-no-passlib "nginx: basic_auth needs passlib on the controller" \
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": \"pw-nopasslib-secret\"}]}}]}"
+  refused nginx real-ip-v4-zero "nginx: nginx_real_ip_from has 0.0.0.0/0, a range of every address" \
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_real_ip_from": ["127.0.0.1", "0.0.0.0/0"]}'
+  refused nginx real-ip-v6-zero "nginx: nginx_real_ip_from has ::/0, a range of every address" \
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_real_ip_from": ["::/0"]}'
   refused nginx auth-anubis "sets anubis, which this version of the role does not support yet" \
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{$site, \"anubis\": true}]}"
-  for log in colon newline-name duplicate newline-password number-password no-users bad-allow unknown-key; do
-    no_secret "$out/nginx-auth-$log.log" pw-colon-secret pw-nlname-secret pw-dup-secret pw-nlpass-secret 123456 pw-allow-secret pw-typo-secret
+  for log in colon newline-name duplicate newline-password number-password no-users bad-allow unknown-key leading-hash leading-space no-passlib; do
+    no_secret "$out/nginx-auth-$log.log" pw-colon-secret pw-nlname-secret pw-dup-secret pw-nlpass-secret 123456 pw-allow-secret pw-typo-secret pw-hash-secret pw-space-secret pw-nopasslib-secret
   done
   after="$(nginx_state)"
   [ "$after" = "$before" ] || fail "nginx/auth: a refused run changed the host: $(diff <(echo "$before") <(echo "$after") || true)"

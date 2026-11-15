@@ -89,7 +89,7 @@ argument_specs:
             and dot-dirs except /.well-known/, composer.json, composer.lock, *.sql, *.bak, *.swp
             and *~.
           - headers, a dict of headers to add or replace; an empty value removes one.
-          - rate_limit, the name of a zone of nginx_rate_limit_zones; a request over the rate and burst gets 503.
+          - rate_limit, the name of a zone of nginx_rate_limit_zones; a request over the rate and burst gets 429 (Too Many Requests).
           - client_max_body_size, 64m by default.
           - user_includes, true by default (deploy snippets).
           - >-
@@ -110,7 +110,12 @@ argument_specs:
       nginx_real_ip_from:
         type: list
         elements: str
-        description: Proxies (addresses or CIDRs) whose X-Forwarded-For is trusted.
+        description:
+          - Proxies (addresses or CIDRs) whose X-Forwarded-For is trusted.
+          - >-
+            Only proxies you control belong here: a client behind a trusted range can forge the
+            address that allow lists and rate limits see. A range of every address (/0, IPv4 or
+            IPv6) is refused.
       nginx_resolvers:
         type: list
         elements: str
