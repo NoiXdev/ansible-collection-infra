@@ -87,6 +87,8 @@
           mv "$root/.home.restore" "$root/home"
       changed_when: true
 
+    # All at once, workers among them: the restored database already has the
+    # previous version's schema, so nothing migrates.
     - name: Start the previous n8n
       community.docker.docker_compose_v2:
         project_src: "{{ n8n_dir }}"

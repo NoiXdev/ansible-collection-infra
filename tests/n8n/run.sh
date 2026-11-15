@@ -44,6 +44,13 @@
 #             refused before any change, and so is a missing fingerprint of
 #             the key (with the right key or another), until it is written
 #             again as the refusal says
+#   queue_update
+#             in queue mode with a worker: a failed update (the main
+#             instance never healthy, so no worker of the new version
+#             starts) rolled back with the worker back on the old release,
+#             the workflow active and its webhook run on the worker; then the
+#             update, with the worker on the new release, started only once
+#             the main instance was ready, and the webhook run on it
 #   failed_update
 #             an update to an image that exits at once: rolled back with the
 #             workflow, the marker that names the failed version and blocks
@@ -384,6 +391,20 @@ write_fingerprint() {
   hx sh -c "cd $dir && (umask 077; docker compose exec -T n8n sh -c 'printf %s \"\$N8N_ENCRYPTION_KEY\" | sha256sum' | cut -d' ' -f1 >$fingerprint)"
 }
 
+# Fails unless the worker started after the main instance was ready (it
+# logs that once it has migrated the database), to the second:
+# expect_worker_after_main <worker>.
+expect_worker_after_main() {
+  local log ready started
+  # Read in full first: grep -m 1 in a pipe would end docker's output with
+  # SIGPIPE, which pipefail turns into a failure.
+  log="$(hx sh -c "cd $dir && docker compose logs --no-color --no-log-prefix --timestamps n8n")"
+  ready="$(grep -m 1 'Editor is now accessible' <<<"$log" | cut -c1-19)"
+  started="$(hx sh -c "docker inspect --format '{{.State.StartedAt}}' \$(cd $dir && docker compose ps --quiet $1)" | cut -c1-19)"
+  [ -n "$ready" ] && [ -n "$started" ] || fail "cannot tell when n8n was ready ($ready) and $1 started ($started)"
+  [[ "$started" > "$ready" || "$started" == "$ready" ]] || fail "$1 started at $started, before the main instance was ready at $ready"
+}
+
 # The scenarios, run by the loop at the end.
 test_refusals() {
   echo "== invalid settings must be refused before any change"
@@ -411,6 +432,9 @@ test_refusals() {
   # A key left empty in YAML would reach n8n as the text None.
   role_fails env-null -e '{"n8n_env": {"NOIX_EMPTY": null}}'
   expect_in_log env-null "n8n_env has no value for NOIX_EMPTY"
+  # The stop grace period is derived from it.
+  role_fails shutdown-timeout -e '{"n8n_env": {"N8N_GRACEFUL_SHUTDOWN_TIMEOUT": "soon"}}'
+  expect_in_log shutdown-timeout "n8n_env N8N_GRACEFUL_SHUTDOWN_TIMEOUT must be a whole number of seconds"
   # Before 2.17.0 n8n does not take the owner from the environment.
   role_fails v2-16 -e n8n_version=2.16.0
   expect_in_log v2-16 "n8n_version 2.16.0"
@@ -728,6 +752,39 @@ test_update() {
   [ "$(service n8n)" = "${images[0]} running healthy" ] || fail "n8n after the refusals: $(service n8n)"
 }
 
+test_queue_update() {
+  echo "== a failed update in queue mode must roll back the main instance and the worker"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "n8n_version=$old_version" -e n8n_workers=1
+  expect_worker_after_main worker-1
+  play "$here/verify.yml" -e n8n_workers=1
+  expect_ran_on_worker worker-1
+  failed_update update-failed-queue -v -e n8n_workers=1
+  [ "$(service worker-1)" = "${old_images[0]} running healthy" ] || fail "worker-1 after the rollback: $(service worker-1)"
+  expect_services db n8n redis worker-1
+  expect_ran_on_worker worker-1
+  hx rm "$marker"
+
+  echo "== an update in queue mode must start the worker on the new release after the main instance"
+  converge -v -e n8n_workers=1
+  expect_no_secrets converge
+  grep -q "update.yml" "$out/converge.log" || fail "the new version in queue mode was not an update"
+  [ "$(service n8n)" = "${images[0]} running healthy" ] || fail "n8n after the update: $(service n8n)"
+  [ "$(service worker-1)" = "${images[0]} running healthy" ] || fail "worker-1 after the update: $(service worker-1)"
+  expect_services db n8n redis worker-1
+  expect_worker_after_main worker-1
+  # The newest backup, beside the one of the failed update.
+  backup="$(hx sh -c "ls -d $backups/*-$old_version | tail -n 1")"
+  [ "$(hx head -c 5 "$backup/n8n.dump")" = PGDMP ] || fail "the backup $backup has no dump"
+  wait_healthy
+  expect_workflow_active
+  expect_ran_on_worker worker-1
+  expect_idempotent -e n8n_workers=1
+  play "$here/verify.yml" -e n8n_workers=1
+}
+
 test_failed_update() {
   echo "== a failed update must roll back and block the failed version"
   new_host
@@ -812,10 +869,10 @@ DOCKERFILE
 
 # All scenarios by default; NOIXDEV_INFRA_N8N_TESTS="refusals router" runs
 # only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update failed_update}; do
+for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update queue_update failed_update}; do
   case "$scenario" in
-    refusals | install | router | queue | update | failed_update) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, failed_update)" ;;
+    refusals | install | router | queue | update | queue_update | failed_update) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, queue_update, failed_update)" ;;
   esac
 done
 

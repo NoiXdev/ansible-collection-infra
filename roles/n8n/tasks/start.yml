@@ -1,0 +1,37 @@
+---
+# Starts the stack of the compose file on disk with the workers last: the
+# database, Valkey and the main instance first, which migrates the database
+# on start (a new version, a fresh install); the workers only once the main
+# instance is healthy, which its readiness is only on a migrated database,
+# so that no worker runs on, or migrates, a schema that is not yet the new
+# version's. Then the whole stack is checked. Sets n8n_healthy and
+# n8n_health_lines (health.yml); never fails on an unhealthy stack by itself,
+# only when docker compose fails.
+
+- name: Start the database and the main instance
+  community.docker.docker_compose_v2:
+    project_src: "{{ n8n_dir }}"
+    services: "{{ n8n_main_services }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+
+- name: Check that the main instance is healthy
+  ansible.builtin.include_tasks: health.yml
+  vars:
+    n8n_health_services: "{{ n8n_main_services }}"
+
+- name: Start the workers
+  when:
+    - n8n_healthy
+    - n8n_queue | bool
+  block:
+    - name: Start the workers
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that n8n and its workers are healthy
+      ansible.builtin.include_tasks: health.yml

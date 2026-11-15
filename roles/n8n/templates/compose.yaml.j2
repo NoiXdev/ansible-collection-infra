@@ -119,6 +119,8 @@ services:
     # Readiness answers 200 only while n8n is connected to its migrated
     # database, so a database n8n cannot use makes the container unhealthy.
 {{ readiness() }}
+    # Above N8N_GRACEFUL_SHUTDOWN_TIMEOUT: running executions finish on a stop.
+    stop_grace_period: {{ n8n_stop_grace_period }}s
     networks: [default, traefik]
     # No published port: Traefik reaches n8n over its network.
     labels:
@@ -171,6 +173,8 @@ services:
 {{ bind(n8n_data_dir ~ '/files', n8n_container_dirs.files) }}
     # The worker's readiness needs Valkey too.
 {{ readiness() }}
+    # Above N8N_GRACEFUL_SHUTDOWN_TIMEOUT: running executions finish on a stop.
+    stop_grace_period: {{ n8n_stop_grace_period }}s
     restart: unless-stopped
 {% endfor %}
 

@@ -2,8 +2,9 @@
 # The pin is newer than the installed version. The new image first (a failed
 # pull changes nothing); then n8n and its workers stopped, the backup
 # (snapshot.yml: dump, home), the compose file written with the new version,
-# the stack started (n8n migrates its database on start) and checked (the
-# readiness of main and workers needs the migrated database), the owner's
+# the stack started (start.yml: the main instance migrates the database on
+# start, the workers follow once it is healthy) and checked (the readiness
+# of main and workers needs the migrated database), the owner's
 # hash made in the new image, which every later run does, and the backups
 # pruned to the newest n8n_dumps_keep. A failure before the backup is
 # complete removes the partial backup, starts the stack as it was and fails.
@@ -30,6 +31,8 @@
     # Nothing writes to the database or the home during the backup. The
     # services of the compose file on disk: the workers that run now, which
     # a new n8n_workers may change. Valkey holds no data and keeps running.
+    # No timeout here: compose waits each container's stop_grace_period, so
+    # running executions finish (N8N_GRACEFUL_SHUTDOWN_TIMEOUT).
     - name: Stop n8n and its workers for the update
       ansible.builtin.command:
         argv: "{{ ['docker', 'compose', 'stop'] + (n8n_compose_on_disk.services | list | reject('in', ['db', 'redis']) | list) }}"
@@ -49,15 +52,9 @@
       # It holds the encryption key, the passwords and the owner's hash.
       no_log: true
 
+    # The workers once the main instance has migrated the database.
     - name: Start n8n {{ n8n_version }}
-      community.docker.docker_compose_v2:
-        project_src: "{{ n8n_dir }}"
-        state: present
-        pull: missing
-        remove_orphans: true
-
-    - name: Check that n8n is healthy
-      ansible.builtin.include_tasks: health.yml
+      ansible.builtin.include_tasks: start.yml
 
     - name: Fail when n8n is not healthy
       ansible.builtin.fail:

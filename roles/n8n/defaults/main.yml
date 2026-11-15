@@ -72,7 +72,9 @@ n8n_redis_image: docker.io/valkey/valkey:9-alpine
 # More settings for the n8n containers (GENERIC_TIMEZONE, execution pruning,
 # SMTP, ...). The settings the role sets itself are refused; true and false
 # become true and false. N8N_PROXY_HOPS defaults to 1 (Traefik); set it here
-# when more proxies add to X-Forwarded-For.
+# when more proxies add to X-Forwarded-For. N8N_GRACEFUL_SHUTDOWN_TIMEOUT
+# (seconds, default 30) is how long n8n waits for running executions on a
+# stop; Docker waits 15 seconds more before it kills n8n.
 n8n_env: {}
 
 # Backups taken before every update (a dump of the database, a copy of the

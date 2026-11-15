@@ -60,9 +60,21 @@ n8n_env_owned:
   - N8N_USER_FOLDER
 n8n_env_owned_prefixes: [DB_, QUEUE_, N8N_INSTANCE_OWNER_, N8N_ENDPOINT_]
 # Settings the role sets unless n8n_env does: Traefik adds one hop to
-# X-Forwarded-For, which n8n's rate limits read the client address from.
+# X-Forwarded-For, which n8n's rate limits read the client address from; on a
+# stop, n8n waits up to N8N_GRACEFUL_SHUTDOWN_TIMEOUT seconds for the
+# executions that run (n8n's own default, written out so that the stop grace
+# period below follows it).
 n8n_env_defaults:
   N8N_PROXY_HOPS: 1
+  N8N_GRACEFUL_SHUTDOWN_TIMEOUT: 30
+# The seconds n8n waits for its executions on a stop, and the grace period of
+# the main instance and the workers (stop_grace_period) above it: docker
+# compose stop, and the recreate of a container, send SIGTERM and SIGKILL
+# after that, so n8n's own shutdown must end first. The role's stops pass no
+# timeout of their own, which would override it.
+n8n_graceful_shutdown_timeout: >-
+  {{ (n8n_env_defaults | combine(n8n_env if n8n_env is mapping else {})).N8N_GRACEFUL_SHUTDOWN_TIMEOUT }}
+n8n_stop_grace_period: "{{ n8n_graceful_shutdown_timeout | int + 15 }}"
 
 # Queue mode (n8n_workers 1 or more): Valkey as redis and one compose
 # service per worker, worker-1 to worker-<n8n_workers>. Services of their
@@ -71,6 +83,9 @@ n8n_env_defaults:
 # removes.
 n8n_queue: "{{ n8n_workers | int > 0 }}"
 n8n_worker_services: "{{ range(1, n8n_workers | int + 1) | map('string') | map('regex_replace', '^', 'worker-') | list }}"
+# The services start.yml starts before the workers: the main instance
+# migrates the database on start, and the workers follow once it is healthy.
+n8n_main_services: "{{ ['db', 'n8n'] + (['redis'] if n8n_queue | bool else []) }}"
 # The compose services the configuration runs.
 n8n_services: "{{ ['db', 'n8n'] + ((['redis'] + n8n_worker_services) if n8n_queue | bool else []) }}"
 

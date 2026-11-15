@@ -94,6 +94,10 @@
           - ('EXECUTIONS_MODE=' ~ ('queue' if verify_workers | int > 0 else 'regular')) in n8n.Config.Env
           - "'DB_TYPE=postgresdb' in n8n.Config.Env"
           - "'N8N_PROXY_HOPS=1' in n8n.Config.Env"
+          # Docker waits longer than n8n's shutdown, so running executions
+          # finish on a stop.
+          - "'N8N_GRACEFUL_SHUTDOWN_TIMEOUT=30' in n8n.Config.Env"
+          - n8n.Config.StopTimeout == 45
           - "'N8N_INSTANCE_OWNER_MANAGED_BY_ENV=true' in n8n.Config.Env"
           - ('N8N_INSTANCE_OWNER_EMAIL=' ~ n8n_owner_email) in n8n.Config.Env
           - ('N8N_INSTANCE_OWNER_FIRST_NAME=' ~ n8n_owner_first_name) in n8n.Config.Env
@@ -151,6 +155,7 @@
           - workers | length == verify_workers | int
           - workers | rejectattr('Config.Image', 'equalto', n8n.Config.Image) | list | length == 0
           - workers | map(attribute='Config.Cmd') | unique | list == [['worker']]
+          - workers | map(attribute='Config.StopTimeout') | unique | list == [45]
           - workers | map(attribute='Config.Env') | map('sort') | unique | list == [n8n.Config.Env | sort]
           - workers | map(attribute='Config.Healthcheck.Test') | map('join', ' ') | select('search', '/healthz/readiness') | list | length == workers | length
           - workers | map(attribute='Mounts') | flatten | map(attribute='Type') | unique | list == ['bind']
