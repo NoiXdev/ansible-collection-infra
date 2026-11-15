@@ -223,7 +223,12 @@
       user: app_node
       proxy: http://127.0.0.1:3000
       tls: "{{ nginx_test_tls }}"
-    nginx_test_static_site:
+    # A group for static other than app_static's own.
+    nginx_test_static_group: ""
+    nginx_test_static_site: >-
+      {{ nginx_test_static_base
+         | combine({'group': nginx_test_static_group} if nginx_test_static_group | length > 0 else {}) }}
+    nginx_test_static_base:
       name: static
       domains: [static.example.test]
       user: app_static

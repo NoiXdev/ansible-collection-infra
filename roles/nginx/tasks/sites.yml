@@ -36,6 +36,8 @@
     groups: "{{ nginx_groups_current }}"
     append: true
   when: nginx_groups_current | length > 0
+  # Workers get their groups when they start: a reload starts new ones.
+  notify: Reload nginx
 
 - name: Find the site configs
   ansible.builtin.find:
@@ -74,6 +76,7 @@
     argv: [gpasswd, -d, www-data, "{{ item }}"]
   loop: "{{ nginx_groups_previous | difference(nginx_groups_current) | select('in', nginx_groups_before) | sort }}"
   changed_when: true
+  notify: Reload nginx
 
 - name: Forget the groups www-data left
   ansible.builtin.copy:

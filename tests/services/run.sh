@@ -1602,6 +1602,18 @@ suite_nginx() {
   prod_answers broken-before
   has_headers https://static.example.test/ 'Strict-Transport-Security: max-age=31536000'
 
+  echo "== nginx: a change of static's group alone reaches the workers"
+  hx nginx groupadd static_readers
+  hx nginx chgrp -R static_readers /srv/static
+  answer="$(ncurl https://static.example.test/)"
+  grep -qE '^HTTP/1.1 (403|404) ' <<<"$answer" || fail "nginx: static answers without www-data in static_readers: $answer"
+  converge nginx static-group "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static_group": "static_readers"}'
+  answer="$(ncurl https://static.example.test/)"
+  grep -qxF 'static index' <<<"$answer" || fail "nginx: static does not answer after its group changed: $answer"
+  answer=" $(hx nginx id -nG www-data) "
+  case "$answer" in *" app_static "*) fail "nginx: www-data is still in app_static's group:$answer" ;; esac
+  case "$answer" in *" static_readers "*) ;; *) fail "nginx: www-data did not join static_readers:$answer" ;; esac
+
   echo "== nginx: a site that leaves the list hits the default server, its root stays"
   converge nginx no-static "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_static": false}'
   rc="$(ncurl_rc https://static.example.test/)"
@@ -1611,9 +1623,10 @@ suite_nginx() {
   hx nginx test ! -e /etc/nginx/sites/static.conf || fail "nginx: static.conf is still there"
   hx nginx test -s /srv/static/index.html || fail "nginx: static's root is gone"
   answer=" $(hx nginx id -nG www-data) "
-  case "$answer" in *" app_static "*) fail "nginx: www-data is still in app_static's group:$answer" ;; esac
+  case "$answer" in *" app_static "* | *" static_readers "*) fail "nginx: www-data is still in static's group:$answer" ;; esac
   case "$answer" in *" app_prod "*) ;; *) fail "nginx: www-data left app_prod's group:$answer" ;; esac
   prod_answers removal
+  hx nginx chgrp -R app_static /srv/static
   nginx_failed_join
 
   echo "== nginx: invalid sites are refused before any change"
