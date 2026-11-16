@@ -7,6 +7,14 @@
 # check asks /healthz/readiness, which needs the database, and on a worker
 # Valkey too (QUEUE_HEALTH_CHECK_ACTIVE); Valkey's answers a ping. Never
 # fails by itself.
+# That is also the database check of an update, so this role runs none of
+# its own: in n8n 2.47.7 the main instance's readiness (abstract-server.js)
+# answers 200 only when the database connection is up (its monitor pings
+# every 2 seconds and marks it down after 3 failures), every migration is
+# applied (the flag is set only once the migrations have run, which n8n does
+# on start before it serves anything) and the server is fully ready; it
+# answers 503 until then, as for a database that does not answer. A worker's
+# (worker-server.js) adds the Valkey connection.
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:
