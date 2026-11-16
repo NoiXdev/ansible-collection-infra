@@ -27,6 +27,11 @@
 # a rollback that failed too refuses every version. The install,
 # the import with a passphrase and the failed update run at -vvv, and their
 # output must not hold a test secret.
+# Then the database check: an update to a test image that starts healthy with
+# a migration its web server start does not apply is rolled back with
+# update-failed naming the check, and a run without changes while the
+# database does not answer (its postmaster stopped, the container still
+# healthy) fails with the check within the health timeout.
 # Then the refusals on an installation: a changed paperless_db_password
 # refused before any change (-vvv), a compose file that is not YAML refused
 # without a line of it in the output (-vvv), and the new password taken once
@@ -82,6 +87,12 @@ old_version=3.3.4
 old_images=("$(value_of "$defaults" paperless_image):$old_version" busybox:1.37)
 backups="$dir/data/backups"
 marker="$dir/update-failed"
+# The marker of an update in progress and its copies of the files the update
+# replaces.
+progress="$dir/update-in-progress"
+progress_compose="$dir/update-in-progress.compose.yaml"
+progress_smb_conf="$dir/update-in-progress.smb.conf"
+progress_samba_pass="$dir/update-in-progress.samba-pass"
 sample_sum="$(shasum -a 256 <"$here/sample.pdf" | cut -d' ' -f1)"
 # The database password the refusals scenario rotates to; a $ that compose and
 # a shell must not expand.
@@ -613,6 +624,56 @@ set_db_password() {
     || fail "cannot set the password of the database user"
 }
 
+# The containers of the compose project.
+containers() { hx docker ps -aq --filter label=com.docker.compose.project=paperless; }
+# Notes the compose file and the containers, for expect_untouched.
+note_untouched() {
+  compose_before="$(hx sha256sum "$dir/compose.yaml")"
+  containers_before="$(containers)"
+}
+# Fails unless the refused run <name> changed nothing: its recap, the compose
+# file and the containers since note_untouched.
+expect_untouched() {
+  expect_unchanged "$1"
+  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run $1 changed the compose file"
+  [ "$(containers)" = "$containers_before" ] || fail "the refused run $1 created or removed containers"
+}
+# Fails unless the one document is there with the original it was added with:
+# expect_document <when>.
+expect_document() {
+  [ "$(doc_count)" = 1 ] || fail "$(doc_count) documents, not 1, $1"
+  [ "$(original_sum)" = "$sample_sum" ] || fail "the original of the document changed $1"
+}
+# Fails when the marker of an update in progress or a copy of it is left:
+# expect_no_progress <when>.
+expect_no_progress() {
+  local file
+  for file in "$progress" "$progress_compose" "$progress_smb_conf" "$progress_samba_pass"; do
+    hx test ! -e "$file" || fail "$file is left $1"
+  done
+}
+# A converge that must fail within <seconds>: killed (and the test failed)
+# when it is still running then. play_fails_within <seconds> <name>
+# [ansible-playbook args...]; its output goes to $out/<name>.log.
+play_fails_within() {
+  local limit="$1" name="$2" pid rc=0
+  shift 2
+  set -m
+  play "$@" >"$out/$name.log" 2>&1 &
+  pid=$!
+  set +m
+  for _ in $(seq "$limit"); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 -- "-$pid" 2>/dev/null || true
+    wait "$pid" || true
+    fail "converge $name still ran after $limit seconds: $(tail -n 5 "$out/$name.log")"
+  fi
+  wait "$pid" || rc=$?
+  [ "$rc" != 0 ] || fail "converge $name succeeded but must fail"
+}
 test_refusals() {
   echo "== a changed database password must be refused before any change"
   new_host
@@ -739,12 +800,72 @@ test_mountpoint() {
   expect_idempotent "${mountpoint_vars[@]}"
 }
 
+# The new release as test.invalid/paperless-ngx with a migration that its web
+# server start does not apply: copied into place by the start of the web
+# server, after the migrations of the start, so Paperless answers and its
+# container turns healthy while the database lacks the migration, as a
+# migration that failed unnoticed leaves it.
+build_unmigrated() {
+  if ! docker exec -i "$host" docker build -q --build-arg "base=${images[0]}" -t "test.invalid/paperless-ngx:$version" - >/dev/null <<'EOF'; then
+ARG base
+FROM $base
+RUN set -eu; \
+    leaf="$(ls documents/migrations | sed -n 's/^\([0-9][0-9]*_.*\)\.py$/\1/p' | sort | tail -n 1)"; \
+    printf 'from django.db import migrations\n\n\nclass Migration(migrations.Migration):\n    dependencies = [("documents", "%s")]\n    operations = []\n' "$leaf" >/opt/test-unapplied.py; \
+    run=/etc/s6-overlay/s6-rc.d/svc-webserver/run; \
+    grep -qx 'cd ${PAPERLESS_SRC_DIR}' "$run"; \
+    sed -i 's|^cd ${PAPERLESS_SRC_DIR}$|&\ncp /opt/test-unapplied.py documents/migrations/9999_test_unapplied.py|' "$run"; \
+    grep -qx 'cp /opt/test-unapplied.py documents/migrations/9999_test_unapplied.py' "$run"
+EOF
+    fail "cannot build the test image with a migration that is not applied"
+  fi
+}
+
+test_db_check() {
+  echo "== an update that leaves the database unusable for Paperless must be rolled back"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "paperless_version=$old_version"
+  consume_sample
+  build_unmigrated
+  play_fails db-check "$here/converge.yml" -v -e paperless_image=test.invalid/paperless-ngx -e paperless_health_timeout=300
+  expect_in_log db-check "update from $old_version to $version in $dir failed, rolled back to $old_version"
+  expect_in_log db-check "database check failed: manage.py migrate --check found a migration that is not applied"
+  expect_no_secrets db-check
+  [ "$(webserver)" = "${old_images[0]} running healthy" ] || fail "the webserver after the rollback: $(webserver)"
+  hx grep -qx "failed_version: $version" "$marker" || fail "the marker does not name $version: $(hx cat "$marker")"
+  hx grep -qx "rolled_back_to: $old_version" "$marker" || fail "the marker does not name $old_version: $(hx cat "$marker")"
+  expect_no_progress "after the rollback"
+  expect_document "after the rollback of an update with a migration that is not applied"
+
+  echo "== a run without changes must fail within the health timeout while the database does not answer"
+  # A successful run with another version removes the marker.
+  converge -e "paperless_version=$old_version"
+  expect_idempotent -e "paperless_version=$old_version"
+  # The postmaster stopped from the test host, as a database that hangs: the
+  # container runs and stays healthy for a minute (until its check has timed
+  # out six times), while no new connection gets an answer.
+  db_pid="$(hx docker inspect --format '{{.State.Pid}}' "$(hx sh -c "cd $dir && docker compose ps --quiet db")")"
+  hx kill -STOP "$db_pid"
+  play_fails_within 180 noop-db-down "$here/converge.yml" -v -e "paperless_version=$old_version" -e paperless_health_timeout=30
+  hx kill -CONT "$db_pid"
+  expect_in_log noop-db-down "Paperless in $dir is unhealthy"
+  expect_in_log noop-db-down "database check failed: manage.py migrate --check did not finish within"
+  expect_no_secrets noop-db-down
+  expect_unchanged noop-db-down
+  # The bound the check had: the rest of paperless_health_timeout.
+  seconds="$(sed -n 's/.*migrate --check did not finish within \([0-9]*\) seconds.*/\1/p' "$out/noop-db-down.log" | head -n 1)"
+  [ -n "$seconds" ] && [ "$seconds" -le 30 ] || fail "the database check was not bounded by paperless_health_timeout=30: ${seconds:-no time} seconds"
+  expect_idempotent -e "paperless_version=$old_version"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_PAPERLESS_TESTS="update failed_update"
 # runs only these (import needs install in the same run).
-for scenario in ${NOIXDEV_INFRA_PAPERLESS_TESTS:-settings install import update failed_update refusals missing_data mountpoint}; do
+for scenario in ${NOIXDEV_INFRA_PAPERLESS_TESTS:-settings install import update failed_update refusals missing_data mountpoint db_check}; do
   case "$scenario" in
-    settings | install | import | update | failed_update | refusals | missing_data | mountpoint) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, import, update, failed_update, refusals, missing_data, mountpoint)" ;;
+    settings | install | import | update | failed_update | refusals | missing_data | mountpoint | db_check) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, import, update, failed_update, refusals, missing_data, mountpoint, db_check)" ;;
   esac
 done
 

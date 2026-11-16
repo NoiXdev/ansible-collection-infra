@@ -214,10 +214,11 @@
       ansible.builtin.fail:
         msg: >-
           Paperless in {{ paperless_dir }} is unhealthy: the webserver and the
-          database are not both healthy within {{ paperless_health_timeout }}
-          seconds ({{ paperless_health_lines | join('; ') }}). The role
-          restarts nothing on a run without changes; see docker compose logs
-          in {{ paperless_dir }}.
+          database are not both healthy, or Paperless cannot use its
+          database, within {{ paperless_health_timeout }} seconds
+          ({{ paperless_health_lines | join('; ') }}). The role restarts
+          nothing on a run without changes; see docker compose logs in
+          {{ paperless_dir }}.
       when: not paperless_healthy
 
 # Reached only by a run that succeeded, so the marker names another version

@@ -93,6 +93,12 @@ paperless_services: >-
      + (['gotenberg', 'tika'] if paperless_tika | bool else [])
      + (['samba'] if paperless_samba | bool else []) }}
 
+# health.yml: the seconds left of its wait when a database check starts, at
+# least 10.
+paperless_db_check_wait: >-
+  {{ [(paperless_health_timeout | int)
+      - (now().timestamp() - paperless_health_start | float) | int, 10] | max }}
+
 # The files as the role writes them; compared with the ones on disk. none
 # means the file must not exist (Samba off).
 paperless_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"

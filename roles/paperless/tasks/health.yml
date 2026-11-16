@@ -1,8 +1,10 @@
 ---
 # Waits up to paperless_health_timeout seconds until the webserver and the
-# database report the health status healthy, and sets paperless_healthy and
-# paperless_health_lines (service, state and health of each container).
-# Never fails by itself.
+# database report the health status healthy, then checks the database as
+# Paperless uses it, and sets paperless_healthy and paperless_health_lines
+# (service, state and health of each container, and the failure of the
+# database check). The webserver's check asks the web server, which answers
+# without the database. Never fails by itself.
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:
@@ -23,8 +25,91 @@
   changed_when: false
   failed_when: false
 
+- name: Note whether the containers are healthy
+  ansible.builtin.set_fact:
+    paperless_containers_healthy: >-
+      {{ ['webserver running healthy', 'db running healthy'] | difference(paperless_health.stdout_lines | default([])) | length == 0 }}
+
+# Once the containers are healthy, Paperless' own view of its database, in
+# the webserver container as the paperless user (as the image's wrappers run
+# manage.py, from the image's working directory): migrate --check fails while
+# the database is unreachable or a migration is not applied, and a read of the
+# documents (every column of the table) proves the schema Paperless uses.
+# The image's timeout bounds each by the rest of the wait, at least 10
+# seconds, so that a check right at the deadline can still start Django; a
+# database that does not answer would hold it forever.
+- name: Check that the migrations of Paperless are applied
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - --user=paperless
+      - webserver
+      - timeout
+      - -s
+      - KILL
+      - "{{ paperless_db_check_wait }}"
+      - python3
+      - manage.py
+      - migrate
+      - --check
+    chdir: "{{ paperless_dir }}"
+  register: paperless_db_migrations
+  changed_when: false
+  failed_when: false
+  when: paperless_containers_healthy
+
+- name: Read the documents of Paperless
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - --user=paperless
+      - webserver
+      - timeout
+      - -s
+      - KILL
+      - "{{ paperless_db_check_wait }}"
+      - python3
+      - manage.py
+      - shell
+      - -c
+      - |
+        from documents.models import Document
+        list(Document.objects.all()[:1])
+    chdir: "{{ paperless_dir }}"
+  register: paperless_db_read
+  changed_when: false
+  failed_when: false
+  when:
+    - paperless_containers_healthy
+    - paperless_db_migrations.rc == 0
+
+# The first check that failed, and what it said: the last line of stderr that
+# names an error (the end of a traceback), else its last line; without one,
+# what the exit code means (KILL from timeout, or migrate --check's 1 for a
+# migration that is not applied).
 - name: Note whether Paperless is healthy
   ansible.builtin.set_fact:
-    paperless_health_lines: "{{ paperless_health.stdout_lines | default([]) | sort }}"
-    paperless_healthy: >-
-      {{ ['webserver running healthy', 'db running healthy'] | difference(paperless_health.stdout_lines | default([])) | length == 0 }}
+    paperless_health_lines: >-
+      {{ paperless_health.stdout_lines | default([]) | sort
+         + ([('database check failed: ' ~ paperless_db_check_error) | trim] if paperless_db_check else []) }}
+    paperless_healthy: "{{ paperless_containers_healthy and not paperless_db_check }}"
+  vars:
+    paperless_db_check: >-
+      {{ ([paperless_db_migrations | combine({'what': 'manage.py migrate --check'}),
+           paperless_db_read | combine({'what': 'reading the documents'})]
+          | selectattr('rc', 'defined') | rejectattr('rc', 'eq', 0) | list | first) | default({}) }}
+    paperless_db_check_error: >-
+      {%- set stderr = (paperless_db_check.stderr | default('') | trim).splitlines() -%}
+      {%- set errors = stderr | select('search', 'Error:') | list -%}
+      {{ (paperless_db_check.what ~ ' did not finish within ' ~ paperless_db_check.cmd[9] ~ ' seconds')
+         if paperless_db_check.rc | default(0) in [124, 137]
+         else (paperless_db_check.what ~ ': ' ~ (errors or stderr) | last | trim) if stderr
+         else 'manage.py migrate --check found a migration that is not applied'
+         if paperless_db_check.what == 'manage.py migrate --check' and paperless_db_check.rc == 1
+         else paperless_db_check.what ~ ' exited with ' ~ paperless_db_check.rc | default('?') }}

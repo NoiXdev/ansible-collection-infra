@@ -156,6 +156,12 @@
   `imported.yml` with a message to remove only the marker). The admin password and the import
   passphrase reach the container through stdin, so they are not in the output even at `-vvv`. See
   the role's guide in the docs.
+- `paperless`: Paperless counts as healthy only when it can use its database. Once the webserver
+  and the database are healthy, `manage.py migrate --check` and a read of the documents run in the
+  webserver container as the `paperless` user, each bounded by what is left of
+  `paperless_health_timeout`. So an update whose new release starts healthy while a migration is
+  not applied is rolled back and recorded in `update-failed`, and a run without changes fails,
+  within the health timeout, while the database does not answer.
 - `nodejs`: new role that installs one Node.js major series from NodeSource (`nodejs_version`,
   default `"24"`) and global npm packages at exact versions (`nodejs_npm_packages`, each with
   `name` and `version`; ranges and tags are refused). A `nodejs` of another series (Ubuntu's own,
