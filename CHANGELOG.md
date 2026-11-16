@@ -44,6 +44,9 @@
   `admin`, `wheel`, `adm`, `shadow`, `disk`, `kmem`, `docker`, `lxd`, `incus-admin`, `libvirt`,
   `systemd-journal`), is refused before any change: `www-data` joins a site's group, so every
   nginx worker would get it.
+- `nginx`: a failed certificate request says what each site serves until a run gets it: a site
+  with a certificate keeps its TLS block, a site without one (new, or switched to `letsencrypt`)
+  only its HTTP block, the ACME challenges and a redirect to HTTPS, none of its content.
 - `anubis`: new mode `host` for an nginx on the host itself (the `nginx` role's sites with
   `anubis: true`): the container publishes `127.0.0.1:anubis_host_port` (8923) only and joins none
   of the other modes' networks. One mode per host.

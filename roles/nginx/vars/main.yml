@@ -74,12 +74,15 @@ nginx_acme_failures: >-
                                 ~ ')') -%}
   {%- endfor -%}
   {{ failures }}
-# A site whose request failed keeps what it had: its HTTP block, or its TLS
-# block with the certificate it has (a new name that failed).
+# A site whose request failed keeps its TLS block if it has a certificate
+# (a new name that failed); one without a certificate (a new site, or one
+# switched to letsencrypt) has only its HTTP block: the ACME challenges and
+# the redirect to HTTPS, none of its content.
 nginx_acme_failed_msg: >-
   nginx: certbot got no certificate for {{ nginx_acme_failures | join('; ') }};
-  {{ 'that site keeps what it had' if nginx_acme_failures | length == 1 else 'those sites keep what they had' }}
-  (its HTTP block, or its TLS block with the certificate it has), and the next run asks again
+  a site with a certificate keeps its TLS block with it, and a site without one (new, or switched
+  to letsencrypt) serves only its HTTP block, the ACME challenges and a redirect to HTTPS, none of
+  its content, until a run gets the certificate; the next run asks again
 
 nginx_site_keys:
   - name

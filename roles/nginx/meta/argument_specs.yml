@@ -32,9 +32,11 @@ argument_specs:
         /etc/letsencrypt/renewal-hooks/deploy/noixdev-nginx reloads nginx after nginx -t.
       - >-
         A certificate request that fails does not stop the other sites: the run fails at the
-        end naming each site and domain that failed, and those sites keep what they had (the
-        HTTP block of a new site, or the TLS block with the certificate it has) until a later
-        run gets the certificate.
+        end naming each site and domain that failed. A site with a certificate keeps its TLS
+        block with it; a site without one (new, renamed, or switched to letsencrypt from off or
+        {cert, key}) serves only its HTTP block, the ACME challenges and a redirect to HTTPS,
+        none of its content, until a later run gets the certificate. Get the certificate first
+        where a serving site must not go down.
       - >-
         The noix error pages (nginx_error_pages, on by default): the error_pages_export role
         exports nginx_error_pages_image once with Docker to nginx_error_pages_dir, and every site

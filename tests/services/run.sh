@@ -1784,6 +1784,9 @@ nginx_acme() {
     fi
     grep -qF 'nginx: certbot got no certificate for site broken (unresolvable.example.test: ' "$out/nginx-acme-$attempt.log" \
       || { cat "$out/nginx-acme-$attempt.log" >&2; fail "nginx: the $attempt failed run does not name unresolvable.example.test"; }
+    # What broken serves until then: its HTTP block, none of its content.
+    grep -qF 'a site without one (new, or switched to letsencrypt) serves only its HTTP block, the ACME challenges and a redirect to HTTPS, none of its content' "$out/nginx-acme-$attempt.log" \
+      || { cat "$out/nginx-acme-$attempt.log" >&2; fail "nginx: the $attempt failed run does not say what a site without a certificate serves"; }
     answer="$(hx nginx systemctl show -p MainPID --value nginx)"
     [ "$answer" = "$master" ] || fail "nginx: the $attempt failed run restarted nginx (MainPID $master, now $answer)"
     answer="$(hx nginx md5sum /etc/nginx/sites/prod.conf /etc/nginx/sites/node.conf /etc/nginx/sites/static.conf)"

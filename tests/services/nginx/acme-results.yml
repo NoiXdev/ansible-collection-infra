@@ -33,5 +33,5 @@
         that:
           - nginx_acme_issued == ['ok']
           - "nginx_acme_failures == ['site bad (bad.example.test: DNS problem)', 'site masked (masked.example.test: an error before certbot ran)']"
-          - nginx_acme_failed_msg is search('those sites keep what they had')
+          - nginx_acme_failed_msg is search('a site without one [(]new, or switched to letsencrypt[)] serves only its HTTP block')
         fail_msg: "issued {{ nginx_acme_issued }}, failures {{ nginx_acme_failures }}, message {{ nginx_acme_failed_msg }}"

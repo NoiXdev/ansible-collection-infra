@@ -8,7 +8,8 @@
 # server than nginx_acme_server, in list order, and each site
 # that got one gets its TLS block. A request that fails is collected: the
 # other sites go on, and the run fails at the end naming each failed site and
-# domain. That site keeps its HTTP block, and the next run asks again.
+# domain. That site keeps its HTTP block (or its TLS block with the
+# certificate it has), and the next run asks again.
 - name: Install certbot
   ansible.builtin.apt:
     name: certbot
