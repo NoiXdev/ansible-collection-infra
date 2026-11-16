@@ -48,15 +48,26 @@
     argv: [cp, -a, "{{ n8n_data_dir }}/home", "{{ n8n_backup_next }}.partial/home"]
   changed_when: true
 
+# It holds the encryption key, the passwords and the owner's hash, so the task is no_log and a
+# failure gets a message of its own.
 - name: Keep the compose file with the backup
-  ansible.builtin.copy:
-    dest: "{{ n8n_backup_next }}.partial/compose.yaml"
-    content: "{{ n8n_compose_before }}"
-    owner: root
-    group: root
-    mode: "0600"
-  # It holds the encryption key, the passwords and the owner's hash.
-  no_log: true
+  block:
+    - name: Keep the compose file with the backup
+      ansible.builtin.copy:
+        dest: "{{ n8n_backup_next }}.partial/compose.yaml"
+        content: "{{ n8n_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+  rescue:
+    - name: Fail on the compose file of the backup
+      ansible.builtin.fail:
+        msg: >-
+          Writing {{ n8n_backup_next }}.partial/compose.yaml, the copy of
+          the compose file in the backup, failed; the error is not shown, as
+          it can quote the secrets. Check that {{ n8n_backup_dir }} is
+          writable and has space.
 
 # Not into a backup of that name (the same second), which mv would move it
 # into.

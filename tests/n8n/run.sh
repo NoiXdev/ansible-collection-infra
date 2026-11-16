@@ -1055,6 +1055,31 @@ expect_marker_removed_first() {
   [[ "$first" == *"(item=$progress)"* ]] || fail "the update $1 did not remove $progress first: ${first:-no removal}"
 }
 
+# Fails unless the restored directory <dir> has the owner and mode of the
+# backup's <backup dir>: expect_same_owner <dir> <backup dir>.
+expect_same_owner() {
+  [ "$(hx stat -c '%u:%g %a' "$1")" = "$(hx stat -c '%u:%g %a' "$2")" ] \
+    || fail "$1 is $(hx stat -c '%u:%g %a' "$1"), not $(hx stat -c '%u:%g %a' "$2") as $2"
+}
+# Fails unless every entry of the list <entries> (one per line) is in the
+# directory <dir>: expect_entries_in <dir> <entries>.
+expect_entries_in() {
+  local entry
+  [ -n "$2" ] || fail "no entries to look for in $1"
+  while IFS= read -r entry; do
+    hx test -e "$1/$entry" || fail "$1 lacks $entry: $(hx ls -A "$1")"
+  done <<<"$2"
+}
+# Makes an entry of the failed attempt that cannot be renamed in the
+# directory <dir>: a mountpoint (EBUSY), as a full disk or an immutable file
+# would stop a move. Sets busy (its path) and busy_before (the other
+# entries, which sort before it and so are set aside first): busy_entry <dir>.
+busy_entry() {
+  busy="$1/zz-noix-busy"
+  hx sh -c "mkdir $busy && echo failed-attempt >$busy/file && mount --bind $busy $busy"
+  busy_before="$(hx sh -c "cd $1 && for e in *; do [ \"\$e\" = zz-noix-busy ] || echo \"\$e\"; done")"
+}
+
 test_interrupted() {
   echo "== n8n_restore_interrupted without an interrupted update must be refused"
   new_host
@@ -1180,14 +1205,18 @@ test_interrupted() {
   # As a restore leaves it that was stopped while it put the home back: n8n
   # stopped, the copy of the backup's home made, the home found set aside,
   # none put back yet. The next restore puts it back all the same.
-  hx sh -c "cd $dir && docker compose stop >/dev/null 2>&1 \
-    && cp -a $backup/home $dir/data/.home.restore && mkdir -m 0700 $backup-failed $backup-failed/home \
+  hx sh -c "cd $dir && docker compose stop" >/dev/null 2>&1
+  set_aside="$(hx ls -A "$dir/data/home")"
+  hx sh -c "cp -a $backup/home $dir/data/.home.restore && mkdir -m 0700 $backup-failed $backup-failed/home \
     && find $dir/data/home -mindepth 1 -maxdepth 1 -exec mv {} $backup-failed/home/ \;"
   # Beside update-failed of another version, which the healthy restore
   # removes as any run that succeeds.
   expect_restored interrupted-restore
   hx test ! -e "$marker" || fail "the restore kept $marker of another version"
   hx test ! -e "$dir/data/.home.restore" || fail "the restore left $dir/data/.home.restore"
+  expect_same_owner "$dir/data/home" "$backup/home"
+  # What the stopped restore set aside stays there.
+  expect_entries_in "$backup-failed/home" "$set_aside"
 
   echo "== an update killed during its rollback must be refused until it is restored"
   hx docker tag "$busybox" "test.invalid/n8n:$version"
@@ -1334,6 +1363,21 @@ test_interrupted() {
   expect_in_log restore-failed-blocked "$marker exists: the n8n update to $new_pin failed"
   expect_in_log restore-failed-blocked "The role refuses every version"
   expect_untouched restore-failed-blocked
+
+  echo "== a restore that cannot set an entry of the home aside must fail and keep what the failed attempt left"
+  # An interrupted update to $version from a backup of $old_version, beside
+  # no update-failed.
+  hx rm "$marker"
+  backup="$(hx sh -c "ls -d $backups/*-$old_version | tail -n 1")"
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backup\ntime: 2026-01-01T00:00:00Z\n' >$progress \
+    && cp -p $backup/compose.yaml $progress_compose"
+  busy_entry "$dir/data/home"
+  play_fails restore-busy "$here/converge.yml" -e "n8n_version=$new_pin" -e n8n_image=test.invalid/n8n \
+    -e n8n_restore_interrupted=true -e n8n_rollback_timeout=60 "${queue[@]}"
+  expect_in_log restore-busy "Restoring n8n $old_version in $dir from the backup $backup after the interrupted update to $version failed (Put the n8n home back:"
+  [ "$(hx cat "$busy/file")" = failed-attempt ] || fail "the entry that could not be set aside lost its content"
+  expect_entries_in "$backup-failed/home" "$busy_before"
+  hx test -d "$dir/data/.home.restore" || fail "the copy was put in place although an entry was not set aside"
 }
 
 test_missing_data() {

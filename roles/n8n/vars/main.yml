@@ -178,7 +178,6 @@ n8n_install_hint: >-
   {{ n8n_data_subdirs[:-1] | join(', ') }} and {{ n8n_data_subdirs[-1] }} of
   {{ n8n_data_dir }}, then run the role again.
 
-# After a failed rollback: how to put the backup back by hand.
 # Added to the refusals of update-failed when n8n_restore_interrupted is set,
 # which they come before: the variable does not apply while that marker
 # stands.
@@ -191,6 +190,7 @@ n8n_marker_restore_note: >-
                ~ n8n_marker_file ~ ' as said, then run the role again.')))
      if n8n_restore_interrupted | bool else '' }}
 
+# After a failed rollback: how to put the backup back by hand.
 n8n_restore_hint: >-
   Roll back by hand in {{ n8n_dir }}: run docker compose stop; copy
   {{ n8n_backup | default('?') }}/compose.yaml to {{ n8n_compose_file }};
