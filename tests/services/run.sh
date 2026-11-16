@@ -1628,7 +1628,7 @@ nginx_auth() {
   refused nginx auth-no-users "nginx: nginx_sites entry ba has an invalid basic_auth: users is a list of at least one" \
     "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"allow\": [\"192.0.2.10\"]}}]}"
   refused nginx auth-bad-allow "nginx: nginx_sites entry ba has an invalid basic_auth: allow has an entry that is not an address or CIDR" \
-    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": \"pw-allow-secret\"}], \"allow\": [\"1.2.3.4; deny all\"]}}]}"
+    "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"password\": \"pw-allow-secret\"}], \"allow\": [\"192.0.2.4; deny all\"]}}]}"
   refused nginx auth-unknown-key "nginx: nginx_sites entry ba has an invalid basic_auth: user #1 has unknown keys (pasword)" \
     "$dir/converge.yml" "${fast[@]}" -v -e "{\"nginx_sites\": [{$site, \"basic_auth\": {\"users\": [{\"name\": \"ann\", \"pasword\": \"pw-typo-secret\"}]}}]}"
   refused nginx auth-leading-hash "nginx: nginx_sites entry ba has an invalid basic_auth: user #1 has no name, or a name with" \
