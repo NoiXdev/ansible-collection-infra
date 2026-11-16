@@ -182,23 +182,28 @@
   it is handled as without one. A rollback restored again keeps the data of the failed attempt in
   `<backup>-failed` and sets the newer ones aside in `<backup>-failed-<time>`; a restore stopped
   while it puts `data/` and `media/` back can be run again.
-- `n8n`: an update that did not finish is no longer taken for a finished one. From its first
-  change until it is healthy or rolled back, an update keeps `update-in-progress` in `n8n_dir`
-  (root, `0600`: the versions, the step and the backup, with a copy of the compose file). A run
-  that stopped during the backup changed nothing else: the next run removes the partial backup and
-  the marker and updates again. A run that stopped after it makes every later run refuse before
-  any change, naming both versions and the backup, until either `n8n_restore_interrupted: true`
-  for one run restores the backup with the compose file from before the update (the database and
-  the n8n home too, workers among the services; the run ends without trying the update again, and
-  the next one does), or the marker is removed to keep n8n as it is. A restore that fails writes
-  `update-failed` as a failed rollback does. The variable is refused without an interrupted
-  update, a marker that is not YAML or lacks its keys is refused, and a marker beside
-  `update-failed` of the same backup (a rollback that stopped after it wrote that) is removed,
-  `update-failed` deciding; beside an `update-failed` of another backup (an earlier update that
-  was rolled back) it is handled as without one. A rollback restored again keeps the home of the
-  failed attempt in `<backup>-failed` and sets the newer one aside in `<backup>-failed-<time>`.
-  No database check of its own is added: n8n's readiness (`/healthz/readiness`) already fails
-  while a migration is not applied or the database does not answer.
+- `n8n`: an update that did not finish is no longer taken for a finished one. From its first change
+  until it is healthy or rolled back, an update keeps `update-in-progress` in `n8n_dir` (root,
+  `0600`: the versions, the step and the backup, with a copy of the compose file). A run that
+  stopped during the backup changed nothing else: the next run removes the partial backup and the
+  marker, then goes on as any run does: it updates only while `n8n_version` is still newer. A run
+  that stopped after it makes every later run refuse before any change, naming both versions and the
+  backup, until either `n8n_restore_interrupted: true` for one run restores the backup with the
+  compose file from before the update (the database and the n8n home too, workers among the
+  services; the run ends without trying the update again, and the next one does), or the marker is
+  removed to keep n8n as it is. A restore, like a rollback, stops every container of the project
+  before it restores the database, also one of a service that the compose file on disk does not
+  name. A restore that fails writes `update-failed` as a failed rollback does. The variable is
+  refused without an interrupted update, a marker that is not YAML, lacks its keys or cannot be read
+  is refused, and a marker beside `update-failed` of the same backup (a rollback that stopped after
+  it wrote that) is removed, `update-failed` deciding, once no other refusal stops the run. With the
+  variable set, a refusal of an `update-failed` says that the variable does not apply while that
+  file stands. Beside an `update-failed` of another backup (an earlier update that was rolled back)
+  it is handled as without one. A rollback restored again keeps the home of the failed attempt in
+  `<backup>-failed` and sets the newer one aside in `<backup>-failed-<time>`; a restore stopped
+  while it puts the home back can be run again. No database check of its own is added: n8n's
+  readiness (`/healthz/readiness`) already fails while a migration is not applied or the database
+  does not answer.
 - `nodejs`: new role that installs one Node.js major series from NodeSource (`nodejs_version`,
   default `"24"`) and global npm packages at exact versions (`nodejs_npm_packages`, each with
   `name` and `version`; ranges and tags are refused). A `nodejs` of another series (Ubuntu's own,

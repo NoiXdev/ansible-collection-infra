@@ -1,10 +1,11 @@
 ---
-# Rolls a failed update back to n8n_backup: the stack stopped, the compose
-# file put back as it was before the run, the database recreated empty and
-# loaded from the dump, the n8n home moved aside to <backup>-failed
-# (<backup>-failed-<UTC time> when that exists: a rollback that was stopped,
-# restored again with n8n_restore_interrupted, has put the failed attempt's
-# there already) and the copy put back, then the previous stack started and
+# Rolls a failed update back to n8n_backup: every container of the project
+# stopped, the compose file put back as it was before the run, the database
+# recreated empty and loaded from the dump, what is in the n8n home moved
+# aside to <backup>-failed (<backup>-failed-<UTC time> when that exists: a
+# rollback that was stopped, restored again with n8n_restore_interrupted,
+# has put the failed attempt's there already) and the copy put in its place,
+# then the previous stack started and
 # checked with health.yml (the services of the previous compose file), both
 # waits bounded by n8n_rollback_timeout. The previous compose file comes
 # first, so the database is restored in the previous database container.
@@ -14,22 +15,54 @@
 - name: Roll back to the backup
   block:
     # All of it: the failed version's main instance and workers must not
-    # write to the database while it is restored.
+    # write to the database while it is restored. The services of the
+    # compose file on disk first, in compose's order, each with its grace
+    # period.
     - name: Stop n8n for the rollback
       ansible.builtin.command:
         argv: [docker, compose, stop]
         chdir: "{{ n8n_dir }}"
       changed_when: true
 
+    # Then every other container of the project that still runs: one of a
+    # service the compose file on disk does not name (a worker of another
+    # n8n_workers) stays up until a docker compose up removes the orphans.
+    - name: Find the containers of n8n that still run
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --quiet
+          - --filter
+          - label=com.docker.compose.project={{ n8n_project }}
+      register: n8n_still_running
+      changed_when: false
+
+    - name: Stop the containers of n8n that still run
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'stop'] + n8n_still_running.stdout_lines }}"
+      changed_when: true
+      when: n8n_still_running.stdout_lines | length > 0
+
+    # It holds the encryption key, the passwords and the owner's hash, so the
+    # task is no_log and a failure gets a message of its own.
     - name: Put the previous compose file back
-      ansible.builtin.copy:
-        dest: "{{ n8n_compose_file }}"
-        content: "{{ n8n_compose_before }}"
-        owner: root
-        group: root
-        mode: "0600"
-      # It holds the encryption key, the passwords and the owner's hash.
-      no_log: true
+      block:
+        - name: Put the previous compose file back
+          ansible.builtin.copy:
+            dest: "{{ n8n_compose_file }}"
+            content: "{{ n8n_compose_before }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+      rescue:
+        - name: Fail on the previous compose file
+          ansible.builtin.fail:
+            msg: >-
+              Writing the previous {{ n8n_compose_file }} failed; the error is
+              not shown, as it can quote the secrets. Check that {{ n8n_dir }}
+              is writable and has space.
 
     - name: Start the previous database
       community.docker.docker_compose_v2:
@@ -75,10 +108,13 @@
         chdir: "{{ n8n_dir }}"
       changed_when: true
 
-    # The copy first, so the home is missing only between two renames. A
-    # rollback that was stopped may have moved the home of the failed attempt
-    # to <backup>-failed already; it stays, and the home found now goes to
-    # <backup>-failed-<UTC time>.
+    # The copy first; then the entries of the home are moved, one rename
+    # each, so the home itself never goes missing (state.yml refuses an
+    # installation without it) and a restore stopped anywhere in between can
+    # be run again: a leftover copy is made afresh, and every entry is in the
+    # home, in the copy or set aside. A rollback that was stopped may have
+    # set the home of the failed attempt aside in <backup>-failed already; it
+    # stays, and the home found now goes to <backup>-failed-<UTC time>.
     - name: Put the n8n home back
       ansible.builtin.shell:
         cmd: |
@@ -87,11 +123,15 @@
           root={{ n8n_data_dir | quote }}
           aside="$backup-failed"
           if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
-          mkdir -m 0700 "$aside"
           rm -rf "$root/.home.restore"
           cp -a "$backup/home" "$root/.home.restore"
-          mv "$root/home" "$aside/home"
-          mv "$root/.home.restore" "$root/home"
+          mkdir -m 0700 "$aside"
+          mkdir "$aside/home"
+          find "$root/home" -mindepth 1 -maxdepth 1 -exec mv {} "$aside/home/" \;
+          find "$root/.home.restore" -mindepth 1 -maxdepth 1 -exec mv {} "$root/home/" \;
+          chown "$(stat -c %u:%g "$backup/home")" "$root/home"
+          chmod "$(stat -c %a "$backup/home")" "$root/home"
+          rmdir "$root/.home.restore"
       changed_when: true
 
     # All at once, workers among them: the restored database already has the

@@ -14,7 +14,9 @@
 # applied (the flag is set only once the migrations have run, which n8n does
 # on start before it serves anything) and the server is fully ready; it
 # answers 503 until then, as for a database that does not answer. A worker's
-# (worker-server.js) adds the Valkey connection.
+# (worker-server.js) adds the Valkey connection. Check this again on a major
+# bump of n8n_version: should readiness stop needing the migrations, the
+# role needs a database check of its own.
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:

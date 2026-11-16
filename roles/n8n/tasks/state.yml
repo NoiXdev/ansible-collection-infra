@@ -37,9 +37,10 @@
 # a host without an n8n container, which the owner's hash is made with, and
 # removing what an interrupted update left that nothing needs: a marker of an
 # update in progress beside update-failed of the same backup (the rollback
-# ran), and, after every refusal, the partial backup and the marker of an
-# update stopped during its backup (the compose file is as before it), or the
-# copy of a marker that was removed by hand.
+# ran; before the refusal of update-failed, else after every refusal), and,
+# after every refusal, the partial backup and the marker of an update stopped
+# during its backup (the compose file is as before it), or the copy of a
+# marker that was removed by hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -120,12 +121,27 @@
   register: n8n_update_marker_read
   failed_when: false
 
+# Whether it exists, which a read that failed does not tell.
+- name: Look for the marker of an update in progress
+  ansible.builtin.stat:
+    path: "{{ n8n_update_marker }}"
+    get_checksum: false
+  register: n8n_update_marker_stat
+
 - name: Note that no update is in progress
   ansible.builtin.set_fact:
     n8n_update_in_progress: {}
 
-# A marker that is not YAML parses to nothing and is refused below. It holds
-# no secret: the copy of the compose file is never read here.
+# A marker that is not YAML parses to nothing and is refused below, as is
+# one that exists but cannot be read (a directory). It holds no secret: the
+# copy of the compose file is never read here.
+- name: Note a marker of an update in progress that cannot be read
+  ansible.builtin.set_fact:
+    n8n_update_in_progress: {step: null}
+  when:
+    - n8n_update_marker_stat.stat.exists
+    - n8n_update_marker_read.content is not defined
+
 - name: Check the marker of an update in progress
   when: n8n_update_marker_read.content is defined
   block:
@@ -172,12 +188,21 @@
          and n8n_update_in_progress.backup | default('', true) | string is match('^/')
          and (n8n_marker.backup | default('', true) | string) == (n8n_update_in_progress.backup | string) }}
 
-- name: Remove the marker of an update in progress beside its failed update
+# When update-failed refuses this run, the marker of the update in progress
+# it records goes first: nothing needs it (the rollback ran), and once
+# update-failed is removed as its refusal says, the next run would take it
+# for an update that did not finish. Every other refusal leaves both, and the
+# run that gets past them all removes it at the end.
+- name: Remove the marker of an update in progress beside the failed update that refuses this run
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
   loop: "{{ n8n_update_marker_files }}"
-  when: n8n_update_rolled_back | bool
+  when:
+    - n8n_update_rolled_back | bool
+    - >-
+      not n8n_marker.rolled_back_to | default(none)
+      or (n8n_marker.failed_version | default(n8n_version) | string) == n8n_version | string
 
 - name: Note that the rolled back update is not in progress
   ansible.builtin.set_fact:
@@ -202,6 +227,7 @@
       The role refuses every version and changes nothing until n8n is
       restored. {{ n8n_restore_hint }} Then check n8n (its workflows and
       credentials) and remove the marker (rm {{ n8n_marker_file }}).
+      {{ n8n_marker_restore_note }}
   vars:
     n8n_backup: "{{ n8n_marker.backup | default('?', true) }}"
   when:
@@ -219,7 +245,7 @@
       {{ n8n_version }} again and changes nothing while the marker names it.
       To try again, remove it (rm {{ n8n_marker_file }}); or set n8n_version
       to another version, and the marker is removed once a run with it
-      succeeds.
+      succeeds. {{ n8n_marker_restore_note }}
   when:
     - n8n_marker_read.content is defined
     - (n8n_marker.failed_version | default(n8n_version) | string) == n8n_version | string
@@ -663,14 +689,24 @@
   loop: "{{ (n8n_partial_backups.files | default([]) | map(attribute='path') | sort) + n8n_update_marker_files }}"
   when: n8n_update_in_progress.step | default(none) == 'backup'
 
+# After every refusal, so that a refused run leaves both markers;
+# update-failed decides on the next run as on this one.
+- name: Remove the marker of an update in progress beside its failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ n8n_update_marker_files }}"
+  when: n8n_update_rolled_back | bool
+
 # It holds the secrets: left when the marker was removed by hand, as its
-# refusal offers.
+# refusal offers, or by a run stopped while it removed the marker and it.
+# Only without a marker: one that exists but cannot be read is refused above.
 - name: Remove the copy of an update in progress without its marker
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
   loop: "{{ n8n_update_marker_files | difference([n8n_update_marker]) }}"
-  when: n8n_update_marker_read.content is not defined
+  when: not n8n_update_marker_stat.stat.exists
 
 - name: Decide what to do
   ansible.builtin.set_fact:

@@ -180,22 +180,40 @@
     n8n_interrupted_from: "{{ n8n_update_in_progress.from_version | default('?') }}"
     n8n_interrupted_to: "{{ n8n_update_in_progress.to_version }}"
   block:
+    # It holds the encryption key, the passwords and the owner's hash, so the
+    # tasks are no_log and a failure gets a message of its own; state.yml has
+    # checked that it exists.
     - name: Read the compose file from before the interrupted update
-      ansible.builtin.slurp:
-        src: "{{ n8n_update_marker_compose }}"
-      register: n8n_update_marker_compose_read
-      # It holds the encryption key, the passwords and the owner's hash;
-      # state.yml has checked that it exists.
-      no_log: true
+      block:
+        - name: Read the compose file from before the interrupted update
+          ansible.builtin.slurp:
+            src: "{{ n8n_update_marker_compose }}"
+          register: n8n_update_marker_compose_read
+          no_log: true
 
-    # restore.yml puts it back and checks the services it names (workers
-    # among them), not those of the interrupted update's compose file.
-    - name: Note the compose file and the backup from before the interrupted update
-      ansible.builtin.set_fact:
-        n8n_compose_before: "{{ n8n_update_marker_compose_read.content | b64decode }}"
-        n8n_compose_on_disk: "{{ n8n_update_marker_compose_read.content | b64decode | from_yaml }}"
-        n8n_backup: "{{ n8n_update_in_progress.backup }}"
-      no_log: true
+        # restore.yml puts it back and checks the services it names (workers
+        # among them), not those of the interrupted update's compose file.
+        - name: Note the compose file and the backup from before the interrupted update
+          ansible.builtin.set_fact:
+            n8n_compose_before: "{{ n8n_update_marker_compose_read.content | b64decode }}"
+            n8n_compose_on_disk: "{{ n8n_update_marker_compose_read.content | b64decode | from_yaml }}"
+            n8n_backup: "{{ n8n_update_in_progress.backup }}"
+          no_log: true
+
+        - name: Check the compose file from before the interrupted update
+          ansible.builtin.assert:
+            that: n8n_compose_on_disk.services is mapping
+            quiet: true
+      rescue:
+        - name: Fail on the copy of the compose file
+          ansible.builtin.fail:
+            msg: >-
+              Reading {{ n8n_update_marker_compose }}, the copy of the compose
+              file from before the interrupted update, failed, or it is not a
+              compose file. The error is not shown: it can quote the file,
+              which holds the encryption key and the passwords. The role
+              changes nothing. Check that it is the compose file root can
+              read, then run the role again.
 
     - name: Roll back to the backup of the interrupted update
       ansible.builtin.include_tasks: restore.yml

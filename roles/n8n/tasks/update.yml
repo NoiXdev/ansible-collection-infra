@@ -13,7 +13,9 @@
 # From the first change on, n8n_update_marker says how far the update got
 # (step backup, then step update with the backup), with a copy of the compose
 # file it replaces; it is removed once the update is healthy, or after the
-# recovery or the rollback, so that only a run that stopped leaves it.
+# recovery or the rollback, so that only a run that stopped leaves it (the
+# marker before its copy: a run stopped in between leaves only the copy,
+# which the next run removes).
 
 - name: Update n8n
   vars:
@@ -58,15 +60,26 @@
       vars:
         n8n_update_step: backup
 
+    # It holds the encryption key, the passwords and the owner's hash, so
+    # the task is no_log and a failure gets a message of its own.
     - name: Keep the compose file from before the update
-      ansible.builtin.copy:
-        dest: "{{ n8n_update_marker_compose }}"
-        content: "{{ n8n_compose_before }}"
-        owner: root
-        group: root
-        mode: "0600"
-      # It holds the encryption key, the passwords and the owner's hash.
-      no_log: true
+      block:
+        - name: Keep the compose file from before the update
+          ansible.builtin.copy:
+            dest: "{{ n8n_update_marker_compose }}"
+            content: "{{ n8n_compose_before }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+      rescue:
+        - name: Fail on the copy of the compose file from before the update
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ n8n_update_marker_compose }}, the copy of the compose
+              file from before the update, failed; the error is not shown, as
+              it can quote the secrets. Check that {{ n8n_dir }} is writable
+              and has space, then run the role again.
 
     # Nothing writes to the database or the home during the backup. The
     # services of the compose file on disk: the workers that run now, which
@@ -94,15 +107,25 @@
       vars:
         n8n_update_step: update
 
+    # It holds the encryption key, the passwords and the owner's hash, so
+    # the task is no_log and a failure gets a message of its own.
     - name: Write the compose file with n8n {{ n8n_version }}
-      ansible.builtin.copy:
-        dest: "{{ n8n_compose_file }}"
-        content: "{{ n8n_compose }}"
-        owner: root
-        group: root
-        mode: "0600"
-      # It holds the encryption key, the passwords and the owner's hash.
-      no_log: true
+      block:
+        - name: Write the compose file with n8n {{ n8n_version }}
+          ansible.builtin.copy:
+            dest: "{{ n8n_compose_file }}"
+            content: "{{ n8n_compose }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+      rescue:
+        - name: Fail on the compose file with n8n {{ n8n_version }}
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ n8n_compose_file }} failed; the error is not shown, as
+              it can quote the secrets. Check that {{ n8n_dir }} is writable
+              and has space.
 
     # The workers once the main instance has migrated the database.
     - name: Start n8n {{ n8n_version }}
