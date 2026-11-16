@@ -40,6 +40,10 @@
   Let's Encrypt's staging directory to production replaces the staging certificates.
 - `nginx`: hardened sites also answer 404 for compressed dumps and backups (`*.sql`, `*.bak` and
   `*.swp` with `.gz`, `.bz2`, `.xz`, `.zst`, `.zip`, `.7z`, `.lz4` or `.lzma`, in any case).
+- `nginx`: a site with the user or group `www-data`, or with a privileged group (`root`, `sudo`,
+  `admin`, `wheel`, `adm`, `shadow`, `disk`, `kmem`, `docker`, `lxd`, `incus-admin`, `libvirt`,
+  `systemd-journal`), is refused before any change: `www-data` joins a site's group, so every
+  nginx worker would get it.
 - `anubis`: new mode `host` for an nginx on the host itself (the `nginx` role's sites with
   `anubis: true`): the container publishes `127.0.0.1:anubis_host_port` (8923) only and joins none
   of the other modes' networks. One mode per host.

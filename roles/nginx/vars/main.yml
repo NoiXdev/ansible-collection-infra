@@ -136,6 +136,23 @@ nginx_sites_public: >-
   {{ sites }}
 nginx_site_names: "{{ nginx_sites_public | map(attribute='name', default='') | list }}"
 
+# Groups no site may have: www-data joins a site's group, so every nginx
+# worker would get the group's privileges (docker's and disk's are root's).
+nginx_privileged_groups:
+  - root
+  - sudo
+  - admin
+  - wheel
+  - adm
+  - shadow
+  - disk
+  - kmem
+  - docker
+  - lxd
+  - incus-admin
+  - libvirt
+  - systemd-journal
+
 # Each site's group: the one it names, or its user's primary group. Needs the
 # getent facts of tasks/validate.yml.
 nginx_gid_names: >-

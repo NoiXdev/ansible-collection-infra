@@ -197,6 +197,20 @@
   loop_control:
     label: "{{ item.name }}"
 
+# A pool of www-data could read every site (www-data is in every site's group).
+- name: Check that no site belongs to www-data
+  ansible.builtin.assert:
+    that:
+      - item.user != 'www-data'
+      - ansible_facts.getent_passwd[item.user][1] != (ansible_facts.getent_passwd.get('www-data') or [none, none])[1]
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has the user {{ item.user }}; the nginx workers run
+      as www-data and read every site, so a site belongs to another user
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Check the site groups
   ansible.builtin.assert:
     that: item.group is string and item.group in ansible_facts.getent_group
@@ -227,6 +241,20 @@
       nginx: nginx_sites entry {{ item.name }} has the group {{ nginx_site_groups[item.name] }}
       (gid {{ ansible_facts.getent_group[nginx_site_groups[item.name]][1] }}); www-data joins a
       site's group, which must not be root
+    quiet: true
+  loop: "{{ nginx_sites_public }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Every nginx worker would get the group (docker's is root's). www-data's own
+# group is never left: it is the primary group, not a listed one.
+- name: Check that no site has www-data's group or a privileged one
+  ansible.builtin.assert:
+    that: nginx_site_groups[item.name] not in ['www-data'] + nginx_privileged_groups
+    fail_msg: >-
+      nginx: nginx_sites entry {{ item.name }} has the group {{ nginx_site_groups[item.name] }};
+      www-data joins a site's group, which must not be www-data or a privileged group
+      ({{ nginx_privileged_groups | join(', ') }}): every nginx worker would get it
     quiet: true
   loop: "{{ nginx_sites_public }}"
   loop_control:

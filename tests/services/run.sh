@@ -2218,6 +2218,13 @@ suite_nginx() {
     "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "x", "domains": ["x.example.test"], "user": "root", "root": "/srv/x", "tls": "off"}]}'
   refused nginx root-group "nginx: nginx_sites entry x has the group root (gid 0); www-data joins a site's group, which must not be root" \
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], $tls_off, \"group\": \"root\"}]}"
+  refused nginx www-data-user "nginx: nginx_sites entry x has the user www-data; the nginx workers run as www-data and read every site, so a site belongs to another user" \
+    "$dir/converge.yml" "${fast[@]}" -e '{"nginx_sites": [{"name": "x", "domains": ["x.example.test"], "user": "www-data", "root": "/srv/x", "tls": "off"}]}'
+  refused nginx www-data-group "nginx: nginx_sites entry x has the group www-data; www-data joins a site's group, which must not be www-data or a privileged group (" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], $tls_off, \"group\": \"www-data\"}]}"
+  # docker.yml installed Docker, so the group docker exists.
+  refused nginx docker-group "nginx: nginx_sites entry x has the group docker; www-data joins a site's group, which must not be www-data or a privileged group (" \
+    "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"x\", \"domains\": [\"x.example.test\"], $tls_off, \"group\": \"docker\"}]}"
   refused nginx bad-name "nginx: nginx_sites entry 'Bad Name' has an invalid name; it must match ^[a-z0-9_-]+$" \
     "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_sites\": [{\"name\": \"Bad Name\", \"domains\": [\"x.example.test\"], $tls_off}]}"
   refused nginx no-acme-email "nginx: nginx_sites entry le uses tls letsencrypt, and nginx_acme_email is empty" \

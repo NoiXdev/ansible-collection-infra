@@ -71,9 +71,11 @@ argument_specs:
             canonical name. redirect_domains, a list, answer with a 301 to the canonical name. A
             domain belongs to one site.
           - >-
-            user (required), the site's system user; it must exist and must not be root. group,
-            the site's group, by default the user's primary group (never gid 0); www-data joins
-            it, so web roots must be group-readable.
+            user (required), the site's system user; it must exist and must be neither root nor
+            www-data. group, the site's group, by default the user's primary group (never gid
+            0, www-data or a privileged group: root, sudo, admin, wheel, adm, shadow, disk, kmem,
+            docker, lxd, incus-admin, libvirt, systemd-journal); www-data joins it, so web roots
+            must be group-readable.
           - >-
             One backend at most. php_pool, the name of a php pool, served by fastcgi to
             /run/php/<php_pool>.sock; only php_front_controller (index.php by default) and the
