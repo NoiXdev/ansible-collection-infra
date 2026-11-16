@@ -62,6 +62,23 @@
 #             then a rollback that fails too (the previous image cannot be
 #             started), whose marker refuses every version, an older one
 #             before the downgrade refusal
+#   interrupted
+#             updates that did not finish, with converges killed (SIGKILL to
+#             their process group) at a point of an update:
+#             n8n_restore_interrupted without an interrupted update refused;
+#             a marker that is not YAML or lacks its keys refused; one beside
+#             update-failed removed, update-failed deciding; killed once the
+#             compose file names the new release: the marker (step update,
+#             both versions, the backup, mode 0600) with its copy of the
+#             compose file refuses every run, and n8n_restore_interrupted
+#             restores the previous release with the workflow, the database
+#             and the n8n home; killed during the rollback of a failed update:
+#             refused and restored the same way, the run after it updating;
+#             in queue mode with a worker, the restore brings the worker back
+#             on the old release; killed during the backup: the next run
+#             cleans up and updates; a restore that fails (the previous image
+#             cannot be started) records a failed rollback and refuses every
+#             version. The refusals and restores run at -vvv.
 #   missing_data
 #             the stack stopped and n8n_data_dir replaced by an empty
 #             directory (an unmounted volume): docker compose start fails,
@@ -129,6 +146,9 @@ busybox=busybox:1.37.0
 old_images=("$(value_of "$defaults" n8n_image):$old_version" "$busybox")
 backups="$dir/data/backups"
 marker="$dir/update-failed"
+# The marker of an update in progress and its copy of the compose file.
+progress="$dir/update-in-progress"
+progress_compose="$dir/update-in-progress.compose.yaml"
 fingerprint="$dir/encryption-key.sha256"
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
@@ -428,6 +448,7 @@ expect_rolled_back() {
   backup="$(hx sed -n 's/^backup: //p' "$marker")"
   [ "$(hx head -c 5 "$backup/n8n.dump")" = PGDMP ] || fail "the marker's backup $backup has no dump"
   hx test -d "$backup-failed/home" || fail "the home of the failed update was not moved to $backup-failed"
+  expect_no_progress "after the rollback"
   expect_workflow_active
   wait_healthy
   expect_answer 200 '"ok":true' /webhook/noix-test -X POST
@@ -450,6 +471,57 @@ expect_worker_after_main() {
   started="$(hx sh -c "docker inspect --format '{{.State.StartedAt}}' \$(cd $dir && docker compose ps --quiet $1)" | cut -c1-19)"
   [ -n "$ready" ] && [ -n "$started" ] || fail "cannot tell when n8n was ready ($ready) and $1 started ($started)"
   [[ "$started" > "$ready" || "$started" == "$ready" ]] || fail "$1 started at $started, before the main instance was ready at $ready"
+}
+
+# Waits until no Ansible module runs on the test host: one that a killed
+# converge started finishes there, as on a host whose SSH session dropped.
+# Five quiet seconds in a row: a docker exec sent just before the kill can
+# start its module a moment later.
+wait_modules() {
+  local quiet=0
+  for _ in $(seq 300); do
+    if hx pgrep -f '[A]nsiballZ_' >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+    [ "$quiet" -lt 5 ] || return 0
+    sleep 1
+  done
+  fail "an Ansible module still runs on the test host after 300 seconds"
+}
+# A converge stopped as a dropped SSH session or a reboot stops it: run in the
+# background in a process group of its own and killed with SIGKILL, the whole
+# group, once the shell condition holds on the test host. play_killed <name>
+# <condition> [converge options...]; its output goes to $out/<name>.log.
+play_killed() {
+  local name="$1" condition="$2" pid
+  shift 2
+  set -m
+  play "$here/converge.yml" "$@" >"$out/$name.log" 2>&1 &
+  pid=$!
+  set +m
+  for _ in $(seq 900); do
+    if hx sh -c "$condition" >/dev/null 2>&1; then
+      kill -9 -- "-$pid"
+      wait "$pid" || true
+      wait_modules
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      tail -n 40 "$out/$name.log" >&2
+      fail "converge $name ended before it was killed at: $condition"
+    fi
+    sleep 0.5
+  done
+  kill -9 -- "-$pid" 2>/dev/null || true
+  wait "$pid" || true
+  fail "converge $name did not reach within the wait: $condition"
+}
+# Fails when the marker of an update in progress or its copy is left:
+# expect_no_progress <when>.
+expect_no_progress() {
+  local file
+  for file in "$progress" "$progress_compose"; do
+    hx test ! -e "$file" || fail "$file is left $1"
+  done
 }
 
 # The scenarios, run by the loop at the end.
@@ -735,6 +807,7 @@ test_update() {
   expect_no_secrets converge
   grep -q "update.yml" "$out/converge.log" || fail "the new version was not an update"
   [ "$(service n8n)" = "${images[0]} running healthy" ] || fail "n8n after the update: $(service n8n)"
+  expect_no_progress "after the update"
   backup="$(hx sh -c "ls -d $backups/*-$old_version")"
   [ "$(printf '%s\n' "$backup" | wc -l | tr -d ' ')" = 1 ] || fail "not one backup of $old_version: $backup"
   [ "$(hx head -c 5 "$backup/n8n.dump")" = PGDMP ] || fail "the backup $backup has no dump in pg_dump's custom format"
@@ -916,6 +989,204 @@ DOCKERFILE
   hx test -e "$marker" || fail "the refused run removed the marker"
 }
 
+# Fails unless the refusal <name> of an interrupted update from $old_version
+# to $version names the backup <backup> and both ways out.
+expect_interrupted_refusal() {
+  expect_in_log "$1" "$progress exists: the n8n update from $old_version to $version did not finish"
+  expect_in_log "$1" "the backup from before it is $2"
+  expect_in_log "$1" "set n8n_restore_interrupted: true for one run to restore it"
+  expect_in_log "$1" "or remove $progress to keep n8n as it is now"
+}
+# The restore of an interrupted update with n8n_restore_interrupted:
+# $old_version healthy again with the workflow, the marker and its copy gone,
+# the compose file back at $old_version, the database as it was before the
+# update ($migrations_before migrations). expect_restored <name> [converge
+# options...].
+expect_restored() {
+  local name="$1"
+  shift
+  play "$here/converge.yml" -vvv -e n8n_restore_interrupted=true "$@" >"$out/$name.log" 2>&1 \
+    || { tail -n 60 "$out/$name.log" >&2; fail "the restore $name failed"; }
+  expect_no_secrets "$name"
+  expect_in_log "$name" "n8n in $dir runs $old_version again"
+  if grep -q "update.yml" "$out/$name.log"; then fail "the restore $name tried the update again"; fi
+  [ "$(service n8n)" = "${old_images[0]} running healthy" ] || fail "n8n after the restore $name: $(service n8n)"
+  expect_no_progress "after the restore $name"
+  hx grep -qF "n8n:$old_version" "$dir/compose.yaml" || fail "the compose file does not name $old_version after the restore $name"
+  [ "$(sql 'SELECT count(*) FROM migrations')" = "$migrations_before" ] || fail "the database after the restore $name is not the one of $old_version"
+  expect_workflow_active
+  wait_healthy
+  expect_answer 200 '"ok":true' /webhook/noix-test -X POST
+}
+
+test_interrupted() {
+  echo "== n8n_restore_interrupted without an interrupted update must be refused"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "n8n_version=$old_version"
+  note_owner_hash
+  play "$here/verify.yml"
+  migrations_before="$(sql 'SELECT count(*) FROM migrations')"
+  note_untouched
+  play_fails restore-no-marker "$here/converge.yml" -e n8n_restore_interrupted=true
+  expect_in_log restore-no-marker "n8n_restore_interrupted is set, but there is no interrupted update in $dir; remove the variable"
+  expect_untouched restore-no-marker
+
+  echo "== a marker of an update in progress that the role did not write must be refused"
+  hx sh -c "echo 'not: [yaml' >$progress"
+  play_fails bad-marker "$here/converge.yml"
+  expect_in_log bad-marker "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched bad-marker
+  hx sh -c "printf 'from_version: $old_version\n' >$progress"
+  play_fails bad-marker-keys "$here/converge.yml"
+  expect_in_log bad-marker-keys "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched bad-marker-keys
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\ntime: 2026-01-01T00:00:00Z\n' >$progress"
+  play_fails bad-marker-backup "$here/converge.yml"
+  expect_in_log bad-marker-backup "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched bad-marker-backup
+  hx rm "$progress"
+
+  echo "== beside update-failed, the marker of an update in progress must be removed and update-failed decide"
+  # As a rescue leaves them that wrote update-failed and was killed before
+  # it removed the marker of the update in progress.
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$progress"
+  hx cp -p "$dir/compose.yaml" "$progress_compose"
+  hx sh -c "printf 'failed_version: $version\nrolled_back_to: $old_version\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$marker"
+  play_fails both-markers "$here/converge.yml"
+  expect_in_log both-markers "$marker exists: the n8n update to $version failed"
+  expect_in_log both-markers "rolled back to $old_version"
+  expect_no_progress "beside update-failed"
+  hx test -e "$marker" || fail "the run removed $marker"
+  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run both-markers changed the compose file"
+  [ "$(containers)" = "$containers_before" ] || fail "the refused run both-markers created or removed containers"
+  hx rm "$marker"
+
+  echo "== an update killed once its compose file names $version must be refused until it is restored"
+  play_killed interrupted "grep -qF 'n8n:$version' $dir/compose.yaml" -vvv
+  expect_no_secrets interrupted
+  hx grep -qx "step: update" "$progress" || fail "the marker does not record the step update: $(hx cat "$progress")"
+  hx grep -qx "from_version: $old_version" "$progress" || fail "the marker does not name $old_version: $(hx cat "$progress")"
+  hx grep -qx "to_version: $version" "$progress" || fail "the marker does not name $version: $(hx cat "$progress")"
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  [ "$(hx head -c 5 "$backup/n8n.dump")" = PGDMP ] || fail "the marker's backup $backup has no dump"
+  for file in "$progress" "$progress_compose"; do
+    [ "$(hx stat -c '%a %U' "$file" 2>&1)" = "600 root" ] || fail "$file is not root's with mode 0600: $(hx stat -c '%a %U' "$file" 2>&1)"
+  done
+  hx cmp -s "$progress_compose" "$backup/compose.yaml" || fail "$progress_compose is not the compose file from before the update"
+  note_untouched
+  play_fails interrupted-refused "$here/converge.yml" -vvv
+  expect_interrupted_refusal interrupted-refused "$backup"
+  expect_no_secrets interrupted-refused
+  expect_untouched interrupted-refused
+  expect_restored interrupted-restore
+
+  echo "== an update killed during its rollback must be refused until it is restored"
+  hx docker tag "$busybox" "test.invalid/n8n:$version"
+  play_killed interrupted-rollback \
+    "backup=\$(sed -n 's/^backup: //p' $progress) && [ -n \"\$backup\" ] && [ -e \"\$backup-failed\" ]" \
+    -vvv -e n8n_image=test.invalid/n8n -e n8n_health_timeout=30 -e n8n_rollback_timeout=300
+  expect_no_secrets interrupted-rollback
+  # The first run without the variable after the restore tried the update to
+  # $version again.
+  grep -qF "Stop n8n and its workers for the update" "$out/interrupted-rollback.log" \
+    || fail "the run after the restore of $old_version did not update to $version"
+  hx test ! -e "$marker" || fail "the killed rollback wrote $marker: $(hx cat "$marker")"
+  hx grep -qx "step: update" "$progress" || fail "the marker does not record the step update: $(hx cat "$progress")"
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  note_untouched
+  play_fails rollback-refused "$here/converge.yml" -vvv
+  expect_interrupted_refusal rollback-refused "$backup"
+  expect_no_secrets rollback-refused
+  expect_untouched rollback-refused
+  expect_restored rollback-restore
+  hx test -d "$backup-failed" || fail "the home of the failed attempt in $backup-failed is gone"
+  # The rollback that was stopped had set it aside already, so the home found
+  # by the restore went to a directory of its own.
+  [ -n "$(hx sh -c "ls -d $backup-failed-*")" ] || fail "the restore after the stopped rollback kept no $backup-failed-<time>"
+  hx docker rmi "test.invalid/n8n:$version" >/dev/null
+
+  echo "== in queue mode, the restore of an interrupted update must bring the worker back"
+  queue=(-e n8n_workers=1)
+  converge -e "n8n_version=$old_version" "${queue[@]}"
+  play "$here/verify.yml" "${queue[@]}"
+  expect_ran_on_worker worker-1
+  migrations_before="$(sql 'SELECT count(*) FROM migrations')"
+  play_killed interrupted-queue "grep -qF 'n8n:$version' $dir/compose.yaml" -vvv "${queue[@]}"
+  expect_no_secrets interrupted-queue
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  [ -n "$backup" ] || fail "the killed update left no marker with a backup: $(hx cat "$progress" 2>&1)"
+  note_untouched
+  play_fails queue-refused "$here/converge.yml" -vvv "${queue[@]}"
+  expect_interrupted_refusal queue-refused "$backup"
+  expect_no_secrets queue-refused
+  expect_untouched queue-refused
+  expect_restored queue-restore "${queue[@]}"
+  [ "$(service worker-1)" = "${old_images[0]} running healthy" ] || fail "worker-1 after the restore: $(service worker-1)"
+  expect_services db n8n redis worker-1
+  expect_ran_on_worker worker-1
+
+  echo "== an update killed during its backup must be cleaned up and done by the next run"
+  play_killed interrupted-backup "ls -d $backups/*.partial" -v "${queue[@]}"
+  expect_no_secrets interrupted-backup
+  hx grep -qx "step: backup" "$progress" || fail "the marker does not record the step backup: $(hx cat "$progress")"
+  # The variable is refused for it, naming why, and nothing is cleaned up.
+  play_fails backup-restore "$here/converge.yml" -e n8n_restore_interrupted=true "${queue[@]}"
+  expect_in_log backup-restore "n8n_restore_interrupted is set, but there is no interrupted update in $dir; remove the variable"
+  expect_in_log backup-restore "records an update that stopped during its backup"
+  hx test -e "$progress" || fail "the refused run removed the marker of the update stopped during its backup"
+  converge -v "${queue[@]}"
+  expect_no_secrets converge
+  grep -q "update.yml" "$out/converge.log" || fail "the run after the interrupted backup was not an update"
+  [ "$(service n8n)" = "${images[0]} running healthy" ] || fail "n8n after the update: $(service n8n)"
+  [ "$(service worker-1)" = "${images[0]} running healthy" ] || fail "worker-1 after the update: $(service worker-1)"
+  if hx sh -c "ls -d $backups/*.partial" >/dev/null 2>&1; then
+    fail "the update left a partial backup: $(hx ls "$backups")"
+  fi
+  expect_no_progress "after the update"
+  wait_healthy
+  expect_workflow_active
+  expect_ran_on_worker worker-1
+  expect_idempotent "${queue[@]}"
+
+  echo "== the copy of the compose file left without its marker must be removed"
+  hx sh -c "umask 077; echo stale >$progress_compose"
+  converge -v "${queue[@]}"
+  expect_no_secrets converge
+  expect_no_progress "after a run that found a copy without a marker"
+
+  echo "== a restore of an interrupted update that fails must record a failed rollback"
+  # The installed release under a name that is then untagged: the restore
+  # cannot start it again (no such registry), after the database was
+  # recreated and loaded. The newer release is busybox under that name.
+  new_pin=2.99.0
+  hx docker tag "${images[0]}" "test.invalid/n8n:$version"
+  hx docker tag "$busybox" "test.invalid/n8n:$new_pin"
+  converge -e "n8n_version=$version" -e n8n_image=test.invalid/n8n "${queue[@]}"
+  play_killed interrupted-failing "grep -qF 'test.invalid/n8n:$new_pin' $dir/compose.yaml" -v \
+    -e "n8n_version=$new_pin" -e n8n_image=test.invalid/n8n "${queue[@]}"
+  expect_no_secrets interrupted-failing
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  [ -n "$backup" ] || fail "the killed update left no marker with a backup: $(hx cat "$progress" 2>&1)"
+  hx docker rmi "test.invalid/n8n:$version" >/dev/null
+  play_fails restore-failed "$here/converge.yml" -vvv -e "n8n_version=$new_pin" -e n8n_image=test.invalid/n8n \
+    -e n8n_restore_interrupted=true -e n8n_health_timeout=60 "${queue[@]}"
+  expect_in_log restore-failed "Restoring n8n $version in $dir from the backup $backup after the interrupted update to $new_pin failed"
+  expect_in_log restore-failed "Roll back by hand in $dir"
+  expect_no_secrets restore-failed
+  hx grep -qx "failed_version: $new_pin" "$marker" || fail "the marker does not name $new_pin: $(hx cat "$marker" 2>&1)"
+  hx grep -qx "rolled_back_to: null" "$marker" || fail "the marker does not record a failed rollback: $(hx cat "$marker")"
+  hx grep -qx "backup: $backup" "$marker" || fail "the marker does not name the backup $backup: $(hx cat "$marker")"
+  hx grep -q "^restore_error: ." "$marker" || fail "the marker records no restore error: $(hx cat "$marker")"
+  expect_no_progress "after the failed restore"
+  note_untouched
+  play_fails restore-failed-blocked "$here/converge.yml" -e "n8n_version=$new_pin" -e n8n_image=test.invalid/n8n "${queue[@]}"
+  expect_in_log restore-failed-blocked "$marker exists: the n8n update to $new_pin failed"
+  expect_in_log restore-failed-blocked "The role refuses every version"
+  expect_untouched restore-failed-blocked
+}
+
 test_missing_data() {
   echo "== a missing data volume must be refused in every state and nothing created"
   new_host
@@ -986,10 +1257,10 @@ test_mountpoint() {
 
 # All scenarios by default; NOIXDEV_INFRA_N8N_TESTS="refusals router" runs
 # only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update queue_update failed_update missing_data mountpoint}; do
+for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update queue_update failed_update interrupted missing_data mountpoint}; do
   case "$scenario" in
-    refusals | install | router | queue | update | queue_update | failed_update | missing_data | mountpoint) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, queue_update, failed_update, missing_data, mountpoint)" ;;
+    refusals | install | router | queue | update | queue_update | failed_update | interrupted | missing_data | mountpoint) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, queue_update, failed_update, interrupted, missing_data, mountpoint)" ;;
   esac
 done
 

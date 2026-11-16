@@ -91,3 +91,11 @@ n8n_health_timeout: 300
 # and its database; a failed update may fail fast, while the previous
 # version's start must not be cut short.
 n8n_rollback_timeout: "{{ n8n_health_timeout }}"
+
+# For one run, after an update that did not finish (a run that stopped after
+# its backup leaves n8n_dir/update-in-progress, and every later run
+# refuses): true restores the backup from before it, with the compose file it
+# replaced, and ends the run; the next run without it tries the update
+# again. Refused without such an update; remove it after the run. Removing
+# update-in-progress instead keeps n8n as it is.
+n8n_restore_interrupted: false

@@ -17,6 +17,22 @@ n8n_marker_file: "{{ n8n_dir }}/update-failed"
 # Written before an install creates anything in n8n_data_dir and removed once
 # n8n is healthy; while it exists every run refuses.
 n8n_install_marker: "{{ n8n_dir }}/install-incomplete"
+# Written by update.yml before the first change of an update (step backup),
+# rewritten once the backup is complete (step update, with the backup) and
+# removed once the update is healthy or rolled back; a run that stopped in
+# between (a dropped SSH session, a reboot) leaves it for the next one
+# (state.yml). YAML with from_version, to_version, step, backup and time;
+# root, mode 0600.
+n8n_update_marker: "{{ n8n_dir }}/update-in-progress"
+# Its copy of the compose file the update replaces (it holds the encryption
+# key and the passwords), for a restore with n8n_restore_interrupted. Root,
+# mode 0600.
+n8n_update_marker_compose: "{{ n8n_dir }}/update-in-progress.compose.yaml"
+# In the order they are removed: the marker last, so that a run stopped in
+# between leaves it.
+n8n_update_marker_files:
+  - "{{ n8n_update_marker_compose }}"
+  - "{{ n8n_update_marker }}"
 # The sha256 of the encryption key the installation was made with, written
 # on install (mode 0600).
 n8n_key_fingerprint_file: "{{ n8n_dir }}/encryption-key.sha256"

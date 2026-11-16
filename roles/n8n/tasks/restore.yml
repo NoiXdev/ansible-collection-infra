@@ -1,13 +1,15 @@
 ---
 # Rolls a failed update back to n8n_backup: the stack stopped, the compose
 # file put back as it was before the run, the database recreated empty and
-# loaded from the dump, the n8n home moved aside to <backup>-failed and the
-# copy put back, then the previous stack started and checked with health.yml
-# (the services of the previous compose file), both waits bounded by
-# n8n_rollback_timeout. The previous compose file comes first, so the
-# database is restored in the previous database container. Never fails by
-# itself: n8n_healthy says whether n8n is healthy again, n8n_restore_error
-# what failed.
+# loaded from the dump, the n8n home moved aside to <backup>-failed
+# (<backup>-failed-<UTC time> when that exists: a rollback that was stopped,
+# restored again with n8n_restore_interrupted, has put the failed attempt's
+# there already) and the copy put back, then the previous stack started and
+# checked with health.yml (the services of the previous compose file), both
+# waits bounded by n8n_rollback_timeout. The previous compose file comes
+# first, so the database is restored in the previous database container.
+# Never fails by itself: n8n_healthy says whether n8n is healthy again,
+# n8n_restore_error what failed.
 
 - name: Roll back to the backup
   block:
@@ -73,17 +75,22 @@
         chdir: "{{ n8n_dir }}"
       changed_when: true
 
-    # The copy first, so the home is missing only between two renames.
+    # The copy first, so the home is missing only between two renames. A
+    # rollback that was stopped may have moved the home of the failed attempt
+    # to <backup>-failed already; it stays, and the home found now goes to
+    # <backup>-failed-<UTC time>.
     - name: Put the n8n home back
       ansible.builtin.shell:
         cmd: |
           set -eu
           backup={{ n8n_backup | quote }}
           root={{ n8n_data_dir | quote }}
-          mkdir -m 0700 "$backup-failed"
+          aside="$backup-failed"
+          if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+          mkdir -m 0700 "$aside"
           rm -rf "$root/.home.restore"
           cp -a "$backup/home" "$root/.home.restore"
-          mv "$root/home" "$backup-failed/home"
+          mv "$root/home" "$aside/home"
           mv "$root/.home.restore" "$root/home"
       changed_when: true
 

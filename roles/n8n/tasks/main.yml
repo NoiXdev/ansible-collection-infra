@@ -153,7 +153,8 @@
       15 seconds more to stop before Docker kills it.
     quiet: true
 
-# Also refuses after a failed update (its marker), on a downgrade, another
+# Also refuses after a failed update (its marker) and after an update that
+# did not finish (its marker, step update), on a downgrade, another
 # PostgreSQL major and another encryption key.
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
@@ -165,6 +166,94 @@
 - name: Update n8n
   ansible.builtin.include_tasks: update.yml
   when: n8n_state == 'update'
+
+# The run after an update that did not finish, with n8n_restore_interrupted:
+# the compose file from before it (the marker's copy) and the database and the
+# n8n home of its backup put back by restore.yml, as a rollback puts them
+# back, and nothing else of the update. Healthy, the marker goes and the run
+# ends; the next run without the variable tries the update again. Not
+# healthy, update-failed records a failed rollback (rolled_back_to null),
+# which refuses every version.
+- name: Restore the backup of the interrupted update
+  when: n8n_state == 'restore_interrupted'
+  vars:
+    n8n_interrupted_from: "{{ n8n_update_in_progress.from_version | default('?') }}"
+    n8n_interrupted_to: "{{ n8n_update_in_progress.to_version }}"
+  block:
+    - name: Read the compose file from before the interrupted update
+      ansible.builtin.slurp:
+        src: "{{ n8n_update_marker_compose }}"
+      register: n8n_update_marker_compose_read
+      # It holds the encryption key, the passwords and the owner's hash;
+      # state.yml has checked that it exists.
+      no_log: true
+
+    # restore.yml puts it back and checks the services it names (workers
+    # among them), not those of the interrupted update's compose file.
+    - name: Note the compose file and the backup from before the interrupted update
+      ansible.builtin.set_fact:
+        n8n_compose_before: "{{ n8n_update_marker_compose_read.content | b64decode }}"
+        n8n_compose_on_disk: "{{ n8n_update_marker_compose_read.content | b64decode | from_yaml }}"
+        n8n_backup: "{{ n8n_update_in_progress.backup }}"
+      no_log: true
+
+    - name: Roll back to the backup of the interrupted update
+      ansible.builtin.include_tasks: restore.yml
+      vars:
+        n8n_installed_version: "{{ n8n_interrupted_from }}"
+
+    - name: Remove the marker of the restored update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ n8n_update_marker_files }}"
+      when: n8n_healthy
+
+    - name: Report the restore
+      ansible.builtin.debug:
+        msg: >-
+          n8n in {{ n8n_dir }} runs {{ n8n_interrupted_from }} again: the
+          interrupted update to {{ n8n_interrupted_to }} was rolled back to
+          the backup {{ n8n_backup }}. Remove n8n_restore_interrupted; the
+          next run with a newer n8n_version tries the update again.
+      when: n8n_healthy
+
+    # As after a failed rollback: the data is in the backup, and no version
+    # may run over the database the restore left.
+    - name: Write the marker of the failed restore
+      ansible.builtin.copy:
+        dest: "{{ n8n_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.n8n role: the update to
+          # failed_version did not finish, and restoring the backup failed.
+          # The role refuses every version while this file exists.
+          {{ {'failed_version': n8n_interrupted_to,
+              'rolled_back_to': none,
+              'backup': n8n_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'restore_error': n8n_restore_error}
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: not n8n_healthy
+
+    - name: Remove the marker of the update whose restore failed
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ n8n_update_marker_files }}"
+      when: not n8n_healthy
+
+    - name: Fail with the failed restore
+      ansible.builtin.fail:
+        msg: >-
+          Restoring n8n {{ n8n_interrupted_from }} in {{ n8n_dir }} from the
+          backup {{ n8n_backup }} after the interrupted update to
+          {{ n8n_interrupted_to }} failed ({{ n8n_restore_error }}), so n8n may
+          be down. {{ n8n_restore_hint }} {{ n8n_marker_file }} refuses every
+          version; remove it once n8n runs again.
+      when: not n8n_healthy
 
 # A reconfigure keeps the version, so the schema stays and it takes no backup.
 - name: Reconfigure n8n

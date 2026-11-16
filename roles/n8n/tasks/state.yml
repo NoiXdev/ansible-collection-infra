@@ -6,23 +6,40 @@
 #                disk (another n8n_workers among it: queue mode, Valkey and
 #                the workers are services of the compose file)
 #   noop         everything as the role writes it
+#   restore_interrupted
+#                an update that did not finish (n8n_update_marker, step
+#                update) and n8n_restore_interrupted: main.yml restores its
+#                backup and does nothing else
 # Also sets n8n_installed (a compose file exists), n8n_compose_before (the
 # compose file on disk, which a rollback puts back), n8n_compose_on_disk (it
 # parsed, which n8n_installed_version reads), n8n_marker_read and n8n_marker
-# (the marker of a failed update), n8n_owner_password_hash (the owner's
-# bcrypt hash, which the compose file holds), n8n_data_present (the
+# (the marker of a failed update), n8n_update_in_progress (the marker of an
+# update that did not finish parsed, empty without one),
+# n8n_owner_password_hash (the owner's bcrypt hash, which the compose file
+# holds; not made for a restore of an interrupted update, which writes no
+# compose file of its own), n8n_data_present (the
 # subdirectories of n8n_data_subdirs that exist) and n8n_down (the expected
 # services that are not running). Refuses, before any change: first an
 # n8n_data_dir that is not a mountpoint (with n8n_data_dir_mountpoint) and an
 # installation without its data subdirectories (an unmounted volume); then a
 # marker of a failed update (one of a failed rollback refuses every version,
 # one of a rollback that worked the failed version), then a compose file that
-# is not YAML, an install that did not complete (its marker), a compose file
-# without an n8n version, a downgrade, an encryption key whose sha256 is not
+# is not YAML, an install that did not complete (its marker), an update that
+# did not finish (n8n_update_marker with step update, read into
+# n8n_update_in_progress; without n8n_restore_interrupted, or with it but
+# without the copy of the compose file or the dump), a marker of it the role
+# did not write, n8n_restore_interrupted without an update to restore, a
+# compose file without an n8n version, a downgrade (not for a restore), an
+# encryption key whose sha256 is not
 # the installation's fingerprint (or no fingerprint), an n8n_db_password
 # that the database does not take, and a PostgreSQL major other than the
-# database's. The only change it can make is pulling the pinned n8n image on
-# a host without an n8n container, which the owner's hash is made with.
+# database's. The only changes it can make are pulling the pinned n8n image on
+# a host without an n8n container, which the owner's hash is made with, and
+# removing what an interrupted update left that nothing needs: a marker of an
+# update in progress beside update-failed (the rollback ran), and, after every
+# refusal, the partial backup and the marker of an update stopped during its
+# backup (the compose file is as before it), or the copy of a marker that was
+# removed by hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -94,6 +111,47 @@
     src: "{{ n8n_marker_file }}"
   register: n8n_marker_read
   failed_when: false
+
+# Left by a run that stopped during an update (update.yml). Not secret: the
+# versions, the step, the backup and the time.
+- name: Read the marker of an update in progress
+  ansible.builtin.slurp:
+    src: "{{ n8n_update_marker }}"
+  register: n8n_update_marker_read
+  failed_when: false
+
+# Beside update-failed, the rescue of the update wrote that marker and was
+# stopped before it removed this one: the rollback ran, and update-failed
+# decides below.
+- name: Remove the marker of an update in progress beside a failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ n8n_update_marker_files }}"
+  when:
+    - n8n_update_marker_read.content is defined
+    - n8n_marker_read.content is defined
+
+- name: Note that no update is in progress
+  ansible.builtin.set_fact:
+    n8n_update_in_progress: {}
+
+# A marker that is not YAML parses to nothing and is refused below. It holds
+# no secret: the copy of the compose file is never read here.
+- name: Check the marker of an update in progress
+  when:
+    - n8n_update_marker_read.content is defined
+    - n8n_marker_read.content is not defined
+  block:
+    - name: Parse the marker of the update in progress
+      ansible.builtin.set_fact:
+        n8n_update_in_progress: "{{ n8n_update_marker_yaml if n8n_update_marker_yaml is mapping else {'step': none} }}"
+      vars:
+        n8n_update_marker_yaml: "{{ n8n_update_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Note a marker that is not YAML
+      ansible.builtin.set_fact:
+        n8n_update_in_progress: {step: null}
 
 # A marker that is not YAML cannot say which version failed.
 - name: Check the marker of a failed update
@@ -188,6 +246,93 @@
       nothing. {{ n8n_install_hint }}
   when: n8n_install_marker_stat.stat.exists
 
+- name: Refuse a marker of an update in progress the role did not write
+  ansible.builtin.fail:
+    msg: >-
+      {{ n8n_update_marker }} exists, but it is not YAML or lacks step or
+      to_version (or, with step update, backup), so the role cannot tell how
+      far the n8n update in {{ n8n_dir }} got and changes nothing. Check n8n,
+      then remove it with its copy (rm
+      {{ n8n_update_marker_files | join(' ') }}).
+  when:
+    - n8n_update_in_progress | length > 0
+    - >-
+      n8n_update_in_progress.step | default(none) not in ['backup', 'update']
+      or not n8n_update_in_progress.to_version | default('', true) | string is match('^\d+\.\d+\.\d+$')
+      or (n8n_update_in_progress.step == 'update'
+          and not n8n_update_in_progress.backup | default('', true) | string is match('^/'))
+
+# Step update: the compose file may name the new version, the database may be
+# migrated or half migrated, and n8n may run either version or neither.
+# Rolling back on its own would lose what changed since, if the update had in
+# fact finished and only the marker's removal was lost; the operator decides.
+- name: Refuse to run after an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      {{ n8n_update_marker }} exists: the n8n update from
+      {{ n8n_update_in_progress.from_version | default('?') }} to
+      {{ n8n_update_in_progress.to_version }} did not finish (the run that
+      started it on {{ n8n_update_in_progress.time | default('?') }}
+      stopped after its backup), and the backup from before it is
+      {{ n8n_update_in_progress.backup }}. n8n in {{ n8n_dir }}
+      may run either version or neither, with a database the new version may
+      have migrated; the role changes nothing. To go back to
+      {{ n8n_update_in_progress.from_version | default('?') }},
+      set n8n_restore_interrupted: true for one run to restore it (the
+      compose file from before the update, and the database and the n8n home
+      from the backup), or remove {{ n8n_update_marker }} to keep n8n as it
+      is now, then check it and run the role again.
+  when:
+    - n8n_update_in_progress.step | default(none) == 'update'
+    - not n8n_restore_interrupted | bool
+
+- name: Look for what the restore of the interrupted update needs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    get_checksum: false
+  loop:
+    - "{{ n8n_update_marker_compose }}"
+    - "{{ n8n_update_in_progress.backup | default('') }}/n8n.dump"
+  register: n8n_restore_needs
+  when:
+    - n8n_update_in_progress.step | default(none) == 'update'
+    - n8n_restore_interrupted | bool
+
+- name: Refuse a restore without the copy of the compose file or the dump
+  ansible.builtin.fail:
+    msg: >-
+      n8n_restore_interrupted is set to restore the backup
+      {{ n8n_update_in_progress.backup }} of the interrupted n8n update
+      from {{ n8n_update_in_progress.from_version | default('?') }} to
+      {{ n8n_update_in_progress.to_version }}, but
+      {{ n8n_restore_missing | join(' and ') }}
+      {{ 'is' if n8n_restore_missing | length == 1 else 'are' }} missing,
+      so the role cannot restore it and changes nothing.
+      {{ n8n_restore_hint }} Then remove {{ n8n_update_marker }} and
+      run the role again without the variable.
+  vars:
+    n8n_backup: "{{ n8n_update_in_progress.backup }}"
+    n8n_restore_missing: >-
+      {{ n8n_restore_needs.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+  when:
+    - n8n_update_in_progress.step | default(none) == 'update'
+    - n8n_restore_interrupted | bool
+    - n8n_restore_missing | length > 0
+
+# A variable left set must never turn a later interruption into a rollback
+# of its own. An update stopped during its backup changed nothing to restore.
+- name: Refuse n8n_restore_interrupted without an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      n8n_restore_interrupted is set, but there is no interrupted update in
+      {{ n8n_dir }}; remove the variable{{ (' (' ~ n8n_update_marker
+      ~ ' records an update that stopped during its backup, before anything changed;'
+      ~ ' the next run without the variable cleans it up and updates)')
+      if n8n_update_in_progress.step | default(none) == 'backup' else '' }}.
+  when:
+    - n8n_restore_interrupted | bool
+    - n8n_update_in_progress.step | default(none) != 'update'
+
 - name: Check the installed version
   when: n8n_installed
   block:
@@ -208,7 +353,10 @@
           {{ n8n_installed_version }} in {{ n8n_dir }}; the role refuses to
           downgrade, n8n cannot migrate its database down, and changes
           nothing. Set n8n_version to {{ n8n_installed_version }} or newer.
-      when: n8n_version is version(n8n_installed_version, '<')
+      # A restore puts the previous compose file back, whatever n8n_version is.
+      when:
+        - n8n_version is version(n8n_installed_version, '<')
+        - n8n_update_in_progress.step | default(none) != 'update'
 
 # n8n encrypts the credentials in the database with the key: with another
 # one it cannot decrypt them, and the next start can make that permanent.
@@ -382,88 +530,94 @@
     - n8n_pg_version_read.results | length == 1
     - n8n_postgres_major != n8n_pg_major
 
-# The owner's hash is made in an n8n image (n8n_owner_hash_script): the one
-# the installed n8n container runs, which is on the host and known to work,
-# so that an update makes it before anything changes (update.yml checks the
-# new image once it runs). Without a container (a fresh install), the pinned
-# image, pulled when the host lacks it. bcrypt with the same salt gives the
-# same hash in either.
-- name: Find the n8n container
-  ansible.builtin.command:
-    argv:
-      - docker
-      - ps
-      - --all
-      - --quiet
-      - --filter
-      - label=com.docker.compose.project={{ n8n_project }}
-      - --filter
-      - label=com.docker.compose.service=n8n
-  register: n8n_container
-  changed_when: false
-  when: n8n_installed
+# A restore of an interrupted update writes the compose file of its copy, not
+# this run's, so it needs no hash (and the n8n container may be one of the
+# interrupted update's that cannot make it).
+- name: Prepare the owner's password hash
+  when: n8n_update_in_progress.step | default(none) != 'update'
+  block:
+    # The owner's hash is made in an n8n image (n8n_owner_hash_script): the one
+    # the installed n8n container runs, which is on the host and known to work,
+    # so that an update makes it before anything changes (update.yml checks the
+    # new image once it runs). Without a container (a fresh install), the pinned
+    # image, pulled when the host lacks it. bcrypt with the same salt gives the
+    # same hash in either.
+    - name: Find the n8n container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --all
+          - --quiet
+          - --filter
+          - label=com.docker.compose.project={{ n8n_project }}
+          - --filter
+          - label=com.docker.compose.service=n8n
+      register: n8n_container
+      changed_when: false
+      when: n8n_installed
 
-- name: Read the image of the n8n container
-  ansible.builtin.command:
-    argv: [docker, inspect, --format, "{{ '{{.Image}}' }}", "{{ n8n_container.stdout_lines | first }}"]
-  register: n8n_container_image
-  changed_when: false
-  when: n8n_container.stdout_lines | default([]) | length > 0
+    - name: Read the image of the n8n container
+      ansible.builtin.command:
+        argv: [docker, inspect, --format, "{{ '{{.Image}}' }}", "{{ n8n_container.stdout_lines | first }}"]
+      register: n8n_container_image
+      changed_when: false
+      when: n8n_container.stdout_lines | default([]) | length > 0
 
-- name: Note the image the owner's hash is made in
-  ansible.builtin.set_fact:
-    n8n_hash_image: >-
-      {{ n8n_container_image.stdout
-         if n8n_container_image.stdout | default('') | length > 0
-         else n8n_image ~ ':' ~ n8n_version }}
+    - name: Note the image the owner's hash is made in
+      ansible.builtin.set_fact:
+        n8n_hash_image: >-
+          {{ n8n_container_image.stdout
+             if n8n_container_image.stdout | default('') | length > 0
+             else n8n_image ~ ':' ~ n8n_version }}
 
-- name: Look for the n8n image
-  ansible.builtin.command:
-    argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ n8n_hash_image }}"]
-  register: n8n_image_inspect
-  changed_when: false
-  failed_when: false
+    - name: Look for the n8n image
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ n8n_hash_image }}"]
+      register: n8n_image_inspect
+      changed_when: false
+      failed_when: false
 
-- name: Pull the n8n image
-  ansible.builtin.command:
-    argv: [docker, pull, --quiet, "{{ n8n_hash_image }}"]
-  changed_when: true
-  when: n8n_image_inspect.rc != 0
+    - name: Pull the n8n image
+      ansible.builtin.command:
+        argv: [docker, pull, --quiet, "{{ n8n_hash_image }}"]
+      changed_when: true
+      when: n8n_image_inspect.rc != 0
 
-# The key and the password go through stdin, never a command line, and the
-# task is no_log; the container has no network. The next task fails with the
-# error.
-- name: Make the owner's password hash
-  ansible.builtin.command:
-    argv:
-      - docker
-      - run
-      - --rm
-      - --interactive
-      - --pull=never
-      - --network=none
-      - --entrypoint=node
-      - "{{ n8n_hash_image }}"
-      - --eval
-      - "{{ n8n_owner_hash_script }}"
-    stdin: "{{ {'key': n8n_encryption_key | string, 'password': n8n_owner_password | string} | to_json }}"
-    stdin_add_newline: false
-  register: n8n_hidden
-  changed_when: false
-  failed_when: false
-  no_log: true
+    # The key and the password go through stdin, never a command line, and the
+    # task is no_log; the container has no network. The next task fails with the
+    # error.
+    - name: Make the owner's password hash
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --interactive
+          - --pull=never
+          - --network=none
+          - --entrypoint=node
+          - "{{ n8n_hash_image }}"
+          - --eval
+          - "{{ n8n_owner_hash_script }}"
+        stdin: "{{ {'key': n8n_encryption_key | string, 'password': n8n_owner_password | string} | to_json }}"
+        stdin_add_newline: false
+      register: n8n_hidden
+      changed_when: false
+      failed_when: false
+      no_log: true
 
-- name: Fail when the owner's password hash was not made
-  ansible.builtin.fail:
-    msg: >-
-      The owner's password hash could not be made in {{ n8n_hash_image }}
-      ({{ n8n_hidden_error }}). The role changes nothing.
-  when: n8n_hidden.rc != 0 or n8n_hidden.stdout is not match('^\$2b\$10\$[./A-Za-z0-9]{53}$')
+    - name: Fail when the owner's password hash was not made
+      ansible.builtin.fail:
+        msg: >-
+          The owner's password hash could not be made in {{ n8n_hash_image }}
+          ({{ n8n_hidden_error }}). The role changes nothing.
+      when: n8n_hidden.rc != 0 or n8n_hidden.stdout is not match('^\$2b\$10\$[./A-Za-z0-9]{53}$')
 
-- name: Note the owner's password hash
-  ansible.builtin.set_fact:
-    n8n_owner_password_hash: "{{ n8n_hidden.stdout }}"
-  no_log: true
+    - name: Note the owner's password hash
+      ansible.builtin.set_fact:
+        n8n_owner_password_hash: "{{ n8n_hidden.stdout }}"
+      no_log: true
 
 - name: Read the services that run
   ansible.builtin.command:
@@ -473,11 +627,43 @@
   changed_when: false
   when: n8n_installed
 
+# After every refusal. Step backup: the compose file and the database are as
+# before the update, and n8n and its workers stopped; the run goes on as any
+# other, which with the same n8n_version tries the update again and starts
+# the stack (a run without changes fails on the stopped containers, as it
+# does for any). A backup being made is below <name>.partial, which only an
+# interrupted backup leaves.
+- name: Find the partial backups of an update stopped during its backup
+  ansible.builtin.find:
+    paths: "{{ n8n_backup_dir }}"
+    file_type: directory
+    patterns: ['^\d{8}T\d{6}Z-\d+\.\d+\.\d+\.partial$']
+    use_regex: true
+  register: n8n_partial_backups
+  when: n8n_update_in_progress.step | default(none) == 'backup'
+
+- name: Remove what an update stopped during its backup left
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (n8n_partial_backups.files | default([]) | map(attribute='path') | sort) + n8n_update_marker_files }}"
+  when: n8n_update_in_progress.step | default(none) == 'backup'
+
+# It holds the secrets: left when the marker was removed by hand, as its
+# refusal offers.
+- name: Remove the copy of an update in progress without its marker
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ n8n_update_marker_files | difference([n8n_update_marker]) }}"
+  when: n8n_update_marker_read.content is not defined
+
 - name: Decide what to do
   ansible.builtin.set_fact:
     n8n_down: "{{ n8n_services | difference(n8n_ps.stdout_lines | default([])) }}"
     n8n_state: >-
-      {{ 'install' if not n8n_installed
+      {{ 'restore_interrupted' if n8n_update_in_progress.step | default(none) == 'update'
+         else 'install' if not n8n_installed
          else 'update' if n8n_version is version(n8n_installed_version, '>')
          else 'reconfigure' if n8n_compose_before != n8n_compose
          else 'noop' }}

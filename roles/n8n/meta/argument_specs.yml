@@ -127,3 +127,10 @@ argument_specs:
         description: >-
           Seconds a rollback after a failed update waits for the previous
           version and its database (default n8n_health_timeout).
+      n8n_restore_interrupted:
+        type: bool
+        description: >-
+          For one run only: after an update that did not finish
+          (n8n_dir/update-in-progress), restore the backup from before it
+          and end the run. Refused when there is no such update; remove it
+          after the run.

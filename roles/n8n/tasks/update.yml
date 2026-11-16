@@ -10,10 +10,23 @@
 # complete removes the partial backup, starts the stack as it was and fails.
 # After it, restore.yml rolls back to the backup, the marker n8n_marker_file
 # names the failed version, and the run fails.
+# From the first change on, n8n_update_marker says how far the update got
+# (step backup, then step update with the backup), with a copy of the compose
+# file it replaces; it is removed once the update is healthy, or after the
+# recovery or the rollback, so that only a run that stopped leaves it.
 
 - name: Update n8n
   vars:
     n8n_new_image: "{{ n8n_image }}:{{ n8n_version }}"
+    n8n_update_marker_content: |
+      # Written by the noixdev.infra.n8n role while it updates n8n, and
+      # removed once the update is healthy or rolled back. A run that finds
+      # it with step update refuses until it is removed or
+      # n8n_restore_interrupted restores the backup.
+      {{ {'from_version': n8n_installed_version, 'to_version': n8n_version, 'step': n8n_update_step}
+         | combine({'backup': n8n_backup} if n8n_update_step == 'update' else {})
+         | combine({'time': n8n_update_started})
+         | to_nice_yaml(sort_keys=false) }}
   block:
     - name: Look for the image of n8n {{ n8n_version }}
       ansible.builtin.command:
@@ -28,6 +41,33 @@
       changed_when: true
       when: n8n_new_image_local.rc != 0
 
+    - name: Note when the update starts
+      ansible.builtin.set_fact:
+        n8n_update_started: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    # Right before the first change. The marker first: a run stopped before
+    # the copy is written leaves the marker, which the next run cleans up
+    # with it, but never a copy without a marker.
+    - name: Write the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ n8n_update_marker }}"
+        content: "{{ n8n_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        n8n_update_step: backup
+
+    - name: Keep the compose file from before the update
+      ansible.builtin.copy:
+        dest: "{{ n8n_update_marker_compose }}"
+        content: "{{ n8n_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the encryption key, the passwords and the owner's hash.
+      no_log: true
+
     # Nothing writes to the database or the home during the backup. The
     # services of the compose file on disk: the workers that run now, which
     # a new n8n_workers may change. Valkey holds no data and keeps running.
@@ -41,6 +81,18 @@
 
     - name: Back up the database and the home
       ansible.builtin.include_tasks: snapshot.yml
+
+    # From here on the compose file and the database change; the backup holds
+    # them as they were.
+    - name: Note the backup in the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ n8n_update_marker }}"
+        content: "{{ n8n_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        n8n_update_step: update
 
     - name: Write the compose file with n8n {{ n8n_version }}
       ansible.builtin.copy:
@@ -123,6 +175,13 @@
               ansible.builtin.set_fact:
                 n8n_restart_error: "{{ n8n_failure | trim }}"
 
+        # Nothing but the partial backup had changed.
+        - name: Remove the marker of the update that failed before the backup
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ n8n_update_marker_files }}"
+
         - name: Fail when the update failed before the backup
           ansible.builtin.fail:
             msg: >-
@@ -157,6 +216,15 @@
         group: root
         mode: "0644"
 
+    # After update-failed: a run stopped before leaves this marker, and the
+    # next one refuses as for an update that did not finish; one stopped
+    # after leaves both, and the next one removes this one.
+    - name: Remove the marker of the rolled back update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ n8n_update_marker_files }}"
+
     - name: Fail with the rollback
       ansible.builtin.fail:
         msg: >-
@@ -179,6 +247,14 @@
           ({{ n8n_restore_error }}), so n8n may be down.
           {{ n8n_restore_hint }} {{ n8n_marker_file }} stops further updates
           to {{ n8n_version }}; remove it once n8n runs again.
+
+# Only after a successful update (the rescue always fails), and outside the
+# block, so that nothing after the health check can roll it back.
+- name: Remove the marker of the update in progress
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ n8n_update_marker_files }}"
 
 # Only after a successful update; the names start with the time, so they
 # sort by age. <backup>-failed directories of rolled back updates stay.
