@@ -25,18 +25,19 @@
 # a compose file, an update that did not finish (tandoor_update_marker with
 # step update, read into tandoor_update_in_progress; without
 # tandoor_restore_interrupted, or with it but without the copy of the compose
-# file or the dump), a marker of it the role did not write, a marker of a
-# failed update (tandoor_marker_read and tandoor_marker; one of a failed
-# rollback refuses every version, one of a rollback that worked the failed
-# version), tandoor_restore_interrupted without an update to restore, a
-# change between local media and S3, a compose file without a Tandoor
-# version, a downgrade (not for a restore), a tandoor_db_password that the
-# database does not take, and a PostgreSQL major other than the database's.
-# Changes only what an interrupted update left that nothing needs: a marker
-# of an update in progress beside update-failed (the rollback ran), and,
-# after every refusal, the partial backup and the marker of an update stopped
-# during its backup (the files are as before it), or the copies of a marker
-# that was removed by hand.
+# file, with S3 of the secret file, or the dump), a marker of it the role did
+# not write, a marker of a failed update (tandoor_marker_read and
+# tandoor_marker; one of a failed rollback refuses every version, one of a
+# rollback that worked the failed version), tandoor_restore_interrupted
+# without an update to restore, a change between local media and S3, a
+# compose file without a Tandoor version, a downgrade (not for a restore), a
+# tandoor_db_password that the database does not take, and a PostgreSQL major
+# other than the database's. Changes only what an interrupted update left
+# that nothing needs: a marker of an update in progress beside update-failed
+# of the same backup (the rollback ran), and, after every refusal, the
+# partial backup and the marker of an update stopped during its backup (the
+# files are as before it), or the copies of a marker that was removed by
+# hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -172,28 +173,15 @@
   register: tandoor_update_marker_read
   failed_when: false
 
-# Beside update-failed, the rescue of the update wrote that marker and was
-# stopped before it removed this one: the rollback ran, and update-failed
-# decides below.
-- name: Remove the marker of an update in progress beside a failed update
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop: "{{ tandoor_update_marker_files }}"
-  when:
-    - tandoor_update_marker_read.content is defined
-    - tandoor_marker_read.content is defined
-
 - name: Note that no update is in progress
   ansible.builtin.set_fact:
     tandoor_update_in_progress: {}
+    tandoor_update_rolled_back: false
 
 # A marker that is not YAML parses to nothing and is refused below. It holds
 # no secret: the copy of the compose file is never read here.
 - name: Check the marker of an update in progress
-  when:
-    - tandoor_update_marker_read.content is defined
-    - tandoor_marker_read.content is not defined
+  when: tandoor_update_marker_read.content is defined
   block:
     - name: Parse the marker of the update in progress
       ansible.builtin.set_fact:
@@ -204,6 +192,45 @@
     - name: Note a marker that is not YAML
       ansible.builtin.set_fact:
         tandoor_update_in_progress: {step: null}
+
+# update-failed of the same backup (both take it from tandoor_backup) was
+# written by the rescue of this update, or by the failed restore of it, which
+# was stopped before it removed this marker: the rollback ran, and
+# update-failed decides below. An update-failed of another backup is left
+# from an earlier update that was rolled back (it stays through updates to
+# other versions), so this marker is checked as without one. So is a marker
+# with step backup, whoever wrote update-failed: the files are as before the
+# update, and it is cleaned up as without update-failed.
+- name: Check whether update-failed records the update in progress
+  when:
+    - tandoor_update_in_progress.step | default(none) == 'update'
+    - tandoor_marker_read.content is defined
+  block:
+    - name: Compare the backups of the two markers
+      ansible.builtin.set_fact:
+        tandoor_update_rolled_back: >-
+          {{ tandoor_failed_yaml is mapping
+             and tandoor_update_in_progress.backup | default('', true) | string is match('^/')
+             and (tandoor_failed_yaml.backup | default('', true) | string) == (tandoor_update_in_progress.backup | string) }}
+      vars:
+        tandoor_failed_yaml: "{{ tandoor_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    # Refused below.
+    - name: Note a marker of a failed update that is not YAML
+      ansible.builtin.set_fact:
+        tandoor_update_rolled_back: false
+
+- name: Remove the marker of an update in progress beside its failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ tandoor_update_marker_files }}"
+  when: tandoor_update_rolled_back | bool
+
+- name: Note that the rolled back update is not in progress
+  ansible.builtin.set_fact:
+    tandoor_update_in_progress: {}
+  when: tandoor_update_rolled_back | bool
 
 - name: Refuse a marker of an update in progress the role did not write
   ansible.builtin.fail:
@@ -250,15 +277,17 @@
   ansible.builtin.stat:
     path: "{{ item }}"
     get_checksum: false
-  loop:
-    - "{{ tandoor_update_marker_compose }}"
-    - "{{ tandoor_update_in_progress.backup | default('') }}/tandoor.dump"
+  # With S3, the copy of the secret file too: without it the restore would
+  # keep a rotated key beside the previous compose file.
+  loop: >-
+    {{ [tandoor_update_marker_compose, (tandoor_update_in_progress.backup | default('')) ~ '/tandoor.dump']
+       + ([tandoor_update_marker_s3_secret] if tandoor_s3_enabled | bool else []) }}
   register: tandoor_restore_needs
   when:
     - tandoor_update_in_progress.step | default(none) == 'update'
     - tandoor_restore_interrupted | bool
 
-- name: Refuse a restore without the copy of the compose file or the dump
+- name: Refuse a restore without the copies of the files or the dump
   ansible.builtin.fail:
     msg: >-
       tandoor_restore_interrupted is set to restore the backup

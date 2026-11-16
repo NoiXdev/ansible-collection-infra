@@ -277,9 +277,11 @@
   the update (and ends without trying the update again; the next run does), or the marker is
   removed to keep Tandoor as it is. A restore that fails writes `update-failed` as a failed rollback
   does. The variable is refused without an interrupted update, a marker that is not YAML or lacks
-  its keys is refused, and a marker beside `update-failed` (a rollback that stopped after it wrote
-  that) is removed, `update-failed` deciding. A rollback restored again keeps the media of the
-  failed attempt in `<backup>-failed` and sets the newer ones aside in `<backup>-failed-<time>`.
+  its keys is refused, and a marker beside `update-failed` of the same backup (a rollback that
+  stopped after it wrote that) is removed, `update-failed` deciding; beside an `update-failed` of
+  another backup (an earlier update that was rolled back) it is handled as without one. A rollback
+  restored again keeps the media of the failed attempt in `<backup>-failed` and sets the newer
+  ones aside in `<backup>-failed-<time>`.
 - `n8n`: new role that runs n8n 2 (`n8n_version`, pinned, major 2 and 2.17.0 or newer) and
   PostgreSQL 18 or newer as one compose project in `n8n_dir` (default `/opt/n8n`), behind Traefik
   with no published port. It needs Docker. `n8n_hostname`, `n8n_encryption_key`, `n8n_db_password`

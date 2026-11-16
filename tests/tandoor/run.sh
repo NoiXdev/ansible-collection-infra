@@ -69,18 +69,20 @@
 #             converges killed (SIGKILL to their process group) at a point of
 #             an update: tandoor_restore_interrupted without an interrupted
 #             update refused; a marker that is not YAML or lacks its keys
-#             refused; a marker beside update-failed removed, update-failed
-#             deciding; killed once the compose file names the new release:
-#             the marker (step update, both versions, the backup, mode 0600)
-#             refuses every run, and tandoor_restore_interrupted restores the
+#             refused; a marker beside update-failed of the same backup
+#             removed, update-failed deciding; killed once the compose file
+#             names the new release: the marker (step update, both versions,
+#             the backup, mode 0600) refuses every run, beside update-failed of
+#             another update too, and tandoor_restore_interrupted restores the
 #             previous release; killed during the rollback of a failed update:
 #             refused and restored the same way; killed during the backup: the
 #             next run cleans up and updates
 #   interrupted_s3
 #             with media in S3, an update that rotates the S3 secret key killed
 #             once the compose file names the new release: the copy of the
-#             secret file (mode 0600) beside the marker, the refusal, and the
-#             restore that puts the previous key back into the web container;
+#             secret file (mode 0600) beside the marker, the refusal, a restore
+#             without that copy refused, and the restore that puts the
+#             previous key back into the web container;
 #             then a restore that fails (the previous image cannot be started):
 #             update-failed records a failed rollback and refuses every
 #             version, and the marker and its copies are gone
@@ -1097,6 +1099,19 @@ test_interrupted() {
   expect_interrupted_refusal interrupted-refused "$backup"
   expect_no_secrets interrupted-refused
   expect_untouched interrupted-refused
+
+  echo "== beside update-failed of another update, the marker of an update in progress must still be refused"
+  # As an earlier update to another version leaves it that was rolled back:
+  # it stays through updates to other versions.
+  hx sh -c "printf 'failed_version: 99.0.0\nrolled_back_to: $old_version\nbackup: $backups/20200101T000000Z-$old_version\ntime: 2020-01-01T00:00:00Z\n' >$marker"
+  markers_before="$(hx sha256sum "$marker" "$progress" "$progress_compose")"
+  play_fails other-update-failed "$here/converge.yml" -vvv
+  expect_interrupted_refusal other-update-failed "$backup"
+  expect_no_secrets other-update-failed
+  expect_untouched other-update-failed
+  [ "$(hx sha256sum "$marker" "$progress" "$progress_compose")" = "$markers_before" ] \
+    || fail "the refused run other-update-failed changed $marker, $progress or $progress_compose"
+  hx rm "$marker"
   expect_restored interrupted-restore
 
   echo "== an update killed during its rollback must be refused until it is restored"
@@ -1162,6 +1177,13 @@ test_interrupted_s3() {
   expect_interrupted_refusal interrupted-s3-refused "$backup"
   expect_no_secrets interrupted-s3-refused
   expect_untouched interrupted-s3-refused
+  # Without the copy of the secret file the restore would keep the rotated key.
+  hx mv "$progress_s3_secret" "$progress_s3_secret.away"
+  play_fails restore-no-s3-copy "$here/converge.yml" -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret" \
+    -e tandoor_restore_interrupted=true
+  expect_in_log restore-no-s3-copy "but $progress_s3_secret is missing, so the role cannot restore it"
+  expect_untouched restore-no-s3-copy
+  hx mv "$progress_s3_secret.away" "$progress_s3_secret"
   expect_restored interrupted-s3-restore -e "@$here/s3.yml"
   [ "$(hx cat "$dir/s3-secret")" = "$s3_secret" ] || fail "the restore did not put the previous key back into $dir/s3-secret"
   expect_container_secret "$s3_secret" "the previous key after the restore"
