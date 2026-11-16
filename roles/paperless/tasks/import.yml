@@ -48,8 +48,8 @@
     - name: Fail when Paperless is not healthy
       ansible.builtin.fail:
         msg: >-
-          Paperless is not healthy within {{ paperless_health_timeout }}
-          seconds ({{ paperless_health_lines | join('; ') }}); see docker
+          Paperless is not healthy {{ paperless_health_within }}
+          ({{ paperless_health_lines | join('; ') }}); see docker
           compose logs in {{ paperless_dir }}
       when: not paperless_healthy
 

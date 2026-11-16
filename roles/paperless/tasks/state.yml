@@ -37,11 +37,12 @@
 # into an installation (no record), of an export outside
 # paperless_export_dir, without a manifest, of another Paperless version,
 # made with a passphrase that is not given, or that paperless_uid cannot
-# read. Changes only what an interrupted update left that nothing needs: a
-# marker of an update in progress beside update-failed of the same backup
-# (the rollback ran), and, after every refusal, the partial backup and the
-# marker of an update stopped during its backup (the files are as before it),
-# or the copies of a marker that was removed by hand.
+# read. Changes only what an interrupted update left that nothing needs,
+# after every refusal of this file: a marker of an update in progress beside
+# update-failed of the same backup (the rollback ran; update-failed decides
+# in main.yml), the partial backup and the marker of an update stopped
+# during its backup (the files are as before it), and the copies of a marker
+# that was removed by hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -158,6 +159,13 @@
   register: paperless_update_marker_read
   failed_when: false
 
+# Whether it exists, which a read that failed does not tell.
+- name: Look for the marker of an update in progress
+  ansible.builtin.stat:
+    path: "{{ paperless_update_marker }}"
+    get_checksum: false
+  register: paperless_update_marker_stat
+
 # Written by update.yml after a failed update; it names the failed version.
 - name: Read the marker of a failed update
   ansible.builtin.slurp:
@@ -180,7 +188,7 @@
       marker that does not apply (rm {{ paperless_update_marker }} and its
       copies, or see the install marker's own hint) and run the role again.
   when:
-    - paperless_update_marker_read.content is defined
+    - paperless_update_marker_stat.stat.exists
     - paperless_install_marker_read.content is defined
 
 - name: Note what the marker is from
@@ -253,8 +261,16 @@
     paperless_update_in_progress: {}
     paperless_update_rolled_back: false
 
-# A marker that is not YAML parses to nothing and is refused below. It holds
-# no secret: the copies are never read here.
+# A marker that is not YAML parses to nothing and is refused below, as is
+# one that exists but cannot be read (a directory). It holds no secret: the
+# copies are never read here.
+- name: Note a marker of an update in progress that cannot be read
+  ansible.builtin.set_fact:
+    paperless_update_in_progress: {step: null}
+  when:
+    - paperless_update_marker_stat.stat.exists
+    - paperless_update_marker_read.content is not defined
+
 - name: Check the marker of an update in progress
   when: paperless_update_marker_read.content is defined
   block:
@@ -271,7 +287,8 @@
 # update-failed of the same backup (both take it from paperless_backup) was
 # written by the rescue of this update, or by the failed restore of it, which
 # was stopped before it removed this marker: the rollback ran, and
-# update-failed decides in main.yml. An update-failed of another backup is
+# update-failed decides in main.yml; the marker goes at the end of this file,
+# once no refusal here stops the run. An update-failed of another backup is
 # left from an earlier update that was rolled back (it stays through updates
 # to other versions), so this marker is checked as without one. So is a
 # marker with step backup, whoever wrote update-failed: the files are as
@@ -294,13 +311,6 @@
     - name: Note a marker of a failed update that is not YAML
       ansible.builtin.set_fact:
         paperless_update_rolled_back: false
-
-- name: Remove the marker of an update in progress beside its failed update
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop: "{{ paperless_update_marker_files }}"
-  when: paperless_update_rolled_back | bool
 
 - name: Note that the rolled back update is not in progress
   ansible.builtin.set_fact:
@@ -734,14 +744,26 @@
   loop: "{{ (paperless_partial_backups.files | default([]) | map(attribute='path') | sort) + paperless_update_marker_files }}"
   when: paperless_update_in_progress.step | default(none) == 'backup'
 
+# After every refusal here, so that a run refused here leaves both markers,
+# and before those of update-failed in main.yml: once it is removed as its
+# refusal says, the next run would take this marker for an update that did
+# not finish.
+- name: Remove the marker of an update in progress beside its failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ paperless_update_marker_files }}"
+  when: paperless_update_rolled_back | bool
+
 # They hold the secrets: left when the marker was removed by hand, as its
-# refusal offers.
+# refusal offers, or by a run stopped while it removed the marker and them.
+# Only without a marker: one that exists but cannot be read is refused above.
 - name: Remove the copies of an update in progress without its marker
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
   loop: "{{ paperless_update_marker_files | difference([paperless_update_marker]) }}"
-  when: paperless_update_marker_read.content is not defined
+  when: not paperless_update_marker_stat.stat.exists
 
 - name: Decide what to do
   ansible.builtin.set_fact:

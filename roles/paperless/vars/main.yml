@@ -50,9 +50,10 @@ paperless_update_marker_copies:
   - path: "{{ paperless_samba_pass_file }}"
     mode: "0600"
     saved: "{{ paperless_update_marker_samba_pass }}"
-# In the order they are removed: the marker last, so that a run stopped in
-# between leaves it.
-paperless_update_marker_files: "{{ paperless_update_marker_copies | map(attribute='saved') | list + [paperless_update_marker] }}"
+# In the order they are removed: the marker first, so that a run stopped in
+# between leaves copies without a marker, which the next run removes
+# (state.yml), and never the marker of a finished update.
+paperless_update_marker_files: "{{ [paperless_update_marker] + paperless_update_marker_copies | map(attribute='saved') | list }}"
 # Written after an import, so a run with the same paperless_import_dir is not
 # a second import.
 paperless_import_record: "{{ paperless_dir }}/imported.yml"
@@ -125,6 +126,11 @@ paperless_services: >-
 paperless_db_check_wait: >-
   {{ [(paperless_health_timeout | int)
       - (now().timestamp() - paperless_health_start | float) | int, 10] | max }}
+# The bound of health.yml in the messages of a failed health check: each
+# database check may end up to 10 seconds after the wait.
+paperless_health_within: >-
+  within {{ paperless_health_timeout }} seconds, at least 10 for each
+  database check
 
 # The files as the role writes them; compared with the ones on disk. none
 # means the file must not exist (Samba off).
@@ -191,6 +197,18 @@ paperless_import_hint: >-
   again.
 
 # After a failed rollback: how to put the backup back by hand.
+# Added to the refusals of update-failed (main.yml) when
+# paperless_restore_interrupted is set, which they come before: the variable
+# does not apply while that marker stands.
+paperless_marker_restore_note: >-
+  {{ ('paperless_restore_interrupted does not apply while ' ~ paperless_marker_file ~ ' exists: '
+      ~ (('deal with it first as said, then run the role again with the variable to restore the'
+          ~ ' interrupted update that ' ~ paperless_update_marker ~ ' records.')
+         if paperless_update_in_progress.step | default(none) == 'update'
+         else ('no interrupted update is left to restore. Remove the variable, deal with '
+               ~ paperless_marker_file ~ ' as said, then run the role again.')))
+     if paperless_restore_interrupted | bool else '' }}
+
 paperless_restore_hint: >-
   Roll back by hand in {{ paperless_dir }}: run docker compose stop
   webserver; recreate the database (docker compose exec -T db psql -U

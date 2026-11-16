@@ -13,7 +13,9 @@
 # From the first change on, paperless_update_marker says how far the update
 # got (step backup, then step update with the backup), with copies of the
 # files it replaces; it is removed once the update is healthy, or after the
-# recovery or the rollback, so that only a run that stopped leaves it.
+# recovery or the rollback, so that only a run that stopped leaves it (the
+# marker before its copies: a run stopped in between leaves only copies,
+# which the next run removes).
 
 - name: Update Paperless
   vars:
@@ -58,19 +60,31 @@
       vars:
         paperless_update_step: backup
 
-    # The ones that exist; a restore removes the others (Samba off).
+    # The ones that exist; a restore removes the others (Samba off). They
+    # hold the secret key and the passwords, so the task is no_log and a
+    # failure gets a message of its own.
     - name: Keep the files from before the update
-      ansible.builtin.copy:
-        dest: "{{ paperless_update_marker_copies | selectattr('path', 'equalto', item.item.path) | map(attribute='saved') | first }}"
-        content: "{{ item.content | b64decode }}"
-        owner: root
-        group: root
-        mode: "0600"
-      loop: "{{ paperless_files_read.results | selectattr('content', 'defined') | list }}"
-      loop_control:
-        label: "{{ item.item.path }}"
-      # They hold the secret key and the passwords.
-      no_log: true
+      block:
+        - name: Keep the files from before the update
+          ansible.builtin.copy:
+            dest: "{{ paperless_update_marker_copies | selectattr('path', 'equalto', item.item.path) | map(attribute='saved') | first }}"
+            content: "{{ item.content | b64decode }}"
+            owner: root
+            group: root
+            mode: "0600"
+          loop: "{{ paperless_files_read.results | selectattr('content', 'defined') | list }}"
+          loop_control:
+            label: "{{ item.item.path }}"
+          no_log: true
+      rescue:
+        - name: Fail on the copies of the files from before the update
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ paperless_update_marker_copies | map(attribute='saved') | join(', ') }},
+              the copies of the files from before the update, failed; the
+              error is not shown, as it can quote the secrets. Check that
+              {{ paperless_dir }} is writable and has space, then run the role
+              again.
 
     # Nothing writes to the database or the files during the backup.
     - name: Stop the webserver and Samba for the update
@@ -94,18 +108,28 @@
       vars:
         paperless_update_step: update
 
+    # They hold the secret key and the passwords, so the task is no_log and
+    # a failure gets a message of its own.
     - name: Write the files with Paperless {{ paperless_version }}
-      ansible.builtin.copy:
-        dest: "{{ item.path }}"
-        content: "{{ item.content }}"
-        owner: root
-        group: root
-        mode: "{{ item.mode }}"
-      loop: "{{ paperless_files | rejectattr('content', 'none') | list }}"
-      loop_control:
-        label: "{{ item.path }}"
-      # They hold the secret key and the passwords.
-      no_log: true
+      block:
+        - name: Write the files with Paperless {{ paperless_version }}
+          ansible.builtin.copy:
+            dest: "{{ item.path }}"
+            content: "{{ item.content }}"
+            owner: root
+            group: root
+            mode: "{{ item.mode }}"
+          loop: "{{ paperless_files | rejectattr('content', 'none') | list }}"
+          loop_control:
+            label: "{{ item.path }}"
+          no_log: true
+      rescue:
+        - name: Fail on the files with Paperless {{ paperless_version }}
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ paperless_files | rejectattr('content', 'none') | map(attribute='path') | join(', ') }}
+              failed; the error is not shown, as it can quote the secrets.
+              Check that {{ paperless_dir }} is writable and has space.
 
     - name: Remove the Samba files
       ansible.builtin.file:
@@ -131,8 +155,8 @@
     - name: Fail when Paperless is not healthy
       ansible.builtin.fail:
         msg: >-
-          Paperless {{ paperless_version }} is not healthy within
-          {{ paperless_health_timeout }} seconds ({{ paperless_health_lines | join('; ') }})
+          Paperless {{ paperless_version }} is not healthy
+          {{ paperless_health_within }} ({{ paperless_health_lines | join('; ') }})
       when: not paperless_healthy
 
   rescue:

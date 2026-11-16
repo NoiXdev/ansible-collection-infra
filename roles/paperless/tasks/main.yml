@@ -137,7 +137,7 @@
       {{ paperless_backup }}. The role refuses every version and changes
       nothing until Paperless is restored. {{ paperless_restore_hint }} Then
       check Paperless (its documents) and remove the marker (rm
-      {{ paperless_marker_file }}).
+      {{ paperless_marker_file }}). {{ paperless_marker_restore_note }}
   vars:
     paperless_backup: "{{ paperless_marker.backup | default('?', true) }}"
   when:
@@ -155,7 +155,7 @@
       {{ paperless_version }} again and changes nothing while the marker
       names it. To try again, remove it (rm {{ paperless_marker_file }}); or
       set paperless_version to another version, and the marker is removed
-      once a run with it succeeds.
+      once a run with it succeeds. {{ paperless_marker_restore_note }}
   when:
     - paperless_marker_read.content is defined
     - (paperless_marker.failed_version | default(paperless_version) | string) == paperless_version
@@ -210,6 +210,21 @@
       register: paperless_files_read
       failed_when: false
       no_log: true
+
+    # Without it restore.yml would remove the compose file as one the
+    # previous version did not have. The error of the read is not shown: it
+    # can quote the file.
+    - name: Fail on the copy of the compose file
+      ansible.builtin.fail:
+        msg: >-
+          Reading {{ paperless_update_marker_compose }}, the copy of the
+          compose file from before the interrupted update, failed. The error
+          is not shown: it can quote the file, which holds the secret key and
+          the passwords. The role changes nothing. Check that it is a file
+          root can read, then run the role again.
+      when: >-
+        paperless_files_read.results | selectattr('item.path', 'equalto', paperless_compose_file)
+        | selectattr('content', 'defined') | list | length == 0
 
     - name: Note the backup from before the interrupted update
       ansible.builtin.set_fact:
@@ -302,7 +317,7 @@
         msg: >-
           Paperless in {{ paperless_dir }} is unhealthy: the webserver and the
           database are not both healthy, or Paperless cannot use its
-          database, within {{ paperless_health_timeout }} seconds
+          database, {{ paperless_health_within }}
           ({{ paperless_health_lines | join('; ') }}). The role restarts
           nothing on a run without changes; see docker compose logs in
           {{ paperless_dir }}.

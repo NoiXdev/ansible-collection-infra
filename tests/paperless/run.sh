@@ -35,17 +35,24 @@
 # healthy) fails with the check within the health timeout. Then the updates
 # that did not finish, with converges killed (SIGKILL to their process group)
 # at a point of an update: paperless_restore_interrupted without an
-# interrupted update refused; a marker that is not YAML or lacks its keys
-# refused; one beside update-failed of the same backup removed, update-failed
-# deciding; one beside an install marker refused naming both files; killed
-# once the compose file names the new release and the Samba files changed:
-# the marker (step update, both versions, the backup, mode 0600) with its
-# copies refuses every run, beside update-failed of another update too, and
-# paperless_restore_interrupted restores the previous release with
-# its document and Samba files; killed during the rollback of a failed
-# update: refused and restored the same way; killed during the backup: the
-# next run cleans up and updates; a restore that fails (the previous image
-# cannot be started) records a failed rollback and refuses every version.
+# interrupted update refused; a marker that is not YAML, lacks its keys or
+# cannot be read (a directory) refused, its copies kept; one beside
+# update-failed of the same backup removed, update-failed deciding (with
+# paperless_restore_interrupted its refusal says the variable does not
+# apply), but kept by a run that another refusal stops; one beside an install
+# marker refused naming both files; killed once the compose file names the
+# new release and the Samba files changed: the marker (step update, both
+# versions, the backup, mode 0600) with its copies refuses every run, beside
+# update-failed of another update too, a copy of the compose file that cannot
+# be read fails the restore with a message of its own, and
+# paperless_restore_interrupted restores the previous release with its
+# document and Samba files after a restore stopped while it put the data and
+# media back, removing that update-failed; killed during the rollback of a
+# failed update: refused and restored the same way; copies that cannot be
+# written fail the update before the backup with a message of their own;
+# killed during the backup: the next run cleans up and updates, removing the
+# marker before its copies; a restore that fails (the previous image cannot
+# be started) records a failed rollback and refuses every version.
 # Then the refusals on an installation: a changed paperless_db_password
 # refused before any change (-vvv), a compose file that is not YAML refused
 # without a line of it in the output (-vvv), and the new password taken once
@@ -519,7 +526,8 @@ test_update() {
   play_fails update-samba "$here/converge.yml"
   grep -q "update.yml" "$out/update-samba.log" || fail "the new version was not an update"
   expect_in_log update-samba "is updated and healthy, but Samba did not start"
-  if grep -qF -- "rolled back" "$out/update-samba.log"; then fail "a Samba that did not start rolled the update back"; fi
+  # The rollback's own message; a task name may hold the words too.
+  if grep -qF -- "failed, rolled back to" "$out/update-samba.log"; then fail "a Samba that did not start rolled the update back"; fi
   hx test ! -e "$marker" || fail "a Samba that did not start wrote the marker: $(hx cat "$marker")"
   [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the update: $(webserver)"
   free_smb_port
@@ -908,6 +916,9 @@ test_db_check() {
   play_fails_within 180 noop-db-down "$here/converge.yml" -v -e "paperless_version=$old_version" -e paperless_health_timeout=30
   hx kill -CONT "$db_pid"
   expect_in_log noop-db-down "Paperless in $dir is unhealthy"
+  # The message says what bounds the check: the health timeout, and at least
+  # 10 seconds for each database check.
+  expect_in_log noop-db-down "within 30 seconds, at least 10 for each database check"
   expect_in_log noop-db-down "database check failed: manage.py migrate --check did not finish within"
   expect_no_secrets noop-db-down
   expect_unchanged noop-db-down
@@ -936,11 +947,30 @@ expect_restored() {
     || { tail -n 60 "$out/$name.log" >&2; fail "the restore $name failed"; }
   expect_no_secrets "$name"
   expect_in_log "$name" "Paperless in $dir runs $old_version again"
-  if grep -q "update.yml" "$out/$name.log"; then fail "the restore $name tried the update again"; fi
+  # The first change of an update to the running Paperless.
+  if grep -qF "Stop the webserver and Samba for the update" "$out/$name.log"; then fail "the restore $name tried the update again"; fi
   [ "$(webserver)" = "${old_images[0]} running healthy" ] || fail "the webserver after the restore $name: $(webserver)"
   expect_document "after the restore $name"
   expect_no_progress "after the restore $name"
   hx grep -qF "paperless-ngx:$old_version" "$dir/compose.yaml" || fail "the compose file does not name $old_version after the restore $name"
+}
+
+# The marker of an update in progress beside update-failed of the same
+# backup, as a rescue leaves them that wrote update-failed and was killed
+# before it removed the marker of the update in progress: both_markers
+# <failed version>.
+both_markers() {
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$progress"
+  hx cp -p "$dir/compose.yaml" "$progress_compose"
+  hx sh -c "printf 'failed_version: $1\nrolled_back_to: $old_version\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$marker"
+}
+# Fails unless the healthy update <name> removed the marker of the update in
+# progress before its copies, so that a run stopped in between leaves no
+# marker of an update that finished.
+expect_marker_removed_first() {
+  local first
+  first="$(awk '/^TASK \[.*: Remove the marker of the update in progress\]/ { on = 1; next } /^TASK \[/ { on = 0 } on && /item=/' "$out/$1.log" | head -n 1)"
+  [[ "$first" == *"(item=$progress)"* ]] || fail "the update $1 did not remove $progress first: ${first:-no removal}"
 }
 
 test_interrupted() {
@@ -969,21 +999,51 @@ test_interrupted() {
   expect_in_log bad-marker-backup "$progress exists, but it is not YAML or lacks step or to_version"
   expect_untouched bad-marker-backup
   hx rm "$progress"
+  # One that cannot be read: refused as well, and its copy stays.
+  hx mkdir "$progress"
+  hx sh -c "umask 077; echo stale >$progress_compose"
+  play_fails unreadable-marker "$here/converge.yml"
+  expect_in_log unreadable-marker "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched unreadable-marker
+  hx test -e "$progress_compose" || fail "the refused run unreadable-marker removed $progress_compose"
+  hx rm -r "$progress" "$progress_compose"
 
   echo "== beside update-failed, the marker of an update in progress must be removed and update-failed decide"
-  # As a rescue leaves them that wrote update-failed and was killed before
-  # it removed the marker of the update in progress.
-  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$progress"
-  hx cp -p "$dir/compose.yaml" "$progress_compose"
-  hx sh -c "printf 'failed_version: $version\nrolled_back_to: $old_version\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$marker"
+  both_markers "$version"
+  # With paperless_restore_interrupted, the variable is refused first (the
+  # rollback ran, so there is nothing to restore), and as a refusal of
+  # state.yml it leaves both markers.
+  markers_before="$(hx sha256sum "$marker" "$progress" "$progress_compose")"
+  play_fails both-markers-restore "$here/converge.yml" -e paperless_restore_interrupted=true
+  expect_in_log both-markers-restore "paperless_restore_interrupted is set, but there is no interrupted update in $dir; remove the variable"
+  expect_untouched both-markers-restore
+  [ "$(hx sha256sum "$marker" "$progress" "$progress_compose")" = "$markers_before" ] \
+    || fail "the refused run both-markers-restore changed $marker, $progress or $progress_compose"
   play_fails both-markers "$here/converge.yml"
   expect_in_log both-markers "$marker exists: the Paperless update to $version failed"
   expect_in_log both-markers "rolled back to $old_version"
+  if grep -qF "paperless_restore_interrupted does not apply" "$out/both-markers.log"; then
+    fail "the refusal both-markers names paperless_restore_interrupted, which is not set"
+  fi
   expect_no_progress "beside update-failed"
   hx test -e "$marker" || fail "the run removed $marker"
   [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run both-markers changed the compose file"
   [ "$(containers)" = "$containers_before" ] || fail "the refused run both-markers created or removed containers"
-  hx rm "$marker"
+  # A run that another refusal stops (here: another PostgreSQL major) keeps
+  # both markers; one that gets past every refusal removes the marker of the
+  # update in progress, and, as it succeeds, update-failed of another version.
+  both_markers 99.0.0
+  markers_before="$(hx sha256sum "$marker" "$progress" "$progress_compose")"
+  play_fails both-markers-refused "$here/converge.yml" -e "paperless_version=$old_version" \
+    -e paperless_postgres_image=docker.io/library/postgres:19
+  expect_in_log both-markers-refused "is PostgreSQL 19, but the database"
+  expect_untouched both-markers-refused
+  [ "$(hx sha256sum "$marker" "$progress" "$progress_compose")" = "$markers_before" ] \
+    || fail "the refused run both-markers-refused changed $marker, $progress or $progress_compose"
+  converge -v -e "paperless_version=$old_version"
+  expect_no_progress "after a run beside update-failed of the same backup"
+  hx test ! -e "$marker" || fail "the successful run kept $marker of another version"
+  expect_idempotent -e "paperless_version=$old_version"
 
   echo "== an update in progress beside an install or import in progress must be refused, naming both files"
   hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$progress"
@@ -1034,8 +1094,42 @@ test_interrupted() {
   expect_untouched other-update-failed
   [ "$(hx sha256sum "$marker" "$progress" "$progress_compose" "$progress_smb_conf" "$progress_samba_pass")" = "$markers_before" ] \
     || fail "the refused run other-update-failed changed $marker, $progress or its copies"
-  hx rm "$marker"
+  # One of another backup that refuses this version: with
+  # paperless_restore_interrupted, it comes first and says to deal with it,
+  # then restore the interrupted update with the variable.
+  hx sh -c "printf 'failed_version: $version\nrolled_back_to: $old_version\nbackup: $backups/20200101T000000Z-$old_version\ntime: 2020-01-01T00:00:00Z\n' >$marker"
+  markers_before="$(hx sha256sum "$marker" "$progress" "$progress_compose")"
+  play_fails other-update-failed-restore "$here/converge.yml" -e paperless_restore_interrupted=true
+  expect_in_log other-update-failed-restore "paperless_restore_interrupted does not apply while $marker exists: deal with it first as said, then run the role again with the variable"
+  expect_untouched other-update-failed-restore
+  [ "$(hx sha256sum "$marker" "$progress" "$progress_compose")" = "$markers_before" ] \
+    || fail "the refused run other-update-failed-restore changed $marker, $progress or $progress_compose"
+  hx sh -c "printf 'failed_version: 99.0.0\nrolled_back_to: $old_version\nbackup: $backups/20200101T000000Z-$old_version\ntime: 2020-01-01T00:00:00Z\n' >$marker"
+  # A copy of the compose file that cannot be read (here: a directory) fails
+  # the restore with a message of its own, before any change.
+  hx mkdir "$dir/copy-dir"
+  play_fails unreadable-copy "$here/converge.yml" -vvv -e paperless_restore_interrupted=true \
+    -e "paperless_update_marker_compose=$dir/copy-dir"
+  expect_in_log unreadable-copy "Reading $dir/copy-dir, the copy of the compose file from before the interrupted update, failed"
+  expect_no_secrets unreadable-copy
+  expect_untouched unreadable-copy
+  hx rmdir "$dir/copy-dir"
+  # As a restore leaves it that was stopped while it put the data and media
+  # back: the webserver stopped, the copies of the backup's made, what was
+  # there set aside, nothing put back yet. The next restore puts them back
+  # all the same.
+  hx sh -c "cd $dir && docker compose stop webserver >/dev/null 2>&1 \
+    && cp -a $backup/data $dir/data/.data.restore && cp -al $backup/media $dir/data/.media.restore \
+    && mkdir -m 0700 $backup-failed $backup-failed/data $backup-failed/media \
+    && find $dir/data/data -mindepth 1 -maxdepth 1 -exec mv {} $backup-failed/data/ \; \
+    && find $dir/data/media -mindepth 1 -maxdepth 1 -exec mv {} $backup-failed/media/ \;"
+  # Beside update-failed of another version, which the healthy restore
+  # removes as any run that succeeds.
   expect_restored interrupted-restore
+  hx test ! -e "$marker" || fail "the restore kept $marker of another version"
+  for d in data media; do
+    hx test ! -e "$dir/data/.$d.restore" || fail "the restore left $dir/data/.$d.restore"
+  done
   hx grep -qx '   server min protocol = SMB2' "$dir/smb.conf" || fail "the restore did not put the Samba configuration back"
 
   echo "== an update killed during its rollback must be refused until it is restored"
@@ -1044,8 +1138,9 @@ test_interrupted() {
     "backup=\$(sed -n 's/^backup: //p' $progress) && [ -n \"\$backup\" ] && [ -e \"\$backup-failed\" ]" \
     -vvv -e paperless_image=test.invalid/paperless-ngx -e paperless_health_timeout=30
   expect_no_secrets interrupted-rollback
-  # The first run without the variable after the restore tried the update to
-  # $version again.
+  # The killed run was the first one without the variable after the
+  # restore, so it tried the update to $version again (into the failed
+  # start and its rollback).
   grep -qF "Stop the webserver and Samba for the update" "$out/interrupted-rollback.log" \
     || fail "the run after the restore of $old_version did not update to $version"
   hx test ! -e "$marker" || fail "the killed rollback wrote $marker: $(hx cat "$marker")"
@@ -1062,6 +1157,14 @@ test_interrupted() {
   # found by the restore went to a directory of their own.
   [ -n "$(hx sh -c "ls -d $backup-failed-*")" ] || fail "the restore after the stopped rollback kept no $backup-failed-<time>"
 
+  echo "== an update whose copies cannot be written must fail before the backup with a message of its own"
+  play_fails copy-fails "$here/converge.yml" -vvv -e paperless_update_marker_compose=/nonexistent/compose.yaml
+  expect_in_log copy-fails "failed before anything changed"
+  expect_in_log copy-fails "Writing /nonexistent/compose.yaml, $progress_smb_conf, $progress_samba_pass, the copies of the files from before the update, failed"
+  expect_no_secrets copy-fails
+  expect_no_progress "after the update whose copies failed"
+  [ "$(webserver)" = "${old_images[0]} running healthy" ] || fail "the webserver after the update whose copies failed: $(webserver)"
+
   echo "== an update killed during its backup must be cleaned up and done by the next run"
   play_killed interrupted-backup "ls -d $backups/*.partial" -v
   expect_no_secrets interrupted-backup
@@ -1069,6 +1172,7 @@ test_interrupted() {
   converge -v
   expect_no_secrets converge
   grep -q "update.yml" "$out/converge.log" || fail "the run after the interrupted backup was not an update"
+  expect_marker_removed_first converge
   [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the update: $(webserver)"
   if hx sh -c "ls -d $backups/*.partial" >/dev/null 2>&1; then
     fail "the update left a partial backup: $(hx ls "$backups")"
