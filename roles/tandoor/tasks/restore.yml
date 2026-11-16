@@ -95,13 +95,15 @@
       changed_when: true
 
     # The copy first; then the entries of mediafiles are moved, one rename
-    # each, so mediafiles itself never goes missing (state.yml refuses an
-    # installation without it) and a restore stopped anywhere in between can
-    # be run again: a leftover copy is made afresh, and every entry is in
-    # mediafiles, in the copy or set aside. A rollback that was stopped
-    # (restored again with tandoor_restore_interrupted) may have set the
-    # media of the failed attempt aside in <backup>-failed already; they
-    # stay, and the media found now go to <backup>-failed-<UTC time>.
+    # each (the first that fails stops the restore, which then fails, before
+    # the copy is put in place), so mediafiles itself never goes missing
+    # (state.yml refuses an installation without it) and a restore stopped
+    # anywhere in between can be run again: a leftover copy is made afresh,
+    # and every entry is in mediafiles, in the copy or set aside. A rollback
+    # that was stopped (restored again with tandoor_restore_interrupted) may
+    # have set the media of the failed attempt aside in <backup>-failed
+    # already; they stay, and the media found now go to <backup>-failed-<UTC
+    # time>.
     - name: Put the media back
       ansible.builtin.shell:
         cmd: |
@@ -110,12 +112,24 @@
           root={{ tandoor_data_dir | quote }}
           aside="$backup-failed"
           if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+          # Every entry of $1 into the directory $2, one rename each; the
+          # first that fails stops the script (set -e).
+          move_entries() {
+            for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+              if [ -e "$entry" ] || [ -L "$entry" ]; then mv -- "$entry" "$2/"; fi
+            done
+          }
+          # Nothing of the failed attempt may stay beside the copy.
+          expect_empty() {
+            if [ -n "$(ls -A "$1")" ]; then echo "$1 is not empty after it was set aside" >&2; exit 1; fi
+          }
           rm -rf "$root/.mediafiles.restore"
           cp -al "$backup/mediafiles" "$root/.mediafiles.restore"
           mkdir -m 0700 "$aside"
           mkdir "$aside/mediafiles"
-          find "$root/mediafiles" -mindepth 1 -maxdepth 1 -exec mv {} "$aside/mediafiles/" \;
-          find "$root/.mediafiles.restore" -mindepth 1 -maxdepth 1 -exec mv {} "$root/mediafiles/" \;
+          move_entries "$root/mediafiles" "$aside/mediafiles"
+          expect_empty "$root/mediafiles"
+          move_entries "$root/.mediafiles.restore" "$root/mediafiles"
           chown "$(stat -c %u:%g "$backup/mediafiles")" "$root/mediafiles"
           chmod "$(stat -c %a "$backup/mediafiles")" "$root/mediafiles"
           rmdir "$root/.mediafiles.restore"

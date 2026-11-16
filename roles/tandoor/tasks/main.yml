@@ -205,7 +205,8 @@
   block:
     # They hold the secret key and the passwords, so the tasks are no_log
     # and a failure gets a message of its own; state.yml has checked that
-    # the copy of the compose file exists.
+    # the copies exist (the S3 secret file's with S3 only, which a copy that
+    # cannot be read must not pass for one that is missing).
     - name: Read the files from before the interrupted update
       block:
         - name: Read the compose file from before the interrupted update
@@ -220,8 +221,8 @@
           ansible.builtin.slurp:
             src: "{{ tandoor_update_marker_s3_secret }}"
           register: tandoor_s3_secret_read
-          failed_when: false
           no_log: true
+          when: tandoor_s3_enabled | bool
 
         - name: Note the files and the backup from before the interrupted update
           ansible.builtin.set_fact:
@@ -229,14 +230,18 @@
             tandoor_backup: "{{ tandoor_update_in_progress.backup }}"
           no_log: true
       rescue:
-        - name: Fail on the copy of the compose file
+        - name: Fail on the copy of the files from before the interrupted update
           ansible.builtin.fail:
             msg: >-
-              Reading {{ tandoor_update_marker_compose }}, the copy of the
-              compose file from before the interrupted update, failed. The
-              error is not shown: it can quote the file, which holds the
-              secret key and the passwords. The role changes nothing. Check
-              that it is a file root can read, then run the role again.
+              Reading {{ tandoor_unread_copy }} from before the interrupted
+              update, failed. The error is not shown: it can quote the file,
+              which holds secrets. The role changes nothing. Check that it is
+              a file root can read, then run the role again.
+          vars:
+            tandoor_unread_copy: >-
+              {{ (tandoor_update_marker_s3_secret ~ ', the copy of the S3 secret file')
+                 if ansible_failed_task.name is search('S3')
+                 else (tandoor_update_marker_compose ~ ', the copy of the compose file') }}
 
     - name: Roll back to the backup of the interrupted update
       ansible.builtin.include_tasks: restore.yml

@@ -1074,6 +1074,31 @@ expect_marker_removed_first() {
   [[ "$first" == *"(item=$progress)"* ]] || fail "the update $1 did not remove $progress first: ${first:-no removal}"
 }
 
+# Fails unless the restored directory <dir> has the owner and mode of the
+# backup's <backup dir>: expect_same_owner <dir> <backup dir>.
+expect_same_owner() {
+  [ "$(hx stat -c '%u:%g %a' "$1")" = "$(hx stat -c '%u:%g %a' "$2")" ] \
+    || fail "$1 is $(hx stat -c '%u:%g %a' "$1"), not $(hx stat -c '%u:%g %a' "$2") as $2"
+}
+# Fails unless every entry of the list <entries> (one per line) is in the
+# directory <dir>: expect_entries_in <dir> <entries>.
+expect_entries_in() {
+  local entry
+  [ -n "$2" ] || fail "no entries to look for in $1"
+  while IFS= read -r entry; do
+    hx test -e "$1/$entry" || fail "$1 lacks $entry: $(hx ls -A "$1")"
+  done <<<"$2"
+}
+# Makes an entry of the failed attempt that cannot be renamed in the
+# directory <dir>: a mountpoint (EBUSY), as a full disk or an immutable file
+# would stop a move. Sets busy (its path) and busy_before (the other
+# entries, which sort before it and so are set aside first): busy_entry <dir>.
+busy_entry() {
+  busy="$1/zz-noix-busy"
+  hx sh -c "mkdir $busy && echo failed-attempt >$busy/file && mount --bind $busy $busy"
+  busy_before="$(hx sh -c "cd $1 && for e in *; do [ \"\$e\" = zz-noix-busy ] || echo \"\$e\"; done")"
+}
+
 test_interrupted() {
   echo "== tandoor_restore_interrupted without an interrupted update must be refused"
   new_host
@@ -1192,14 +1217,18 @@ test_interrupted() {
   # As a restore leaves it that was stopped while it put the media back: web
   # stopped, the copy of the backup's media made, the media found set aside,
   # none put back yet. The next restore puts them back all the same.
-  hx sh -c "cd $dir && docker compose stop web >/dev/null 2>&1 \
-    && cp -al $backup/mediafiles $dir/data/.mediafiles.restore && mkdir -m 0700 $backup-failed $backup-failed/mediafiles \
+  hx sh -c "cd $dir && docker compose stop web" >/dev/null 2>&1
+  set_aside="$(hx ls -A "$dir/data/mediafiles")"
+  hx sh -c "cp -al $backup/mediafiles $dir/data/.mediafiles.restore && mkdir -m 0700 $backup-failed $backup-failed/mediafiles \
     && find $dir/data/mediafiles -mindepth 1 -maxdepth 1 -exec mv {} $backup-failed/mediafiles/ \;"
   # Beside update-failed of another version, which the healthy restore
   # removes as any run that succeeds.
   expect_restored interrupted-restore
   hx test ! -e "$marker" || fail "the restore kept $marker of another version"
   hx test ! -e "$dir/data/.mediafiles.restore" || fail "the restore left $dir/data/.mediafiles.restore"
+  expect_same_owner "$dir/data/mediafiles" "$backup/mediafiles"
+  # What the stopped restore set aside stays there.
+  expect_entries_in "$backup-failed/mediafiles" "$set_aside"
 
   echo "== an update killed during its rollback must be refused until it is restored"
   hx docker tag "$busybox" "test.invalid/recipes:$version"
@@ -1246,6 +1275,18 @@ test_interrupted() {
   expect_no_progress "after the update"
   expect_recipe "after the update that followed the interrupted backup"
   expect_idempotent
+
+  echo "== a restore that cannot set an entry of the media aside must fail and keep what the failed attempt left"
+  # An interrupted update to $version from the backup of the update above.
+  backup="$(hx sh -c "ls -d $backups/*-$old_version | tail -n 1")"
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backup\ntime: 2026-01-01T00:00:00Z\n' >$progress \
+    && cp -p $backup/compose.yaml $progress_compose"
+  busy_entry "$dir/data/mediafiles"
+  play_fails restore-busy "$here/converge.yml" -e tandoor_restore_interrupted=true -e tandoor_rollback_timeout=60
+  expect_in_log restore-busy "Restoring Tandoor $old_version in $dir from the backup $backup after the interrupted update to $version failed (Put the media back:"
+  [ "$(hx cat "$busy/file")" = failed-attempt ] || fail "the entry that could not be set aside lost its content"
+  expect_entries_in "$backup-failed/mediafiles" "$busy_before"
+  hx test -d "$dir/data/.mediafiles.restore" || fail "the copy was put in place although an entry was not set aside"
 }
 
 test_interrupted_s3() {
@@ -1281,6 +1322,15 @@ test_interrupted_s3() {
   expect_in_log restore-no-s3-copy "but $progress_s3_secret is missing, so the role cannot restore it"
   expect_untouched restore-no-s3-copy
   hx mv "$progress_s3_secret.away" "$progress_s3_secret"
+  # One that cannot be read (here: a directory) is not taken for a missing
+  # one: the restore fails with a message of its own, before any change.
+  hx mkdir "$dir/copy-dir"
+  play_fails unreadable-s3-copy "$here/converge.yml" -vvv -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret" \
+    -e tandoor_restore_interrupted=true -e "tandoor_update_marker_s3_secret=$dir/copy-dir"
+  expect_in_log unreadable-s3-copy "Reading $dir/copy-dir, the copy of the S3 secret file from before the interrupted update, failed"
+  expect_no_secrets unreadable-s3-copy
+  expect_untouched unreadable-s3-copy
+  hx rmdir "$dir/copy-dir"
   expect_restored interrupted-s3-restore -e "@$here/s3.yml"
   [ "$(hx cat "$dir/s3-secret")" = "$s3_secret" ] || fail "the restore did not put the previous key back into $dir/s3-secret"
   expect_container_secret "$s3_secret" "the previous key after the restore"
