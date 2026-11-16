@@ -2,9 +2,10 @@
 # Rolls a failed update back to tandoor_backup: the web container stopped,
 # the compose file (and with S3 the secret file) put back as they were
 # before the run, the database recreated empty and loaded from the dump,
-# with local media the media moved aside to <backup>-failed and the copy put
-# back (as hard links again; to <backup>-failed-<time> when <backup>-failed
-# exists), then the previous stack started and checked
+# with local media what is in mediafiles moved aside to
+# <backup>-failed/mediafiles and the copy put in its place (as hard links
+# again; to <backup>-failed-<time> when <backup>-failed exists), then the
+# previous stack started and checked
 # with health.yml, both waits bounded by tandoor_rollback_timeout. The
 # previous files come first, so the database is
 # restored in the previous database container. Media in S3 stay as they are:
@@ -19,25 +20,35 @@
         chdir: "{{ tandoor_dir }}"
       changed_when: true
 
-    - name: Put the previous S3 secret file back
-      ansible.builtin.copy:
-        dest: "{{ tandoor_s3_secret_file }}"
-        content: "{{ tandoor_s3_secret_read.content | b64decode }}"
-        owner: root
-        group: root
-        mode: "0600"
-      no_log: true
-      when: tandoor_s3_secret_read.content is defined
+    # They hold the secret key and the passwords, so the tasks are no_log
+    # and a failure gets a message of its own.
+    - name: Put the previous files back
+      block:
+        - name: Put the previous S3 secret file back
+          ansible.builtin.copy:
+            dest: "{{ tandoor_s3_secret_file }}"
+            content: "{{ tandoor_s3_secret_read.content | b64decode }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+          when: tandoor_s3_secret_read.content is defined
 
-    - name: Put the previous compose file back
-      ansible.builtin.copy:
-        dest: "{{ tandoor_compose_file }}"
-        content: "{{ tandoor_compose_before }}"
-        owner: root
-        group: root
-        mode: "0600"
-      # It holds the secret key and the passwords.
-      no_log: true
+        - name: Put the previous compose file back
+          ansible.builtin.copy:
+            dest: "{{ tandoor_compose_file }}"
+            content: "{{ tandoor_compose_before }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+      rescue:
+        - name: Fail on the previous files
+          ansible.builtin.fail:
+            msg: >-
+              Writing the previous {{ tandoor_compose_file }}{{ (' or ' ~ tandoor_s3_secret_file) if tandoor_s3_secret_read.content is defined else '' }}
+              failed; the error is not shown, as it can quote the secrets.
+              Check that {{ tandoor_dir }} is writable and has space.
 
     - name: Start the previous database
       community.docker.docker_compose_v2:
@@ -83,11 +94,14 @@
         chdir: "{{ tandoor_dir }}"
       changed_when: true
 
-    # The copy first, so the media are missing only between two renames. A
-    # rollback that was stopped (restored again with
-    # tandoor_restore_interrupted) may have moved the media of the failed
-    # attempt to <backup>-failed already; they stay, and the media found now
-    # go to <backup>-failed-<UTC time>.
+    # The copy first; then the entries of mediafiles are moved, one rename
+    # each, so mediafiles itself never goes missing (state.yml refuses an
+    # installation without it) and a restore stopped anywhere in between can
+    # be run again: a leftover copy is made afresh, and every entry is in
+    # mediafiles, in the copy or set aside. A rollback that was stopped
+    # (restored again with tandoor_restore_interrupted) may have set the
+    # media of the failed attempt aside in <backup>-failed already; they
+    # stay, and the media found now go to <backup>-failed-<UTC time>.
     - name: Put the media back
       ansible.builtin.shell:
         cmd: |
@@ -96,11 +110,15 @@
           root={{ tandoor_data_dir | quote }}
           aside="$backup-failed"
           if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
-          mkdir -m 0700 "$aside"
           rm -rf "$root/.mediafiles.restore"
           cp -al "$backup/mediafiles" "$root/.mediafiles.restore"
-          mv "$root/mediafiles" "$aside/mediafiles"
-          mv "$root/.mediafiles.restore" "$root/mediafiles"
+          mkdir -m 0700 "$aside"
+          mkdir "$aside/mediafiles"
+          find "$root/mediafiles" -mindepth 1 -maxdepth 1 -exec mv {} "$aside/mediafiles/" \;
+          find "$root/.mediafiles.restore" -mindepth 1 -maxdepth 1 -exec mv {} "$root/mediafiles/" \;
+          chown "$(stat -c %u:%g "$backup/mediafiles")" "$root/mediafiles"
+          chmod "$(stat -c %a "$backup/mediafiles")" "$root/mediafiles"
+          rmdir "$root/.mediafiles.restore"
       changed_when: true
       when: not tandoor_s3_enabled | bool
 
@@ -121,7 +139,8 @@
         tandoor_restore_error: >-
           {{ '' if tandoor_healthy
              else 'Tandoor ' ~ tandoor_installed_version ~ ' is not healthy within '
-                  ~ tandoor_rollback_timeout ~ ' seconds (' ~ tandoor_health_lines | join('; ') ~ ')' }}
+                  ~ tandoor_rollback_timeout ~ ' seconds, at least 10 for each database check ('
+                  ~ tandoor_health_lines | join('; ') ~ ')' }}
 
   rescue:
     - name: Note the failed rollback

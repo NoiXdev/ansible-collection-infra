@@ -203,27 +203,40 @@
     tandoor_interrupted_from: "{{ tandoor_update_in_progress.from_version | default('?') }}"
     tandoor_interrupted_to: "{{ tandoor_update_in_progress.to_version }}"
   block:
-    - name: Read the compose file from before the interrupted update
-      ansible.builtin.slurp:
-        src: "{{ tandoor_update_marker_compose }}"
-      register: tandoor_update_marker_compose_read
-      # It holds the secret key and the passwords; state.yml has checked
-      # that it exists.
-      no_log: true
+    # They hold the secret key and the passwords, so the tasks are no_log
+    # and a failure gets a message of its own; state.yml has checked that
+    # the copy of the compose file exists.
+    - name: Read the files from before the interrupted update
+      block:
+        - name: Read the compose file from before the interrupted update
+          ansible.builtin.slurp:
+            src: "{{ tandoor_update_marker_compose }}"
+          register: tandoor_update_marker_compose_read
+          no_log: true
 
-    # restore.yml puts it back when it has content; without S3 there is none.
-    - name: Read the S3 secret file from before the interrupted update
-      ansible.builtin.slurp:
-        src: "{{ tandoor_update_marker_s3_secret }}"
-      register: tandoor_s3_secret_read
-      failed_when: false
-      no_log: true
+        # restore.yml puts it back when it has content; without S3 there is
+        # none.
+        - name: Read the S3 secret file from before the interrupted update
+          ansible.builtin.slurp:
+            src: "{{ tandoor_update_marker_s3_secret }}"
+          register: tandoor_s3_secret_read
+          failed_when: false
+          no_log: true
 
-    - name: Note the files and the backup from before the interrupted update
-      ansible.builtin.set_fact:
-        tandoor_compose_before: "{{ tandoor_update_marker_compose_read.content | b64decode }}"
-        tandoor_backup: "{{ tandoor_update_in_progress.backup }}"
-      no_log: true
+        - name: Note the files and the backup from before the interrupted update
+          ansible.builtin.set_fact:
+            tandoor_compose_before: "{{ tandoor_update_marker_compose_read.content | b64decode }}"
+            tandoor_backup: "{{ tandoor_update_in_progress.backup }}"
+          no_log: true
+      rescue:
+        - name: Fail on the copy of the compose file
+          ansible.builtin.fail:
+            msg: >-
+              Reading {{ tandoor_update_marker_compose }}, the copy of the
+              compose file from before the interrupted update, failed. The
+              error is not shown: it can quote the file, which holds the
+              secret key and the passwords. The role changes nothing. Check
+              that it is a file root can read, then run the role again.
 
     - name: Roll back to the backup of the interrupted update
       ansible.builtin.include_tasks: restore.yml
@@ -312,8 +325,8 @@
         msg: >-
           Tandoor in {{ tandoor_dir }} is unhealthy: the web and the database
           containers are not both healthy, or Tandoor cannot use its database,
-          within {{ tandoor_health_timeout }} seconds
-          ({{ tandoor_health_lines | join('; ') }}). The role restarts nothing
+          {{ tandoor_health_within }} ({{ tandoor_health_lines | join('; ') }}).
+          The role restarts nothing
           on a run without changes; see docker compose logs in
           {{ tandoor_dir }}.
       when: not tandoor_healthy

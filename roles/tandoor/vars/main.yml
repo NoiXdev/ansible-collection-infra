@@ -56,12 +56,13 @@ tandoor_update_marker: "{{ tandoor_dir }}/update-in-progress"
 # with S3, the secret file. Root, mode 0600.
 tandoor_update_marker_compose: "{{ tandoor_dir }}/update-in-progress.compose.yaml"
 tandoor_update_marker_s3_secret: "{{ tandoor_dir }}/update-in-progress.s3-secret"
-# In the order they are removed: the marker last, so that a run stopped in
-# between leaves it.
+# In the order they are removed: the marker first, so that a run stopped in
+# between leaves copies without a marker, which the next run removes
+# (state.yml), and never the marker of a finished update.
 tandoor_update_marker_files:
+  - "{{ tandoor_update_marker }}"
   - "{{ tandoor_update_marker_compose }}"
   - "{{ tandoor_update_marker_s3_secret }}"
-  - "{{ tandoor_update_marker }}"
 
 # tandoor_compose_on_disk, the compose file on disk parsed (empty when there
 # is none), is set by state.yml, which parses it in a no_log task.
@@ -111,6 +112,11 @@ tandoor_services: [db, web]
 tandoor_db_check_wait: >-
   {{ [(tandoor_health_wait | default(tandoor_health_timeout) | int)
       - (now().timestamp() - tandoor_health_start | float) | int, 10] | max }}
+# The bound of health.yml in the messages of a failed health check: each
+# database check may end up to 10 seconds after the wait.
+tandoor_health_within: >-
+  within {{ tandoor_health_timeout }} seconds, at least 10 for each database
+  check
 
 # The compose file as the role writes it; compared with the one on disk.
 tandoor_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
@@ -151,6 +157,18 @@ tandoor_install_hint: >-
   {{ 'subdirectories' if tandoor_data_subdirs | length > 1 else 'subdirectory' }}
   {{ tandoor_data_subdirs | join(' and ') }} of
   {{ tandoor_data_dir }}, then run the role again.
+
+# Added to the refusals of update-failed when tandoor_restore_interrupted is
+# set, which they come before: the variable does not apply while that marker
+# stands.
+tandoor_marker_restore_note: >-
+  {{ ('tandoor_restore_interrupted does not apply while ' ~ tandoor_marker_file ~ ' exists: '
+      ~ (('deal with it first as said, then run the role again with the variable to restore the'
+          ~ ' interrupted update that ' ~ tandoor_update_marker ~ ' records.')
+         if tandoor_update_in_progress.step | default(none) == 'update'
+         else ('no interrupted update is left to restore. Remove the variable, deal with '
+               ~ tandoor_marker_file ~ ' as said, then run the role again.')))
+     if tandoor_restore_interrupted | bool else '' }}
 
 # After a failed rollback: how to put the backup back by hand.
 tandoor_restore_hint: >-

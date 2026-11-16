@@ -10,7 +10,9 @@
 # From the first change on, tandoor_update_marker says how far the update
 # got (step backup, then step update with the backup), with copies of the
 # files it replaces; it is removed once the update is healthy, or after the
-# recovery or the rollback, so that only a run that stopped leaves it.
+# recovery or the rollback, so that only a run that stopped leaves it (the
+# marker before its copies: a run stopped in between leaves only copies,
+# which the next run removes).
 
 - name: Update Tandoor
   vars:
@@ -55,25 +57,37 @@
       vars:
         tandoor_update_step: backup
 
-    - name: Keep the compose file from before the update
-      ansible.builtin.copy:
-        dest: "{{ tandoor_update_marker_compose }}"
-        content: "{{ tandoor_compose_before }}"
-        owner: root
-        group: root
-        mode: "0600"
-      # It holds the secret key and the passwords.
-      no_log: true
+    # They hold the secret key and the passwords, so the tasks are no_log
+    # and a failure gets a message of its own.
+    - name: Keep the files from before the update
+      block:
+        - name: Keep the compose file from before the update
+          ansible.builtin.copy:
+            dest: "{{ tandoor_update_marker_compose }}"
+            content: "{{ tandoor_compose_before }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
 
-    - name: Keep the S3 secret file from before the update
-      ansible.builtin.copy:
-        dest: "{{ tandoor_update_marker_s3_secret }}"
-        content: "{{ tandoor_s3_secret_read.content | b64decode }}"
-        owner: root
-        group: root
-        mode: "0600"
-      no_log: true
-      when: tandoor_s3_secret_read.content is defined
+        - name: Keep the S3 secret file from before the update
+          ansible.builtin.copy:
+            dest: "{{ tandoor_update_marker_s3_secret }}"
+            content: "{{ tandoor_s3_secret_read.content | b64decode }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+          when: tandoor_s3_secret_read.content is defined
+      rescue:
+        - name: Fail on the copies of the files from before the update
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ tandoor_update_marker_compose }}{{ (' or ' ~ tandoor_update_marker_s3_secret) if tandoor_s3_secret_read.content is defined else '' }},
+              the copy of the files from before the update, failed; the error
+              is not shown, as it can quote the secrets. Check that
+              {{ tandoor_dir }} is writable and has space, then run the role
+              again.
 
     # Nothing writes to the database or the media during the backup.
     - name: Stop Tandoor for the update
@@ -97,25 +111,35 @@
       vars:
         tandoor_update_step: update
 
-    - name: Write the S3 secret file
-      ansible.builtin.copy:
-        dest: "{{ tandoor_s3_secret_file }}"
-        content: "{{ tandoor_s3_settings.secret_key }}"
-        owner: root
-        group: root
-        mode: "0600"
-      no_log: true
-      when: tandoor_s3_enabled | bool
+    # They hold the secret key and the passwords, so the tasks are no_log
+    # and a failure gets a message of its own.
+    - name: Write the files with Tandoor {{ tandoor_version }}
+      block:
+        - name: Write the S3 secret file
+          ansible.builtin.copy:
+            dest: "{{ tandoor_s3_secret_file }}"
+            content: "{{ tandoor_s3_settings.secret_key }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+          when: tandoor_s3_enabled | bool
 
-    - name: Write the compose file with Tandoor {{ tandoor_version }}
-      ansible.builtin.copy:
-        dest: "{{ tandoor_compose_file }}"
-        content: "{{ tandoor_compose }}"
-        owner: root
-        group: root
-        mode: "0600"
-      # It holds the secret key and the passwords.
-      no_log: true
+        - name: Write the compose file with Tandoor {{ tandoor_version }}
+          ansible.builtin.copy:
+            dest: "{{ tandoor_compose_file }}"
+            content: "{{ tandoor_compose }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+      rescue:
+        - name: Fail on the files with Tandoor {{ tandoor_version }}
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ tandoor_compose_file }}{{ (' or ' ~ tandoor_s3_secret_file) if tandoor_s3_enabled | bool else '' }}
+              failed; the error is not shown, as it can quote the secrets.
+              Check that {{ tandoor_dir }} is writable and has space.
 
     # The new image recreates the web container, which reads the S3 secret
     # file on start.
@@ -132,8 +156,8 @@
     - name: Fail when Tandoor is not healthy
       ansible.builtin.fail:
         msg: >-
-          Tandoor {{ tandoor_version }} is not healthy within
-          {{ tandoor_health_timeout }} seconds ({{ tandoor_health_lines | join('; ') }})
+          Tandoor {{ tandoor_version }} is not healthy
+          {{ tandoor_health_within }} ({{ tandoor_health_lines | join('; ') }})
       when: not tandoor_healthy
 
   rescue:

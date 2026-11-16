@@ -41,7 +41,7 @@
     - name: Fail when Tandoor is not healthy
       ansible.builtin.fail:
         msg: >-
-          Tandoor is not healthy within {{ tandoor_health_timeout }} seconds
+          Tandoor is not healthy {{ tandoor_health_within }}
           ({{ tandoor_health_lines | join('; ') }}); see docker compose logs in
           {{ tandoor_dir }}
       when: not tandoor_healthy

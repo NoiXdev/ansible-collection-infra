@@ -267,24 +267,28 @@
 - `tandoor`: Tandoor counts as healthy only when it can use its database. Once the containers are
   healthy, `manage.py migrate --check` and a read of the spaces run in the web container, each
   bounded by what is left of the health wait (`tandoor_health_timeout`, or
-  `tandoor_rollback_timeout` in a rollback). So an update whose new release starts healthy while a
-  migration is not applied is rolled back and recorded in `update-failed`, and a run without
-  changes fails, within the health timeout, while the database does not answer.
+  `tandoor_rollback_timeout` in a rollback), but at least 10 seconds. So an update whose new
+  release starts healthy while a migration is not applied is rolled back and recorded in
+  `update-failed`, and a run without changes fails, within the health timeout (at least 10 seconds
+  for each database check), while the database does not answer.
 - `tandoor`: an update that did not finish is no longer taken for a finished one. From its first
   change until it is healthy or rolled back, an update keeps `update-in-progress` in `tandoor_dir`
   (root, `0600`: the versions, the step and the backup, with copies of the compose file and, with
   S3, the secret file). A run that stopped during the backup changed nothing else: the next run
-  removes the partial backup and the marker and updates again. A run that stopped after it makes
-  every later run refuse before any change, naming both versions and the backup, until either
-  `tandoor_restore_interrupted: true` for one run restores the backup with the files from before
-  the update (and ends without trying the update again; the next run does), or the marker is
-  removed to keep Tandoor as it is. A restore that fails writes `update-failed` as a failed rollback
-  does. The variable is refused without an interrupted update, a marker that is not YAML or lacks
-  its keys is refused, and a marker beside `update-failed` of the same backup (a rollback that
-  stopped after it wrote that) is removed, `update-failed` deciding; beside an `update-failed` of
-  another backup (an earlier update that was rolled back) it is handled as without one. A rollback
-  restored again keeps the media of the failed attempt in `<backup>-failed` and sets the newer
-  ones aside in `<backup>-failed-<time>`.
+  removes the partial backup and the marker, then goes on as any run does: it updates only while
+  `tandoor_version` is still newer. A run that stopped after it makes every later run refuse before
+  any change, naming both versions and the backup, until either `tandoor_restore_interrupted: true`
+  for one run restores the backup with the files from before the update (and ends without trying the
+  update again; the next run does), or the marker is removed to keep Tandoor as it is. A restore
+  that fails writes `update-failed` as a failed rollback does. The variable is refused without an
+  interrupted update, a marker that is not YAML, lacks its keys or cannot be read is refused, and a
+  marker beside `update-failed` of the same backup (a rollback that stopped after it wrote that) is
+  removed, `update-failed` deciding, once no other refusal stops the run. With the variable set, a
+  refusal of an `update-failed` says that the variable does not apply while that file stands. Beside
+  an `update-failed` of another backup (an earlier update that was rolled back) it is handled as
+  without one. A rollback restored again keeps the media of the failed attempt in `<backup>-failed`
+  and sets the newer ones aside in `<backup>-failed-<time>`; a restore stopped while it puts the
+  media back can be run again.
 - `n8n`: new role that runs n8n 2 (`n8n_version`, pinned, major 2 and 2.17.0 or newer) and
   PostgreSQL 18 or newer as one compose project in `n8n_dir` (default `/opt/n8n`), behind Traefik
   with no published port. It needs Docker. `n8n_hostname`, `n8n_encryption_key`, `n8n_db_password`

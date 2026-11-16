@@ -34,10 +34,10 @@
 # tandoor_db_password that the database does not take, and a PostgreSQL major
 # other than the database's. Changes only what an interrupted update left
 # that nothing needs: a marker of an update in progress beside update-failed
-# of the same backup (the rollback ran), and, after every refusal, the
-# partial backup and the marker of an update stopped during its backup (the
-# files are as before it), or the copies of a marker that was removed by
-# hand.
+# of the same backup (the rollback ran; before the refusal of update-failed,
+# else after every refusal), and, after every refusal, the partial backup and
+# the marker of an update stopped during its backup (the files are as before
+# it), or the copies of a marker that was removed by hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -173,13 +173,28 @@
   register: tandoor_update_marker_read
   failed_when: false
 
+# Whether it exists, which a read that failed does not tell.
+- name: Look for the marker of an update in progress
+  ansible.builtin.stat:
+    path: "{{ tandoor_update_marker }}"
+    get_checksum: false
+  register: tandoor_update_marker_stat
+
 - name: Note that no update is in progress
   ansible.builtin.set_fact:
     tandoor_update_in_progress: {}
     tandoor_update_rolled_back: false
 
-# A marker that is not YAML parses to nothing and is refused below. It holds
-# no secret: the copy of the compose file is never read here.
+# A marker that is not YAML parses to nothing and is refused below, as is
+# one that exists but cannot be read (a directory). It holds no secret: the
+# copy of the compose file is never read here.
+- name: Note a marker of an update in progress that cannot be read
+  ansible.builtin.set_fact:
+    tandoor_update_in_progress: {step: null}
+  when:
+    - tandoor_update_marker_stat.stat.exists
+    - tandoor_update_marker_read.content is not defined
+
 - name: Check the marker of an update in progress
   when: tandoor_update_marker_read.content is defined
   block:
@@ -196,7 +211,8 @@
 # update-failed of the same backup (both take it from tandoor_backup) was
 # written by the rescue of this update, or by the failed restore of it, which
 # was stopped before it removed this marker: the rollback ran, and
-# update-failed decides below. An update-failed of another backup is left
+# update-failed decides below; the marker goes only once no other refusal
+# stops the run. An update-failed of another backup is left
 # from an earlier update that was rolled back (it stays through updates to
 # other versions), so this marker is checked as without one. So is a marker
 # with step backup, whoever wrote update-failed: the files are as before the
@@ -219,13 +235,6 @@
     - name: Note a marker of a failed update that is not YAML
       ansible.builtin.set_fact:
         tandoor_update_rolled_back: false
-
-- name: Remove the marker of an update in progress beside its failed update
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop: "{{ tandoor_update_marker_files }}"
-  when: tandoor_update_rolled_back | bool
 
 - name: Note that the rolled back update is not in progress
   ansible.builtin.set_fact:
@@ -325,6 +334,22 @@
           cannot tell which Tandoor update failed and changes nothing. Check
           Tandoor, then remove the file (rm {{ tandoor_marker_file }}).
 
+# When update-failed refuses this run, the marker of the update in progress
+# it records goes first: nothing needs it (the rollback ran), and once
+# update-failed is removed as its refusal says, the next run would take it
+# for an update that did not finish. Every other refusal leaves both, and the
+# run that gets past them all removes it at the end.
+- name: Remove the marker of an update in progress beside the failed update that refuses this run
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ tandoor_update_marker_files }}"
+  when:
+    - tandoor_update_rolled_back | bool
+    - >-
+      not tandoor_marker.rolled_back_to | default(none)
+      or (tandoor_marker.failed_version | default(tandoor_version) | string) == tandoor_version
+
 # The rollback failed (or the marker does not say it worked): the database
 # may be empty or half restored, and the backup holds the data. Any version
 # would take a backup of that database, come up healthy and remove the
@@ -343,6 +368,7 @@
       The role refuses every version and changes nothing until Tandoor is
       restored. {{ tandoor_restore_hint }} Then check Tandoor (its recipes and
       images) and remove the marker (rm {{ tandoor_marker_file }}).
+      {{ tandoor_marker_restore_note }}
   vars:
     tandoor_backup: "{{ tandoor_marker.backup | default('?', true) }}"
   when:
@@ -360,7 +386,7 @@
       {{ tandoor_version }} again and changes nothing while the marker names
       it. To try again, remove it (rm {{ tandoor_marker_file }}); or set
       tandoor_version to another version, and the marker is removed once a
-      run with it succeeds.
+      run with it succeeds. {{ tandoor_marker_restore_note }}
   when:
     - tandoor_marker_read.content is defined
     - (tandoor_marker.failed_version | default(tandoor_version) | string) == tandoor_version
@@ -601,14 +627,24 @@
   loop: "{{ (tandoor_partial_backups.files | default([]) | map(attribute='path') | sort) + tandoor_update_marker_files }}"
   when: tandoor_update_in_progress.step | default(none) == 'backup'
 
+# After every refusal, so that a refused run leaves both markers; update-failed
+# decides on the next run as on this one.
+- name: Remove the marker of an update in progress beside its failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ tandoor_update_marker_files }}"
+  when: tandoor_update_rolled_back | bool
+
 # They hold the secrets: left when the marker was removed by hand, as its
-# refusal offers.
+# refusal offers, or by a run stopped while it removed the marker and them.
+# Only without a marker: one that exists but cannot be read is refused above.
 - name: Remove the copies of an update in progress without its marker
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
   loop: "{{ tandoor_update_marker_files | difference([tandoor_update_marker]) }}"
-  when: tandoor_update_marker_read.content is not defined
+  when: not tandoor_update_marker_stat.stat.exists
 
 - name: Decide what to do
   ansible.builtin.set_fact:
