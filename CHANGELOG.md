@@ -35,6 +35,9 @@
   tested with the site configs in one `nginx -t`, and put back with them when nginx rejects the
   config: a rate limit zone or an `nginx_http_extra` definition leaves in the same run as the site
   that stops using it.
+- `nginx`: a Let's Encrypt certificate whose renewal config names another ACME server than
+  `nginx_acme_server` is reissued from `nginx_acme_server` on the next run, so a switch from
+  Let's Encrypt's staging directory to production replaces the staging certificates.
 - `anubis`: new mode `host` for an nginx on the host itself (the `nginx` role's sites with
   `anubis: true`): the container publishes `127.0.0.1:anubis_host_port` (8923) only and joins none
   of the other modes' networks. One mode per host.

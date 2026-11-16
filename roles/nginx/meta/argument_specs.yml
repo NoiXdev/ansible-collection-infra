@@ -26,8 +26,9 @@ argument_specs:
         tls letsencrypt: certbot from Ubuntu's archive, with the webroot challenge, gets one
         certificate per site, named after the site (/etc/letsencrypt/live/<name>/), for its
         domains and redirect domains. A site first gets its HTTP block, then its certificate,
-        then its TLS block; a run asks again only when the certificate is missing or its names
-        differ from the site's. certbot.timer renews the certificates, and the deploy hook
+        then its TLS block; a run asks again only when the certificate is missing, its names
+        differ from the site's, or its renewal config names another ACME server than
+        nginx_acme_server (it is then reissued from nginx_acme_server). certbot.timer renews the certificates, and the deploy hook
         /etc/letsencrypt/renewal-hooks/deploy/noixdev-nginx reloads nginx after nginx -t.
       - >-
         A certificate request that fails does not stop the other sites: the run fails at the
@@ -198,4 +199,5 @@ argument_specs:
         type: str
         description: >-
           The ACME directory (an https URL) certbot asks; Let's Encrypt's production directory by
-          default. certbot keeps it per certificate for the renewals.
+          default. certbot keeps it per certificate for the renewals; a certificate whose renewal
+          config names another server is reissued from this one on the next run.

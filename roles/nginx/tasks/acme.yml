@@ -4,7 +4,8 @@
 # /.well-known/acme-challenge/ (site.conf.j2). sites.yml wrote each site's
 # HTTP block, and its TLS block only where the certificate is there already.
 # Here nginx reloads with those, certbot asks for each site whose certificate
-# is missing or has other names than the site, in list order, and each site
+# is missing, has other names than the site, or comes from another ACME
+# server than nginx_acme_server, in list order, and each site
 # that got one gets its TLS block. A request that fails is collected: the
 # other sites go on, and the run fails at the end naming each failed site and
 # domain. That site keeps its HTTP block, and the next run asks again.
@@ -60,6 +61,21 @@
   changed_when: false
   check_mode: false
 
+# certbot renews a certificate from the server its renewal config names
+# (root's, in /etc/letsencrypt/renewal): one from another server than
+# nginx_acme_server (Let's Encrypt's staging, say) is asked for again. A
+# missing config has no server (rc 2).
+- name: Read the ACME servers of the certificates
+  ansible.builtin.command:
+    argv: [sed, -n, 's/^server *= *//p', "/etc/letsencrypt/renewal/{{ item.name }}.conf"]
+  loop: "{{ nginx_acme_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: nginx_acme_renewal
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
 - name: Ask for the certificates
   ansible.builtin.command:
     argv:
@@ -78,6 +94,9 @@
       - --non-interactive
       - --server
       - "{{ nginx_acme_server }}"
+      # Same names from a new server are otherwise not due yet: certbot
+      # would keep the certificate.
+      - --force-renewal
   loop: "{{ nginx_acme_pending }}"
   loop_control:
     label: "{{ item.name }}"
@@ -99,10 +118,14 @@
       {%-   endif -%}
       {%- endfor -%}
       {{ ns.certs }}
+    nginx_acme_servers: >-
+      {{ dict(nginx_acme_renewal.results | map(attribute='item.name')
+              | zip(nginx_acme_renewal.results | map(attribute='stdout', default='') | map('trim'))) }}
     nginx_acme_pending: >-
       {%- set pending = [] -%}
       {%- for site in nginx_acme_sites -%}
-      {%-   if nginx_acme_names[site.name] | default([]) != (site.domains + site.redirect_domains) | unique | sort -%}
+      {%-   if nginx_acme_names[site.name] | default([]) != (site.domains + site.redirect_domains) | unique | sort
+              or nginx_acme_servers[site.name] | default('') != nginx_acme_server -%}
       {%-     set _ = pending.append(site) -%}
       {%-   endif -%}
       {%- endfor -%}

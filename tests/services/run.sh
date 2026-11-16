@@ -1825,6 +1825,24 @@ nginx_acme() {
   answer="$(hx nginx certbot certificates --cert-name prod 2>/dev/null)"
   grep -qE '^ +Domains: prod[.]example[.]test www[.]prod[.]example[.]test$' <<<"$answer" || fail "nginx: prod's certificate has other names: $answer"
   hx nginx sh -c 'test ! -e /etc/nginx/sites/broken.conf && test ! -e /etc/nginx/sites/late.conf' || fail "nginx: the extra sites are still there"
+
+  # The same Pebble under another directory URL: another ACME server to
+  # certbot (an account and a renewal server of its own).
+  echo "== nginx: a new nginx_acme_server reissues prod's certificate from it, once, and back"
+  local server
+  for server in https://127.0.0.1:14000/dir https://localhost:14000/dir; do
+    serial="$(nginx_serial prod.example.test)"
+    before="$(nginx_issued)"
+    converge nginx "acme-server-${server//[^a-z0-9]/}" "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_acme_server\": \"$server\"}"
+    answer="$(nginx_issued)"
+    [ "$answer" = $((before + 1)) ] || fail "nginx: certbot issued $answer certificates for prod after the server became $server, not $((before + 1))"
+    answer="$(hx nginx sh -c 'grep "^server *=" /etc/letsencrypt/renewal/prod.conf || true')"
+    [ "$answer" = "server = $server" ] || fail "nginx: prod's renewal conf names '$answer', not the server $server"
+    answer="$(nginx_serial prod.example.test)"
+    [ "$answer" != "$serial" ] || fail "nginx: prod still presents the certificate from before the server became $server ($serial)"
+    answer="$(nginx_trusted https://prod.example.test/)"
+    [ "$answer" = "200 " ] || fail "nginx: prod.example.test over HTTPS answered $answer after the server became $server"
+  done
 }
 
 # nginx_no_docker: error pages (on by default) on a fresh container without
