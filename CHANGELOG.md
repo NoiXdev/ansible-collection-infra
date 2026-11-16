@@ -189,11 +189,12 @@
   the next one does), or the marker is removed to keep n8n as it is. A restore that fails writes
   `update-failed` as a failed rollback does. The variable is refused without an interrupted
   update, a marker that is not YAML or lacks its keys is refused, and a marker beside
-  `update-failed` (a rollback that stopped after it wrote that) is removed, `update-failed`
-  deciding. A rollback restored again keeps the home of the failed attempt in `<backup>-failed` and
-  sets the newer one aside in `<backup>-failed-<time>`. No database check of its own is added:
-  n8n's readiness (`/healthz/readiness`) already fails while a migration is not applied or the
-  database does not answer.
+  `update-failed` of the same backup (a rollback that stopped after it wrote that) is removed,
+  `update-failed` deciding; beside an `update-failed` of another backup (an earlier update that
+  was rolled back) it is handled as without one. A rollback restored again keeps the home of the
+  failed attempt in `<backup>-failed` and sets the newer one aside in `<backup>-failed-<time>`.
+  No database check of its own is added: n8n's readiness (`/healthz/readiness`) already fails
+  while a migration is not applied or the database does not answer.
 - `nodejs`: new role that installs one Node.js major series from NodeSource (`nodejs_version`,
   default `"24"`) and global npm packages at exact versions (`nodejs_npm_packages`, each with
   `name` and `version`; ranges and tags are refused). A `nodejs` of another series (Ubuntu's own,

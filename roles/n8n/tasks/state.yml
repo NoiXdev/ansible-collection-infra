@@ -36,10 +36,10 @@
 # database's. The only changes it can make are pulling the pinned n8n image on
 # a host without an n8n container, which the owner's hash is made with, and
 # removing what an interrupted update left that nothing needs: a marker of an
-# update in progress beside update-failed (the rollback ran), and, after every
-# refusal, the partial backup and the marker of an update stopped during its
-# backup (the compose file is as before it), or the copy of a marker that was
-# removed by hand.
+# update in progress beside update-failed of the same backup (the rollback
+# ran), and, after every refusal, the partial backup and the marker of an
+# update stopped during its backup (the compose file is as before it), or the
+# copy of a marker that was removed by hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -120,18 +120,6 @@
   register: n8n_update_marker_read
   failed_when: false
 
-# Beside update-failed, the rescue of the update wrote that marker and was
-# stopped before it removed this one: the rollback ran, and update-failed
-# decides below.
-- name: Remove the marker of an update in progress beside a failed update
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop: "{{ n8n_update_marker_files }}"
-  when:
-    - n8n_update_marker_read.content is defined
-    - n8n_marker_read.content is defined
-
 - name: Note that no update is in progress
   ansible.builtin.set_fact:
     n8n_update_in_progress: {}
@@ -139,9 +127,7 @@
 # A marker that is not YAML parses to nothing and is refused below. It holds
 # no secret: the copy of the compose file is never read here.
 - name: Check the marker of an update in progress
-  when:
-    - n8n_update_marker_read.content is defined
-    - n8n_marker_read.content is not defined
+  when: n8n_update_marker_read.content is defined
   block:
     - name: Parse the marker of the update in progress
       ansible.builtin.set_fact:
@@ -169,6 +155,34 @@
           {{ n8n_marker_file }} exists, but it is not YAML, so the role cannot
           tell which n8n update failed and changes nothing. Check n8n, then
           remove the file (rm {{ n8n_marker_file }}).
+
+# update-failed of the same backup (both take it from n8n_backup) was written
+# by the rescue of this update, or by the failed restore of it, which was
+# stopped before it removed this marker: the rollback ran, and update-failed
+# decides below. An update-failed of another backup is left from an earlier
+# update that was rolled back (it stays through updates to other versions),
+# so this marker is checked as without one. So is a marker with step backup,
+# whoever wrote update-failed: the compose file is as before the update, and
+# it is cleaned up as without update-failed.
+- name: Compare the backups of the two markers
+  ansible.builtin.set_fact:
+    n8n_update_rolled_back: >-
+      {{ n8n_marker_read.content is defined
+         and n8n_update_in_progress.step | default(none) == 'update'
+         and n8n_update_in_progress.backup | default('', true) | string is match('^/')
+         and (n8n_marker.backup | default('', true) | string) == (n8n_update_in_progress.backup | string) }}
+
+- name: Remove the marker of an update in progress beside its failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ n8n_update_marker_files }}"
+  when: n8n_update_rolled_back | bool
+
+- name: Note that the rolled back update is not in progress
+  ansible.builtin.set_fact:
+    n8n_update_in_progress: {}
+  when: n8n_update_rolled_back | bool
 
 # The rollback failed (or the marker does not say it worked): the database
 # may be empty or half restored, and the backup holds the data. Any version

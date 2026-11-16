@@ -67,10 +67,11 @@
 #             their process group) at a point of an update:
 #             n8n_restore_interrupted without an interrupted update refused;
 #             a marker that is not YAML or lacks its keys refused; one beside
-#             update-failed removed, update-failed deciding; killed once the
-#             compose file names the new release: the marker (step update,
-#             both versions, the backup, mode 0600) with its copy of the
-#             compose file refuses every run, and n8n_restore_interrupted
+#             update-failed of the same backup removed, update-failed
+#             deciding; killed once the compose file names the new release:
+#             the marker (step update, both versions, the backup, mode 0600)
+#             with its copy of the compose file refuses every run, beside
+#             update-failed of another update too, and n8n_restore_interrupted
 #             restores the previous release with the workflow, the database
 #             and the n8n home; killed during the rollback of a failed update:
 #             refused and restored the same way, the run after it updating;
@@ -1080,6 +1081,19 @@ test_interrupted() {
   expect_interrupted_refusal interrupted-refused "$backup"
   expect_no_secrets interrupted-refused
   expect_untouched interrupted-refused
+
+  echo "== beside update-failed of another update, the marker of an update in progress must still be refused"
+  # As an earlier update to another version leaves it that was rolled back:
+  # it stays through updates to other versions.
+  hx sh -c "printf 'failed_version: 99.0.0\nrolled_back_to: $old_version\nbackup: $backups/20200101T000000Z-$old_version\ntime: 2020-01-01T00:00:00Z\n' >$marker"
+  markers_before="$(hx sha256sum "$marker" "$progress" "$progress_compose")"
+  play_fails other-update-failed "$here/converge.yml" -vvv
+  expect_interrupted_refusal other-update-failed "$backup"
+  expect_no_secrets other-update-failed
+  expect_untouched other-update-failed
+  [ "$(hx sha256sum "$marker" "$progress" "$progress_compose")" = "$markers_before" ] \
+    || fail "the refused run other-update-failed changed $marker, $progress or its copy"
+  hx rm "$marker"
   expect_restored interrupted-restore
 
   echo "== an update killed during its rollback must be refused until it is restored"
