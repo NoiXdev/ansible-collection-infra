@@ -76,6 +76,14 @@
 #             previous release; killed during the rollback of a failed update:
 #             refused and restored the same way; killed during the backup: the
 #             next run cleans up and updates
+#   interrupted_s3
+#             with media in S3, an update that rotates the S3 secret key killed
+#             once the compose file names the new release: the copy of the
+#             secret file (mode 0600) beside the marker, the refusal, and the
+#             restore that puts the previous key back into the web container;
+#             then a restore that fails (the previous image cannot be started):
+#             update-failed records a failed rollback and refuses every
+#             version, and the marker and its copies are gone
 # The failed install and the update run at -v, the install, a reconfigure,
 # the failed update and the interrupted ones with their refusals and restores
 # at -vvv, every repeated converge at -v; their output must not hold a test
@@ -124,9 +132,11 @@ old_version=2.6.15
 old_images=("$(value_of "$defaults" tandoor_image):$old_version" "$busybox")
 backups="$dir/data/backups"
 marker="$dir/update-failed"
-# The marker of an update in progress and its copy of the compose file.
+# The marker of an update in progress and its copies of the compose file and,
+# with S3, the secret file.
 progress="$dir/update-in-progress"
 progress_compose="$dir/update-in-progress.compose.yaml"
+progress_s3_secret="$dir/update-in-progress.s3-secret"
 # The test secrets, which no run's output may hold.
 secrets=(
   "$(value_of "$here/vars.yml" tandoor_secret_key)"
@@ -730,7 +740,7 @@ failed_update() {
 # expect_no_progress <when>.
 expect_no_progress() {
   local file
-  for file in "$progress" "$progress_compose" "$dir/update-in-progress.s3-secret"; do
+  for file in "$progress" "$progress_compose" "$progress_s3_secret"; do
     hx test ! -e "$file" || fail "$file is left $1"
   done
 }
@@ -1015,10 +1025,14 @@ expect_interrupted_refusal() {
 }
 # The restore of an interrupted update with tandoor_restore_interrupted:
 # $old_version healthy again with the recipe, the marker and its copy gone,
-# the compose file back at $old_version. expect_restored <when>.
+# the compose file back at $old_version. expect_restored <when> [converge
+# options...].
 expect_restored() {
-  play "$here/converge.yml" -vvv -e tandoor_restore_interrupted=true >"$out/$1.log" 2>&1 \
-    || { tail -n 60 "$out/$1.log" >&2; fail "the restore $1 failed"; }
+  local name="$1"
+  shift
+  play "$here/converge.yml" -vvv -e tandoor_restore_interrupted=true "$@" >"$out/$name.log" 2>&1 \
+    || { tail -n 60 "$out/$name.log" >&2; fail "the restore $name failed"; }
+  set -- "$name"
   expect_no_secrets "$1"
   expect_in_log "$1" "Tandoor in $dir runs $old_version again"
   if grep -q "update.yml" "$out/$1.log"; then fail "the restore $1 tried the update again"; fi
@@ -1122,12 +1136,72 @@ test_interrupted() {
   expect_idempotent
 }
 
+test_interrupted_s3() {
+  echo "== with media in S3, an interrupted update that rotated the secret key must be restored with the previous key"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  load_set "${s3_images[@]}"
+  hx sh -c 'echo "127.0.0.1 s3.test" >>/etc/hosts'
+  converge -e "@$here/s3.yml" -e "tandoor_version=$old_version"
+  add_recipe
+  # The update also writes the rotated key into the secret file (RustFS
+  # keeps its own), before its compose file.
+  play_killed interrupted-s3 "grep -qF 'recipes:$version' $dir/compose.yaml" -vvv \
+    -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret"
+  expect_no_secrets interrupted-s3
+  hx grep -qx "step: update" "$progress" || fail "the marker does not record the step update: $(hx cat "$progress")"
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  for file in "$progress" "$progress_compose" "$progress_s3_secret"; do
+    [ "$(hx stat -c '%a %U' "$file")" = "600 root" ] || fail "$file is not root's with mode 0600: $(hx stat -c '%a %U' "$file" 2>&1)"
+  done
+  [ "$(hx cat "$progress_s3_secret")" = "$s3_secret" ] || fail "$progress_s3_secret does not hold the secret key from before the update"
+  [ "$(hx cat "$dir/s3-secret")" = "$s3_rotated_secret" ] || fail "the killed update did not write the rotated key into $dir/s3-secret"
+  note_untouched
+  play_fails interrupted-s3-refused "$here/converge.yml" -vvv -e "@$here/s3.yml" -e "s3_secret_key=$s3_rotated_secret"
+  expect_interrupted_refusal interrupted-s3-refused "$backup"
+  expect_no_secrets interrupted-s3-refused
+  expect_untouched interrupted-s3-refused
+  expect_restored interrupted-s3-restore -e "@$here/s3.yml"
+  [ "$(hx cat "$dir/s3-secret")" = "$s3_secret" ] || fail "the restore did not put the previous key back into $dir/s3-secret"
+  expect_container_secret "$s3_secret" "the previous key after the restore"
+
+  echo "== a restore of an interrupted update that fails must record a failed rollback"
+  # The installed release under a name that is then untagged: the restore
+  # cannot start it again (no such registry), after the database was
+  # recreated and loaded. The new release under that name as well.
+  hx docker tag "${old_images[0]}" "test.invalid/recipes:$old_version"
+  hx docker tag "${images[0]}" "test.invalid/recipes:$version"
+  converge -e "@$here/s3.yml" -e "tandoor_version=$old_version" -e tandoor_image=test.invalid/recipes
+  play_killed interrupted-s3-failing "grep -qF 'test.invalid/recipes:$version' $dir/compose.yaml" -v \
+    -e "@$here/s3.yml" -e tandoor_image=test.invalid/recipes
+  expect_no_secrets interrupted-s3-failing
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  [ -n "$backup" ] || fail "the killed update left no marker with a backup: $(hx cat "$progress" 2>&1)"
+  hx docker rmi "test.invalid/recipes:$old_version" >/dev/null
+  play_fails restore-failed "$here/converge.yml" -vvv -e "@$here/s3.yml" -e tandoor_image=test.invalid/recipes \
+    -e tandoor_restore_interrupted=true -e tandoor_rollback_timeout=60
+  expect_in_log restore-failed "Restoring Tandoor $old_version in $dir from the backup $backup after the interrupted update to $version failed"
+  expect_in_log restore-failed "Roll back by hand in $dir"
+  expect_no_secrets restore-failed
+  hx grep -qx "failed_version: $version" "$marker" || fail "the marker does not name $version: $(hx cat "$marker" 2>&1)"
+  hx grep -qx "rolled_back_to: null" "$marker" || fail "the marker does not record a failed rollback: $(hx cat "$marker")"
+  hx grep -qx "backup: $backup" "$marker" || fail "the marker does not name the backup $backup: $(hx cat "$marker")"
+  hx grep -q "^restore_error: ." "$marker" || fail "the marker records no restore error: $(hx cat "$marker")"
+  expect_no_progress "after the failed restore"
+  note_untouched
+  play_fails restore-failed-blocked "$here/converge.yml" -e "@$here/s3.yml" -e tandoor_image=test.invalid/recipes
+  expect_in_log restore-failed-blocked "$marker exists: the Tandoor update to $version failed"
+  expect_in_log restore-failed-blocked "The role refuses every version"
+  expect_untouched restore-failed-blocked
+}
+
 # All scenarios by default; NOIXDEV_INFRA_TANDOOR_TESTS="settings router"
 # runs only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update refusals missing_data mountpoint db_check interrupted}; do
+for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update refusals missing_data mountpoint db_check interrupted interrupted_s3}; do
   case "$scenario" in
-    settings | install | router | s3 | update | failed_update | refusals | missing_data | mountpoint | db_check | interrupted) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, refusals, missing_data, mountpoint, db_check, interrupted)" ;;
+    settings | install | router | s3 | update | failed_update | refusals | missing_data | mountpoint | db_check | interrupted | interrupted_s3) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, refusals, missing_data, mountpoint, db_check, interrupted, interrupted_s3)" ;;
   esac
 done
 
