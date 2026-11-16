@@ -173,9 +173,11 @@
   is removed to keep Paperless as it is. A restore that fails writes `update-failed` as a failed
   rollback does. The variable is refused without an interrupted update, a marker that is not YAML
   or lacks its keys is refused, a marker beside an `install-incomplete` marker is refused naming
-  both files, and a marker beside `update-failed` (a rollback that stopped after it wrote that) is
-  removed, `update-failed` deciding. A rollback restored again keeps the data of the failed
-  attempt in `<backup>-failed` and sets the newer ones aside in `<backup>-failed-<time>`.
+  both files, and a marker beside `update-failed` of the same backup (a rollback that stopped
+  after it wrote that) is removed, `update-failed` deciding; beside an `update-failed` of another
+  backup (an earlier update that was rolled back) it is handled as without one. A rollback
+  restored again keeps the data of the failed attempt in `<backup>-failed` and sets the newer
+  ones aside in `<backup>-failed-<time>`.
 - `n8n`: an update that did not finish is no longer taken for a finished one. From its first
   change until it is healthy or rolled back, an update keeps `update-in-progress` in `n8n_dir`
   (root, `0600`: the versions, the step and the backup, with a copy of the compose file). A run

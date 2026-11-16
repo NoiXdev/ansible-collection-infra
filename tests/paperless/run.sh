@@ -36,11 +36,12 @@
 # that did not finish, with converges killed (SIGKILL to their process group)
 # at a point of an update: paperless_restore_interrupted without an
 # interrupted update refused; a marker that is not YAML or lacks its keys
-# refused; one beside update-failed removed, update-failed deciding; one
-# beside an install marker refused naming both files; killed once the compose
-# file names the new release and the Samba files changed: the marker (step
-# update, both versions, the backup, mode 0600) with its copies refuses every
-# run, and paperless_restore_interrupted restores the previous release with
+# refused; one beside update-failed of the same backup removed, update-failed
+# deciding; one beside an install marker refused naming both files; killed
+# once the compose file names the new release and the Samba files changed:
+# the marker (step update, both versions, the backup, mode 0600) with its
+# copies refuses every run, beside update-failed of another update too, and
+# paperless_restore_interrupted restores the previous release with
 # its document and Samba files; killed during the rollback of a failed
 # update: refused and restored the same way; killed during the backup: the
 # next run cleans up and updates; a restore that fails (the previous image
@@ -1021,6 +1022,19 @@ test_interrupted() {
   expect_interrupted_refusal interrupted-refused "$backup"
   expect_no_secrets interrupted-refused
   expect_untouched interrupted-refused
+
+  echo "== beside update-failed of another update, the marker of an update in progress must still be refused"
+  # As an earlier update to another version leaves it that was rolled back:
+  # it stays through updates to other versions.
+  hx sh -c "printf 'failed_version: 99.0.0\nrolled_back_to: $old_version\nbackup: $backups/20200101T000000Z-$old_version\ntime: 2020-01-01T00:00:00Z\n' >$marker"
+  markers_before="$(hx sha256sum "$marker" "$progress" "$progress_compose" "$progress_smb_conf" "$progress_samba_pass")"
+  play_fails other-update-failed "$here/converge.yml" -vvv
+  expect_interrupted_refusal other-update-failed "$backup"
+  expect_no_secrets other-update-failed
+  expect_untouched other-update-failed
+  [ "$(hx sha256sum "$marker" "$progress" "$progress_compose" "$progress_smb_conf" "$progress_samba_pass")" = "$markers_before" ] \
+    || fail "the refused run other-update-failed changed $marker, $progress or its copies"
+  hx rm "$marker"
   expect_restored interrupted-restore
   hx grep -qx '   server min protocol = SMB2' "$dir/smb.conf" || fail "the restore did not put the Samba configuration back"
 
