@@ -1993,6 +1993,31 @@ nginx_anubis() {
   nexpect "200 backend" https://prod.example.test/page --expect "$front"
 }
 
+# nginx_together: a rate limit zone, and a map of nginx_http_extra, leave
+# nginx.conf in the same run as the site config that stops using them: one
+# run converges, as it does when they come in together.
+nginx_together() {
+  local dir="$here/nginx" fast=(-e nginx_test_prepare=false) answer
+  local zones='{"nginx_rate_limit_zones": [{"name": "default", "rate": "10r/s", "burst": 20}, {"name": "strict", "rate": "1r/s", "burst": 5}]}'
+  local map='{"nginx_http_extra": "map $host $noix_test_host {\n    default \"together\";\n}\n", "nginx_test_prod_extra": "add_header X-Noix-Test $noix_test_host always;"}'
+  echo "== nginx: a zone and an http-level map come in with the sites that use them"
+  converge nginx together "$dir/converge.yml" "${fast[@]}" -e "$zones" -e nginx_test_static_rate_limit=strict -e "$map"
+  hx nginx grep -qx '    limit_req zone=strict burst=5 nodelay;' /etc/nginx/sites/static.conf || fail "nginx: static.conf lacks the zone strict"
+  has_headers https://prod.example.test/ 'X-Noix-Test: together'
+
+  echo "== nginx: a zone leaves in the same run as the site that stops using it"
+  converge nginx together-no-zone "$dir/converge.yml" "${fast[@]}" -e "$map"
+  hx nginx sh -c '! grep -q "zone=strict" /etc/nginx/nginx.conf /etc/nginx/sites/static.conf' || fail "nginx: the zone strict is still there"
+  answer="$(ncurl https://static.example.test/)"
+  grep -qxF 'static index' <<<"$answer" || fail "nginx: static does not answer after its zone went: $answer"
+
+  echo "== nginx: an nginx_http_extra map leaves in the same run as the site that stops using it"
+  converge nginx together-no-map "$dir/converge.yml" "${fast[@]}"
+  hx nginx sh -c '! grep -q noix_test_host /etc/nginx/nginx.conf /etc/nginx/sites/prod.conf' || fail "nginx: the map is still there"
+  has_headers https://prod.example.test/ -X-Noix-Test
+  prod_answers together
+}
+
 suite_nginx() {
   local dir="$here/nginx" codename series version policy before after rc answer
   local fast=(-e nginx_test_prepare=false)
@@ -2091,14 +2116,19 @@ suite_nginx() {
   converge nginx defaults "$dir/converge.yml" "${fast[@]}"
   play nginx "$dir/verify.yml"
 
-  echo "== nginx: a site config nginx rejects fails naming nginx's error, the previous one stays"
-  before="$(hx nginx md5sum /etc/nginx/sites/prod.conf)"
-  if play nginx "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_prod_extra": "this is not nginx;"}' >"$out/nginx-rollback.log" 2>&1; then
+  nginx_together
+
+  # The run changes nginx.conf too (a comment in nginx_http_extra): the
+  # global config and the sites are tested together, and put back together.
+  echo "== nginx: a site config nginx rejects fails naming nginx's error, the previous one stays, nginx.conf too"
+  before="$(hx nginx md5sum /etc/nginx/sites/prod.conf /etc/nginx/nginx.conf)"
+  if play nginx "$dir/converge.yml" "${fast[@]}" -e '{"nginx_test_prod_extra": "this is not nginx;", "nginx_http_extra": "# noixdev rollback test\n"}' \
+      >"$out/nginx-rollback.log" 2>&1; then
     fail "nginx: the run with a broken extra did not fail"
   fi
   grep -qF 'unknown directive "this" in /etc/nginx/sites/prod.conf' "$out/nginx-rollback.log" \
     || { cat "$out/nginx-rollback.log" >&2; fail "nginx: the failure does not name nginx's error"; }
-  [ "$(hx nginx md5sum /etc/nginx/sites/prod.conf)" = "$before" ] || fail "nginx: prod.conf changed after the rejected run"
+  [ "$(hx nginx md5sum /etc/nginx/sites/prod.conf /etc/nginx/nginx.conf)" = "$before" ] || fail "nginx: prod.conf or nginx.conf changed after the rejected run"
   [ "$(hx nginx sh -c 'ls -A /etc/nginx/sites' | paste -sd' ' -)" = "node.conf prod.conf static.conf" ] \
     || fail "nginx: the rejected run left files in /etc/nginx/sites: $(hx nginx ls -A /etc/nginx/sites)"
   prod_answers rollback

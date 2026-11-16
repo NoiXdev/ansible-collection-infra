@@ -94,14 +94,11 @@
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Configure nginx
-      ansible.builtin.include_tasks: global.yml
-
     - name: Export the error pages
       ansible.builtin.include_tasks: error_pages.yml
       when: nginx_error_pages
 
-    - name: Configure the sites
+    - name: Configure nginx and the sites
       ansible.builtin.include_tasks: sites.yml
 
     - name: Start nginx

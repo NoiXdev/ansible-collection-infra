@@ -31,6 +31,10 @@
   root path (a deploy's `current`) re-pointed at another site's tree is not served. A deploy's
   `current -> releases/N` works when the site user owns both; a root reached through a link of one
   owner to another owner's tree is not served, so use the real path or a link of the same owner.
+- `nginx`: the global config (`nginx.conf`, the default server, the hardening) is written and
+  tested with the site configs in one `nginx -t`, and put back with them when nginx rejects the
+  config: a rate limit zone or an `nginx_http_extra` definition leaves in the same run as the site
+  that stops using it.
 - `anubis`: new mode `host` for an nginx on the host itself (the `nginx` role's sites with
   `anubis: true`): the container publishes `127.0.0.1:anubis_host_port` (8923) only and joins none
   of the other modes' networks. One mode per host.

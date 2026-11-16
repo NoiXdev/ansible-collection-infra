@@ -1,4 +1,15 @@
 ---
+- name: Create the role's nginx directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ nginx_role_dir }}"
+    - "{{ nginx_sites_dir }}"
+
 - name: Read the groups www-data joined for the sites
   ansible.builtin.slurp:
     src: "{{ nginx_groups_state }}"
@@ -81,13 +92,17 @@
       {{ files }}
   when: nginx_sites_public | selectattr('basic_auth_on') | list | length > 0
 
-- name: Apply the site configs
+# The global config (nginx_global_files) and the site configs in one call,
+# one nginx -t: a rate limit zone or an nginx_http_extra definition leaves
+# in the same run as the site that stops using it, and comes in with the
+# site that starts to.
+- name: Apply the global config and the site configs
   ansible.builtin.include_tasks: apply.yml
   vars:
     nginx_letsencrypt_ready: >-
       {{ nginx_letsencrypt_certs.results | selectattr('stat.exists') | map(attribute='item.name') | list }}
     nginx_apply_files: >-
-      {%- set files = [] -%}
+      {%- set files = nginx_global_files | list -%}
       {%- for site in nginx_sites_public -%}
       {%- if site.tls is mapping -%}
       {%-   set tls_files = site.tls -%}
@@ -102,9 +117,9 @@
       {%- endfor -%}
       {{ files }}
     nginx_apply_remove: >-
-      {{ nginx_site_files.files | map(attribute='path')
+      {{ nginx_global_remove + (nginx_site_files.files | map(attribute='path')
          | reject('in', nginx_site_names | map('regex_replace', '^(.*)$', nginx_sites_dir ~ '/\1.conf') | list)
-         | sort }}
+         | sort) }}
 
 - name: Remove the Basic auth users of the sites without basic_auth
   ansible.builtin.include_tasks: apply.yml
