@@ -81,8 +81,11 @@ argument_specs:
             serves root as static files.
           - >-
             root, the document root (an absolute path); required for php_pool and static sites.
-            A link below root is followed only when it has the same owner as its target
-            (disable_symlinks if_not_owner); the path of root itself is not checked.
+            A link is followed only when it has the same owner as its target
+            (disable_symlinks if_not_owner), in every part of the path, root's own path too: a
+            deploy's current -> releases/N works when the site user owns both, and a root reached
+            through a link of one owner to a tree of another is not served (404 or 403); use the real path
+            or a link of the same owner.
           - >-
             tls, letsencrypt (the default; nginx_acme_email is then required), off (HTTP only),
             or {cert, key} with the paths of an existing certificate and key. With TLS, port 80

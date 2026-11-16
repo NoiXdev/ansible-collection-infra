@@ -1449,6 +1449,23 @@ nginx_links() {
   answer="$(ncurl https://static.example.test/own.txt)"
   grep -qxF 'static index' <<<"$answer" || fail "nginx: static did not follow app_static's link to its own file: $answer"
   hx nginx rm -f /srv/static/foreign.txt /srv/static/own.txt /srv/static/root-owned.txt
+
+  # rel's root goes through a deploy's link current (app_static's): to its
+  # own release it is followed; re-pointed at prod's tree it is not.
+  echo "== nginx: a link in a site's root path is followed to the user's own release, not to another owner's tree"
+  local dir="$here/nginx" fast=(-e nginx_test_prepare=false)
+  local rel='{"name": "rel", "domains": ["rel.example.test"], "user": "app_static", "root": "/srv/rel/current/public", "tls": "off"}'
+  hx nginx install -d -o app_static -g app_static -m 0750 /srv/rel /srv/rel/releases /srv/rel/releases/1 /srv/rel/releases/1/public
+  hx nginx runuser -u app_static -- sh -c 'echo "rel release 1" > /srv/rel/releases/1/public/index.html && ln -sfn releases/1 /srv/rel/current'
+  converge nginx links-release "$dir/converge.yml" "${fast[@]}" -e "{\"nginx_test_extra_sites\": [$rel]}"
+  answer="$(ncurl http://rel.example.test/)"
+  grep -qxF 'rel release 1' <<<"$answer" || fail "nginx: rel did not follow app_static's link current to its own release: $answer"
+  hx nginx runuser -u app_static -- ln -sfn /srv/prod /srv/rel/current
+  answer="$(ncurl http://rel.example.test/.well-known/x.txt)"
+  grep -qE '^HTTP/1.1 (403|404) ' <<<"$answer" || fail "nginx: rel served app_prod's tree through its link current: $answer"
+  if grep -qF well-known <<<"$answer"; then fail "nginx: rel showed app_prod's file through its link current: $answer"; fi
+  play nginx "$dir/converge.yml" "${fast[@]}" >"$out/nginx-links-gone.log" 2>&1 || { cat "$out/nginx-links-gone.log" >&2; fail "nginx: the run without rel failed"; }
+  hx nginx rm -rf /srv/rel
 }
 
 # nginx_code [curl args]: the status of prod's front page over HTTPS from

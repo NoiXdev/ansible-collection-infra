@@ -97,10 +97,12 @@ server {
     client_max_body_size {{ site.client_max_body_size }};
 {% if site.root is defined %}
     root {{ site.root }};
-    # www-data is in every site's group: a link below root to a file of
-    # another owner (another environment's, say) is not followed. The root's
-    # own path (a deploy's current -> releases/N) is not checked.
-    disable_symlinks if_not_owner from=$document_root;
+    # www-data is in every site's group: a link to a file of another owner
+    # (another environment's, say) is not followed, in every part of the
+    # path, the root's own path too (a site user's link current re-pointed
+    # at another site's tree). A deploy's current -> releases/N works when
+    # the site user owns the link and the release.
+    disable_symlinks if_not_owner;
     index {{ (site.php_front_controller ~ ' ') if site.php_pool is defined else '' }}index.html;
 {% endif %}
 {% if site.rate_limit is defined %}
@@ -133,8 +135,7 @@ server {
     # own answers pass unchanged (no fastcgi_intercept_errors or
     # proxy_intercept_errors). ^~: no regex location (the hardening's
     # dotfiles) takes the path. The release behind the link current is
-    # root's, as the link is: disable_symlinks if_not_owner follows it, and
-    # $document_root here is the alias, below the link.
+    # root's, as the link is: disable_symlinks if_not_owner follows it.
 {% for code in nginx_error_pages_codes | map('int') | unique | sort %}
     error_page {{ code }} /.noix-error/{{ code }}.html;
 {% endfor %}

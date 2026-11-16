@@ -26,6 +26,11 @@
   `anubis` and `basic_auth`, and 401 must not be among `nginx_error_pages_codes` while a site has
   Anubis. Deploy snippets (`user_includes`, `nginx_user_includes`, `nginx_include_user`) are not
   supported yet and are refused. `nginx_ipv6` ignores link-local addresses.
+- `nginx`: a link is followed only to a file of its own owner in every part of a path, the web
+  root's own path too (`disable_symlinks if_not_owner` without `from=`): a site user's link in its
+  root path (a deploy's `current`) re-pointed at another site's tree is not served. A deploy's
+  `current -> releases/N` works when the site user owns both; a root reached through a link of one
+  owner to another owner's tree is not served, so use the real path or a link of the same owner.
 - `anubis`: new mode `host` for an nginx on the host itself (the `nginx` role's sites with
   `anubis: true`): the container publishes `127.0.0.1:anubis_host_port` (8923) only and joins none
   of the other modes' networks. One mode per host.
