@@ -78,3 +78,11 @@ paperless_import_passphrase: ""
 paperless_dumps_keep: 3
 # Seconds to wait for the webserver and the database to become healthy.
 paperless_health_timeout: 300
+
+# For one run, after an update that did not finish (a run that stopped after
+# its backup leaves paperless_dir/update-in-progress, and every later run
+# refuses): true restores the backup from before it, with the files it
+# replaced, and ends the run; the next run without it tries the update
+# again. Refused without such an update; remove it after the run. Removing
+# update-in-progress instead keeps Paperless as it is.
+paperless_restore_interrupted: false

@@ -25,13 +25,26 @@
 # that exits at once: rolled back with the document, the marker that blocks
 # the failed version, and the update once the marker is removed; a marker of
 # a rollback that failed too refuses every version. The install,
-# the import with a passphrase and the failed update run at -vvv, and their
-# output must not hold a test secret.
+# the import with a passphrase, the failed update and the interrupted ones
+# with their refusals and restores run at -vvv, and their output must not
+# hold a test secret.
 # Then the database check: an update to a test image that starts healthy with
 # a migration its web server start does not apply is rolled back with
 # update-failed naming the check, and a run without changes while the
 # database does not answer (its postmaster stopped, the container still
-# healthy) fails with the check within the health timeout.
+# healthy) fails with the check within the health timeout. Then the updates
+# that did not finish, with converges killed (SIGKILL to their process group)
+# at a point of an update: paperless_restore_interrupted without an
+# interrupted update refused; a marker that is not YAML or lacks its keys
+# refused; one beside update-failed removed, update-failed deciding; one
+# beside an install marker refused naming both files; killed once the compose
+# file names the new release and the Samba files changed: the marker (step
+# update, both versions, the backup, mode 0600) with its copies refuses every
+# run, and paperless_restore_interrupted restores the previous release with
+# its document and Samba files; killed during the rollback of a failed
+# update: refused and restored the same way; killed during the backup: the
+# next run cleans up and updates; a restore that fails (the previous image
+# cannot be started) records a failed rollback and refuses every version.
 # Then the refusals on an installation: a changed paperless_db_password
 # refused before any change (-vvv), a compose file that is not YAML refused
 # without a line of it in the output (-vvv), and the new password taken once
@@ -674,6 +687,49 @@ play_fails_within() {
   wait "$pid" || rc=$?
   [ "$rc" != 0 ] || fail "converge $name succeeded but must fail"
 }
+# Waits until no Ansible module runs on the test host: one that a killed
+# converge started finishes there, as on a host whose SSH session dropped.
+# Five quiet seconds in a row: a docker exec sent just before the kill can
+# start its module a moment later.
+wait_modules() {
+  local quiet=0
+  for _ in $(seq 300); do
+    if hx pgrep -f '[A]nsiballZ_' >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+    [ "$quiet" -lt 5 ] || return 0
+    sleep 1
+  done
+  fail "an Ansible module still runs on the test host after 300 seconds"
+}
+# A converge stopped as a dropped SSH session or a reboot stops it: run in the
+# background in a process group of its own and killed with SIGKILL, the whole
+# group, once the shell condition holds on the test host. play_killed <name>
+# <condition> [converge options...]; its output goes to $out/<name>.log.
+play_killed() {
+  local name="$1" condition="$2" pid
+  shift 2
+  set -m
+  play "$here/converge.yml" "$@" >"$out/$name.log" 2>&1 &
+  pid=$!
+  set +m
+  for _ in $(seq 900); do
+    if hx sh -c "$condition" >/dev/null 2>&1; then
+      kill -9 -- "-$pid"
+      wait "$pid" || true
+      wait_modules
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      tail -n 40 "$out/$name.log" >&2
+      fail "converge $name ended before it was killed at: $condition"
+    fi
+    sleep 0.5
+  done
+  kill -9 -- "-$pid" 2>/dev/null || true
+  wait "$pid" || true
+  fail "converge $name did not reach within the wait: $condition"
+}
+
 test_refusals() {
   echo "== a changed database password must be refused before any change"
   new_host
@@ -860,12 +916,190 @@ test_db_check() {
   expect_idempotent -e "paperless_version=$old_version"
 }
 
+# Fails unless the refusal <name> of an interrupted update from $old_version
+# to $version names the backup <backup> and both ways out.
+expect_interrupted_refusal() {
+  expect_in_log "$1" "$progress exists: the Paperless update from $old_version to $version did not finish"
+  expect_in_log "$1" "the backup from before it is $2"
+  expect_in_log "$1" "set paperless_restore_interrupted: true for one run to restore it"
+  expect_in_log "$1" "or remove $progress to keep Paperless as it is now"
+}
+# The restore of an interrupted update with paperless_restore_interrupted:
+# $old_version healthy again with the document, the marker and its copies
+# gone, the compose file back at $old_version. expect_restored <name>
+# [converge options...].
+expect_restored() {
+  local name="$1"
+  shift
+  play "$here/converge.yml" -vvv -e paperless_restore_interrupted=true "$@" >"$out/$name.log" 2>&1 \
+    || { tail -n 60 "$out/$name.log" >&2; fail "the restore $name failed"; }
+  expect_no_secrets "$name"
+  expect_in_log "$name" "Paperless in $dir runs $old_version again"
+  if grep -q "update.yml" "$out/$name.log"; then fail "the restore $name tried the update again"; fi
+  [ "$(webserver)" = "${old_images[0]} running healthy" ] || fail "the webserver after the restore $name: $(webserver)"
+  expect_document "after the restore $name"
+  expect_no_progress "after the restore $name"
+  hx grep -qF "paperless-ngx:$old_version" "$dir/compose.yaml" || fail "the compose file does not name $old_version after the restore $name"
+}
+
+test_interrupted() {
+  echo "== paperless_restore_interrupted without an interrupted update must be refused"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "paperless_version=$old_version"
+  consume_sample
+  note_untouched
+  play_fails restore-no-marker "$here/converge.yml" -e paperless_restore_interrupted=true
+  expect_in_log restore-no-marker "paperless_restore_interrupted is set, but there is no interrupted update in $dir; remove the variable"
+  expect_untouched restore-no-marker
+
+  echo "== a marker of an update in progress that the role did not write must be refused"
+  hx sh -c "echo 'not: [yaml' >$progress"
+  play_fails bad-marker "$here/converge.yml"
+  expect_in_log bad-marker "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched bad-marker
+  hx sh -c "printf 'from_version: $old_version\n' >$progress"
+  play_fails bad-marker-keys "$here/converge.yml"
+  expect_in_log bad-marker-keys "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched bad-marker-keys
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\ntime: 2026-01-01T00:00:00Z\n' >$progress"
+  play_fails bad-marker-backup "$here/converge.yml"
+  expect_in_log bad-marker-backup "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched bad-marker-backup
+  hx rm "$progress"
+
+  echo "== beside update-failed, the marker of an update in progress must be removed and update-failed decide"
+  # As a rescue leaves them that wrote update-failed and was killed before
+  # it removed the marker of the update in progress.
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$progress"
+  hx cp -p "$dir/compose.yaml" "$progress_compose"
+  hx sh -c "printf 'failed_version: $version\nrolled_back_to: $old_version\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$marker"
+  play_fails both-markers "$here/converge.yml"
+  expect_in_log both-markers "$marker exists: the Paperless update to $version failed"
+  expect_in_log both-markers "rolled back to $old_version"
+  expect_no_progress "beside update-failed"
+  hx test -e "$marker" || fail "the run removed $marker"
+  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run both-markers changed the compose file"
+  [ "$(containers)" = "$containers_before" ] || fail "the refused run both-markers created or removed containers"
+  hx rm "$marker"
+
+  echo "== an update in progress beside an install or import in progress must be refused, naming both files"
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$progress"
+  hx cp -p "$dir/compose.yaml" "$progress_compose"
+  hx sh -c "printf 'version: %s\nsource: \"%s\"\n' '$old_version' '$import' >$dir/install-incomplete"
+  progress_sum="$(hx sha256sum "$progress" "$progress_compose" "$dir/install-incomplete")"
+  play_fails both-install "$here/converge.yml"
+  expect_in_log both-install "$progress and $dir/install-incomplete both exist"
+  expect_untouched both-install
+  [ "$(hx sha256sum "$progress" "$progress_compose" "$dir/install-incomplete")" = "$progress_sum" ] \
+    || fail "the refused run both-install changed the markers or the copy"
+  # With the variable: the same refusal.
+  play_fails both-install-restore "$here/converge.yml" -e paperless_restore_interrupted=true
+  expect_in_log both-install-restore "$progress and $dir/install-incomplete both exist"
+  expect_untouched both-install-restore
+  hx rm "$progress" "$progress_compose" "$dir/install-incomplete"
+
+  echo "== an update killed once its compose file names $version must be refused until it is restored"
+  # With the Samba files changed as well, which the restore puts back.
+  play_killed interrupted "grep -qF 'paperless-ngx:$version' $dir/compose.yaml && grep -qx '   server min protocol = SMB3' $dir/smb.conf" \
+    -vvv -e paperless_samba_min_protocol=SMB3
+  expect_no_secrets interrupted
+  hx grep -qx "step: update" "$progress" || fail "the marker does not record the step update: $(hx cat "$progress")"
+  hx grep -qx "from_version: $old_version" "$progress" || fail "the marker does not name $old_version: $(hx cat "$progress")"
+  hx grep -qx "to_version: $version" "$progress" || fail "the marker does not name $version: $(hx cat "$progress")"
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  [ "$(hx head -c 5 "$backup/paperless.dump")" = PGDMP ] || fail "the marker's backup $backup has no dump"
+  for file in "$progress" "$progress_compose" "$progress_smb_conf" "$progress_samba_pass"; do
+    [ "$(hx stat -c '%a %U' "$file" 2>&1)" = "600 root" ] || fail "$file is not root's with mode 0600: $(hx stat -c '%a %U' "$file" 2>&1)"
+  done
+  hx cmp -s "$progress_compose" "$backup/compose.yaml" || fail "$progress_compose is not the compose file from before the update"
+  hx grep -qx '   server min protocol = SMB2' "$progress_smb_conf" || fail "$progress_smb_conf is not the Samba configuration from before the update"
+  hx grep -qx '   server min protocol = SMB3' "$dir/smb.conf" || fail "the killed update did not write the new Samba configuration"
+  note_untouched
+  play_fails interrupted-refused "$here/converge.yml" -vvv
+  expect_interrupted_refusal interrupted-refused "$backup"
+  expect_no_secrets interrupted-refused
+  expect_untouched interrupted-refused
+  expect_restored interrupted-restore
+  hx grep -qx '   server min protocol = SMB2' "$dir/smb.conf" || fail "the restore did not put the Samba configuration back"
+
+  echo "== an update killed during its rollback must be refused until it is restored"
+  hx docker tag busybox:1.37 "test.invalid/paperless-ngx:$version"
+  play_killed interrupted-rollback \
+    "backup=\$(sed -n 's/^backup: //p' $progress) && [ -n \"\$backup\" ] && [ -e \"\$backup-failed\" ]" \
+    -vvv -e paperless_image=test.invalid/paperless-ngx -e paperless_health_timeout=30
+  expect_no_secrets interrupted-rollback
+  # The first run without the variable after the restore tried the update to
+  # $version again.
+  grep -qF "Stop the webserver and Samba for the update" "$out/interrupted-rollback.log" \
+    || fail "the run after the restore of $old_version did not update to $version"
+  hx test ! -e "$marker" || fail "the killed rollback wrote $marker: $(hx cat "$marker")"
+  hx grep -qx "step: update" "$progress" || fail "the marker does not record the step update: $(hx cat "$progress")"
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  note_untouched
+  play_fails rollback-refused "$here/converge.yml" -vvv
+  expect_interrupted_refusal rollback-refused "$backup"
+  expect_no_secrets rollback-refused
+  expect_untouched rollback-refused
+  expect_restored rollback-restore
+  hx test -d "$backup-failed" || fail "the data of the failed attempt in $backup-failed are gone"
+  # The rollback that was stopped had set them aside already, so the ones
+  # found by the restore went to a directory of their own.
+  [ -n "$(hx sh -c "ls -d $backup-failed-*")" ] || fail "the restore after the stopped rollback kept no $backup-failed-<time>"
+
+  echo "== an update killed during its backup must be cleaned up and done by the next run"
+  play_killed interrupted-backup "ls -d $backups/*.partial" -v
+  expect_no_secrets interrupted-backup
+  hx grep -qx "step: backup" "$progress" || fail "the marker does not record the step backup: $(hx cat "$progress")"
+  converge -v
+  expect_no_secrets converge
+  grep -q "update.yml" "$out/converge.log" || fail "the run after the interrupted backup was not an update"
+  [ "$(webserver)" = "${images[0]} running healthy" ] || fail "the webserver after the update: $(webserver)"
+  if hx sh -c "ls -d $backups/*.partial" >/dev/null 2>&1; then
+    fail "the update left a partial backup: $(hx ls "$backups")"
+  fi
+  expect_no_progress "after the update"
+  expect_document "after the update that followed the interrupted backup"
+  expect_idempotent
+
+  echo "== a restore of an interrupted update that fails must record a failed rollback"
+  # The installed release under a name that is then untagged: the restore
+  # cannot start it again (no such registry), after the database was
+  # recreated and loaded. The newer release is busybox under that name.
+  new_pin=3.4.3
+  hx docker tag "${images[0]}" "test.invalid/paperless-ngx:$version"
+  hx docker tag busybox:1.37 "test.invalid/paperless-ngx:$new_pin"
+  converge -e "paperless_version=$version" -e paperless_image=test.invalid/paperless-ngx
+  play_killed interrupted-failing "grep -qF 'test.invalid/paperless-ngx:$new_pin' $dir/compose.yaml" -v \
+    -e "paperless_version=$new_pin" -e paperless_image=test.invalid/paperless-ngx
+  expect_no_secrets interrupted-failing
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  [ -n "$backup" ] || fail "the killed update left no marker with a backup: $(hx cat "$progress" 2>&1)"
+  hx docker rmi "test.invalid/paperless-ngx:$version" >/dev/null
+  play_fails restore-failed "$here/converge.yml" -vvv -e "paperless_version=$new_pin" -e paperless_image=test.invalid/paperless-ngx \
+    -e paperless_restore_interrupted=true -e paperless_health_timeout=60
+  expect_in_log restore-failed "Restoring Paperless $version in $dir from the backup $backup after the interrupted update to $new_pin failed"
+  expect_in_log restore-failed "Roll back by hand in $dir"
+  expect_no_secrets restore-failed
+  hx grep -qx "failed_version: $new_pin" "$marker" || fail "the marker does not name $new_pin: $(hx cat "$marker" 2>&1)"
+  hx grep -qx "rolled_back_to: null" "$marker" || fail "the marker does not record a failed rollback: $(hx cat "$marker")"
+  hx grep -qx "backup: $backup" "$marker" || fail "the marker does not name the backup $backup: $(hx cat "$marker")"
+  hx grep -q "^restore_error: ." "$marker" || fail "the marker records no restore error: $(hx cat "$marker")"
+  expect_no_progress "after the failed restore"
+  note_untouched
+  play_fails restore-failed-blocked "$here/converge.yml" -e "paperless_version=$new_pin" -e paperless_image=test.invalid/paperless-ngx
+  expect_in_log restore-failed-blocked "$marker exists: the Paperless update to $new_pin failed"
+  expect_in_log restore-failed-blocked "The role refuses every version"
+  expect_untouched restore-failed-blocked
+}
+
 # All scenarios by default; NOIXDEV_INFRA_PAPERLESS_TESTS="update failed_update"
 # runs only these (import needs install in the same run).
-for scenario in ${NOIXDEV_INFRA_PAPERLESS_TESTS:-settings install import update failed_update refusals missing_data mountpoint db_check}; do
+for scenario in ${NOIXDEV_INFRA_PAPERLESS_TESTS:-settings install import update failed_update refusals missing_data mountpoint db_check interrupted}; do
   case "$scenario" in
-    settings | install | import | update | failed_update | refusals | missing_data | mountpoint | db_check) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, import, update, failed_update, refusals, missing_data, mountpoint, db_check)" ;;
+    settings | install | import | update | failed_update | refusals | missing_data | mountpoint | db_check | interrupted) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, import, update, failed_update, refusals, missing_data, mountpoint, db_check, interrupted)" ;;
   esac
 done
 

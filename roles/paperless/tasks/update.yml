@@ -10,10 +10,23 @@
 # paperless_marker_file names the failed version, and the run fails. A Samba
 # that does not start after a healthy update fails the run without a
 # rollback and without the marker.
+# From the first change on, paperless_update_marker says how far the update
+# got (step backup, then step update with the backup), with copies of the
+# files it replaces; it is removed once the update is healthy, or after the
+# recovery or the rollback, so that only a run that stopped leaves it.
 
 - name: Update Paperless
   vars:
     paperless_new_image: "{{ paperless_image }}:{{ paperless_version }}"
+    paperless_update_marker_content: |
+      # Written by the noixdev.infra.paperless role while it updates Paperless,
+      # and removed once the update is healthy or rolled back. A run that
+      # finds it with step update refuses until it is removed or
+      # paperless_restore_interrupted restores the backup.
+      {{ {'from_version': paperless_installed_version, 'to_version': paperless_version, 'step': paperless_update_step}
+         | combine({'backup': paperless_backup} if paperless_update_step == 'update' else {})
+         | combine({'time': paperless_update_started})
+         | to_nice_yaml(sort_keys=false) }}
   block:
     - name: Look for the image of Paperless {{ paperless_version }}
       ansible.builtin.command:
@@ -28,6 +41,37 @@
       changed_when: true
       when: paperless_new_image_local.rc != 0
 
+    - name: Note when the update starts
+      ansible.builtin.set_fact:
+        paperless_update_started: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    # Right before the first change. The marker first: a run stopped before
+    # the copies are written leaves the marker, which the next run cleans up
+    # with them, but never copies without a marker.
+    - name: Write the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ paperless_update_marker }}"
+        content: "{{ paperless_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        paperless_update_step: backup
+
+    # The ones that exist; a restore removes the others (Samba off).
+    - name: Keep the files from before the update
+      ansible.builtin.copy:
+        dest: "{{ paperless_update_marker_copies | selectattr('path', 'equalto', item.item.path) | map(attribute='saved') | first }}"
+        content: "{{ item.content | b64decode }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ paperless_files_read.results | selectattr('content', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+      # They hold the secret key and the passwords.
+      no_log: true
+
     # Nothing writes to the database or the files during the backup.
     - name: Stop the webserver and Samba for the update
       ansible.builtin.command:
@@ -37,6 +81,18 @@
 
     - name: Back up the database and the files
       ansible.builtin.include_tasks: snapshot.yml
+
+    # From here on the files and the database change; the backup holds them
+    # as they were.
+    - name: Note the backup in the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ paperless_update_marker }}"
+        content: "{{ paperless_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        paperless_update_step: update
 
     - name: Write the files with Paperless {{ paperless_version }}
       ansible.builtin.copy:
@@ -105,6 +161,13 @@
               ansible.builtin.set_fact:
                 paperless_restart_error: "{{ paperless_failure | trim }}"
 
+        # Nothing but the partial backup had changed.
+        - name: Remove the marker of the update that failed before the backup
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ paperless_update_marker_files }}"
+
         - name: Fail when the update failed before the backup
           ansible.builtin.fail:
             msg: >-
@@ -139,6 +202,15 @@
         group: root
         mode: "0644"
 
+    # After update-failed: a run stopped before leaves this marker, and the
+    # next one refuses as for an update that did not finish; one stopped
+    # after leaves both, and the next one removes this one.
+    - name: Remove the marker of the rolled back update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ paperless_update_marker_files }}"
+
     - name: Fail with the rollback
       ansible.builtin.fail:
         msg: >-
@@ -164,6 +236,14 @@
           {{ paperless_restore_hint }} {{ paperless_marker_file }} stops
           further updates to {{ paperless_version }}; remove it once Paperless
           runs again.
+
+# Only after a successful update (the rescue always fails), and outside the
+# block, so that nothing after the health check can roll it back.
+- name: Remove the marker of the update in progress
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ paperless_update_marker_files }}"
 
 # Only after a successful update; the names start with the time, so they
 # sort by age. <backup>-failed directories of rolled back updates stay.

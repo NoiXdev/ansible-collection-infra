@@ -98,15 +98,11 @@
   vars:
     paperless_owned: "{{ paperless_env.keys() | select('in', paperless_env_owned) | list }}"
 
+# Also reads the marker of a failed update (paperless_marker_read, written by
+# update.yml; it names the failed version) and refuses after an update that
+# did not finish (its marker, step update).
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
-
-# Written by update.yml after a failed update; it names the failed version.
-- name: Read the marker of a failed update
-  ansible.builtin.slurp:
-    src: "{{ paperless_marker_file }}"
-  register: paperless_marker_read
-  failed_when: false
 
 # A marker that is not YAML cannot say which version failed.
 - name: Check the marker of a failed update
@@ -187,6 +183,97 @@
 - name: Update Paperless
   ansible.builtin.include_tasks: update.yml
   when: paperless_state == 'update'
+
+# The run after an update that did not finish, with
+# paperless_restore_interrupted: the files from before it (the marker's
+# copies) and the database, data and media of its backup put back by
+# restore.yml, as a rollback puts them back, and nothing else of the update.
+# Healthy, the marker goes and the run ends; the next run without the
+# variable tries the update again. Not healthy, update-failed records a
+# failed rollback (rolled_back_to null), which refuses every version.
+- name: Restore the backup of the interrupted update
+  when: paperless_state == 'restore_interrupted'
+  vars:
+    paperless_interrupted_from: "{{ paperless_update_in_progress.from_version | default('?') }}"
+    paperless_interrupted_to: "{{ paperless_update_in_progress.to_version }}"
+  block:
+    # What restore.yml puts back: a file without a copy did not exist (the
+    # Samba files with Samba off), and the restore removes it. state.yml has
+    # checked that the compose file's copy exists. They hold the secret key
+    # and the passwords.
+    - name: Read the files from before the interrupted update
+      ansible.builtin.slurp:
+        src: "{{ item.saved }}"
+      loop: "{{ paperless_update_marker_copies }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: paperless_files_read
+      failed_when: false
+      no_log: true
+
+    - name: Note the backup from before the interrupted update
+      ansible.builtin.set_fact:
+        paperless_backup: "{{ paperless_update_in_progress.backup }}"
+
+    - name: Roll back to the backup of the interrupted update
+      ansible.builtin.include_tasks: restore.yml
+      vars:
+        paperless_installed_version: "{{ paperless_interrupted_from }}"
+
+    - name: Remove the marker of the restored update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ paperless_update_marker_files }}"
+      when: paperless_healthy
+
+    - name: Report the restore
+      ansible.builtin.debug:
+        msg: >-
+          Paperless in {{ paperless_dir }} runs {{ paperless_interrupted_from }}
+          again: the interrupted update to {{ paperless_interrupted_to }} was
+          rolled back to the backup {{ paperless_backup }}. Remove
+          paperless_restore_interrupted; the next run with a newer
+          paperless_version tries the update again.
+      when: paperless_healthy
+
+    # As after a failed rollback: the data is in the backup, and no version
+    # may run over the database the restore left.
+    - name: Write the marker of the failed restore
+      ansible.builtin.copy:
+        dest: "{{ paperless_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.paperless role: the update to
+          # failed_version did not finish, and restoring the backup failed.
+          # The role refuses every version while this file exists.
+          {{ {'failed_version': paperless_interrupted_to,
+              'rolled_back_to': none,
+              'backup': paperless_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'restore_error': paperless_restore_error}
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: not paperless_healthy
+
+    - name: Remove the marker of the update whose restore failed
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ paperless_update_marker_files }}"
+      when: not paperless_healthy
+
+    - name: Fail with the failed restore
+      ansible.builtin.fail:
+        msg: >-
+          Restoring Paperless {{ paperless_interrupted_from }} in {{ paperless_dir }}
+          from the backup {{ paperless_backup }} after the interrupted update to
+          {{ paperless_interrupted_to }} failed ({{ paperless_restore_error }}), so
+          Paperless may be down. {{ paperless_restore_hint }}
+          {{ paperless_marker_file }} refuses every version; remove it once
+          Paperless runs again.
+      when: not paperless_healthy
 
 # A reconfigure keeps the version, so the schema stays and it takes no backup.
 - name: Reconfigure Paperless

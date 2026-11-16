@@ -162,6 +162,20 @@
   `paperless_health_timeout`. So an update whose new release starts healthy while a migration is
   not applied is rolled back and recorded in `update-failed`, and a run without changes fails,
   within the health timeout, while the database does not answer.
+- `paperless`: an update that did not finish is no longer taken for a finished one. From its first
+  change until it is healthy or rolled back, an update keeps `update-in-progress` in
+  `paperless_dir` (root, `0600`: the versions, the step and the backup, with copies of the compose
+  file and the Samba files). A run that stopped during the backup changed nothing else: the next
+  run removes the partial backup and the marker and updates again. A run that stopped after it
+  makes every later run refuse before any change, naming both versions and the backup, until
+  either `paperless_restore_interrupted: true` for one run restores the backup with the files from
+  before the update (and ends without trying the update again; the next run does), or the marker
+  is removed to keep Paperless as it is. A restore that fails writes `update-failed` as a failed
+  rollback does. The variable is refused without an interrupted update, a marker that is not YAML
+  or lacks its keys is refused, a marker beside an `install-incomplete` marker is refused naming
+  both files, and a marker beside `update-failed` (a rollback that stopped after it wrote that) is
+  removed, `update-failed` deciding. A rollback restored again keeps the data of the failed
+  attempt in `<backup>-failed` and sets the newer ones aside in `<backup>-failed-<time>`.
 - `nodejs`: new role that installs one Node.js major series from NodeSource (`nodejs_version`,
   default `"24"`) and global npm packages at exact versions (`nodejs_npm_packages`, each with
   `name` and `version`; ranges and tags are refused). A `nodejs` of another series (Ubuntu's own,

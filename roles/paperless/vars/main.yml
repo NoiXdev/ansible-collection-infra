@@ -26,6 +26,33 @@ paperless_marker_file: "{{ paperless_dir }}/update-failed"
 # Written before an install creates anything in paperless_data_dir and
 # removed once the first admin exists; while it exists every run refuses.
 paperless_install_marker: "{{ paperless_dir }}/install-incomplete"
+# Written by update.yml before the first change of an update (step backup),
+# rewritten once the backup is complete (step update, with the backup) and
+# removed once the update is healthy or rolled back; a run that stopped in
+# between (a dropped SSH session, a reboot) leaves it for the next one
+# (state.yml). YAML with from_version, to_version, step, backup and time;
+# root, mode 0600.
+paperless_update_marker: "{{ paperless_dir }}/update-in-progress"
+# Its copies of the files the update replaces, for a restore with
+# paperless_restore_interrupted: the compose file (it holds the secrets) and
+# the Samba files, when they exist. Root, mode 0600.
+paperless_update_marker_compose: "{{ paperless_dir }}/update-in-progress.compose.yaml"
+paperless_update_marker_smb_conf: "{{ paperless_dir }}/update-in-progress.smb.conf"
+paperless_update_marker_samba_pass: "{{ paperless_dir }}/update-in-progress.samba-pass"
+# Each file the role writes, with its mode and where its copy is saved.
+paperless_update_marker_copies:
+  - path: "{{ paperless_compose_file }}"
+    mode: "0600"
+    saved: "{{ paperless_update_marker_compose }}"
+  - path: "{{ paperless_smb_conf }}"
+    mode: "0644"
+    saved: "{{ paperless_update_marker_smb_conf }}"
+  - path: "{{ paperless_samba_pass_file }}"
+    mode: "0600"
+    saved: "{{ paperless_update_marker_samba_pass }}"
+# In the order they are removed: the marker last, so that a run stopped in
+# between leaves it.
+paperless_update_marker_files: "{{ paperless_update_marker_copies | map(attribute='saved') | list + [paperless_update_marker] }}"
 # Written after an import, so a run with the same paperless_import_dir is not
 # a second import.
 paperless_import_record: "{{ paperless_dir }}/imported.yml"

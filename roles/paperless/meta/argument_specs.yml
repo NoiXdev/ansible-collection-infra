@@ -129,3 +129,10 @@ argument_specs:
       paperless_health_timeout:
         type: int
         description: Seconds to wait for the webserver and the database to become healthy.
+      paperless_restore_interrupted:
+        type: bool
+        description: >-
+          For one run only: after an update that did not finish
+          (paperless_dir/update-in-progress), restore the backup from before
+          it and end the run. Refused when there is no such update; remove it
+          after the run.

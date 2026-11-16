@@ -3,7 +3,10 @@
 # files the role writes put back as they were before the run (from
 # paperless_files_read; the ones that did not exist removed), the database
 # recreated empty and loaded from the dump, data/ and media/ moved aside to
-# <backup>-failed and the snapshot copied back (media as hard links again),
+# <backup>-failed (<backup>-failed-<UTC time> when that exists: a rollback
+# that was stopped, restored again with paperless_restore_interrupted, has
+# put the failed attempt's there already) and the snapshot copied back (media
+# as hard links again),
 # then the previous stack (Samba with it) started and checked with
 # health.yml. The previous
 # files come first, so the database is restored in the previous database
@@ -90,12 +93,14 @@
           set -eu
           backup={{ paperless_backup | quote }}
           root={{ paperless_data_dir | quote }}
-          mkdir -m 0700 "$backup-failed"
+          aside="$backup-failed"
+          if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+          mkdir -m 0700 "$aside"
           rm -rf "$root/.data.restore" "$root/.media.restore"
           cp -a "$backup/data" "$root/.data.restore"
           cp -al "$backup/media" "$root/.media.restore"
           for d in data media; do
-            mv "$root/$d" "$backup-failed/$d"
+            mv "$root/$d" "$aside/$d"
             mv "$root/.$d.restore" "$root/$d"
           done
       changed_when: true

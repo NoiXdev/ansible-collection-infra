@@ -7,25 +7,41 @@
 #   reconfigure  a file the role writes (compose file, smb.conf, Samba
 #                password) differs from the one on disk
 #   noop         everything as the role writes it
+#   restore_interrupted
+#                an update that did not finish (paperless_update_marker, step
+#                update) and paperless_restore_interrupted: main.yml restores
+#                its backup and does nothing else
 # Also sets paperless_installed (a compose file exists),
 # paperless_compose_before (the compose file on disk),
 # paperless_compose_on_disk (it parsed, which paperless_installed_version
 # reads), paperless_files_read (the files on
-# disk, which a rollback puts back), paperless_files_changed (the paths of
+# disk, which a rollback puts back), paperless_marker_read (the marker of a
+# failed update, read here, which main.yml decides on),
+# paperless_update_in_progress (the marker of an update that did not finish
+# parsed, empty without one), paperless_files_changed (the paths of
 # the files that differ) and paperless_down (the expected services that are
 # not running). With an import record, paperless_import_dir is ignored.
-# Changes nothing; refuses, before anything else, a paperless_data_dir that is
+# Refuses, before anything else, a paperless_data_dir that is
 # not a mountpoint (with paperless_data_dir_mountpoint), a compose file that
 # is not YAML and a compose file without all of paperless_data_subdirs (an unmounted volume); then a marker
 # beside the record of a completed import, an install or import that did
-# not complete, left-over data without a compose
-# file, a compose file without a Paperless version, a
-# downgrade, a paperless_db_password that the database does not take, a
+# not complete (an update in progress beside one, naming both), left-over
+# data without a compose file, an update that did not finish
+# (paperless_update_marker with step update, read into
+# paperless_update_in_progress; without paperless_restore_interrupted, or with
+# it but without the copy of the compose file or the dump), a marker of it
+# the role did not write, paperless_restore_interrupted without an update to
+# restore, a compose file without a Paperless version, a downgrade (not for
+# a restore), a paperless_db_password that the database does not take, a
 # PostgreSQL major other than the database's, and an import
 # into an installation (no record), of an export outside
 # paperless_export_dir, without a manifest, of another Paperless version,
 # made with a passphrase that is not given, or that paperless_uid cannot
-# read.
+# read. Changes only what an interrupted update left that nothing needs: a
+# marker of an update in progress beside update-failed (the rollback ran),
+# and, after every refusal, the partial backup and the marker of an update
+# stopped during its backup (the files are as before it), or the copies of a
+# marker that was removed by hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -134,6 +150,39 @@
   register: paperless_install_marker_read
   failed_when: false
 
+# Left by a run that stopped during an update (update.yml). Not secret: the
+# versions, the step, the backup and the time.
+- name: Read the marker of an update in progress
+  ansible.builtin.slurp:
+    src: "{{ paperless_update_marker }}"
+  register: paperless_update_marker_read
+  failed_when: false
+
+# Written by update.yml after a failed update; it names the failed version.
+- name: Read the marker of a failed update
+  ansible.builtin.slurp:
+    src: "{{ paperless_marker_file }}"
+  register: paperless_marker_read
+  failed_when: false
+
+# Imports and installs run only on an empty host, and an update only on an
+# installation, so the role never writes both: a hand edit or a restored
+# backup did, and what the update left and what the install left cannot be
+# told apart.
+- name: Refuse an update in progress beside an install or import in progress
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_update_marker }} and {{ paperless_install_marker }} both
+      exist: an update of Paperless in {{ paperless_dir }} did not finish, and
+      so did an install or an import, which the role never starts on an
+      installation. The role cannot tell what state Paperless is in and
+      changes nothing. Check Paperless (its documents), then remove the
+      marker that does not apply (rm {{ paperless_update_marker }} and its
+      copies, or see the install marker's own hint) and run the role again.
+  when:
+    - paperless_update_marker_read.content is defined
+    - paperless_install_marker_read.content is defined
+
 - name: Note what the marker is from
   ansible.builtin.set_fact:
     paperless_incomplete_source: >-
@@ -199,6 +248,126 @@
     - not paperless_installed
     - paperless_data_found | length > 0
 
+# Beside update-failed, the rescue of the update wrote that marker and was
+# stopped before it removed this one: the rollback ran, and update-failed
+# decides in main.yml.
+- name: Remove the marker of an update in progress beside a failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ paperless_update_marker_files }}"
+  when:
+    - paperless_update_marker_read.content is defined
+    - paperless_marker_read.content is defined
+
+- name: Note that no update is in progress
+  ansible.builtin.set_fact:
+    paperless_update_in_progress: {}
+
+# A marker that is not YAML parses to nothing and is refused below. It holds
+# no secret: the copies are never read here.
+- name: Check the marker of an update in progress
+  when:
+    - paperless_update_marker_read.content is defined
+    - paperless_marker_read.content is not defined
+  block:
+    - name: Parse the marker of the update in progress
+      ansible.builtin.set_fact:
+        paperless_update_in_progress: "{{ paperless_update_marker_yaml if paperless_update_marker_yaml is mapping else {'step': none} }}"
+      vars:
+        paperless_update_marker_yaml: "{{ paperless_update_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Note a marker that is not YAML
+      ansible.builtin.set_fact:
+        paperless_update_in_progress: {step: null}
+
+- name: Refuse a marker of an update in progress the role did not write
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_update_marker }} exists, but it is not YAML or lacks step or
+      to_version (or, with step update, backup), so the role cannot tell how
+      far the Paperless update in {{ paperless_dir }} got and changes nothing.
+      Check Paperless, then remove it with its copies (rm
+      {{ paperless_update_marker_files | join(' ') }}).
+  when:
+    - paperless_update_in_progress | length > 0
+    - >-
+      paperless_update_in_progress.step | default(none) not in ['backup', 'update']
+      or not paperless_update_in_progress.to_version | default('', true) | string is match('^\d+\.\d+\.\d+$')
+      or (paperless_update_in_progress.step == 'update'
+          and not paperless_update_in_progress.backup | default('', true) | string is match('^/'))
+
+# Step update: the compose file may name the new version, the database may be
+# migrated or half migrated, and Paperless may run either version or neither.
+# Rolling back on its own would lose what changed since, if the update had in
+# fact finished and only the marker's removal was lost; the operator decides.
+- name: Refuse to run after an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      {{ paperless_update_marker }} exists: the Paperless update from
+      {{ paperless_update_in_progress.from_version | default('?') }} to
+      {{ paperless_update_in_progress.to_version }} did not finish (the run that
+      started it on {{ paperless_update_in_progress.time | default('?') }}
+      stopped after its backup), and the backup from before it is
+      {{ paperless_update_in_progress.backup }}. Paperless in {{ paperless_dir }}
+      may run either version or neither, with a database the new version may
+      have migrated; the role changes nothing. To go back to
+      {{ paperless_update_in_progress.from_version | default('?') }},
+      set paperless_restore_interrupted: true for one run to restore it (the
+      files from before the update, and the database, data and media from the
+      backup), or remove {{ paperless_update_marker }} to keep Paperless as it
+      is now, then check it and run the role again.
+  when:
+    - paperless_update_in_progress.step | default(none) == 'update'
+    - not paperless_restore_interrupted | bool
+
+- name: Look for what the restore of the interrupted update needs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    get_checksum: false
+  loop:
+    - "{{ paperless_update_marker_compose }}"
+    - "{{ paperless_update_in_progress.backup | default('') }}/paperless.dump"
+  register: paperless_restore_needs
+  when:
+    - paperless_update_in_progress.step | default(none) == 'update'
+    - paperless_restore_interrupted | bool
+
+- name: Refuse a restore without the copy of the compose file or the dump
+  ansible.builtin.fail:
+    msg: >-
+      paperless_restore_interrupted is set to restore the backup
+      {{ paperless_update_in_progress.backup }} of the interrupted Paperless
+      update from {{ paperless_update_in_progress.from_version | default('?') }} to
+      {{ paperless_update_in_progress.to_version }}, but
+      {{ paperless_restore_missing | join(' and ') }}
+      {{ 'is' if paperless_restore_missing | length == 1 else 'are' }} missing,
+      so the role cannot restore it and changes nothing.
+      {{ paperless_restore_hint }} Then remove {{ paperless_update_marker }} and
+      run the role again without the variable.
+  vars:
+    paperless_backup: "{{ paperless_update_in_progress.backup }}"
+    paperless_restore_missing: >-
+      {{ paperless_restore_needs.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+  when:
+    - paperless_update_in_progress.step | default(none) == 'update'
+    - paperless_restore_interrupted | bool
+    - paperless_restore_missing | length > 0
+
+# A variable left set must never turn a later interruption into a rollback
+# of its own. An update stopped during its backup changed nothing to restore.
+- name: Refuse paperless_restore_interrupted without an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      paperless_restore_interrupted is set, but there is no interrupted update in
+      {{ paperless_dir }}; remove the variable{{ (' (' ~ paperless_update_marker
+      ~ ' records an update that stopped during its backup, before anything changed;'
+      ~ ' the next run without the variable cleans it up and updates)')
+      if paperless_update_in_progress.step | default(none) == 'backup' else '' }}.
+  when:
+    - paperless_restore_interrupted | bool
+    - paperless_update_in_progress.step | default(none) != 'update'
+
 - name: Check the installed version
   when: paperless_installed
   block:
@@ -220,7 +389,10 @@
           {{ paperless_dir }}; the role refuses to downgrade, Paperless cannot
           migrate its database down, and changes nothing. Set
           paperless_version to {{ paperless_installed_version }} or newer.
-      when: paperless_version is version(paperless_installed_version, '<')
+      # A restore puts the previous files back, whatever paperless_version is.
+      when:
+        - paperless_version is version(paperless_installed_version, '<')
+        - paperless_update_in_progress.step | default(none) != 'update'
 
 # PostgreSQL takes POSTGRES_PASSWORD only when it creates the cluster: on an
 # existing one a new paperless_db_password would reach Paperless but not the
@@ -514,12 +686,44 @@
   changed_when: false
   when: paperless_installed
 
+# After every refusal. Step backup: the files and the database are as before
+# the update, and the webserver and Samba stopped; the run goes on as any
+# other, which with the same paperless_version tries the update again and
+# starts the stack (a run without changes fails on the stopped containers, as
+# it does for any). A backup being made is below <name>.partial, which only
+# an interrupted backup leaves.
+- name: Find the partial backups of an update stopped during its backup
+  ansible.builtin.find:
+    paths: "{{ paperless_backup_dir }}"
+    file_type: directory
+    patterns: ['^\d{8}T\d{6}Z-\d+\.\d+\.\d+\.partial$']
+    use_regex: true
+  register: paperless_partial_backups
+  when: paperless_update_in_progress.step | default(none) == 'backup'
+
+- name: Remove what an update stopped during its backup left
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (paperless_partial_backups.files | default([]) | map(attribute='path') | sort) + paperless_update_marker_files }}"
+  when: paperless_update_in_progress.step | default(none) == 'backup'
+
+# They hold the secrets: left when the marker was removed by hand, as its
+# refusal offers.
+- name: Remove the copies of an update in progress without its marker
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ paperless_update_marker_files | difference([paperless_update_marker]) }}"
+  when: paperless_update_marker_read.content is not defined
+
 - name: Decide what to do
   ansible.builtin.set_fact:
     paperless_down: >-
       {{ paperless_services | difference(paperless_ps.stdout_lines | default([])) }}
     paperless_state: >-
-      {{ 'import' if paperless_import_wanted | bool
+      {{ 'restore_interrupted' if paperless_update_in_progress.step | default(none) == 'update'
+         else 'import' if paperless_import_wanted | bool
          else 'install' if not paperless_installed
          else 'update' if paperless_version is version(paperless_installed_version, '>')
          else 'reconfigure' if paperless_files_changed | length > 0
