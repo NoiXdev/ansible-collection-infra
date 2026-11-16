@@ -225,6 +225,12 @@
   database first, as the message says) and a compose file that is not YAML (the parser's error,
   which could quote a line with a secret, is not shown). The admin password reaches the container
   through stdin, so it is not in the output even at `-vvv`. See the role's guide in the docs.
+- `tandoor`: Tandoor counts as healthy only when it can use its database. Once the containers are
+  healthy, `manage.py migrate --check` and a read of the spaces run in the web container, each
+  bounded by what is left of the health wait (`tandoor_health_timeout`, or
+  `tandoor_rollback_timeout` in a rollback). So an update whose new release starts healthy while a
+  migration is not applied is rolled back and recorded in `update-failed`, and a run without
+  changes fails, within the health timeout, while the database does not answer.
 - `n8n`: new role that runs n8n 2 (`n8n_version`, pinned, major 2 and 2.17.0 or newer) and
   PostgreSQL 18 or newer as one compose project in `n8n_dir` (default `/opt/n8n`), behind Traefik
   with no published port. It needs Docker. `n8n_hostname`, `n8n_encryption_key`, `n8n_db_password`

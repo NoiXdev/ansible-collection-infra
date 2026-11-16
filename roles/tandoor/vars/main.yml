@@ -87,6 +87,11 @@ tandoor_env_owned_prefixes: [POSTGRES_, EMAIL_, S3_]
 
 # The compose services the configuration runs.
 tandoor_services: [db, web]
+# health.yml: the seconds left of its wait when a database check starts, at
+# least 10.
+tandoor_db_check_wait: >-
+  {{ [(tandoor_health_wait | default(tandoor_health_timeout) | int)
+      - (now().timestamp() - tandoor_health_start | float) | int, 10] | max }}
 
 # The compose file as the role writes it; compared with the one on disk.
 tandoor_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"

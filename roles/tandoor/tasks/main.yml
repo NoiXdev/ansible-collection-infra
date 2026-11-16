@@ -215,9 +215,10 @@
       ansible.builtin.fail:
         msg: >-
           Tandoor in {{ tandoor_dir }} is unhealthy: the web and the database
-          containers are not both healthy within {{ tandoor_health_timeout }}
-          seconds ({{ tandoor_health_lines | join('; ') }}). The role restarts
-          nothing on a run without changes; see docker compose logs in
+          containers are not both healthy, or Tandoor cannot use its database,
+          within {{ tandoor_health_timeout }} seconds
+          ({{ tandoor_health_lines | join('; ') }}). The role restarts nothing
+          on a run without changes; see docker compose logs in
           {{ tandoor_dir }}.
       when: not tandoor_healthy
 

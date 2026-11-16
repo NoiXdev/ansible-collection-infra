@@ -59,6 +59,12 @@
 #   mountpoint
 #             tandoor_data_dir_mountpoint on a plain directory refused,
 #             nothing created; an install onto a tmpfs
+#   db_check  an update to a test image that starts healthy with a migration
+#             its boot script does not apply: the database check fails and
+#             the update is rolled back with update-failed naming it; a run
+#             without changes while the database does not answer (its
+#             postmaster stopped, the container still healthy) fails with the
+#             database check within the health timeout
 # The failed install and the update run at -v, the install, a reconfigure
 # and the failed update at -vvv, every repeated converge at -v; their output
 # must not hold a test secret. Every successful converge is repeated and must
@@ -294,6 +300,28 @@ set_db_password() {
   printf "ALTER USER tandoor PASSWORD '%s';\n" "${1//$quote/$quote$quote}" \
     | docker exec -i "$host" sh -c "cd $dir && docker compose exec -T db psql -q -U tandoor -d postgres -v ON_ERROR_STOP=1" \
     || fail "cannot set the password of the database user"
+}
+# A converge that must fail within <seconds>: killed (and the test failed)
+# when it is still running then. play_fails_within <seconds> <name>
+# [ansible-playbook args...]; its output goes to $out/<name>.log.
+play_fails_within() {
+  local limit="$1" name="$2" pid rc=0
+  shift 2
+  set -m
+  play "$@" >"$out/$name.log" 2>&1 &
+  pid=$!
+  set +m
+  for _ in $(seq "$limit"); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 -- "-$pid" 2>/dev/null || true
+    wait "$pid" || true
+    fail "converge $name still ran after $limit seconds: $(tail -n 5 "$out/$name.log")"
+  fi
+  wait "$pid" || rc=$?
+  [ "$rc" != 0 ] || fail "converge $name succeeded but must fail"
 }
 # The id of the database container.
 db_id() { hx sh -c "cd $dir && docker compose ps --quiet db"; }
@@ -853,12 +881,69 @@ test_mountpoint() {
   expect_idempotent "${mountpoint_vars[@]}"
 }
 
+# The new release as test.invalid/recipes with a migration that its boot
+# script does not apply: copied into place after the boot's migrate, so
+# Tandoor starts and its container turns healthy while the database lacks
+# the migration, as a migration that failed unnoticed leaves it.
+build_unmigrated() {
+  if ! docker exec -i "$host" docker build -q --build-arg "base=${images[0]}" -t "test.invalid/recipes:$version" - >/dev/null <<'EOF'; then
+ARG base
+FROM $base
+RUN set -eu; \
+    leaf="$(ls cookbook/migrations | sed -n 's/^\([0-9][0-9]*_.*\)\.py$/\1/p' | sort | tail -n 1)"; \
+    printf 'from django.db import migrations\n\n\nclass Migration(migrations.Migration):\n    dependencies = [("cookbook", "%s")]\n    operations = []\n' "$leaf" >/opt/test-unapplied.py; \
+    grep -qx 'python manage.py migrate' boot.sh; \
+    sed -i 's|^python manage.py migrate$|&\ncp /opt/test-unapplied.py cookbook/migrations/9999_test_unapplied.py|' boot.sh; \
+    grep -qx 'cp /opt/test-unapplied.py cookbook/migrations/9999_test_unapplied.py' boot.sh
+EOF
+    fail "cannot build the test image with a migration that is not applied"
+  fi
+}
+
+test_db_check() {
+  echo "== an update that leaves the database unusable for Tandoor must be rolled back"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "tandoor_version=$old_version"
+  add_recipe
+  build_unmigrated
+  play_fails db-check "$here/converge.yml" -v -e tandoor_image=test.invalid/recipes -e tandoor_rollback_timeout=300
+  expect_in_log db-check "update from $old_version to $version in $dir failed, rolled back to $old_version"
+  expect_in_log db-check "database check failed: manage.py migrate --check found a migration that is not applied"
+  expect_no_secrets db-check
+  [ "$(web)" = "${old_images[0]} running healthy" ] || fail "web after the rollback: $(web)"
+  hx grep -qx "failed_version: $version" "$marker" || fail "the marker does not name $version: $(hx cat "$marker")"
+  hx grep -qx "rolled_back_to: $old_version" "$marker" || fail "the marker does not name $old_version: $(hx cat "$marker")"
+  expect_recipe "after the rollback of an update with a migration that is not applied"
+
+  echo "== a run without changes must fail within the health timeout while the database does not answer"
+  # A successful run with another version removes the marker.
+  converge -e "tandoor_version=$old_version"
+  expect_idempotent -e "tandoor_version=$old_version"
+  # The postmaster stopped from the test host, as a database that hangs: the
+  # container runs and stays healthy for a minute (until its check has timed
+  # out six times), while no new connection gets an answer.
+  db_pid="$(hx docker inspect --format '{{.State.Pid}}' "$(db_id)")"
+  hx kill -STOP "$db_pid"
+  play_fails_within 180 noop-db-down "$here/converge.yml" -v -e "tandoor_version=$old_version" -e tandoor_health_timeout=30
+  hx kill -CONT "$db_pid"
+  expect_in_log noop-db-down "Tandoor in $dir is unhealthy"
+  expect_in_log noop-db-down "database check failed: manage.py migrate --check did not finish within"
+  expect_no_secrets noop-db-down
+  expect_unchanged noop-db-down
+  # The bound the check had: the rest of tandoor_health_timeout.
+  seconds="$(sed -n 's/.*migrate --check did not finish within \([0-9]*\) seconds.*/\1/p' "$out/noop-db-down.log" | head -n 1)"
+  [ -n "$seconds" ] && [ "$seconds" -le 30 ] || fail "the database check was not bounded by tandoor_health_timeout=30: ${seconds:-no time} seconds"
+  expect_idempotent -e "tandoor_version=$old_version"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_TANDOOR_TESTS="settings router"
 # runs only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update refusals missing_data mountpoint}; do
+for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update refusals missing_data mountpoint db_check}; do
   case "$scenario" in
-    settings | install | router | s3 | update | failed_update | refusals | missing_data | mountpoint) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, refusals, missing_data, mountpoint)" ;;
+    settings | install | router | s3 | update | failed_update | refusals | missing_data | mountpoint | db_check) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, refusals, missing_data, mountpoint, db_check)" ;;
   esac
 done
 

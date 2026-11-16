@@ -1,9 +1,11 @@
 ---
 # Waits up to tandoor_health_timeout seconds (tandoor_health_wait, when the
 # includer sets it) until the web and the database containers report the
-# health status healthy, and sets tandoor_healthy and tandoor_health_lines
-# (service, state and health of each container). The web container's check
-# asks Django through the image's nginx. Never fails by itself.
+# health status healthy, then checks the database as Tandoor uses it, and
+# sets tandoor_healthy and tandoor_health_lines (service, state and health of
+# each container, and the failure of the database check). The web
+# container's check asks Django through the image's nginx, which answers
+# without the database. Never fails by itself.
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:
@@ -24,8 +26,91 @@
   changed_when: false
   failed_when: false
 
+- name: Note whether the containers are healthy
+  ansible.builtin.set_fact:
+    tandoor_containers_healthy: >-
+      {{ ['web running healthy', 'db running healthy'] | difference(tandoor_health.stdout_lines | default([])) | length == 0 }}
+
+# Once the containers are healthy, Tandoor's own view of its database, in the
+# web container with the image's virtualenv (as its boot script runs
+# manage.py): migrate --check fails while the database is unreachable or a
+# migration is not applied, and a read of every column of the spaces proves
+# the schema Tandoor uses. The image's timeout (busybox) bounds each by the
+# rest of the wait, at least 10 seconds, so that a check right at the
+# deadline can still start Django; a database that does not answer would
+# hold it forever.
+- name: Check that the migrations of Tandoor are applied
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - web
+      - timeout
+      - -s
+      - KILL
+      - "{{ tandoor_db_check_wait }}"
+      - /opt/recipes/venv/bin/python
+      - manage.py
+      - migrate
+      - --check
+    chdir: "{{ tandoor_dir }}"
+  register: tandoor_db_migrations
+  changed_when: false
+  failed_when: false
+  when: tandoor_containers_healthy
+
+- name: Read the spaces of Tandoor
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - web
+      - timeout
+      - -s
+      - KILL
+      - "{{ tandoor_db_check_wait }}"
+      - /opt/recipes/venv/bin/python
+      - manage.py
+      - shell
+      - -c
+      - |
+        from django_scopes import scopes_disabled
+        from cookbook.models import Space
+        with scopes_disabled():
+            list(Space.objects.all()[:1])
+    chdir: "{{ tandoor_dir }}"
+  register: tandoor_db_read
+  changed_when: false
+  failed_when: false
+  when:
+    - tandoor_containers_healthy
+    - tandoor_db_migrations.rc == 0
+
+# The first check that failed, and what it said: the last line of stderr that
+# names an error (the end of a traceback), else its last line; without one,
+# what the exit code means (KILL from timeout, or migrate --check's 1 for a
+# migration that is not applied).
 - name: Note whether Tandoor is healthy
   ansible.builtin.set_fact:
-    tandoor_health_lines: "{{ tandoor_health.stdout_lines | default([]) | sort }}"
-    tandoor_healthy: >-
-      {{ ['web running healthy', 'db running healthy'] | difference(tandoor_health.stdout_lines | default([])) | length == 0 }}
+    tandoor_health_lines: >-
+      {{ tandoor_health.stdout_lines | default([]) | sort
+         + ([('database check failed: ' ~ tandoor_db_check_error) | trim] if tandoor_db_check else []) }}
+    tandoor_healthy: "{{ tandoor_containers_healthy and not tandoor_db_check }}"
+  vars:
+    tandoor_db_check: >-
+      {{ ([tandoor_db_migrations | combine({'what': 'manage.py migrate --check'}),
+           tandoor_db_read | combine({'what': 'reading the spaces'})]
+          | selectattr('rc', 'defined') | rejectattr('rc', 'eq', 0) | list | first) | default({}) }}
+    tandoor_db_check_error: >-
+      {%- set stderr = (tandoor_db_check.stderr | default('') | trim).splitlines() -%}
+      {%- set errors = stderr | select('search', 'Error:') | list -%}
+      {{ (tandoor_db_check.what ~ ' did not finish within ' ~ tandoor_db_check.cmd[8] ~ ' seconds')
+         if tandoor_db_check.rc | default(0) == 137
+         else (tandoor_db_check.what ~ ': ' ~ (errors or stderr) | last | trim) if stderr
+         else 'manage.py migrate --check found a migration that is not applied'
+         if tandoor_db_check.what == 'manage.py migrate --check' and tandoor_db_check.rc == 1
+         else tandoor_db_check.what ~ ' exited with ' ~ tandoor_db_check.rc | default('?') }}
