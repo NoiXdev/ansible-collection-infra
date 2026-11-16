@@ -177,11 +177,12 @@
   or cannot be read is refused, a marker beside an `install-incomplete` marker is refused naming
   both files, and a marker beside `update-failed` of the same backup (a rollback that stopped after
   it wrote that) is removed, `update-failed` deciding, once no other refusal stops the run. With the
-  variable set, a refusal of an `update-failed` says that the variable does not apply while that
-  file stands. Beside an `update-failed` of another backup (an earlier update that was rolled back)
-  it is handled as without one. A rollback restored again keeps the data of the failed attempt in
-  `<backup>-failed` and sets the newer ones aside in `<backup>-failed-<time>`; a restore stopped
-  while it puts `data/` and `media/` back can be run again.
+  variable set beside an `update-failed` of the same backup, the variable itself is refused (nothing
+  is left to restore); beside one of another backup, its refusal says that the variable does not
+  apply while that file stands. Beside an `update-failed` of another backup (an earlier update that
+  was rolled back) it is handled as without one. A rollback restored again keeps the data of the
+  failed attempt in `<backup>-failed` and sets the newer ones aside in `<backup>-failed-<time>`; a
+  restore stopped while it puts `data/` and `media/` back can be run again.
 - `n8n`: an update that did not finish is no longer taken for a finished one. From its first change
   until it is healthy or rolled back, an update keeps `update-in-progress` in `n8n_dir` (root,
   `0600`: the versions, the step and the backup, with a copy of the compose file). A run that

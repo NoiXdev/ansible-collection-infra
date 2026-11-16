@@ -196,19 +196,19 @@ paperless_import_hint: >-
   keep {{ paperless_export_dir }}, which holds the export), then run the role
   again.
 
-# After a failed rollback: how to put the backup back by hand.
 # Added to the refusals of update-failed (main.yml) when
 # paperless_restore_interrupted is set, which they come before: the variable
-# does not apply while that marker stands.
+# does not apply while that marker stands. They are reached with the
+# variable only beside an update that did not finish; without one, or beside
+# the update that update-failed records, state.yml refuses the variable
+# first.
 paperless_marker_restore_note: >-
   {{ ('paperless_restore_interrupted does not apply while ' ~ paperless_marker_file ~ ' exists: '
-      ~ (('deal with it first as said, then run the role again with the variable to restore the'
-          ~ ' interrupted update that ' ~ paperless_update_marker ~ ' records.')
-         if paperless_update_in_progress.step | default(none) == 'update'
-         else ('no interrupted update is left to restore. Remove the variable, deal with '
-               ~ paperless_marker_file ~ ' as said, then run the role again.')))
+      ~ 'deal with it first as said, then run the role again with the variable to restore the'
+      ~ ' interrupted update that ' ~ paperless_update_marker ~ ' records.')
      if paperless_restore_interrupted | bool else '' }}
 
+# After a failed rollback: how to put the backup back by hand.
 paperless_restore_hint: >-
   Roll back by hand in {{ paperless_dir }}: run docker compose stop
   webserver; recreate the database (docker compose exec -T db psql -U

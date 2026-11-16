@@ -973,6 +973,31 @@ expect_marker_removed_first() {
   [[ "$first" == *"(item=$progress)"* ]] || fail "the update $1 did not remove $progress first: ${first:-no removal}"
 }
 
+# Fails unless the restored directory <dir> has the owner and mode of the
+# backup's <backup dir>: expect_same_owner <dir> <backup dir>.
+expect_same_owner() {
+  [ "$(hx stat -c '%u:%g %a' "$1")" = "$(hx stat -c '%u:%g %a' "$2")" ] \
+    || fail "$1 is $(hx stat -c '%u:%g %a' "$1"), not $(hx stat -c '%u:%g %a' "$2") as $2"
+}
+# Fails unless every entry of the list <entries> (one per line) is in the
+# directory <dir>: expect_entries_in <dir> <entries>.
+expect_entries_in() {
+  local entry
+  [ -n "$2" ] || fail "no entries to look for in $1"
+  while IFS= read -r entry; do
+    hx test -e "$1/$entry" || fail "$1 lacks $entry: $(hx ls -A "$1")"
+  done <<<"$2"
+}
+# Makes an entry of the failed attempt that cannot be renamed in the
+# directory <dir>: a mountpoint (EBUSY), as a full disk or an immutable file
+# would stop a move. Sets busy (its path) and busy_before (the other
+# entries, which sort before it and so are set aside first): busy_entry <dir>.
+busy_entry() {
+  busy="$1/zz-noix-busy"
+  hx sh -c "mkdir $busy && echo failed-attempt >$busy/file && mount --bind $busy $busy"
+  busy_before="$(hx sh -c "cd $1 && for e in *; do [ \"\$e\" = zz-noix-busy ] || echo \"\$e\"; done")"
+}
+
 test_interrupted() {
   echo "== paperless_restore_interrupted without an interrupted update must be refused"
   new_host
@@ -1110,16 +1135,26 @@ test_interrupted() {
   hx mkdir "$dir/copy-dir"
   play_fails unreadable-copy "$here/converge.yml" -vvv -e paperless_restore_interrupted=true \
     -e "paperless_update_marker_compose=$dir/copy-dir"
-  expect_in_log unreadable-copy "Reading $dir/copy-dir, the copy of the compose file from before the interrupted update, failed"
+  expect_in_log unreadable-copy "Reading $dir/copy-dir, the copy of a file from before the interrupted update, failed"
   expect_no_secrets unreadable-copy
   expect_untouched unreadable-copy
+  # So does a copy of a Samba file that exists but cannot be read: it is not
+  # taken for one the previous version did not have.
+  play_fails unreadable-smb-copy "$here/converge.yml" -vvv -e paperless_restore_interrupted=true \
+    -e "paperless_update_marker_smb_conf=$dir/copy-dir"
+  expect_in_log unreadable-smb-copy "Reading $dir/copy-dir, the copy of a file from before the interrupted update, failed"
+  expect_no_secrets unreadable-smb-copy
+  expect_untouched unreadable-smb-copy
+  hx test -e "$dir/smb.conf" || fail "the refused run unreadable-smb-copy removed $dir/smb.conf"
   hx rmdir "$dir/copy-dir"
   # As a restore leaves it that was stopped while it put the data and media
   # back: the webserver stopped, the copies of the backup's made, what was
   # there set aside, nothing put back yet. The next restore puts them back
   # all the same.
-  hx sh -c "cd $dir && docker compose stop webserver >/dev/null 2>&1 \
-    && cp -a $backup/data $dir/data/.data.restore && cp -al $backup/media $dir/data/.media.restore \
+  hx sh -c "cd $dir && docker compose stop webserver" >/dev/null 2>&1
+  set_aside_data="$(hx ls -A "$dir/data/data")"
+  set_aside_media="$(hx ls -A "$dir/data/media")"
+  hx sh -c "cp -a $backup/data $dir/data/.data.restore && cp -al $backup/media $dir/data/.media.restore \
     && mkdir -m 0700 $backup-failed $backup-failed/data $backup-failed/media \
     && find $dir/data/data -mindepth 1 -maxdepth 1 -exec mv {} $backup-failed/data/ \; \
     && find $dir/data/media -mindepth 1 -maxdepth 1 -exec mv {} $backup-failed/media/ \;"
@@ -1129,7 +1164,11 @@ test_interrupted() {
   hx test ! -e "$marker" || fail "the restore kept $marker of another version"
   for d in data media; do
     hx test ! -e "$dir/data/.$d.restore" || fail "the restore left $dir/data/.$d.restore"
+    expect_same_owner "$dir/data/$d" "$backup/$d"
   done
+  # What the stopped restore set aside stays there.
+  expect_entries_in "$backup-failed/data" "$set_aside_data"
+  expect_entries_in "$backup-failed/media" "$set_aside_media"
   hx grep -qx '   server min protocol = SMB2' "$dir/smb.conf" || fail "the restore did not put the Samba configuration back"
 
   echo "== an update killed during its rollback must be refused until it is restored"
@@ -1210,6 +1249,21 @@ test_interrupted() {
   expect_in_log restore-failed-blocked "$marker exists: the Paperless update to $new_pin failed"
   expect_in_log restore-failed-blocked "The role refuses every version"
   expect_untouched restore-failed-blocked
+
+  echo "== a restore that cannot set an entry of media aside must fail and keep what the failed attempt left"
+  # An interrupted update to $version from a backup of $old_version, beside
+  # no update-failed.
+  hx rm "$marker"
+  backup="$(hx sh -c "ls -d $backups/*-$old_version | tail -n 1")"
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backup\ntime: 2026-01-01T00:00:00Z\n' >$progress \
+    && cp -p $backup/compose.yaml $progress_compose && cp -p $dir/smb.conf $progress_smb_conf && cp -p $dir/samba-pass $progress_samba_pass"
+  busy_entry "$dir/data/media"
+  play_fails restore-busy "$here/converge.yml" -e "paperless_version=$new_pin" -e paperless_image=test.invalid/paperless-ngx \
+    -e paperless_restore_interrupted=true
+  expect_in_log restore-busy "Restoring Paperless $old_version in $dir from the backup $backup after the interrupted update to $version failed (Put the data and media directories back:"
+  [ "$(hx cat "$busy/file")" = failed-attempt ] || fail "the entry that could not be set aside lost its content"
+  expect_entries_in "$backup-failed/media" "$busy_before"
+  hx test -d "$dir/data/.media.restore" || fail "the copy was put in place although an entry was not set aside"
 }
 
 # All scenarios by default; NOIXDEV_INFRA_PAPERLESS_TESTS="update failed_update"

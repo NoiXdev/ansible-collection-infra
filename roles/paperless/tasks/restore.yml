@@ -96,10 +96,11 @@
       changed_when: true
 
     # The copies first; then the entries of data/ and media/ are moved, one
-    # rename each, so neither directory ever goes missing (state.yml refuses
-    # an installation without it) and a restore stopped anywhere in between
-    # can be run again: leftover copies are made afresh, and every entry is
-    # in its directory, in the copy or set aside.
+    # rename each (the first that fails stops the restore, which then fails,
+    # before that copy is put in place), so neither directory ever goes
+    # missing (state.yml refuses an installation without it) and a restore
+    # stopped anywhere in between can be run again: leftover copies are made
+    # afresh, and every entry is in its directory, in the copy or set aside.
     - name: Put the data and media directories back
       ansible.builtin.shell:
         cmd: |
@@ -108,14 +109,26 @@
           root={{ paperless_data_dir | quote }}
           aside="$backup-failed"
           if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+          # Every entry of $1 into the directory $2, one rename each; the
+          # first that fails stops the script (set -e).
+          move_entries() {
+            for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+              if [ -e "$entry" ] || [ -L "$entry" ]; then mv -- "$entry" "$2/"; fi
+            done
+          }
+          # Nothing of the failed attempt may stay beside the copy.
+          expect_empty() {
+            if [ -n "$(ls -A "$1")" ]; then echo "$1 is not empty after it was set aside" >&2; exit 1; fi
+          }
           rm -rf "$root/.data.restore" "$root/.media.restore"
           cp -a "$backup/data" "$root/.data.restore"
           cp -al "$backup/media" "$root/.media.restore"
           mkdir -m 0700 "$aside"
           for d in data media; do
             mkdir "$aside/$d"
-            find "$root/$d" -mindepth 1 -maxdepth 1 -exec mv {} "$aside/$d/" \;
-            find "$root/.$d.restore" -mindepth 1 -maxdepth 1 -exec mv {} "$root/$d/" \;
+            move_entries "$root/$d" "$aside/$d"
+            expect_empty "$root/$d"
+            move_entries "$root/.$d.restore" "$root/$d"
             chown "$(stat -c %u:%g "$backup/$d")" "$root/$d"
             chmod "$(stat -c %a "$backup/$d")" "$root/$d"
             rmdir "$root/.$d.restore"

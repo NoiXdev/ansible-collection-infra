@@ -211,20 +211,39 @@
       failed_when: false
       no_log: true
 
-    # Without it restore.yml would remove the compose file as one the
-    # previous version did not have. The error of the read is not shown: it
-    # can quote the file.
-    - name: Fail on the copy of the compose file
+    # A copy that was not read is a file the previous version did not have,
+    # which restore.yml removes; so one that exists must have been read, and
+    # the compose file's always (state.yml has checked that it exists).
+    - name: Look for the copies of the files from before the interrupted update
+      ansible.builtin.stat:
+        path: "{{ item.saved }}"
+        get_checksum: false
+      loop: "{{ paperless_update_marker_copies }}"
+      loop_control:
+        label: "{{ item.saved }}"
+      register: paperless_copies_stat
+
+    # The error of the read is not shown: it can quote the file.
+    - name: Fail on a copy that cannot be read
       ansible.builtin.fail:
         msg: >-
-          Reading {{ paperless_update_marker_compose }}, the copy of the
-          compose file from before the interrupted update, failed. The error
-          is not shown: it can quote the file, which holds the secret key and
-          the passwords. The role changes nothing. Check that it is a file
-          root can read, then run the role again.
-      when: >-
-        paperless_files_read.results | selectattr('item.path', 'equalto', paperless_compose_file)
-        | selectattr('content', 'defined') | list | length == 0
+          Reading {{ paperless_unread_copies | join(' and ') }}, the copy of a
+          file from before the interrupted update, failed. The error is not
+          shown: it can quote the file, which holds secrets. The role changes
+          nothing. Check that it is a file root can read, then run the role
+          again.
+      vars:
+        paperless_unread_copies: >-
+          {%- set found = [] -%}
+          {%- for read in paperless_files_read.results -%}
+          {%-   if read.content is not defined
+                   and (paperless_copies_stat.results[loop.index0].stat.exists
+                        or read.item.path == paperless_compose_file) -%}
+          {%-     set _ = found.append(read.item.saved) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ found }}
+      when: paperless_unread_copies | length > 0
 
     - name: Note the backup from before the interrupted update
       ansible.builtin.set_fact:

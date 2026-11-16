@@ -49,15 +49,26 @@
     - [cp, -al, "{{ paperless_data_dir }}/media", "{{ paperless_backup_next }}.partial/media"]
   changed_when: true
 
+# It holds the secret key and the database password, so the task is no_log and a
+# failure gets a message of its own.
 - name: Keep the compose file with the backup
-  ansible.builtin.copy:
-    dest: "{{ paperless_backup_next }}.partial/compose.yaml"
-    content: "{{ paperless_compose_before }}"
-    owner: root
-    group: root
-    mode: "0600"
-  # It holds the secret key and the database password.
-  diff: false
+  block:
+    - name: Keep the compose file with the backup
+      ansible.builtin.copy:
+        dest: "{{ paperless_backup_next }}.partial/compose.yaml"
+        content: "{{ paperless_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+  rescue:
+    - name: Fail on the compose file of the backup
+      ansible.builtin.fail:
+        msg: >-
+          Writing {{ paperless_backup_next }}.partial/compose.yaml, the copy of
+          the compose file in the backup, failed; the error is not shown, as
+          it can quote the secrets. Check that {{ paperless_backup_dir }} is
+          writable and has space.
 
 # Not into a backup of that name (the same second), which mv would move it
 # into.
