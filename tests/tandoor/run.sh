@@ -65,10 +65,21 @@
 #             without changes while the database does not answer (its
 #             postmaster stopped, the container still healthy) fails with the
 #             database check within the health timeout
-# The failed install and the update run at -v, the install, a reconfigure
-# and the failed update at -vvv, every repeated converge at -v; their output
-# must not hold a test secret. Every successful converge is repeated and must
-# change nothing.
+#   interrupted
+#             converges killed (SIGKILL to their process group) at a point of
+#             an update: tandoor_restore_interrupted without an interrupted
+#             update refused; a marker that is not YAML or lacks its keys
+#             refused; a marker beside update-failed removed, update-failed
+#             deciding; killed once the compose file names the new release:
+#             the marker (step update, both versions, the backup, mode 0600)
+#             refuses every run, and tandoor_restore_interrupted restores the
+#             previous release; killed during the rollback of a failed update:
+#             refused and restored the same way; killed during the backup: the
+#             next run cleans up and updates
+# The failed install and the update run at -v, the install, a reconfigure,
+# the failed update and the interrupted ones with their refusals and restores
+# at -vvv, every repeated converge at -v; their output must not hold a test
+# secret. Every successful converge is repeated and must change nothing.
 # NOIXDEV_INFRA_TANDOOR_TESTS selects scenarios (see the end of the file);
 # NOIXDEV_INFRA_TANDOOR_TEST_HOST and NOIXDEV_INFRA_TANDOOR_TEST_OUT (the
 # directory of the logs and image tarballs) let two runs go side by side.
@@ -113,6 +124,9 @@ old_version=2.6.15
 old_images=("$(value_of "$defaults" tandoor_image):$old_version" "$busybox")
 backups="$dir/data/backups"
 marker="$dir/update-failed"
+# The marker of an update in progress and its copy of the compose file.
+progress="$dir/update-in-progress"
+progress_compose="$dir/update-in-progress.compose.yaml"
 # The test secrets, which no run's output may hold.
 secrets=(
   "$(value_of "$here/vars.yml" tandoor_secret_key)"
@@ -322,6 +336,48 @@ play_fails_within() {
   fi
   wait "$pid" || rc=$?
   [ "$rc" != 0 ] || fail "converge $name succeeded but must fail"
+}
+# Waits until no Ansible module runs on the test host: one that a killed
+# converge started finishes there, as on a host whose SSH session dropped.
+# Five quiet seconds in a row: a docker exec sent just before the kill can
+# start its module a moment later.
+wait_modules() {
+  local quiet=0
+  for _ in $(seq 300); do
+    if hx pgrep -f '[A]nsiballZ_' >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+    [ "$quiet" -lt 5 ] || return 0
+    sleep 1
+  done
+  fail "an Ansible module still runs on the test host after 300 seconds"
+}
+# A converge stopped as a dropped SSH session or a reboot stops it: run in the
+# background in a process group of its own and killed with SIGKILL, the whole
+# group, once the shell condition holds on the test host. play_killed <name>
+# <condition> [converge options...]; its output goes to $out/<name>.log.
+play_killed() {
+  local name="$1" condition="$2" pid
+  shift 2
+  set -m
+  play "$here/converge.yml" "$@" >"$out/$name.log" 2>&1 &
+  pid=$!
+  set +m
+  for _ in $(seq 900); do
+    if hx sh -c "$condition" >/dev/null 2>&1; then
+      kill -9 -- "-$pid"
+      wait "$pid" || true
+      wait_modules
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      tail -n 40 "$out/$name.log" >&2
+      fail "converge $name ended before it was killed at: $condition"
+    fi
+    sleep 0.5
+  done
+  kill -9 -- "-$pid" 2>/dev/null || true
+  wait "$pid" || true
+  fail "converge $name did not reach within the wait: $condition"
 }
 # The id of the database container.
 db_id() { hx sh -c "cd $dir && docker compose ps --quiet db"; }
@@ -618,6 +674,7 @@ test_update() {
   expect_no_secrets converge
   grep -q "update.yml" "$out/converge.log" || fail "the new version was not an update"
   [ "$(web)" = "${images[0]} running healthy" ] || fail "web after the update: $(web)"
+  expect_no_progress "after the update"
   backup="$(hx sh -c "ls -d $backups/*-$old_version")"
   [ "$(printf '%s\n' "$backup" | wc -l | tr -d ' ')" = 1 ] || fail "not one backup of $old_version: $backup"
   [ "$(hx head -c 5 "$backup/tandoor.dump")" = PGDMP ] || fail "the backup $backup has no dump in pg_dump's custom format"
@@ -667,6 +724,15 @@ failed_update() {
   hx grep -qx "rolled_back_to: $old_version" "$marker" || fail "the marker does not name $old_version: $(hx cat "$marker")"
   backup="$(hx sed -n 's/^backup: //p' "$marker")"
   [ "$(hx head -c 5 "$backup/tandoor.dump")" = PGDMP ] || fail "the marker's backup $backup has no dump"
+  expect_no_progress "after the rollback"
+}
+# Fails when the marker of an update in progress or a copy of it is left:
+# expect_no_progress <when>.
+expect_no_progress() {
+  local file
+  for file in "$progress" "$progress_compose" "$dir/update-in-progress.s3-secret"; do
+    hx test ! -e "$file" || fail "$file is left $1"
+  done
 }
 
 test_failed_update() {
@@ -915,6 +981,7 @@ test_db_check() {
   [ "$(web)" = "${old_images[0]} running healthy" ] || fail "web after the rollback: $(web)"
   hx grep -qx "failed_version: $version" "$marker" || fail "the marker does not name $version: $(hx cat "$marker")"
   hx grep -qx "rolled_back_to: $old_version" "$marker" || fail "the marker does not name $old_version: $(hx cat "$marker")"
+  expect_no_progress "after the rollback"
   expect_recipe "after the rollback of an update with a migration that is not applied"
 
   echo "== a run without changes must fail within the health timeout while the database does not answer"
@@ -938,12 +1005,129 @@ test_db_check() {
   expect_idempotent -e "tandoor_version=$old_version"
 }
 
+# Fails unless the refusal <name> of an interrupted update from $old_version
+# to $version names the backup <backup> and both ways out.
+expect_interrupted_refusal() {
+  expect_in_log "$1" "$progress exists: the Tandoor update from $old_version to $version did not finish"
+  expect_in_log "$1" "the backup from before it is $2"
+  expect_in_log "$1" "set tandoor_restore_interrupted: true for one run to restore it"
+  expect_in_log "$1" "or remove $progress to keep Tandoor as it is now"
+}
+# The restore of an interrupted update with tandoor_restore_interrupted:
+# $old_version healthy again with the recipe, the marker and its copy gone,
+# the compose file back at $old_version. expect_restored <when>.
+expect_restored() {
+  play "$here/converge.yml" -vvv -e tandoor_restore_interrupted=true >"$out/$1.log" 2>&1 \
+    || { tail -n 60 "$out/$1.log" >&2; fail "the restore $1 failed"; }
+  expect_no_secrets "$1"
+  expect_in_log "$1" "Tandoor in $dir runs $old_version again"
+  if grep -q "update.yml" "$out/$1.log"; then fail "the restore $1 tried the update again"; fi
+  [ "$(web)" = "${old_images[0]} running healthy" ] || fail "web after the restore $1: $(web)"
+  expect_recipe "after the restore $1"
+  expect_no_progress "after the restore $1"
+  hx grep -qF "recipes:$old_version" "$dir/compose.yaml" || fail "the compose file does not name $old_version after the restore $1"
+}
+
+test_interrupted() {
+  echo "== tandoor_restore_interrupted without an interrupted update must be refused"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "tandoor_version=$old_version"
+  add_recipe
+  note_untouched
+  play_fails restore-no-marker "$here/converge.yml" -e tandoor_restore_interrupted=true
+  expect_in_log restore-no-marker "tandoor_restore_interrupted is set, but there is no interrupted update in $dir; remove the variable"
+  expect_untouched restore-no-marker
+
+  echo "== a marker of an update in progress that the role did not write must be refused"
+  hx sh -c "echo 'not: [yaml' >$progress"
+  play_fails bad-marker "$here/converge.yml"
+  expect_in_log bad-marker "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched bad-marker
+  hx sh -c "printf 'from_version: $old_version\n' >$progress"
+  play_fails bad-marker-keys "$here/converge.yml"
+  expect_in_log bad-marker-keys "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched bad-marker-keys
+  hx rm "$progress"
+
+  echo "== beside update-failed, the marker of an update in progress must be removed and update-failed decide"
+  # As a rescue leaves them that wrote update-failed and was killed before
+  # it removed the marker of the update in progress.
+  hx sh -c "printf 'from_version: $old_version\nto_version: $version\nstep: update\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$progress"
+  hx cp -p "$dir/compose.yaml" "$progress_compose"
+  hx sh -c "printf 'failed_version: $version\nrolled_back_to: $old_version\nbackup: $backups/20260101T000000Z-$old_version\ntime: 2026-01-01T00:00:00Z\n' >$marker"
+  play_fails both-markers "$here/converge.yml"
+  expect_in_log both-markers "$marker exists: the Tandoor update to $version failed"
+  expect_in_log both-markers "rolled back to $old_version"
+  expect_no_progress "beside update-failed"
+  hx test -e "$marker" || fail "the run removed $marker"
+  [ "$(hx sha256sum "$dir/compose.yaml")" = "$compose_before" ] || fail "the refused run both-markers changed the compose file"
+  [ "$(containers)" = "$containers_before" ] || fail "the refused run both-markers created or removed containers"
+  hx rm "$marker"
+
+  echo "== an update killed once its compose file names $version must be refused until it is restored"
+  play_killed interrupted "grep -qF 'recipes:$version' $dir/compose.yaml" -vvv
+  expect_no_secrets interrupted
+  hx grep -qx "step: update" "$progress" || fail "the marker does not record the step update: $(hx cat "$progress")"
+  hx grep -qx "from_version: $old_version" "$progress" || fail "the marker does not name $old_version: $(hx cat "$progress")"
+  hx grep -qx "to_version: $version" "$progress" || fail "the marker does not name $version: $(hx cat "$progress")"
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  [ "$(hx head -c 5 "$backup/tandoor.dump")" = PGDMP ] || fail "the marker's backup $backup has no dump"
+  for file in "$progress" "$progress_compose"; do
+    [ "$(hx stat -c '%a %U' "$file")" = "600 root" ] || fail "$file is not root's with mode 0600: $(hx stat -c '%a %U' "$file")"
+  done
+  hx cmp -s "$progress_compose" "$backup/compose.yaml" || fail "$progress_compose is not the compose file from before the update"
+  note_untouched
+  play_fails interrupted-refused "$here/converge.yml" -vvv
+  expect_interrupted_refusal interrupted-refused "$backup"
+  expect_no_secrets interrupted-refused
+  expect_untouched interrupted-refused
+  expect_restored interrupted-restore
+
+  echo "== an update killed during its rollback must be refused until it is restored"
+  hx docker tag "$busybox" "test.invalid/recipes:$version"
+  play_killed interrupted-rollback \
+    "backup=\$(sed -n 's/^backup: //p' $progress) && [ -n \"\$backup\" ] && [ -e \"\$backup-failed\" ]" \
+    -vvv -e tandoor_image=test.invalid/recipes -e tandoor_health_timeout=30 -e tandoor_rollback_timeout=300
+  expect_no_secrets interrupted-rollback
+  # The first run without the variable after the restore tried the update
+  # to $version again.
+  grep -qF "Stop Tandoor for the update" "$out/interrupted-rollback.log" \
+    || fail "the run after the restore of $old_version did not update to $version"
+  hx test ! -e "$marker" || fail "the killed rollback wrote $marker: $(hx cat "$marker")"
+  hx grep -qx "step: update" "$progress" || fail "the marker does not record the step update: $(hx cat "$progress")"
+  backup="$(hx sed -n 's/^backup: //p' "$progress")"
+  note_untouched
+  play_fails rollback-refused "$here/converge.yml" -vvv
+  expect_interrupted_refusal rollback-refused "$backup"
+  expect_no_secrets rollback-refused
+  expect_untouched rollback-refused
+  expect_restored rollback-restore
+  hx test -d "$backup-failed" || fail "the media of the failed attempt in $backup-failed are gone"
+
+  echo "== an update killed during its backup must be cleaned up and done by the next run"
+  play_killed interrupted-backup "ls -d $backups/*.partial" -v
+  expect_no_secrets interrupted-backup
+  hx grep -qx "step: backup" "$progress" || fail "the marker does not record the step backup: $(hx cat "$progress")"
+  converge -v
+  expect_no_secrets converge
+  grep -q "update.yml" "$out/converge.log" || fail "the run after the interrupted backup was not an update"
+  [ "$(web)" = "${images[0]} running healthy" ] || fail "web after the update: $(web)"
+  if hx sh -c "ls -d $backups/*.partial" >/dev/null 2>&1; then
+    fail "the update left a partial backup: $(hx ls "$backups")"
+  fi
+  expect_no_progress "after the update"
+  expect_recipe "after the update that followed the interrupted backup"
+  expect_idempotent
+}
+
 # All scenarios by default; NOIXDEV_INFRA_TANDOOR_TESTS="settings router"
 # runs only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update refusals missing_data mountpoint db_check}; do
+for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update failed_update refusals missing_data mountpoint db_check interrupted}; do
   case "$scenario" in
-    settings | install | router | s3 | update | failed_update | refusals | missing_data | mountpoint | db_check) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, refusals, missing_data, mountpoint, db_check)" ;;
+    settings | install | router | s3 | update | failed_update | refusals | missing_data | mountpoint | db_check | interrupted) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (settings, install, router, s3, update, failed_update, refusals, missing_data, mountpoint, db_check, interrupted)" ;;
   esac
 done
 

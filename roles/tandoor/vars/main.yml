@@ -44,6 +44,24 @@ tandoor_marker_file: "{{ tandoor_dir }}/update-failed"
 # once the first admin and its space exist; while it exists every run
 # refuses.
 tandoor_install_marker: "{{ tandoor_dir }}/install-incomplete"
+# Written by update.yml before the first change of an update (step backup),
+# rewritten once the backup is complete (step update, with the backup) and
+# removed once the update is healthy or rolled back; a run that stopped in
+# between (a dropped SSH session, a reboot) leaves it for the next one
+# (state.yml). YAML with from_version, to_version, step, backup and time;
+# root, mode 0600.
+tandoor_update_marker: "{{ tandoor_dir }}/update-in-progress"
+# Its copies of the files the update replaces, for a restore with
+# tandoor_restore_interrupted: the compose file (it holds the secrets) and,
+# with S3, the secret file. Root, mode 0600.
+tandoor_update_marker_compose: "{{ tandoor_dir }}/update-in-progress.compose.yaml"
+tandoor_update_marker_s3_secret: "{{ tandoor_dir }}/update-in-progress.s3-secret"
+# In the order they are removed: the marker last, so that a run stopped in
+# between leaves it.
+tandoor_update_marker_files:
+  - "{{ tandoor_update_marker_compose }}"
+  - "{{ tandoor_update_marker_s3_secret }}"
+  - "{{ tandoor_update_marker }}"
 
 # tandoor_compose_on_disk, the compose file on disk parsed (empty when there
 # is none), is set by state.yml, which parses it in a no_log task.
@@ -87,6 +105,7 @@ tandoor_env_owned_prefixes: [POSTGRES_, EMAIL_, S3_]
 
 # The compose services the configuration runs.
 tandoor_services: [db, web]
+
 # health.yml: the seconds left of its wait when a database check starts, at
 # least 10.
 tandoor_db_check_wait: >-

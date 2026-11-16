@@ -102,3 +102,11 @@ tandoor_health_timeout: 300
 # Seconds a rollback after a failed update waits for the previous version
 # and its database.
 tandoor_rollback_timeout: "{{ tandoor_health_timeout }}"
+
+# For one run, after an update that did not finish (a run that stopped after
+# its backup leaves tandoor_dir/update-in-progress, and every later run
+# refuses): true restores the backup from before it, with the files it
+# replaced, and ends the run; the next run without it tries the update
+# again. Refused without such an update; remove it after the run. Removing
+# update-in-progress instead keeps Tandoor as it is.
+tandoor_restore_interrupted: false

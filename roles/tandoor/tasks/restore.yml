@@ -3,7 +3,8 @@
 # the compose file (and with S3 the secret file) put back as they were
 # before the run, the database recreated empty and loaded from the dump,
 # with local media the media moved aside to <backup>-failed and the copy put
-# back (as hard links again), then the previous stack started and checked
+# back (as hard links again; to <backup>-failed-<time> when <backup>-failed
+# exists), then the previous stack started and checked
 # with health.yml, both waits bounded by tandoor_rollback_timeout. The
 # previous files come first, so the database is
 # restored in the previous database container. Media in S3 stay as they are:
@@ -82,17 +83,23 @@
         chdir: "{{ tandoor_dir }}"
       changed_when: true
 
-    # The copy first, so the media are missing only between two renames.
+    # The copy first, so the media are missing only between two renames. A
+    # rollback that was stopped (restored again with
+    # tandoor_restore_interrupted) may have moved the media of the failed
+    # attempt to <backup>-failed already; they stay, and the media found now
+    # go to <backup>-failed-<UTC time>.
     - name: Put the media back
       ansible.builtin.shell:
         cmd: |
           set -eu
           backup={{ tandoor_backup | quote }}
           root={{ tandoor_data_dir | quote }}
-          mkdir -m 0700 "$backup-failed"
+          aside="$backup-failed"
+          if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+          mkdir -m 0700 "$aside"
           rm -rf "$root/.mediafiles.restore"
           cp -al "$backup/mediafiles" "$root/.mediafiles.restore"
-          mv "$root/mediafiles" "$backup-failed/mediafiles"
+          mv "$root/mediafiles" "$aside/mediafiles"
           mv "$root/.mediafiles.restore" "$root/mediafiles"
       changed_when: true
       when: not tandoor_s3_enabled | bool

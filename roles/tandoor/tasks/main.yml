@@ -164,7 +164,8 @@
   vars:
     tandoor_env_null: "{{ tandoor_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
 
-# Also refuses after a failed update (its marker).
+# Also refuses after a failed update (its marker) and after an update that
+# did not finish (its marker, step update).
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
 
@@ -188,6 +189,101 @@
 - name: Update Tandoor
   ansible.builtin.include_tasks: update.yml
   when: tandoor_state == 'update'
+
+# The run after an update that did not finish, with
+# tandoor_restore_interrupted: the files from before it (the marker's
+# copies) and the database and the media of its backup put back by
+# restore.yml, as a rollback puts them back, and nothing else of the update.
+# Healthy, the marker goes and the run ends; the next run without the
+# variable tries the update again. Not healthy, update-failed records a
+# failed rollback (rolled_back_to null), which refuses every version.
+- name: Restore the backup of the interrupted update
+  when: tandoor_state == 'restore_interrupted'
+  vars:
+    tandoor_interrupted_from: "{{ tandoor_update_in_progress.from_version | default('?') }}"
+    tandoor_interrupted_to: "{{ tandoor_update_in_progress.to_version }}"
+  block:
+    - name: Read the compose file from before the interrupted update
+      ansible.builtin.slurp:
+        src: "{{ tandoor_update_marker_compose }}"
+      register: tandoor_update_marker_compose_read
+      # It holds the secret key and the passwords; state.yml has checked
+      # that it exists.
+      no_log: true
+
+    # restore.yml puts it back when it has content; without S3 there is none.
+    - name: Read the S3 secret file from before the interrupted update
+      ansible.builtin.slurp:
+        src: "{{ tandoor_update_marker_s3_secret }}"
+      register: tandoor_s3_secret_read
+      failed_when: false
+      no_log: true
+
+    - name: Note the files and the backup from before the interrupted update
+      ansible.builtin.set_fact:
+        tandoor_compose_before: "{{ tandoor_update_marker_compose_read.content | b64decode }}"
+        tandoor_backup: "{{ tandoor_update_in_progress.backup }}"
+      no_log: true
+
+    - name: Roll back to the backup of the interrupted update
+      ansible.builtin.include_tasks: restore.yml
+      vars:
+        tandoor_installed_version: "{{ tandoor_interrupted_from }}"
+
+    - name: Remove the marker of the restored update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ tandoor_update_marker_files }}"
+      when: tandoor_healthy
+
+    - name: Report the restore
+      ansible.builtin.debug:
+        msg: >-
+          Tandoor in {{ tandoor_dir }} runs {{ tandoor_interrupted_from }}
+          again: the interrupted update to {{ tandoor_interrupted_to }} was
+          rolled back to the backup {{ tandoor_backup }}. Remove
+          tandoor_restore_interrupted; the next run with a newer
+          tandoor_version tries the update again.
+      when: tandoor_healthy
+
+    # As after a failed rollback: the data is in the backup, and no version
+    # may run over the database the restore left.
+    - name: Write the marker of the failed restore
+      ansible.builtin.copy:
+        dest: "{{ tandoor_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.tandoor role: the update to
+          # failed_version did not finish, and restoring the backup failed.
+          # The role refuses every version while this file exists.
+          {{ {'failed_version': tandoor_interrupted_to,
+              'rolled_back_to': none,
+              'backup': tandoor_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'restore_error': tandoor_restore_error}
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: not tandoor_healthy
+
+    - name: Remove the marker of the update whose restore failed
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ tandoor_update_marker_files }}"
+      when: not tandoor_healthy
+
+    - name: Fail with the failed restore
+      ansible.builtin.fail:
+        msg: >-
+          Restoring Tandoor {{ tandoor_interrupted_from }} in {{ tandoor_dir }}
+          from the backup {{ tandoor_backup }} after the interrupted update to
+          {{ tandoor_interrupted_to }} failed ({{ tandoor_restore_error }}), so
+          Tandoor may be down. {{ tandoor_restore_hint }}
+          {{ tandoor_marker_file }} refuses every version; remove it once
+          Tandoor runs again.
+      when: not tandoor_healthy
 
 # A reconfigure keeps the version, so the schema stays and it takes no backup.
 - name: Reconfigure Tandoor

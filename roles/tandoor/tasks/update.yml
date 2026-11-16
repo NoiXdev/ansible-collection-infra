@@ -7,10 +7,23 @@
 # the backup is complete removes the partial backup, starts the stack as it
 # was and fails. After it, restore.yml rolls back to the backup, the marker
 # tandoor_marker_file names the failed version, and the run fails.
+# From the first change on, tandoor_update_marker says how far the update
+# got (step backup, then step update with the backup), with copies of the
+# files it replaces; it is removed once the update is healthy, or after the
+# recovery or the rollback, so that only a run that stopped leaves it.
 
 - name: Update Tandoor
   vars:
     tandoor_new_image: "{{ tandoor_image }}:{{ tandoor_version }}"
+    tandoor_update_marker_content: |
+      # Written by the noixdev.infra.tandoor role while it updates Tandoor,
+      # and removed once the update is healthy or rolled back. A run that
+      # finds it with step update refuses until it is removed or
+      # tandoor_restore_interrupted restores the backup.
+      {{ {'from_version': tandoor_installed_version, 'to_version': tandoor_version, 'step': tandoor_update_step}
+         | combine({'backup': tandoor_backup} if tandoor_update_step == 'update' else {})
+         | combine({'time': tandoor_update_started})
+         | to_nice_yaml(sort_keys=false) }}
   block:
     - name: Look for the image of Tandoor {{ tandoor_version }}
       ansible.builtin.command:
@@ -25,6 +38,43 @@
       changed_when: true
       when: tandoor_new_image_local.rc != 0
 
+    - name: Note when the update starts
+      ansible.builtin.set_fact:
+        tandoor_update_started: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    # Right before the first change. The marker first: a run stopped before
+    # the copies are written leaves the marker, which the next run cleans up
+    # with them, but never copies without a marker.
+    - name: Write the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ tandoor_update_marker }}"
+        content: "{{ tandoor_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        tandoor_update_step: backup
+
+    - name: Keep the compose file from before the update
+      ansible.builtin.copy:
+        dest: "{{ tandoor_update_marker_compose }}"
+        content: "{{ tandoor_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      # It holds the secret key and the passwords.
+      no_log: true
+
+    - name: Keep the S3 secret file from before the update
+      ansible.builtin.copy:
+        dest: "{{ tandoor_update_marker_s3_secret }}"
+        content: "{{ tandoor_s3_secret_read.content | b64decode }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: tandoor_s3_secret_read.content is defined
+
     # Nothing writes to the database or the media during the backup.
     - name: Stop Tandoor for the update
       ansible.builtin.command:
@@ -34,6 +84,18 @@
 
     - name: Back up the database and the media
       ansible.builtin.include_tasks: snapshot.yml
+
+    # From here on the files and the database change; the backup holds them
+    # as they were.
+    - name: Note the backup in the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ tandoor_update_marker }}"
+        content: "{{ tandoor_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        tandoor_update_step: update
 
     - name: Write the S3 secret file
       ansible.builtin.copy:
@@ -100,6 +162,13 @@
               ansible.builtin.set_fact:
                 tandoor_restart_error: "{{ tandoor_failure | trim }}"
 
+        # Nothing but the partial backup had changed.
+        - name: Remove the marker of the update that failed before the backup
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ tandoor_update_marker_files }}"
+
         - name: Fail when the update failed before the backup
           ansible.builtin.fail:
             msg: >-
@@ -134,6 +203,15 @@
         group: root
         mode: "0644"
 
+    # After update-failed: a run stopped before leaves this marker, and the
+    # next one refuses as for an update that did not finish; one stopped
+    # after leaves both, and the next one removes this one.
+    - name: Remove the marker of the rolled back update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ tandoor_update_marker_files }}"
+
     - name: Fail with the rollback
       ansible.builtin.fail:
         msg: >-
@@ -163,6 +241,14 @@
           ({{ tandoor_restore_error }}), so Tandoor may be down.
           {{ tandoor_restore_hint }} {{ tandoor_marker_file }} stops further
           updates to {{ tandoor_version }}; remove it once Tandoor runs again.
+
+# Only after a successful update (the rescue always fails), and outside the
+# block, so that nothing after the health check can roll it back.
+- name: Remove the marker of the update in progress
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ tandoor_update_marker_files }}"
 
 # Only after a successful update; the names start with the time, so they
 # sort by age. <backup>-failed directories of rolled back updates stay.
