@@ -82,6 +82,16 @@
             - {dest: /srv/prod/public/composer.json, user: app_prod, content: "{}\n"}
             - {dest: /srv/prod/public/composer.lock, user: app_prod, content: "{}\n"}
             - {dest: /srv/prod/public/dump.sql, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/dump.sql.gz, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/dump.sql.bz2, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/dump.sql.xz, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/dump.sql.zst, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/dump.sql.zip, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/dump.sql.7z, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/dump.sql.lz4, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/dump.sql.lzma, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/Dump.SQL.GZ, user: app_prod, content: "-- dump\n"}
+            - {dest: /srv/prod/public/a.bak.gz, user: app_prod, content: "backup\n"}
             - {dest: /srv/prod/public/a.bak, user: app_prod, content: "backup\n"}
             - {dest: /srv/prod/public/a.swp, user: app_prod, content: "swap\n"}
             - {dest: /srv/prod/public/a~, user: app_prod, content: "editor\n"}

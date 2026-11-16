@@ -9,8 +9,8 @@ location ~* (?:^|/)composer\.(?:json|lock)$ {
     return 404;
 }
 
-# Dumps, backups and editor files.
-location ~* \.(?:sql|bak|swp)$ {
+# Dumps, backups and editor files, also compressed (dump.sql.gz).
+location ~* \.(?:sql|bak|swp)(?:\.(?:gz|bz2|xz|zst|zip|7z|lz4|lzma))?$ {
     return 404;
 }
 

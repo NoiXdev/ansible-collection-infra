@@ -97,7 +97,8 @@ argument_specs:
             Referrer-Policy strict-origin-when-cross-origin and X-Frame-Options SAMEORIGIN, HSTS
             (max-age one year, no includeSubDomains) unless hsts is false, and 404 for dotfiles
             and dot-dirs except /.well-known/, composer.json, composer.lock, *.sql, *.bak, *.swp
-            and *~.
+            and their compressed copies (.gz, .bz2, .xz, .zst, .zip, .7z, .lz4, .lzma; in any
+            case), and *~.
           - headers, a dict of headers to add or replace; an empty value removes one.
           - rate_limit, the name of a zone of nginx_rate_limit_zones; a request over the rate and burst gets 429 (Too Many Requests).
           - client_max_body_size, 64m by default.

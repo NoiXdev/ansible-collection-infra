@@ -91,6 +91,17 @@
       - {url: "https://prod.example.test/composer.json", status: 404}
       - {url: "https://prod.example.test/composer.lock", status: 404}
       - {url: "https://prod.example.test/dump.sql", status: 404}
+      # Compressed dumps too, in any case.
+      - {url: "https://prod.example.test/dump.sql.gz", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/dump.sql.bz2", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/dump.sql.xz", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/dump.sql.zst", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/dump.sql.zip", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/dump.sql.7z", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/dump.sql.lz4", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/dump.sql.lzma", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/Dump.SQL.GZ", status: 404, absent: [-- dump, backup]}
+      - {url: "https://prod.example.test/a.bak.gz", status: 404, absent: [-- dump, backup]}
       - {url: "https://prod.example.test/a.bak", status: 404}
       - {url: "https://prod.example.test/a.swp", status: 404}
       - {url: "https://prod.example.test/a~", status: 404}
