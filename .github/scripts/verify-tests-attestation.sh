@@ -13,20 +13,27 @@
 #     bump of CONTRIBUTING.md's "Releasing"), so the tested code is exactly
 #     the released code.
 #
-# Checks: the note's SSH signature (namespace noixdev-infra-tests) against
-# .github/tests-allowed-signers as of the RELEASE commit, then the payload:
-# not a dry run, a Docker version is recorded, its commit and tree are the
-# tested commit's, failed is 0, passed > 0, every entry passed, and the
-# entries cover tests/all.sh AT THE TESTED COMMIT: each suite of all_suites by
-# its exact label, the host suite as host-<release> for each release of
-# host_releases. Needs full history and refs/notes/tests
-# fetched (git fetch origin '+refs/notes/tests:refs/notes/tests'), git,
-# ssh-keygen and python3. Exit 0 = release allowed.
+# The checks live in attest_carry.py beside this script (its `verify`), which
+# tests/attest.sh shares. The tested note: its SSH signature (namespace
+# noixdev-infra-tests) against .github/tests-allowed-signers as of the RELEASE
+# commit, not a dry run, its commit and tree are the tested commit's, every
+# entry that ran passed (failed is 0), a Docker version when anything ran, it
+# finished at most 30 days ago, and every entry of tests/all.sh AT THE TESTED
+# COMMIT (each suite of all_suites, host and services once per release as
+# host-<release> and services-<release>) appears exactly once, ran or carried.
+# A carried entry is proven from the note of its carriedFrom commit C, never
+# from the tested note's word: C is an ancestor of the tested commit, its
+# note passes the same note checks, the entry ran and passed there at most 30
+# days ago, no valid note between C and the tested commit ran it again, and no
+# file changed since C is shared, unmatched or of the entry's suite in
+# tests/suites.conf at the tested commit. Schema 1 notes (everything ran)
+# still pass. Needs full history and refs/notes/tests fetched
+# (git fetch origin '+refs/notes/tests:refs/notes/tests'), git, ssh-keygen and
+# python3. Exit 0 = release allowed.
 set -euo pipefail
 
-NAMESPACE=noixdev-infra-tests
 NOTES_REF=refs/notes/tests
-SIGNERS=.github/tests-allowed-signers
+here="$(cd "$(dirname "$0")" && pwd)"
 
 error() {
   echo "::error::$*"
@@ -73,114 +80,6 @@ if ! has_note "$tested"; then
   error "No tests attestation for ${tested:0:7}${release_too:-}. Run tests/attest.sh on that commit (see CONTRIBUTING.md), then re-run this check."
 fi
 
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-git notes --ref="$NOTES_REF" show "$tested" >"$work/note"
-git show "$release:$SIGNERS" >"$work/allowed_signers" 2>/dev/null ||
-  error "$SIGNERS is missing at ${release:0:7}"
-git show "$tested:tests/all.sh" >"$work/all.sh" 2>/dev/null ||
-  error "tests/all.sh is missing at ${tested:0:7}"
-
-# extract NOTE DIR: writes DIR/payload.json and DIR/payload.json.sig, prints
-#   the signer. check PAYLOAD TESTED TREE ALLSH: the signed payload's content.
-read -r -d '' py <<'PY' || true
-import base64, binascii, json, re, sys
-
-def error(msg):
-    print("::error::" + msg)
-    sys.exit(1)
-
-def load(path):
-    try:
-        with open(path, "rb") as f:
-            data = json.loads(f.read().decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        error("The tests attestation payload is not valid JSON.")
-    if not isinstance(data, dict):
-        error("The tests attestation payload is not a JSON object.")
-    return data
-
-mode = sys.argv[1]
-if mode == "extract":
-    note_path, out = sys.argv[2:]
-    lines = open(note_path, encoding="utf-8").read().splitlines()
-    payloads = [l[len("payload: "):] for l in lines if l.startswith("payload: ")]
-    if len(payloads) != 1:
-        error("The tests attestation note has no single payload line.")
-    try:
-        payload = base64.b64decode(payloads[0].strip(), validate=True)
-    except (binascii.Error, ValueError):
-        error("The tests attestation payload is not valid base64.")
-    begin = "-----BEGIN SSH SIGNATURE-----"
-    end = "-----END SSH SIGNATURE-----"
-    if lines.count(begin) != 1 or lines.count(end) != 1 or lines.index(begin) > lines.index(end):
-        error("The tests attestation note has no single SSH signature.")
-    signature = lines[lines.index(begin):lines.index(end) + 1]
-    with open(out + "/payload.json", "wb") as f:
-        f.write(payload)
-    with open(out + "/payload.json.sig", "w", encoding="utf-8") as f:
-        f.write("\n".join(signature) + "\n")
-    signer = load(out + "/payload.json").get("signer")
-    if not isinstance(signer, str) or not re.fullmatch(r"[^\s]+", signer):
-        error("The tests attestation payload names no signer.")
-    print(signer)
-
-elif mode == "check":
-    payload_path, tested, tree, allsh_path = sys.argv[2:]
-    p = load(payload_path)
-    if p.get("schema") != 1:
-        error(f"Unknown tests attestation schema {p.get('schema')!r}.")
-    if "dryRun" in p:
-        error("The tests attestation is from a dry run (tests/attest.sh self-test mode), not a real run.")
-    docker = p.get("docker")
-    if not isinstance(docker, str) or docker.strip() in ("", "unknown"):
-        error("The tests attestation records no Docker version, so the suites did not run on Docker.")
-    commit = p.get("commit")
-    if commit != tested:
-        error(f"The tests attestation is for {str(commit)[:7]}, not {tested[:7]}.")
-    if p.get("tree") != tree:
-        error(f"The tests attestation's tree does not match {tested[:7]}.")
-    suites, passed, failed = p.get("suites"), p.get("passed"), p.get("failed")
-    if (not isinstance(suites, list) or type(passed) is not int or type(failed) is not int
-            or not all(isinstance(e, dict) and isinstance(e.get("label"), str)
-                       and isinstance(e.get("result"), str) for e in suites)):
-        error("The tests attestation payload is malformed (suites, passed, failed).")
-    not_passed = [e["label"] for e in suites if e["result"] != "pass"]
-    if failed != 0 or passed <= 0 or not_passed:
-        detail = f" (not passed: {' '.join(not_passed)})" if not_passed else ""
-        error(f"The tests attestation for {tested[:7]} is red: {passed} passed, {failed} failed{detail}.")
-    allsh = open(allsh_path, encoding="utf-8").read()
-    def array(name):
-        lines = re.findall(r"^" + name + r"=\(([^)]*)\)[ \t]*$", allsh, re.M)
-        if len(lines) != 1 or not lines[0].split():
-            error(f"tests/all.sh at {tested[:7]} has no single {name}=(...) line.")
-        return lines[0].split()
-    expected = []
-    for suite in array("all_suites"):
-        if suite == "host":
-            expected += ["host-" + r for r in array("host_releases")]
-        elif suite == "services":
-            expected += ["services-" + r for r in array("services_releases")]
-        else:
-            expected.append(suite)
-    labels = {e["label"] for e in suites}
-    missing = [l for l in expected if l not in labels]
-    if missing:
-        error(f"The tests attestation for {tested[:7]} does not cover every suite of tests/all.sh; "
-              f"missing or not passed: {' '.join(missing)}.")
-    labels = " ".join(e["label"] for e in suites)
-    print(f"Tests attestation OK for {tested[:7]}, signed by {p['signer']}: "
-          f"{passed} passed, {failed} failed ({labels}; {p.get('arch')}, {p.get('os')}, "
-          f"finished {p.get('finishedAt')})")
-PY
-
-signer="$(python3 -I -c "$py" extract "$work/note" "$work")" || {
-  # python printed the ::error:: line on stdout, which $(...) captured.
-  echo "$signer"
-  exit 1
-}
-if ! ssh-keygen -Y verify -f "$work/allowed_signers" -I "$signer" -n "$NAMESPACE" \
-  -s "$work/payload.json.sig" <"$work/payload.json" >/dev/null; then
-  error "The tests attestation signature for ${tested:0:7} does not verify for $signer (namespace $NAMESPACE) against $SIGNERS of ${release:0:7}."
-fi
-python3 -I -c "$py" check "$work/payload.json" "$tested" "$(git rev-parse "$tested^{tree}")" "$work/all.sh"
+# Prints the ::error:: lines or the OK line; its exit status is the check's.
+exec python3 -I "$here/attest_carry.py" verify --repo . --tested "$tested" --release "$release" \
+  --notes-ref "$NOTES_REF" --now "$(date +%s)"

@@ -12,7 +12,9 @@ library only, Python 3.9 or later, run as `python3 -I`.
                        [--dry-run]
   attest_carry.py verify --repo DIR --tested C --release R --notes-ref REF --now EPOCH
 
-Errors print "::error::<message>" on stdout and exit 1.
+Errors print "::error::<message>" on stdout and exit 1; verify prints one
+such line per problem (every carried entry that cannot be proven), or its
+OK line.
 
 The map, tests/suites.conf, is line based: "#" starts a comment, sections are
 [ignore], [shared] and [suite <name>], every other line is a pattern. A
@@ -46,6 +48,7 @@ NAMESPACE = "noixdev-infra-tests"
 
 MAP_PATH = "tests/suites.conf"
 ALLSH_PATH = "tests/all.sh"
+SIGNERS_PATH = ".github/tests-allowed-signers"
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 LABEL_RE = re.compile(r"[A-Za-z0-9._-]+")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -62,6 +65,14 @@ class NoteError(Exception):
     def __init__(self, message: str):
         super().__init__(message)
         self.message = message
+
+
+class SignatureError(NoteError):
+    """A note whose SSH signature does not verify for its signer."""
+
+    def __init__(self, message: str, signer: str):
+        super().__init__(message)
+        self.signer = signer
 
 
 class GitError(Exception):
@@ -340,7 +351,8 @@ def verify_note(note_text: str, signers_path: str, tmpdir: str) -> dict:
     except OSError:
         raise NoteError("ssh-keygen is required to verify the tests attestation.")
     if rc != 0:
-        raise NoteError(f"The tests attestation signature does not verify for {signer} (namespace {NAMESPACE}).")
+        raise SignatureError(f"The tests attestation signature does not verify for {signer} "
+                             f"(namespace {NAMESPACE}).", signer)
     return p
 
 
@@ -542,8 +554,141 @@ def build_payload(plan_entries, summary_text, commit, tree, signer, arch, os_nam
     return payload
 
 
+# --- release check ----------------------------------------------------------
+
+def _days(age: int) -> int:
+    return -(-age // 86400)  # rounded up, so past the limit always reads as more than it
+
+
+def _carry_error(repo, notes_ref, m, tested, label, suite, c, signers_path, tmp, runs, cache,
+                 now) -> Optional[str]:
+    """Why the entry label of suite, carried from c into tested, cannot be
+    trusted, or None. Everything is proven from git and c's own note."""
+    c7, t7 = c[:7], tested[:7]
+    if _git(repo, "rev-parse", "--verify", "--quiet", c + "^{commit}", ok=(0, 1)).returncode != 0:
+        return f"carriedFrom {c} of {label} is not a commit in this repository"
+    if _git(repo, "merge-base", "--is-ancestor", c, tested, ok=(0, 1)).returncode != 0:
+        return f"{label} is carried from {c7}, which is not an ancestor of {t7}"
+    if ("payload", c) not in cache:
+        text = read_note(repo, notes_ref, c)
+        if text is None:
+            cache[("payload", c)] = "which has no tests attestation"
+        else:
+            try:
+                p = verify_note(text, signers_path, tmp)
+                check_payload(p, c, _git(repo, "rev-parse", c + "^{tree}").stdout.strip(), False)
+                cache[("payload", c)] = p
+            except SignatureError as e:
+                cache[("payload", c)] = (f"whose tests attestation signature does not verify for {e.signer} "
+                                         f"(namespace {NAMESPACE}) against {SIGNERS_PATH}")
+            except NoteError as e:
+                cache[("payload", c)] = f"whose tests attestation is not valid: {e.message.rstrip('.')}"
+    p = cache[("payload", c)]
+    if isinstance(p, str):
+        return f"{label} is carried from {c7}, {p}"
+    entry = ran_entries(p).get(label)
+    if entry is None:
+        source = next((e["carriedFrom"] for e in p.get("carried", []) if e["label"] == label), None)
+        if source is not None:
+            return (f"{label} is carried from {c7}, but {label} was carried at {c7} (from {source[:7]}) and "
+                    f"did not run there; a carry must name the commit where the entry ran")
+        return f"{label} is carried from {c7}, but {label} did not run at {c7}"
+    if entry["result"] != "pass":
+        return f"{label} is carried from {c7}, but {label} failed at {c7} ({entry['result']})"
+    try:
+        age = age_seconds(p, now)
+    except NoteError as e:
+        return f"{label} is carried from {c7}, whose run cannot be used: {e.message.rstrip('.')}"
+    if age > MAX_AGE_DAYS * 86400:
+        return (f"{label} is carried from {c7}, whose run finished {p['finishedAt']}, {_days(age)} days old "
+                f"(a release accepts runs up to {MAX_AGE_DAYS} days old)")
+    if ("between", c) not in cache:
+        cache[("between", c)] = set(_git(repo, "rev-list", f"{c}..{tested}").stdout.split()) - {tested}
+    newer = [(x, e) for x, _, e in runs.get(label, []) if x in cache[("between", c)]]
+    if newer:
+        x, e = newer[0]
+        return f"{label} is carried from {c7}, but {label} ran again at {x[:7]} ({e['result']}), after {c7}"
+    if ("changed", c) not in cache:
+        cache[("changed", c)] = changed_files(repo, c, tested)
+    changed = cache[("changed", c)]
+    hit = affected_suites(m, changed)
+    if hit == "ALL":
+        for path in changed:
+            kind, _ = classify(m, path)
+            if kind in ("shared", "unmatched"):
+                where = "a shared path" if kind == "shared" else f"in no section of {MAP_PATH}"
+                return f"{label} is carried from {c7}, but {path} changed since then ({where})"
+    if suite in hit:
+        path = next(path for path in changed if suite in classify(m, path)[1])
+        return f"{label} is carried from {c7}, but {path} changed since then (in [suite {suite}] of {MAP_PATH})"
+    return None
+
+
 def verify_release(repo, tested, release, notes_ref, now) -> str:
-    raise NotImplementedError("verify_release is Task 4")
+    """The OK line of the release check of release, whose tests ran at
+    tested (release itself, or its parent for a version bump). Raises
+    NoteError (one line per problem) or GitError when the release is not
+    allowed. A carried entry is proven from its source note, never from
+    what the tested note claims about it."""
+    tested, release = _commit(repo, tested), _commit(repo, release)
+    t7 = tested[:7]
+    fix = f" - run tests/attest.sh on {t7} (see CONTRIBUTING.md), then re-run this check."
+    text = read_note(repo, notes_ref, tested)
+    if text is None:
+        raise NoteError(f"No tests attestation for {t7}." + fix)
+    with tempfile.TemporaryDirectory() as tmp:
+        signers_path = tmp + "/allowed_signers"
+        with open(signers_path, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(_show(repo, release, SIGNERS_PATH))
+        entries = expected_entries(_show(repo, tested, ALLSH_PATH))
+        try:
+            p = verify_note(text, signers_path, tmp)
+            check_payload(p, tested, _git(repo, "rev-parse", tested + "^{tree}").stdout.strip(), False)
+        except SignatureError as e:
+            raise NoteError(f"The tests attestation signature for {t7} does not verify for {e.signer} "
+                            f"(namespace {NAMESPACE}) against {SIGNERS_PATH} of {release[:7]}." + fix)
+        except NoteError as e:
+            raise NoteError(e.message + fix)
+        ran = ran_entries(p)
+        carried = {e["label"]: e["carriedFrom"] for e in p.get("carried", [])}
+        not_passed = [label for label, e in ran.items() if e["result"] != "pass"]
+        if p["failed"] != 0 or not_passed:
+            detail = f" (not passed: {' '.join(not_passed)})" if not_passed else ""
+            raise NoteError(f"The tests attestation for {t7} is red: {p['passed']} passed, "
+                            f"{p['failed']} failed{detail}." + fix)
+        missing = [label for label, _ in entries if label not in ran and label not in carried]
+        if missing:
+            raise NoteError(f"The tests attestation for {t7} does not cover every entry of {ALLSH_PATH}; "
+                            f"missing or not passed: {' '.join(missing)}." + fix)
+        try:
+            age = age_seconds(p, now)
+        except NoteError as e:
+            raise NoteError(e.message + fix)
+        if age > MAX_AGE_DAYS * 86400:
+            raise NoteError(f"The tests attestation for {t7} finished at {p['finishedAt']}, {_days(age)} days "
+                            f"old (a release accepts runs up to {MAX_AGE_DAYS} days old)." + fix)
+        to_prove = [(label, suite) for label, suite in entries if label in carried]
+        errors, notes = [], [f"{label}: {n}" for label, e in ran.items() for n in e.get("notes", [])]
+        if to_prove:
+            m = parse_map(_show(repo, tested, MAP_PATH))
+            runs, _ = _runs(repo, tested, notes_ref, signers_path, False)
+            cache = {}
+            for label, suite in to_prove:
+                error = _carry_error(repo, notes_ref, m, tested, label, suite, carried[label], signers_path,
+                                     tmp, runs, cache, now)
+                if error:
+                    errors.append(error + "." + fix)
+                else:
+                    source = ran_entries(cache[("payload", carried[label])])[label]
+                    notes += [f"{label}: {n}" for n in source.get("notes", [])]
+        if errors:
+            raise NoteError("\n".join(errors))
+    sources = [f"{label} from {carried[label][:7]}" for label, _ in to_prove]
+    detail = (" ".join(ran) or "nothing ran") + (f"; carried: {', '.join(sources)}" if sources else "")
+    notes_part = f"; notes: {', '.join(notes)}" if notes else ""
+    return (f"Tests attestation OK for {t7}, signed by {p['signer']}: {len(ran)} ran, {p['passed']} passed, "
+            f"{p['failed']} failed, {len(sources)} carried ({detail}; {p.get('arch')}, {p.get('os')}, "
+            f"finished {p.get('finishedAt')}{notes_part})")
 
 
 # --- CLI --------------------------------------------------------------------
@@ -590,8 +735,13 @@ def _cmd_build_payload(a) -> int:
 
 
 def _cmd_verify(a) -> int:
-    print("::error::not implemented")
-    return 1
+    try:
+        print(verify_release(a.repo, a.tested, a.release, a.notes_ref, a.now))
+    except NoteError as e:
+        for line in e.message.splitlines():
+            print("::error::" + line)
+        return 1
+    return 0
 
 
 def main(argv=None) -> int:

@@ -395,10 +395,16 @@ class BuildPayload(unittest.TestCase):
                 self.build(summary)
 
 
-class NotImplementedYet(unittest.TestCase):
-    def test_verify_release_is_task_4(self):
-        with self.assertRaises(NotImplementedError):
-            ac.verify_release(".", "a" * 40, "a" * 40, "refs/notes/tests", 0)
+class ReleaseCheck(unittest.TestCase):
+    """verify_release itself runs in tests/attest/selftest.sh (section 15)."""
+
+    def test_signature_error_is_a_note_error(self):
+        e = ac.SignatureError("does not verify", "m@example.com")
+        self.assertIsInstance(e, ac.NoteError)
+        self.assertEqual((e.message, e.signer), ("does not verify", "m@example.com"))
+
+    def test_days_round_up(self):
+        self.assertEqual([ac._days(a) for a in (1, 86400, 86401, 31 * 86400)], [1, 1, 2, 31])
 
 
 class Constants(unittest.TestCase):

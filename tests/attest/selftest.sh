@@ -5,7 +5,7 @@
 # .github/scripts/attest_carry.py (its unit tests, check-map on this
 # repository's HEAD, the run-or-carry plan). No Docker, no network: it works
 # in a throwaway git repository with throwaway ed25519 keys, a copy of the
-# three scripts and stub suites behind the real tests/all.sh. Most cases use
+# scripts and stub suites behind the real tests/all.sh. Most cases use
 # ATTEST_DRY_RUN=1; the "real mode" cases push to local bare repositories
 # with fake docker and gh commands. CI runs it (ci.yml).
 #
@@ -126,7 +126,7 @@ repo="$tmp/repo"
 mkdir -p "$repo/tests" "$repo/.github/scripts"
 git init -q -b main "$repo"
 cp "$src/tests/all.sh" "$src/tests/attest.sh" "$repo/tests/"
-cp "$src/.github/scripts/verify-tests-attestation.sh" "$repo/.github/scripts/"
+cp "$src/.github/scripts/verify-tests-attestation.sh" "$src/.github/scripts/attest_carry.py" "$repo/.github/scripts/"
 echo "maintainer@example.com namespaces=\"noixdev-infra-tests\" $(cat "$tmp/key.pub")" >"$repo/.github/tests-allowed-signers"
 printf 'tests/output/\n' >"$repo/.gitignore"
 printf 'namespace: noixdev\nname: infra\nversion: 0.1.0\ndescription: selftest\n' >"$repo/galaxy.yml"
@@ -623,6 +623,228 @@ expect "14. check-map: a role in no suite fails" 1 "::error::roles/zzz/ is in no
   python3 -I "$H" check-map --repo "$repo" --commit HEAD
 repo="$selftest_repo"
 unset selftest_repo b0 p0 a29 a27 r1 x1 h1 f1 l1 entry_count
+
+# --- 15. the release check with carried entries ----------------------------------------------
+# A repository of its own like the plan's, with real (not dry-run) notes made
+# by plan and build-payload and signed with the selftest's keys. The release
+# check runs as on a tag: at the current time, from the source tree.
+VS="$src/.github/scripts/verify-tests-attestation.sh"
+selftest_repo="$repo"
+repo="$tmp/gate"
+NOW="$(date +%s)"
+mkdir -p "$repo/tests" "$repo/.github"
+git init -q -b main "$repo"
+cp "$src/tests/all.sh" "$repo/tests/"
+cp "$tmp/plan-signers" "$repo/.github/tests-allowed-signers"
+{
+  printf '[ignore]\nCHANGELOG.md\n[shared]\ntests/all.sh\ntests/suites.conf\nshared/\n'
+  for s in "${suites[@]}"; do printf '[suite %s]\nroles/%s/\n' "$s" "$s"; done
+} >"$repo/tests/suites.conf"
+for s in "${suites[@]}"; do
+  mkdir -p "$repo/roles/$s"
+  echo "$s" >"$repo/roles/$s/main.yml"
+done
+printf '# Changelog\n' >"$repo/CHANGELOG.md"
+g add -A && g commit -q -m "chore: gate repo"
+gb0="$(head_sha)"
+: >"$tmp/gate-empty"
+printf 'harbor pass 2\n' >"$tmp/gate-harbor"
+# gate_note COMMIT DAYS-AGO PLAN SUMMARY [KEY] [--dry-run]: the payload that
+# build-payload makes of PLAN and SUMMARY for COMMIT, finished DAYS-AGO
+# before $NOW, signed by KEY as COMMIT's note in refs/notes/tests.
+gate_note() {
+  local finished docker=29.0.0-selftest
+  finished="$(iso_ago "$2")"
+  [ -z "${6:-}" ] || docker=unknown
+  python3 -I "$H" build-payload --plan "$3" --summary "$4" --out "$tmp/gate-payload.json" \
+    --commit "$1" --tree "$(g rev-parse "$1^{tree}")" --signer maintainer@example.com --arch x86_64 \
+    --os Linux --docker "$docker" --started "$finished" --finished "$finished" ${6:+"$6"} >/dev/null
+  sign_note "$1" "$tmp/gate-payload.json" "${5:-$tmp/key}"
+}
+gate_all() { # gate_all COMMIT: the plan --all of COMMIT into $tmp/gate-all.json
+  python3 -I "$H" plan --repo "$repo" --head "$1" --notes-ref "$REAL" --signers "$tmp/plan-signers" \
+    --now "$NOW" --all >"$tmp/gate-all.json"
+}
+# gate_full COMMIT DAYS-AGO [FAILING-LABEL] [KEY] [--dry-run]: the note of a
+# full run of COMMIT; services-<first release> records the mysql shim note.
+gate_full() {
+  gate_all "$1"
+  printf '%s\n' "$all_pass" | sed -e "s/^${3:-none} pass /${3:-none} fail /" \
+    -e "s/^services-${sreleases[0]} pass [0-9]*\$/& mysql_via_systemctl_shim/" >"$tmp/gate-summary"
+  gate_note "$1" "$2" "$tmp/gate-all.json" "$tmp/gate-summary" "${4:-$tmp/key}" "${5:-}"
+}
+# gate_carry COMMIT FROM [PYTHON] [SUMMARY]: the note of COMMIT that carries
+# every entry from FROM; PYTHON may edit that plan p first, SUMMARY is what ran.
+gate_carry() {
+  gate_all "$1"
+  json_edit "$tmp/gate-all.json" "for e in p: e.update(action='carry', carriedFrom='$2')
+${3:-}"
+  gate_note "$1" 0.1 "$tmp/gate-all.json" "${4:-$tmp/gate-empty}"
+}
+# gate_plan: the plan of HEAD from the real notes into $tmp/plan.json.
+gate_plan() {
+  python3 -I "$H" plan --repo "$repo" --head HEAD --notes-ref "$REAL" --signers "$tmp/plan-signers" \
+    --now "$NOW" >"$tmp/plan.json"
+}
+entry_count="$(printf '%s\n' "$all_pass" | wc -l | tr -d ' ')"
+
+change CHANGELOG.md
+g1="$(head_sha)"
+gate_full "$g1" 1
+expect "15. gate: a full schema 2 run passes" 0 "Tests attestation OK for ${g1:0:7}" -- "$VS" "$g1"
+
+g checkout -q -b g-role "$g1"
+change roles/harbor/main.yml
+t1="$(head_sha)"
+gate_plan
+check "15. gate: after a change in harbor's role the plan runs only harbor" plan_count run 1
+gate_note "$t1" 0.1 "$tmp/plan.json" "$tmp/gate-harbor"
+expect "15. gate: a schema 2 note that carries from an older schema 2 note passes" 0 \
+  "Tests attestation OK for ${t1:0:7}" -- "$VS" "$t1"
+check "15. gate: the OK line counts what ran and what is carried" \
+  grep -qF "1 ran, 1 passed, 0 failed, $((entry_count - 1)) carried" "$tmp/out"
+check "15. gate: the OK line has the note of a carried entry" \
+  grep -qF "services-${sreleases[0]}: mysql via systemctl shim" "$tmp/out"
+
+g checkout -q -b g-chain "$t1"
+change CHANGELOG.md
+t="$(head_sha)"
+gate_plan
+check "15. gate: the plan carries harbor from its newer run" plan_is harbor carry "" "$t1"
+gate_note "$t" 0.1 "$tmp/plan.json" "$tmp/gate-empty"
+expect "15. gate: a note that carries from two older notes, nothing ran, passes" 0 \
+  "Tests attestation OK for ${t:0:7}" -- "$VS" "$t"
+json_edit "$tmp/plan.json" "for e in p:
+    if e['label'] == 'e2e': e['carriedFrom'] = '$t1'"
+gate_note "$t" 0.1 "$tmp/plan.json" "$tmp/gate-empty"
+expect "15. gate: an entry that was itself carried at its source is refused" 1 \
+  "e2e was carried at ${t1:0:7}" -- "$VS" "$t"
+check "15. gate: the message names the source and the fix" \
+  grep -qF "e2e is carried from ${t1:0:7}, but" "$tmp/out"
+check "15. gate: the message says to run tests/attest.sh" grep -qF "run tests/attest.sh" "$tmp/out"
+
+g checkout -q -b g-schema1 "$g1"
+change CHANGELOG.md
+s1="$(head_sha)"
+gate_full "$s1" 1
+payload_of "$REAL" "$s1" >"$tmp/gate-s1.json"
+json_edit "$tmp/gate-s1.json" 'p["schema"] = 1; del p["carried"], p["carriedCount"]'
+sign_note "$s1" "$tmp/gate-s1.json" "$tmp/key"
+expect "15. gate: a schema 1 tested note passes, as today" 0 "Tests attestation OK for ${s1:0:7}" -- "$VS" "$s1"
+change roles/harbor/main.yml
+t="$(head_sha)"
+gate_plan
+check "15. gate: the plan carries from the schema 1 note" plan_is e2e carry "" "$s1"
+gate_note "$t" 0.1 "$tmp/plan.json" "$tmp/gate-harbor"
+expect "15. gate: a schema 2 note that carries from a schema 1 note passes" 0 \
+  "Tests attestation OK for ${t:0:7}" -- "$VS" "$t"
+
+g checkout -q -b g-changed "$g1"
+change roles/harbor/main.yml
+t="$(head_sha)"
+gate_carry "$t" "$g1"
+expect "15. gate: a carried entry whose suite file changed is refused" 1 \
+  "harbor is carried from ${g1:0:7}, but roles/harbor/main.yml changed" -- "$VS" "$t"
+check "15. gate: the entries of unchanged suites are not named" sh -c '! grep -qF "e2e is carried" "$1"' _ "$tmp/out"
+
+g checkout -q -b g-shared "$g1"
+change shared/x
+t="$(head_sha)"
+gate_carry "$t" "$g1"
+expect "15. gate: a carry past a change of a shared path is refused" 1 \
+  "e2e is carried from ${g1:0:7}, but shared/x changed since then (a shared path)" -- "$VS" "$t"
+
+g checkout -q -b g-old "$g1"
+change CHANGELOG.md
+o="$(head_sha)"
+gate_full "$o" 31
+change CHANGELOG.md
+t="$(head_sha)"
+gate_carry "$t" "$o"
+expect "15. gate: a source older than 30 days is refused" 1 "days old" -- "$VS" "$t"
+check "15. gate: the age message names the entry and the source" \
+  grep -qF "e2e is carried from ${o:0:7}, whose run finished $(iso_ago 31)" "$tmp/out"
+
+g checkout -q -b g-side "$gb0"
+change CHANGELOG.md
+x="$(head_sha)"
+gate_full "$x" 1
+g checkout -q -b g-notancestor "$g1"
+change CHANGELOG.md
+t="$(head_sha)"
+gate_carry "$t" "$g1" "p[0]['carriedFrom'] = '$x'"
+expect "15. gate: a source that is not an ancestor is refused" 1 \
+  "${suites[0]} is carried from ${x:0:7}, which is not an ancestor of ${t:0:7}" -- "$VS" "$t"
+
+g checkout -q -b g-badkey "$g1"
+change CHANGELOG.md
+k="$(head_sha)"
+gate_full "$k" 0.5 harbor "$tmp/other"
+change CHANGELOG.md
+t="$(head_sha)"
+gate_carry "$t" "$k"
+expect "15. gate: a source signed by an unlisted key is refused" 1 "does not verify" -- "$VS" "$t"
+check "15. gate: the signature message names the entry and the source" \
+  grep -qF "e2e is carried from ${k:0:7}, whose tests attestation" "$tmp/out"
+gate_carry "$t" "$g1"
+expect "15. gate: a newer red note that does not verify neither blocks nor counts" 0 \
+  "Tests attestation OK for ${t:0:7}" -- "$VS" "$t"
+
+g checkout -q -b g-red "$g1"
+change CHANGELOG.md
+r="$(head_sha)"
+gate_full "$r" 0.5 harbor
+change CHANGELOG.md
+t="$(head_sha)"
+gate_carry "$t" "$r"
+expect "15. gate: an entry that failed at its source is refused" 1 "harbor failed at ${r:0:7}" -- "$VS" "$t"
+gate_carry "$t" "$g1"
+expect "15. gate: a carry past a newer red run is refused" 1 \
+  "harbor is carried from ${g1:0:7}, but harbor ran again at ${r:0:7} (fail)" -- "$VS" "$t"
+
+g checkout -q -b g-stale "$g1"
+change CHANGELOG.md
+t="$(head_sha)"
+gate_full "$t" 31
+expect "15. gate: a tested note whose own run is 31 days old is refused" 1 "days old" -- "$VS" "$t"
+check "15. gate: the message names the tested commit" \
+  grep -qF "The tests attestation for ${t:0:7} finished at $(iso_ago 31)" "$tmp/out"
+
+g checkout -q -b g-forged "$g1"
+change CHANGELOG.md
+t="$(head_sha)"
+gate_carry "$t" "$gb0"
+expect "15. gate: carriedFrom a commit without a note is refused" 1 \
+  "e2e is carried from ${gb0:0:7}, which has no tests attestation" -- "$VS" "$t"
+gate_carry "$t" "$g1" "p[0]['carriedFrom'] = '0123456789abcdef0123456789abcdef01234567'"
+expect "15. gate: carriedFrom an unknown commit is refused" 1 \
+  "carriedFrom 0123456789abcdef0123456789abcdef01234567 of ${suites[0]} is not a commit in this repository" -- "$VS" "$t"
+gate_carry "$t" "$g1" "p[:] = [e for e in p if e['label'] != 'harbor']"
+expect "15. gate: an entry neither run nor carried is refused" 1 "missing or not passed: harbor" -- "$VS" "$t"
+gate_carry "$t" "$g1" "p.append({'label': 'harbor', 'action': 'run'})" "$tmp/gate-harbor"
+expect "15. gate: an entry both run and carried is refused" 1 "lists harbor more than once" -- "$VS" "$t"
+
+g checkout -q -b g-dry "$g1"
+change CHANGELOG.md
+d="$(head_sha)"
+gate_full "$d" 0.5 "" "$tmp/key" --dry-run
+change CHANGELOG.md
+t="$(head_sha)"
+gate_carry "$t" "$d"
+expect "15. gate: a dry-run source is refused" 1 "dry run" -- "$VS" "$t"
+check "15. gate: the dry-run message names the entry and the source" \
+  grep -qF "e2e is carried from ${d:0:7}, whose tests attestation" "$tmp/out"
+
+g checkout -q -b g-future "$g1"
+change CHANGELOG.md
+f="$(head_sha)"
+gate_full "$f" -2
+change CHANGELOG.md
+t="$(head_sha)"
+gate_carry "$t" "$f"
+expect "15. gate: a source finished 2 days in the future is refused" 1 "in the future" -- "$VS" "$t"
+repo="$selftest_repo"
+unset selftest_repo gb0 g1 t1 t s1 o x k r d f entry_count
 
 # --- suite helpers (tests/lib/suite.sh) ---------------------------------------------------------
 # A suite that stops on an unbound variable must not exit 0: bash 3.2 (macOS)
