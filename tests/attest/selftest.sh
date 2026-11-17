@@ -581,6 +581,14 @@ plan_note "$(head_sha)" 0.5
 plan_case "14. plan: a note on HEAD itself"
 check "14. plan: HEAD's own note is no source (the new note replaces it)" plan_is "*" carry "" "$p0"
 
+g checkout -q -b headred "$p0"
+change CHANGELOG.md
+h1="$(head_sha)"
+plan_note "$h1" 0.5 harbor
+plan_case "14. plan: a red run in HEAD's own note (tests/attest.sh --all left it red)"
+check "14. plan: the entry red at HEAD runs, not carried from an older green run" plan_is harbor run "red at ${h1:0:7} (fail)"
+check "14. plan: the entries green at HEAD are carried from the older run, not from HEAD" plan_is e2e carry "" "$p0"
+
 g checkout -q -b future "$p0"
 change CHANGELOG.md
 f1="$(head_sha)"
@@ -614,7 +622,7 @@ g add -A && g commit -q -m "feat: an unmapped role"
 expect "14. check-map: a role in no suite fails" 1 "::error::roles/zzz/ is in no [suite] section" -- \
   python3 -I "$H" check-map --repo "$repo" --commit HEAD
 repo="$selftest_repo"
-unset selftest_repo b0 p0 a29 a27 r1 x1 f1 l1 entry_count
+unset selftest_repo b0 p0 a29 a27 r1 x1 h1 f1 l1 entry_count
 
 # --- suite helpers (tests/lib/suite.sh) ---------------------------------------------------------
 # A suite that stops on an unbound variable must not exit 0: bash 3.2 (macOS)

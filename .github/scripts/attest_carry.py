@@ -17,9 +17,15 @@ Errors print "::error::<message>" on stdout and exit 1.
 The map, tests/suites.conf, is line based: "#" starts a comment, sections are
 [ignore], [shared] and [suite <name>], every other line is a pattern. A
 pattern ending in "/" matches the paths below it, any other pattern is an
-fnmatch pattern ("*" also matches "/"). Per changed file: [ignore] touches no
-suite, [shared] every suite, a suite pattern that suite (a file may touch
+fnmatch pattern ("*" also matches "/", except in [ignore], where each "/"-
+separated segment is matched on its own). Per changed file: [ignore] touches
+no suite, [shared] every suite, a suite pattern that suite (a file may touch
 several), and a file no pattern matches every suite.
+
+check-map also checks that each suite lists, as roles/<r>/, every role that
+its listed roles (their tasks/, handlers/ and meta/ files) and its own test
+files reference as noixdev.infra.<r>, so the suite holds the transitive
+closure of its roles.
 """
 import argparse
 import base64
@@ -46,6 +52,8 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 # Top-level files outside any suite that [ignore] may name besides *.md.
 IGNORABLE_TOP_LEVEL = ("LICENSE", ".ansible-lint", ".yamllint", ".gitignore")
 RELEASE_SUITES = ("host", "services")  # one entry per release: <suite>-<release>
+ROLE_REF_RE = re.compile(r"noixdev\.infra\.([a-z0-9_]+)")
+ROLE_REF_DIRS = ("tasks", "handlers", "meta")  # where a role references other roles
 
 
 class NoteError(Exception):
@@ -94,9 +102,18 @@ def matches(path: str, pattern: str) -> bool:
     return fnmatch.fnmatchcase(path, pattern)
 
 
+def ignore_matches(path: str, pattern: str) -> bool:
+    """matches() for [ignore]: a glob matches segment by segment, so "*" stops
+    at "/" (roles/*/README.md is not roles/x/templates/README.md)."""
+    if pattern.endswith("/"):
+        return path.startswith(pattern)
+    parts, globs = path.split("/"), pattern.split("/")
+    return len(parts) == len(globs) and all(fnmatch.fnmatchcase(a, b) for a, b in zip(parts, globs))
+
+
 def classify(m: dict, path: str) -> tuple:
     """("ignored"|"shared"|"unmatched", set()) or ("suites", {names})."""
-    if any(matches(path, p) for p in m["ignore"]):
+    if any(ignore_matches(path, p) for p in m["ignore"]):
         return "ignored", set()
     if any(matches(path, p) for p in m["shared"]):
         return "shared", set()
@@ -149,9 +166,37 @@ def _ignore_allowed(pattern: str) -> bool:
     return False
 
 
-def check_map(m: dict, allsh: str, role_dirs: list) -> list:
+def _dependency_errors(m: dict, roles: set, files: dict) -> list:
+    """Each suite must list, as roles/<x>/, every role x that its listed
+    roles or its own test files reference as noixdev.infra.<x>."""
+    refs = {}  # role -> [(referenced role, file)]
+    for path in sorted(files):
+        parts = path.split("/")
+        if len(parts) >= 4 and parts[0] == "roles" and parts[1] in roles and parts[2] in ROLE_REF_DIRS:
+            refs.setdefault(parts[1], []).extend(
+                (x, path) for x in ROLE_REF_RE.findall(files[path]) if x in roles and x != parts[1])
+    errors = []
+    for suite, patterns in m["suites"].items():
+        listed = {p[len("roles/"):-1] for p in patterns if re.fullmatch(r"roles/[^/*?\[]+/", p)}
+        sources = [ref for role in sorted(listed) for ref in refs.get(role, [])]
+        for path in sorted(files):
+            if path.startswith("tests/") and any(matches(path, p) for p in patterns):
+                sources += [(x, path) for x in ROLE_REF_RE.findall(files[path]) if x in roles]
+        missing = {}
+        for x, path in sources:
+            if x not in listed:
+                missing.setdefault(x, []).append(path)
+        for x, paths in sorted(missing.items()):
+            errors.append(f"[suite {suite}] lacks roles/{x}/, which {', '.join(dict.fromkeys(paths))} "
+                          f"reference(s) as noixdev.infra.{x}; add roles/{x}/ to that section")
+    return errors
+
+
+def check_map(m: dict, allsh: str, role_dirs: list, files: Optional[dict] = None) -> list:
     """Errors of the map against all_suites and the roles (role names, or
-    roles/<name>/ paths)."""
+    roles/<name>/ paths). With files (path -> text: the roles' tasks/,
+    handlers/ and meta/ files and the files under tests/), also every role a
+    suite's roles or test files reference is checked to be in that suite."""
     try:
         suites = list(dict.fromkeys(suite for _, suite in expected_entries(allsh)))
     except ValueError as e:
@@ -161,9 +206,11 @@ def check_map(m: dict, allsh: str, role_dirs: list) -> list:
     errors += [f"[suite {s}] in tests/suites.conf is not a suite of all_suites in tests/all.sh"
                for s in m["suites"] if s not in suites]
     claimed = {p for patterns in m["suites"].values() for p in patterns}
+    roles = set()
     for role in role_dirs:
-        name = role[len("roles/"):] if role.startswith("roles/") else role
-        prefix = "roles/" + name.strip("/") + "/"
+        name = (role[len("roles/"):] if role.startswith("roles/") else role).strip("/")
+        roles.add(name)
+        prefix = "roles/" + name + "/"
         if prefix not in claimed:
             errors.append(f"{prefix} is in no [suite] section of tests/suites.conf; "
                           f"add the exact pattern {prefix} to each suite that uses the role")
@@ -171,6 +218,8 @@ def check_map(m: dict, allsh: str, role_dirs: list) -> list:
                f"top-level *.md files, {', '.join(IGNORABLE_TOP_LEVEL)}, roles/*/README.md and "
                f"paths under .github/ outside .github/scripts/"
                for p in m["ignore"] if not _ignore_allowed(p)]
+    if files is not None:
+        errors += _dependency_errors(m, roles, files)
     return errors
 
 
@@ -204,6 +253,31 @@ def _show(repo: str, commit: str, path: str) -> str:
 
 def _ancestors(repo: str, commit: str) -> set:
     return set(_git(repo, "rev-list", commit).stdout.split())
+
+
+def _read_files(repo: str, commit: str, paths: list) -> dict:
+    """path -> text (undecodable bytes replaced) of the blobs at commit."""
+    paths = [p for p in paths if "\n" not in p]
+    if not paths:
+        return {}
+    try:
+        r = subprocess.run(["git", "-C", repo, "cat-file", "--batch"],
+                           input="".join(f"{commit}:{p}\n" for p in paths).encode("utf-8", "surrogateescape"),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:
+        raise GitError(f"cannot run git: {e}")
+    if r.returncode != 0:
+        raise GitError(f"git cat-file failed at {commit[:7]}")
+    out, pos, files = r.stdout, 0, {}
+    for path in paths:
+        nl = out.find(b"\n", pos)
+        header = out[pos:nl].split()
+        if nl < 0 or len(header) != 3 or header[1] != b"blob":
+            raise GitError(f"cannot read {path} at {commit[:7]}")
+        size = int(header[2])
+        files[path] = out[nl + 1:nl + 1 + size].decode("utf-8", "replace")
+        pos = nl + 1 + size + 1
+    return files
 
 
 def changed_files(repo: str, a: str, b: str) -> list:
@@ -327,18 +401,20 @@ def age_seconds(p: dict, now: int) -> int:
 
 # --- plan -------------------------------------------------------------------
 
-def _runs(repo: str, head: str, notes_ref: str, signers_path: str, allow_dry_run: bool) -> dict:
-    """label -> [(commit, payload, entry)] of the valid notes of head's
-    ancestors (head itself excluded: its note is the one to be replaced),
-    descendants before their ancestors."""
+def _runs(repo: str, head: str, notes_ref: str, signers_path: str, allow_dry_run: bool) -> tuple:
+    """(runs, at_head): runs is label -> [(commit, payload, entry)] of the
+    valid notes of head's ancestors, descendants before their ancestors;
+    head itself is no carry source, since its note is the one to be
+    replaced. at_head is label -> entry of what ran in head's own valid note,
+    so a red run there is not replaced by a carry."""
     noted = _noted_commits(repo, notes_ref)
-    runs = {}
+    runs, at_head = {}, {}
     if not noted:
-        return runs
+        return runs, at_head
     order = _git(repo, "rev-list", "--topo-order", head).stdout.split()
     with tempfile.TemporaryDirectory() as tmp:
         for commit in order:
-            if commit == head or commit not in noted:
+            if commit not in noted:
                 continue
             text = read_note(repo, notes_ref, commit)
             if text is None:
@@ -349,13 +425,18 @@ def _runs(repo: str, head: str, notes_ref: str, signers_path: str, allow_dry_run
                 check_payload(p, commit, tree, allow_dry_run)
             except NoteError:
                 continue
+            if commit == head:
+                at_head = ran_entries(p)
+                continue
             for label, entry in ran_entries(p).items():
                 runs.setdefault(label, []).append((commit, p, entry))
-    return runs
+    return runs, at_head
 
 
-def _decide(repo, m, head, label, suite, candidates, now, cache) -> dict:
+def _decide(repo, m, head, label, suite, candidates, at_head, now, cache) -> dict:
     run = {"label": label, "suite": suite, "action": "run"}
+    if label in at_head and at_head[label]["result"] != "pass":
+        return dict(run, reason=f"red at {head[:7]} ({at_head[label]['result']})")
     if not candidates:
         return dict(run, reason=f"no signed run of {label} before {head[:7]}")
     c, p, entry = candidates[0]
@@ -399,9 +480,10 @@ def plan(repo, head, notes_ref, signers_path, now, force_all, allow_dry_run) -> 
     m = parse_map(_show(repo, head, MAP_PATH))
     if force_all:
         return [{"label": label, "suite": suite, "action": "run", "reason": "--all"} for label, suite in entries]
-    runs = _runs(repo, head, notes_ref, signers_path, allow_dry_run)
+    runs, at_head = _runs(repo, head, notes_ref, signers_path, allow_dry_run)
     cache = {}
-    return [_decide(repo, m, head, label, suite, runs.get(label, []), now, cache) for label, suite in entries]
+    return [_decide(repo, m, head, label, suite, runs.get(label, []), at_head, now, cache)
+            for label, suite in entries]
 
 
 # --- payload ----------------------------------------------------------------
@@ -471,7 +553,9 @@ def _cmd_check_map(a) -> int:
     m = parse_map(_show(a.repo, commit, MAP_PATH))
     tree = _git(a.repo, "ls-tree", commit, "roles/").stdout
     roles = [line.split("\t", 1)[1] for line in tree.splitlines() if line.split()[1:2] == ["tree"]]
-    errors = check_map(m, _show(a.repo, commit, ALLSH_PATH), roles)
+    paths = [p for p in _git(a.repo, "ls-tree", "-r", "-z", "--name-only", commit, "--", "roles", "tests").stdout.split("\0")
+             if p.startswith("tests/") or (len(p.split("/")) >= 4 and p.split("/")[2] in ROLE_REF_DIRS)]
+    errors = check_map(m, _show(a.repo, commit, ALLSH_PATH), roles, _read_files(a.repo, commit, paths))
     for e in errors:
         print("::error::" + e)
     if errors:

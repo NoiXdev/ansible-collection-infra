@@ -84,6 +84,11 @@ class Matches(unittest.TestCase):
         self.assertTrue(ac.matches("roles/php/README.md", "roles/*/README.md"))
         self.assertFalse(ac.matches("roles/php/README.txt", "roles/*/README.md"))
 
+    def test_ignore_glob_stops_at_slash(self):
+        self.assertTrue(ac.ignore_matches("roles/php/README.md", "roles/*/README.md"))
+        self.assertFalse(ac.ignore_matches("roles/x/templates/README.md", "roles/*/README.md"))
+        self.assertTrue(ac.ignore_matches(".github/workflows/ci.yml", ".github/workflows/"))
+
     def test_exact(self):
         self.assertTrue(ac.matches("tests/run.sh", "tests/run.sh"))
         self.assertFalse(ac.matches("tests/run.shx", "tests/run.sh"))
@@ -107,6 +112,9 @@ class AffectedSuites(unittest.TestCase):
 
     def test_ignore_wins(self):
         self.assertEqual(ac.affected_suites(self.m, ["roles/tandoor/README.md"]), set())
+
+    def test_nested_readme_is_not_ignored(self):
+        self.assertEqual(ac.affected_suites(self.m, ["roles/tandoor/templates/README.md"]), {"tandoor"})
 
     def test_ignore_wins_over_shared(self):
         m = ac.parse_map("[ignore]\nNOTES.md\n[shared]\nNOTES.md\n[suite a]\nNOTES.md\n")
@@ -213,6 +221,68 @@ class CheckMap(unittest.TestCase):
                   ".github/pull_request_template.md\n.github/ISSUE_TEMPLATE/\n"
         m = ac.parse_map(MAP.replace("CHANGELOG.md\n", "CHANGELOG.md\n" + allowed))
         self.assertEqual(ac.check_map(m, self.ALL, []), [])
+
+
+class CheckMapDependencies(unittest.TestCase):
+    """A suite lists every role its roles and its test files reference, transitively."""
+    ALL = "all_suites=(a b)\n"
+    MAP = "[suite a]\ntests/a/\nroles/nginx/\n[suite b]\nroles/php/\nroles/redis/\n"
+    FILES = {
+        "roles/nginx/tasks/main.yml": "- ansible.builtin.include_role:\n    name: noixdev.infra.php\n"
+                                      "- noixdev.infra.warn:\n    msg: x\n",
+        "roles/php/meta/main.yml": "dependencies:\n  - role: noixdev.infra.redis\n",
+        "roles/redis/tasks/main.yml": "# Written by the noixdev.infra.redis role\n",
+        "tests/a/converge.yml": "- hosts: all\n  roles: [noixdev.infra.nginx]\n",
+    }
+    ROLES = ["nginx", "php", "redis"]
+
+    def errors(self, map_text, files):
+        return ac.check_map(ac.parse_map(map_text), self.ALL, self.ROLES, files)
+
+    def test_missing_include_role_dependency(self):
+        errors = self.errors(self.MAP, self.FILES)
+        self.assertTrue(any("[suite a]" in e and "roles/php/" in e and "roles/nginx/tasks/main.yml" in e
+                            for e in errors), errors)
+
+    def test_missing_transitive_dependency(self):
+        errors = self.errors(self.MAP.replace("roles/nginx/\n", "roles/nginx/\nroles/php/\n", 1), self.FILES)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("[suite a]", errors[0])
+        self.assertIn("roles/redis/", errors[0])
+        self.assertIn("roles/php/meta/main.yml", errors[0])
+
+    def test_complete(self):
+        m = self.MAP.replace("roles/nginx/\n", "roles/nginx/\nroles/php/\nroles/redis/\n", 1)
+        self.assertEqual(self.errors(m, self.FILES), [])
+
+    def test_test_file_reference(self):
+        files = dict(self.FILES, **{"tests/a/verify.yml": "- noixdev.infra.redis\n"})
+        m = self.MAP.replace("roles/nginx/\n", "roles/nginx/\nroles/php/\n", 1)
+        errors = self.errors(m, files)
+        self.assertTrue(any("tests/a/verify.yml" in e and "roles/redis/" in e for e in errors), errors)
+
+    def test_test_file_outside_the_section_does_not_count(self):
+        files = {"tests/b/converge.yml": "- noixdev.infra.nginx\n"}
+        self.assertEqual(self.errors("[suite a]\nroles/nginx/\nroles/php/\nroles/redis/\n[suite b]\nroles/php/\n"
+                                     "roles/redis/\n", files), [])
+
+    def test_cli_on_a_repository(self):
+        with tempfile.TemporaryDirectory() as repo:
+            env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
+                       GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+            files = dict(self.FILES, **{"tests/all.sh": self.ALL, "tests/suites.conf": self.MAP})
+            for path, text in files.items():
+                os.makedirs(os.path.join(repo, os.path.dirname(path)), exist_ok=True)
+                with open(os.path.join(repo, path), "w") as f:
+                    f.write(text)
+            for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "x"]):
+                subprocess.run(["git", "-C", repo] + args, check=True, env=env, stdout=subprocess.DEVNULL)
+            r = subprocess.run([sys.executable, "-I", ac.__file__, "check-map", "--repo", repo, "--commit", "HEAD"],
+                               stdout=subprocess.PIPE, universal_newlines=True, env=env)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("::error::[suite a] lacks roles/php/", r.stdout)
+            self.assertIn("roles/nginx/tasks/main.yml", r.stdout)
 
 
 class Payload(unittest.TestCase):
