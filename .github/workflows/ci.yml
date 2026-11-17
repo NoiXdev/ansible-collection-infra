@@ -49,3 +49,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: tests/attest/selftest.sh
+
+  release-tool:
+    # The unit tests of the release tool that release.yml calls.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 -I -m unittest discover -s .github/release -p test_release.py
