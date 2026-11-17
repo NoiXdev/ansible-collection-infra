@@ -75,6 +75,22 @@ grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/idempotence.log" \
 echo "== verify"
 play "$here/verify.yml"
 
+# tailscale: a failed login ends within tailscale_login_timeout, reports what
+# tailscale up said and removes the auth key file. Without network access the
+# login times out instead; both are "tailscale up failed".
+echo "== tailscale login fails within the timeout"
+start=$SECONDS
+if play "$here/tailscale_login.yml" >"$out/tailscale-login.log" 2>&1; then
+  echo "tailscale accepted a bad auth key" >&2; exit 1
+fi
+[ $((SECONDS - start)) -lt 90 ] || { echo "tailscale login did not stop at its timeout" >&2; exit 1; }
+grep -qF "tailscale up failed" "$out/tailscale-login.log" \
+  || { cat "$out/tailscale-login.log" >&2; echo "tailscale login: expected the message: tailscale up failed" >&2; exit 1; }
+! grep -qF "flag provided but not defined" "$out/tailscale-login.log" \
+  || { echo "tailscale up does not know --timeout" >&2; exit 1; }
+! docker exec "$host" test -e /run/tailscale-authkey \
+  || { echo "tailscale login left the auth key file behind" >&2; exit 1; }
+
 # oh_my_zsh: deploy owns its home and can put a link there as ~/.zshrc. Root
 # must neither write through it nor read it: the target stays as it is and
 # its content shows up nowhere, not even in --diff output.

@@ -1,0 +1,11 @@
+---
+# The tailscale role with an auth key the control server rejects.
+# tests/host/run.sh expects the run to fail with the login error within the
+# timeout and the auth key file to be gone.
+- name: Log in to Tailscale with a bad auth key
+  hosts: testhost
+  roles:
+    - role: noixdev.infra.tailscale
+      vars:
+        tailscale_auth_key: tskey-auth-noixdevtest-0000000000000000
+        tailscale_login_timeout: 15

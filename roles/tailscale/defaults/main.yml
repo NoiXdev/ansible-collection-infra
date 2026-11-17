@@ -6,3 +6,4 @@ tailscale_accept_routes: false
 tailscale_accept_dns: false
 tailscale_advertise_tags: []
 tailscale_ssh: false
+tailscale_login_timeout: 120

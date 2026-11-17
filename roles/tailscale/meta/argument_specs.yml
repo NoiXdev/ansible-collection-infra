@@ -29,3 +29,8 @@ argument_specs:
       tailscale_ssh:
         type: bool
         description: Enable Tailscale SSH.
+      tailscale_login_timeout:
+        type: int
+        description: >-
+          Seconds the first login waits for the node to come up. A login that
+          takes longer fails the run, and names a pending device approval.

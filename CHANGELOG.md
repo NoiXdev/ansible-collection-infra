@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `tailscale`: the first login gives up after `tailscale_login_timeout` seconds (default 120)
+  instead of waiting forever. The run then fails with what `tailscale up` reported or, when the
+  tailnet requires device approval, names the node to approve in the admin console. The auth key
+  file is removed either way.
 - Releases are cut by the `release` workflow (Actions tab, `bump` patch, minor or major, `dry_run`
   on by default): it checks main, CI, the signed test run and the changelog, then bumps
   `galaxy.yml` and `CHANGELOG.md`, tags `vX.Y.Z`, publishes the release, updates the README

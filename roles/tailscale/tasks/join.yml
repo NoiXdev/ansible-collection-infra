@@ -16,12 +16,40 @@
         mode: "0600"
       no_log: true
 
+    # Without --timeout, tailscale up waits forever, for example while the
+    # tailnet requires device approval.
     - name: Log in
       ansible.builtin.command:
-        argv: "{{ tailscale_up_argv }}"
-      changed_when: true
+        argv: "{{ tailscale_up_argv + ['--timeout=' ~ tailscale_login_timeout ~ 's'] }}"
+      register: tailscale_up
+      changed_when: tailscale_up.rc == 0
+      failed_when: false
   always:
     - name: Remove the auth key file
       ansible.builtin.file:
         path: /run/tailscale-authkey
         state: absent
+
+- name: Read the node state after the failed login
+  ansible.builtin.command:
+    cmd: tailscale status --json
+  register: tailscale_login_status
+  changed_when: false
+  failed_when: false
+  when: tailscale_up.rc != 0
+
+- name: Report the failed login
+  ansible.builtin.fail:
+    msg: "{{ (tailscale_login_state == 'NeedsMachineAuth') | ternary(tailscale_login_pending, tailscale_login_error) }}"
+  vars:
+    tailscale_login_pending: >-
+      tailscale up stopped after {{ tailscale_login_timeout }} s: the node
+      {{ tailscale_hostname }} waits for approval in the Tailscale admin
+      console (Machines). Approve it, then run again.
+    tailscale_login_error: >-
+      tailscale up failed (state {{ tailscale_login_state | default('unknown', true) }}):
+      {{ (tailscale_up.stderr | default('', true) or tailscale_up.stdout | default('', true)) | trim }}
+    tailscale_login_state: >-
+      {{ ((tailscale_login_status.stdout | default('', true) | trim).startswith('{')
+          | ternary(tailscale_login_status.stdout, '{}') | from_json).BackendState | default('') }}
+  when: tailscale_up.rc != 0
