@@ -166,12 +166,65 @@ optionally, branch protection on `main` can require the status `tests/local`.
 
 ## Releasing
 
-Maintainers cut a release like this:
+Maintainers cut a release with the `release` workflow:
 
 1. Attest the last commit before the bump, once it is on `main` and CI is green: run
    a real amd64 mysql test by hand first when the run would use the systemctl shim,
-   then `tests/attest.sh`. Do not attest the bump commit itself: it always changes
-   `galaxy.yml`, a shared file, so that would rerun every entry (hours).
+   then `tests/attest.sh`, and push the notes. Do not attest the bump commit itself: it
+   always changes `galaxy.yml`, a shared file, so that would rerun every entry (hours).
+2. Make sure `## Unreleased` in `CHANGELOG.md` has the entries of the release.
+3. Run the workflow `release` from the Actions tab on `main`: first with `dry_run` on (the
+   default), read its summary, then again with `dry_run` off. `bump` is `patch`, `minor`
+   (the default) or `major`. One release runs at a time.
+
+What the workflow checks, in this order, before it writes anything:
+
+- It runs on `main`, and `ci.yml` has a green push run for that exact commit.
+- For a real run, the organization has the webhook as a secret or variable named
+  `DISCORD_WEBHOOK_RELEASE_NOTIFICATION` (no environment is needed). A real run refuses
+  without it, so a release is never left unannounced.
+- The version in `galaxy.yml` has its tag `vX.Y.Z`. If it has none, an earlier release
+  stopped half-way and the workflow refuses to bump past it (see below).
+- The shapes it edits can be placed: `## Unreleased` is there once and is the first
+  `## ` heading, it has at least one entry (blank lines and an HTML comment do not
+  count), the new version's heading is not there yet, and `README.md` has exactly one
+  install example with a `version: v…` line.
+- The release check (`.github/scripts/verify-tests-attestation.sh`) accepts the guarded
+  commit, and then accepts the local bump commit, whose tree it records.
+
+A dry run stops here and writes nothing. A real run then:
+
+1. Creates the bump commit `chore: bump the collection to X.Y.Z` on `main` through the
+   API (a verified commit, and only if `main` has not moved since the checks). It changes
+   only `CHANGELOG.md` and the `version:` line of `galaxy.yml`: the heading
+   `## X.Y.Z — YYYY-MM-DD` (UTC date of the run) goes under a new empty `## Unreleased`.
+   Its tree must equal the tree that passed the check.
+2. Creates the lightweight tag `vX.Y.Z` on it, together with the GitHub release of the same
+   name. The release text is the version's changelog section, cut at a line boundary if it
+   would pass 60 000 bytes, with a pointer to `CHANGELOG.md`.
+3. Commits `docs: point the install example at vX.Y.Z` (the install example of
+   `README.md`).
+4. Posts the release to Discord, last.
+
+The tag and the commits are made with the workflow's own token, so they start no further
+workflow: the tag does not run `release-gate.yml`, because the workflow ran the same check
+before tagging, and the README commit, the new head of `main`, has no `ci.yml` run until the
+next push. The next release needs a new `## Unreleased` entry anyway, and that push runs CI.
+
+### When a run stops half-way
+
+The error message of the `publish` job says what exists: the bump commit, the tag and
+release, the README commit. Finish what is missing by hand, as in "Releasing by hand"
+(revert the bump commit, or tag it after checking its tree, or create the release for the
+tag, or bump the README install example). If only the README commit failed, the
+announcement still goes out and the run turns red afterwards. The workflow never repeats a
+step past what exists: when `galaxy.yml` on `main` has a version without a tag, it refuses to bump again,
+and the fix is to finish the previous release by hand. A failed Discord post does not undo
+the release.
+
+### Releasing by hand
+
+1. Attest the last commit before the bump as in step 1 above.
 2. Bump `version` in `galaxy.yml`.
 3. Move the entries of `CHANGELOG.md` from *Unreleased* under the new version.
 4. Commit (`chore: bump the collection to X.Y.Z`) on `main` and push it. The bump commit

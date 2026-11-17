@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Releases are cut by the `release` workflow (Actions tab, `bump` patch, minor or major, `dry_run`
+  on by default): it checks main, CI, the signed test run and the changelog, then bumps
+  `galaxy.yml` and `CHANGELOG.md`, tags `vX.Y.Z`, publishes the release, updates the README
+  install example and announces it on Discord. The steps by hand stay in `CONTRIBUTING.md`.
 - `nginx`: new role that installs nginx of one stable series from nginx.org (`nginx_version`, a
   quoted `major.minor` such as `"1.30"`; Ubuntu 24.04 and 26.04, any other release is refused
   before any change) and serves the sites of `nginx_sites`, the complete list: a site that leaves
