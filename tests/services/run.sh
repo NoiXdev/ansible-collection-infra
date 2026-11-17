@@ -2265,6 +2265,7 @@ for role in $services; do
 done
 echo "== services ($services) passed on ubuntu $ubuntu"
 if [ "$shim_used" = 1 ]; then
+  echo "noix-attest-note: mysql via systemctl shim"
   echo "== WARNING: emulated amd64: mysql.service not exercised, systemctl shim in use"
 fi
 noix_done

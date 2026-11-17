@@ -199,6 +199,8 @@ expected = []
 for suite in array("all_suites"):
     if suite == "host":
         expected += ["host-" + r for r in array("host_releases")]
+    elif suite == "services":
+        expected += ["services-" + r for r in array("services_releases")]
     else:
         expected.append(suite)
 
@@ -207,11 +209,11 @@ for n, line in enumerate(open(summary_path, encoding="utf-8"), 1):
     if not line.strip():
         continue
     fields = line.split()
-    if (len(fields) != 3 or not re.fullmatch(r"[A-Za-z0-9._-]+", fields[0])
+    if (len(fields) < 3 or not re.fullmatch(r"[A-Za-z0-9._-]+", fields[0])
             or fields[1] not in ("pass", "fail", "skipped")
             or not re.fullmatch(r"[0-9]+", fields[2])):
         sys.exit(f"summary line {n} is malformed: {line.strip()!r}")
-    suites.append({"label": fields[0], "result": fields[1], "seconds": int(fields[2])})
+    suites.append({"label": fields[0], "result": fields[1], "seconds": int(fields[2])})  # notes (fields[3:]) are ignored until Task 5
 
 labels = {e["label"] for e in suites}
 passed = sum(1 for e in suites if e["result"] == "pass")

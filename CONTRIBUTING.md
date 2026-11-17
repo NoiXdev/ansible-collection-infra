@@ -37,8 +37,8 @@ Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tes
 check this first. The `mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
 (`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `tandoor` about 2 GB and `n8n` about 3 GB of images, `cloudpanel` runs CloudPanel's real installer.
-`tests/services/run.sh` (nodejs, redis, mariadb, mysql) is not part of `tests/all.sh` or
-the signed test run yet: run it on its own, with `UBUNTU=24.04` and `UBUNTU=26.04`.
+`tests/services/run.sh` (nodejs, redis, mariadb, mysql) is part of `tests/all.sh` as the
+`services` suite, once per Ubuntu release (`SERVICES_UBUNTU`); run it on its own with `UBUNTU=24.04` or `UBUNTU=26.04`.
 
 Each test converges the roles, converges again (the second run must change nothing),
 and then verifies the result. `KEEP=1` leaves the test container running for

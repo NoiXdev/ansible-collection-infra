@@ -131,8 +131,9 @@ printf 'namespace: noixdev\nname: infra\nversion: 0.1.0\ndescription: selftest\n
 printf '# Changelog\n\n## Unreleased\n' >"$repo/CHANGELOG.md"
 read -r -a suites <<<"$(sed -nE 's/^all_suites=\(([^)]*)\)$/\1/p' "$repo/tests/all.sh")"
 read -r -a releases <<<"$(sed -nE 's/^host_releases=\(([^)]*)\)$/\1/p' "$repo/tests/all.sh")"
-if [ "${#suites[@]}" -eq 0 ] || [ "${#releases[@]}" -lt 2 ]; then
-  echo "selftest: tests/all.sh needs all_suites=(...) and host_releases=(...) with two releases or more" >&2
+read -r -a sreleases <<<"$(sed -nE 's/^services_releases=\(([^)]*)\)$/\1/p' "$repo/tests/all.sh")"
+if [ "${#suites[@]}" -eq 0 ] || [ "${#releases[@]}" -lt 2 ] || [ "${#sreleases[@]}" -lt 2 ]; then
+  echo "selftest: tests/all.sh needs all_suites=(...), host_releases=(...) and services_releases=(...) with two releases or more each" >&2
   exit 1
 fi
 last_suite="${suites[${#suites[@]} - 1]}"
@@ -140,13 +141,14 @@ last_host="host-${releases[${#releases[@]} - 1]}"
 # A stub per suite: fails when its label is in STUB_FAIL.
 stub() { # stub PATH LABEL-EXPRESSION
   mkdir -p "$(dirname "$1")"
-  printf '#!/usr/bin/env bash\nlabel="%s"\ncase " ${STUB_FAIL:-} " in *" $label "*) echo "$label failed"; exit 1 ;; esac\necho "$label passed"\n' "$2" >"$1"
+  printf '#!/usr/bin/env bash\nlabel="%s"\ncase " ${STUB_FAIL:-} " in *" $label "*) echo "$label failed"; exit 1 ;; esac\n[ -z "${STUB_NOTE:-}" ] || echo "noix-attest-note: $STUB_NOTE"\necho "$label passed"\n' "$2" >"$1"
   chmod +x "$1"
 }
 for suite in "${suites[@]}"; do
   case "$suite" in
     e2e) stub "$repo/tests/run.sh" e2e ;;
     host) stub "$repo/tests/host/run.sh" 'host-$UBUNTU' ;;
+    services) stub "$repo/tests/services/run.sh" 'services-$UBUNTU' ;;
     *) stub "$repo/tests/$suite/run.sh" "$suite" ;;
   esac
 done
@@ -169,6 +171,8 @@ chmod +x "$tmp/runner"
 all_pass="$(for s in "${suites[@]}"; do
   if [ "$s" = host ]; then
     for r in "${releases[@]}"; do echo "host-$r pass 3"; done
+  elif [ "$s" = services ]; then
+    for r in "${sreleases[@]}"; do echo "services-$r pass 3"; done
   else
     echo "$s pass 2"
   fi
@@ -179,7 +183,7 @@ export ATTEST_DRY_RUN=1 ATTEST_RUNNER="$repo/tests/all.sh"
 
 # --- tests/all.sh --summary -------------------------------------------------
 expect "all.sh: --summary without a file is rejected" 2 "usage:" -- tests/all.sh --summary
-expect "all.sh: an unknown suite is rejected" 2 "unknown suite: bogus" -- tests/all.sh --summary "$tmp/s" bogus
+expect "all.sh: an unknown suite is rejected" 2 "unknown suite or entry: bogus" -- tests/all.sh --summary "$tmp/s" bogus
 check "all.sh: rejected runs write no summary" test ! -e "$tmp/s"
 expect "all.sh: all stub suites pass" 0 "summary" -- tests/all.sh --keep-going --summary "$tmp/s"
 check "all.sh: one summary line per run entry, host once per host_releases entry" \
@@ -188,6 +192,18 @@ expect "all.sh: a failing suite without --keep-going stops the run" 1 "stopped a
   env STUB_FAIL=e2e tests/all.sh --summary "$tmp/s"
 check "all.sh: the summary marks the failure and the skipped rest" \
   test "$(head -2 "$tmp/s" | cut -d' ' -f1,2)" = "$(printf 'e2e fail\nhost-%s skipped' "${releases[0]}")"
+expect "all.sh: services expands to one entry per services release" 0 "summary" -- tests/all.sh --summary "$tmp/s" services
+check "all.sh: the services entries pass" \
+  test "$(cut -d' ' -f1,2 "$tmp/s")" = "$(printf 'services-%s pass\n' "${sreleases[@]}")"
+expect "all.sh: entry labels run in all_suites order, whatever the argument order" 0 "summary" -- \
+  tests/all.sh --summary "$tmp/s" "services-${sreleases[1]}" "host-${releases[0]}"
+check "all.sh: host-<release> runs before services-<release>" \
+  test "$(cut -d' ' -f1,2 "$tmp/s")" = "$(printf 'host-%s pass\nservices-%s pass' "${releases[0]}" "${sreleases[1]}")"
+expect "all.sh: an entry of a release that is not listed is rejected" 2 "unknown suite or entry" -- tests/all.sh host-22.04
+expect "all.sh: a note of a suite lands in the summary line" 0 "summary" -- \
+  env STUB_NOTE="mysql via systemctl shim" tests/all.sh --summary "$tmp/s" "services-${sreleases[0]}"
+check "all.sh: the note has its spaces replaced by underscores" \
+  test "$(cut -d' ' -f1,2,4 "$tmp/s")" = "services-${sreleases[0]} pass mysql_via_systemctl_shim"
 
 # --- 1. green run -------------------------------------------------------------
 c1="$(head_sha)"
@@ -401,7 +417,7 @@ expect "13. real: Docker without amd64 emulation refuses to start" 2 "cannot run
 expect "13. real: a first run (no notes on origin yet) is green" 0 "pushed, status tests/local set" -- real "$A"
 check "13. real: origin has the note of the run" git --git-dir="$origin" notes --ref="$REAL" show "$c13"
 check "13. real: the stale local note was not pushed" sh -c '! git --git-dir="$1" notes --ref=refs/notes/tests show "$2" >/dev/null 2>&1' _ "$origin" "$c1"
-entries=$((${#releases[@]} + ${#suites[@]})) # host per release, newsuite from case 8
+entries=$((${#releases[@]} + ${#sreleases[@]} + ${#suites[@]} - 1)) # host and services per release, newsuite from case 8
 check "13. real: the status call" sh -c 'a="$(tr "\n" " " <"$1")"; [ "$a" = "$2" ] || { echo "got: $a"; exit 1; }' _ "$tmp/gh-call" \
   "api --method POST repos/example/selftest/statuses/$c13 -f state=success -f context=tests/local -f description=$entries passed, 0 failed (0 min, $(uname -m), signed) "
 commit_change "feat: thirteen b"

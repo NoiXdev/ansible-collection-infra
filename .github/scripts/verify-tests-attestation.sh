@@ -159,6 +159,8 @@ elif mode == "check":
     for suite in array("all_suites"):
         if suite == "host":
             expected += ["host-" + r for r in array("host_releases")]
+        elif suite == "services":
+            expected += ["services-" + r for r in array("services_releases")]
         else:
             expected.append(suite)
     labels = {e["label"] for e in suites}
