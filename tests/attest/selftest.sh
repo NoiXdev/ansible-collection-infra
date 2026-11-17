@@ -5,7 +5,8 @@
 # .github/scripts/attest_carry.py (its unit tests, check-map on this
 # repository's HEAD, the run-or-carry plan). No Docker, no network: it works
 # in a throwaway git repository with throwaway ed25519 keys, a copy of the
-# scripts and stub suites behind the real tests/all.sh. Most cases use
+# scripts, stub suites behind the real tests/all.sh and a stub
+# tests/suites.conf (one roles/<suite>/ per suite). Most cases use
 # ATTEST_DRY_RUN=1; the "real mode" cases push to local bare repositories
 # with fake docker and gh commands. CI runs it (ci.yml).
 #
@@ -109,11 +110,12 @@ sign_note() {
   g notes --ref="$REAL" add -f -F "$tmp/note" "$commit" 2>/dev/null
 }
 # promote COMMIT [KEY]: turns the dry run's payload of COMMIT into a real
-# run's (no dryRun, a Docker version), signed by KEY into refs/notes/tests.
-# Everything else is what tests/attest.sh produced.
+# run's (no dryRun, a Docker version when anything ran), signed by KEY into
+# refs/notes/tests. Everything else is what tests/attest.sh produced.
 promote() {
   payload_of "$DRY" "$1" >"$tmp/promoted.json"
-  json_edit "$tmp/promoted.json" 'del p["dryRun"]; p["docker"] = "29.0.0-selftest"'
+  json_edit "$tmp/promoted.json" 'del p["dryRun"]
+if p["suites"]: p["docker"] = "29.0.0-selftest"'
   sign_note "$1" "$tmp/promoted.json" "${2:-$tmp/key}"
 }
 
@@ -154,7 +156,29 @@ for suite in "${suites[@]}"; do
     *) stub "$repo/tests/$suite/run.sh" "$suite" ;;
   esac
 done
+# A stub map: each suite has its stub and a roles/<suite>/ of its own.
+# roles.txt (commit_change) is in no section, so a commit_change reruns every
+# entry; CHANGELOG.md is ignored.
+{
+  printf '[ignore]\nCHANGELOG.md\nREADME.md\n.gitignore\n[shared]\ngalaxy.yml\n.github/tests-allowed-signers\n'
+  for suite in "${suites[@]}"; do
+    case "$suite" in
+      e2e) printf '[suite e2e]\ntests/run.sh\nroles/e2e/\n' ;;
+      *) printf '[suite %s]\ntests/%s/\nroles/%s/\n' "$suite" "$suite" "$suite" ;;
+    esac
+    mkdir -p "$repo/roles/$suite/tasks"
+    printf -- '- ansible.builtin.debug:\n    msg: %s\n' "$suite" >"$repo/roles/$suite/tasks/main.yml"
+  done
+} >"$repo/tests/suites.conf"
 g add -A && g commit -q -m "chore: selftest repo"
+role_change() { # role_change SUITE: a commit that changes only that suite's role
+  echo "# a change" >>"$repo/roles/$1/tasks/main.yml"
+  g add -A && g commit -q -m "feat: change the $1 role"
+}
+docs_change() { # docs_change: a commit that changes only CHANGELOG.md (ignored)
+  echo "- a line" >>"$repo/CHANGELOG.md"
+  g add -A && g commit -q -m "docs: a changelog line"
+}
 
 # A fake runner outside the repo: writes $FAKE_SUMMARY as the summary,
 # commits during the run with FAKE_COMMIT=1, marks that it ran.
@@ -216,8 +240,8 @@ check "1. green run: the dry run leaves refs/notes/tests alone" sh -c '! git rev
 check "1. green run: the note has the payload and the signature" \
   sh -c 'git notes --ref="$1" show HEAD | grep -q "^payload: " && git notes --ref="$1" show HEAD | grep -qx -- "-----BEGIN SSH SIGNATURE-----"' _ "$DRY"
 payload_of "$DRY" "$c1" >"$tmp/green.json"
-check "1. green run: the payload keys are in order, dry run marked" \
-  python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1])); assert list(p)==["schema","commit","tree","signer","suites","passed","failed","arch","os","docker","startedAt","finishedAt","dryRun"], list(p); assert p["dryRun"] is True and p["docker"]=="unknown"; assert p["failed"]==0 and p["passed"]==len(p["suites"])' "$tmp/green.json"
+check "1. green run: a schema 2 payload, keys in order, dry run marked, nothing carried" \
+  python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1])); assert list(p)==["schema","commit","tree","signer","suites","carried","passed","failed","carriedCount","arch","os","docker","startedAt","finishedAt","dryRun"], list(p); assert p["schema"]==2 and p["dryRun"] is True and p["docker"]=="unknown"; assert p["failed"]==0 and p["passed"]==len(p["suites"]) and p["carried"]==[] and p["carriedCount"]==0' "$tmp/green.json"
 check "1. green run: the payload has no path, user or host name" \
   sh -c '! grep -q / "$1" && ! grep -qiF "\"$2\"" "$1" && ! grep -qiF "\"$3\"" "$1"' _ "$tmp/green.json" "${USER:-nobody}" "$(hostname -s 2>/dev/null || echo nohostname)"
 g notes --ref="$REAL" add -f -m "$(note_of "$DRY" "$c1")" "$c1"
@@ -343,6 +367,7 @@ c8a="$(head_sha)"
 promote "$c8a"
 sed -i.bak 's/^all_suites=(\(.*\))$/all_suites=(\1 newsuite)/' "$repo/tests/all.sh" && rm "$repo/tests/all.sh.bak"
 stub "$repo/tests/newsuite/run.sh" newsuite
+printf '[suite newsuite]\ntests/newsuite/\n' >>"$repo/tests/suites.conf"
 g add -A && g commit -q -m "test: add newsuite"
 c8="$(head_sha)"
 payload_of "$REAL" "$c8a" >"$tmp/p8.json"
@@ -421,7 +446,7 @@ check "13. real: origin has the note of the run" git --git-dir="$origin" notes -
 check "13. real: the stale local note was not pushed" sh -c '! git --git-dir="$1" notes --ref=refs/notes/tests show "$2" >/dev/null 2>&1' _ "$origin" "$c1"
 entries=$((${#releases[@]} + ${#sreleases[@]} + ${#suites[@]} - 1)) # host and services per release, newsuite from case 8
 check "13. real: the status call" sh -c 'a="$(tr "\n" " " <"$1")"; [ "$a" = "$2" ] || { echo "got: $a"; exit 1; }' _ "$tmp/gh-call" \
-  "api --method POST repos/example/selftest/statuses/$c13 -f state=success -f context=tests/local -f description=$entries passed, 0 failed (0 min, $(uname -m), signed) "
+  "api --method POST repos/example/selftest/statuses/$c13 -f state=success -f context=tests/local -f description=$entries ran, $entries passed, 0 failed, 0 carried (0 min, $(uname -m), signed) "
 commit_change "feat: thirteen b"
 g push -q origin main
 c13b="$(head_sha)"
@@ -434,6 +459,45 @@ check "13. real: the red status call" grep -qx "state=failure" "$tmp/gh-call"
 g fetch -q origin "+$REAL:$REAL"
 expect "13. real: verifier allows the real green note" 0 "Tests attestation OK for ${c13:0:7}" -- "$V" "$c13"
 expect "13. real: verifier refuses the real red note" 1 "is red: " -- "$V" "$c13b"
+
+# A partial real run: e2e's role changed, listmonk is red at c13b, the rest
+# is carried from c13b. A forged green note of c13b in the local ref only
+# must not count: the plan reads origin's notes.
+role_change e2e
+g push -q origin main
+c13c="$(head_sha)"
+payload_of "$REAL" "$c13b" >"$tmp/forged.json"
+json_edit "$tmp/forged.json" 'for e in p["suites"]: e["result"] = "pass"
+p["passed"] = len(p["suites"]); p["failed"] = 0'
+sign_note "$c13b" "$tmp/forged.json" "$tmp/key"
+rm -f "$tmp/gh-call"
+expect "13. real: --plan plans from origin's notes, not a local-only one" 0 "listmonk  run  red at ${c13b:0:7} (fail)" -- \
+  real "$A" --plan
+check "13. real: --plan runs the entry whose role changed" grep -qF "e2e  run  roles/e2e/tasks/main.yml changed since ${c13b:0:7}" "$tmp/out"
+check "13. real: --plan carries the rest from origin's note" grep -qF "harbor  carry from ${c13b:0:7} (0 days)" "$tmp/out"
+check "13. real: --plan publishes nothing" sh -c '! git --git-dir="$1" notes --ref=refs/notes/tests show "$2" >/dev/null 2>&1 && [ ! -e "$3" ]' _ \
+  "$origin" "$c13c" "$tmp/gh-call"
+expect "13. real: a partial run without harbor needs no amd64 emulation" 0 "pushed, status tests/local set" -- \
+  env -u ATTEST_DRY_RUN -u ATTEST_RUNNER PATH="$tmp/bin-noamd64:$PATH" "$A"
+check "13. real: the partial run's status counts what ran and what is carried" grep -qx \
+  "description=2 ran, 2 passed, 0 failed, $((entries - 2)) carried (0 min, $(uname -m), signed)" "$tmp/gh-call"
+g fetch -q origin "+$REAL:$REAL"
+expect "13. real: the release check allows the partial real note" 0 "Tests attestation OK for ${c13c:0:7}" -- "$V" "$c13c"
+check "13. real: the release check counts 2 ran and the rest carried" \
+  grep -qF "2 ran, 2 passed, 0 failed, $((entries - 2)) carried" "$tmp/out"
+docs_change
+g push -q origin main
+c13d="$(head_sha)"
+mkdir -p "$tmp/bin-nodocker"
+cp "$tmp/bin/gh" "$tmp/bin-nodocker/gh"
+printf '#!/usr/bin/env bash\necho "Cannot connect to the Docker daemon" >&2\nexit 1\n' >"$tmp/bin-nodocker/docker"
+chmod +x "$tmp/bin-nodocker/docker"
+expect "13. real: a docs-only commit publishes an all-carried note without Docker" 0 "pushed, status tests/local set" -- \
+  env -u ATTEST_DRY_RUN -u ATTEST_RUNNER PATH="$tmp/bin-nodocker:$PATH" "$A"
+check "13. real: the all-carried status" grep -qx \
+  "description=0 ran, 0 passed, 0 failed, $entries carried (0 min, $(uname -m), signed)" "$tmp/gh-call"
+g fetch -q origin "+$REAL:$REAL"
+expect "13. real: the release check allows the all-carried real note" 0 "Tests attestation OK for ${c13d:0:7}" -- "$V" "$c13d"
 
 # --- 14. the shared helper (.github/scripts/attest_carry.py) -----------------------------------
 H="$src/.github/scripts/attest_carry.py"
@@ -925,6 +989,135 @@ check "15. gate: the bump's parent carries entries" grep -qF "$((entry_count - 1
 repo="$selftest_repo"
 unset selftest_repo gb0 g1 t1 t s1 o x k r d f m1 tagobj entry_count
 
+# --- 16. tests/attest.sh: run or carry ---------------------------------------------------------
+# Dry runs in the selftest repository; a recording runner keeps the argv of
+# each call and runs the real tests/all.sh (stub suites).
+cat >"$tmp/rec-runner" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"$tmp/runner-argv"
+exec "$repo/tests/all.sh" "\$@"
+EOF
+chmod +x "$tmp/rec-runner"
+# runner_labels: the labels the last runner call got ("none" when not called).
+runner_labels() {
+  if [ -e "$tmp/runner-argv" ]; then
+    [ "$(sed -n 1,2p "$tmp/runner-argv" | tr '\n' ' ')" = "--keep-going --summary " ] || echo "bad argv: "
+    sed -n '4,$p' "$tmp/runner-argv" | tr '\n' ' '
+  else
+    echo none
+  fi
+}
+labels_are() { # labels_are "LABEL ...": the last runner call got exactly these
+  local got
+  got="$(runner_labels)"
+  [ "$got" = "$1 " ] || {
+    echo "runner got: $got"
+    return 1
+  }
+}
+# pcheck COMMIT PYTHON: PYTHON asserts on the dry-run payload p of COMMIT.
+pcheck() {
+  payload_of "$DRY" "$1" >"$tmp/pcheck.json" || return 1
+  python3 -I -c 'import json,sys
+p = json.load(open(sys.argv[1]))
+exec(sys.argv[2])' "$tmp/pcheck.json" "$2"
+}
+r16() { env ATTEST_RUNNER="$tmp/rec-runner" "$@"; }
+all16="$(printf '%s\n' "$all_pass" | cut -d' ' -f1 | tr '\n' ' ')newsuite" # newsuite from case 8
+n16=$((${#releases[@]} + ${#sreleases[@]} + ${#suites[@]} - 1))
+
+commit_change "feat: sixteen base"
+q0="$(head_sha)"
+rm -f "$tmp/runner-argv"
+expect "16. a full run to carry from is green" 0 "green: $n16 ran, $n16 passed, 0 failed, 0 carried" -- r16 "$A"
+check "16. the full run gives the runner every entry" labels_are "$all16"
+
+role_change harbor
+q1="$(head_sha)"
+rm -f "$tmp/runner-argv"
+expect "16. a change in one suite's role: green" 0 "green: 1 ran, 1 passed, 0 failed, $((n16 - 1)) carried" -- r16 "$A"
+check "16. the runner gets only that suite's entry" labels_are harbor
+check "16. the note lists that entry as run and the rest as carried from the full run" pcheck "$q1" "
+assert p['schema'] == 2, p
+assert [e['label'] for e in p['suites']] == ['harbor'] and p['suites'][0]['result'] == 'pass', p['suites']
+assert [c['label'] for c in p['carried']] == [l for l in '$all16'.split() if l != 'harbor'], p['carried']
+assert all(c['carriedFrom'] == '$q0' for c in p['carried']), p['carried']
+assert p['carriedCount'] == $((n16 - 1)) and p['passed'] == 1 and p['failed'] == 0, p"
+promote "$q0"
+promote "$q1"
+expect "16. the release check allows the partial note (promoted)" 0 "Tests attestation OK for ${q1:0:7}" -- "$V" "$q1"
+check "16. the release check counts 1 ran and the rest carried" grep -qF "1 ran, 1 passed, 0 failed, $((n16 - 1)) carried" "$tmp/out"
+
+docs_change
+q2="$(head_sha)"
+rm -f "$tmp/runner-argv"
+expect "16. a CHANGELOG.md-only commit is green" 0 "green: 0 ran, 0 passed, 0 failed, $n16 carried" -- r16 "$A"
+check "16. a CHANGELOG.md-only commit calls no runner" test ! -e "$tmp/runner-argv"
+check "16. its note carries every entry, harbor from its newer run" pcheck "$q2" "
+assert p['suites'] == [] and p['docker'] == 'none', p
+src = {c['label']: c['carriedFrom'] for c in p['carried']}
+assert list(src) == '$all16'.split(), src
+assert src.pop('harbor') == '$q1' and set(src.values()) == {'$q0'}, src"
+promote "$q2"
+expect "16. the release check allows the all-carried note (promoted)" 0 "Tests attestation OK for ${q2:0:7}" -- "$V" "$q2"
+
+role_change listmonk
+q3="$(head_sha)"
+rm -f "$tmp/runner-argv"
+expect "16. --plan prints a run line" 0 "listmonk  run  roles/listmonk/tasks/main.yml changed since ${q0:0:7}" -- r16 "$A" --plan
+check "16. --plan prints carry lines" grep -qxF "harbor  carry from ${q1:0:7} (0 days)" "$tmp/out"
+check "16. --plan prints one line per entry" test "$(grep -cE '^[A-Za-z0-9._-]+  (run  |carry from )' "$tmp/out")" = "$n16"
+check "16. --plan calls no runner" test ! -e "$tmp/runner-argv"
+check "16. --plan leaves no note" sh -c '! git notes --ref="$1" show "$2" >/dev/null 2>&1' _ "$DRY" "$q3"
+expect "16. --plan needs no signing key" 0 "listmonk  run  " -- r16 env TESTS_SIGNING_KEY="$tmp/missing.pub" "$A" --plan
+expect "16. --all runs everything" 0 "green: $n16 ran, $n16 passed, 0 failed, 0 carried" -- r16 "$A" --all
+check "16. --all gives the runner every entry" labels_are "$all16"
+check "16. --all carries nothing" pcheck "$q3" "assert p['carried'] == [] and len(p['suites']) == $n16, p"
+
+role_change harbor
+q4="$(head_sha)"
+rm -f "$tmp/runner-argv"
+expect "16. a red partial run is published and exits 1" 1 "red: 1 ran, 0 passed, 1 failed, $((n16 - 1)) carried" -- \
+  r16 env STUB_FAIL=harbor "$A"
+check "16. the red partial run ran only harbor" labels_are harbor
+check "16. the red partial note has harbor failed and the rest carried" pcheck "$q4" "
+assert [(e['label'], e['result']) for e in p['suites']] == [('harbor', 'fail')], p['suites']
+assert p['carriedCount'] == $((n16 - 1)) and p['failed'] == 1, p"
+rm -f "$tmp/runner-argv"
+expect "16. a note of an entry is in the status description" 0 \
+  "green: 1 ran, 1 passed, 0 failed, $((n16 - 1)) carried (0 min, $(uname -m), signed); notes: harbor mysql via systemctl shim" -- \
+  r16 env STUB_NOTE="mysql via systemctl shim" "$A"
+check "16. the rerun on the red commit runs only the red entry" labels_are harbor
+check "16. the note of the entry is in the payload" pcheck "$q4" "assert p['suites'][0]['notes'] == ['mysql via systemctl shim'], p"
+
+docs_change
+q5="$(head_sha)"
+expect "16. --plan shows the note of a carried entry" 0 "harbor  carry from ${q4:0:7} (0 days), mysql via systemctl shim" -- \
+  r16 "$A" --plan
+expect "16. a carried entry's note is in the status description" 0 \
+  "carried (0 min, $(uname -m), signed); notes: harbor mysql via systemctl shim" -- r16 "$A"
+check "16. the docs-only note on top of the rerun carries harbor from it" pcheck "$q5" "
+assert {c['label']: c['carriedFrom'] for c in p['carried']}['harbor'] == '$q4', p"
+expect "16. a long description" 0 "green: " -- r16 env STUB_NOTE="mysql via systemctl shim" "$A" --all
+check "16. the status description is cut at 140 characters" \
+  test "$(sed -n 's/^green: //p' "$tmp/out" | awk '{ print length($0) }')" = 140
+
+rm -f "$tmp/runner-argv"
+expect "16. SERVICES_UBUNTU refuses to start" 2 "unset SERVICES_UBUNTU" -- r16 env SERVICES_UBUNTU=24.04 "$A"
+expect "16. NOIXDEV_INFRA_N8N_TESTS refuses to start" 2 "unset NOIXDEV_INFRA_N8N_TESTS" -- r16 env NOIXDEV_INFRA_N8N_TESTS=x "$A"
+check "16. the knobs never reach the runner" test ! -e "$tmp/runner-argv"
+
+mkdir -p "$repo/roles/zzz/tasks"
+echo "- ansible.builtin.debug: {}" >"$repo/roles/zzz/tasks/main.yml"
+g add -A && g commit -q -m "feat: an unmapped role"
+q6="$(head_sha)"
+expect "16. a map error refuses to start, naming it" 2 "roles/zzz/ is in no [suite] section" -- r16 "$A"
+check "16. a map error writes no note and runs nothing" \
+  sh -c '! git notes --ref="$1" show "$2" >/dev/null 2>&1 && [ ! -e "$3" ]' _ "$DRY" "$q6" "$tmp/runner-argv"
+expect "16. --plan refuses on a map error too" 2 "roles/zzz/ is in no [suite] section" -- r16 "$A" --plan
+g rm -rq roles/zzz && g commit -q -m "fix: drop the unmapped role"
+unset q0 q1 q2 q3 q4 q5 q6 all16 n16
+
 # --- suite helpers (tests/lib/suite.sh) ---------------------------------------------------------
 # A suite that stops on an unbound variable must not exit 0: bash 3.2 (macOS)
 # runs the EXIT trap with $?=0 there, so only a finished flag catches it.
@@ -1003,13 +1196,14 @@ check "suite helpers: the replaced link resolves to the root" \
 unset p1 p2 rc1 rc2 link_root
 
 # --- preconditions -----------------------------------------------------------------------
-expect "precondition: no arguments" 2 "takes no arguments" -- tests/attest.sh e2e
+expect "precondition: a suite argument is refused with the usage" 2 "usage: tests/attest.sh [--all | --plan]" -- tests/attest.sh e2e
+expect "precondition: --all and --plan together are refused" 2 "usage: tests/attest.sh [--all | --plan]" -- "$A" --all --plan
 expect "precondition: missing signing key" 2 "signing key $tmp/missing.pub not found" -- \
   env TESTS_SIGNING_KEY="$tmp/missing.pub" "$A"
 expect "precondition: key:: literal is not supported" 2 "not supported" -- \
   env TESTS_SIGNING_KEY="key::$(cat "$tmp/key.pub")" "$A"
 expect "precondition: no summary means nothing published" 2 "wrote no summary" -- \
-  env ATTEST_RUNNER=/usr/bin/true "$A"
+  env ATTEST_RUNNER=/usr/bin/true "$A" --all
 
 echo
 if [ "$failures" = 0 ]; then

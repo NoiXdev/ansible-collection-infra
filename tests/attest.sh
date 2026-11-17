@@ -1,45 +1,74 @@
 #!/usr/bin/env bash
-# Runs every Docker test suite (tests/all.sh --keep-going) on this machine and
-# publishes a SIGNED result for the exact commit it ran against. The tag
-# workflow release-gate.yml checks it with
+# Runs the Docker test suites that need running on this machine, carries the
+# others forward by reference, and publishes a SIGNED result for the exact
+# commit it ran against. The tag workflow release-gate.yml checks it with
 # .github/scripts/verify-tests-attestation.sh and flags a release tag that
 # has no valid, green attestation (it cannot stop the tag itself).
 #
-#   tests/attest.sh
+#   tests/attest.sh [--all | --plan]
 #
-# It takes no suite arguments: an attestation always covers every suite in
-# all_suites of tests/all.sh, the host suite once per release in its
-# host_releases. It refuses to start while a variable that narrows or
-# changes what the suites run is set (coverage_knobs below; add a suite's
-# new knob there).
+#   (none)  runs the entries that need running, carries the rest;
+#   --all   runs every entry and carries nothing;
+#   --plan  prints the plan, one line per entry, and exits 0 without running
+#           or publishing anything:
+#             <label>  run  <reason>
+#             <label>  carry from <sha7> (<N> days)[, <note>...]
+# Any other argument exits 2 with the usage.
+#
+# The entries are those of tests/all.sh at HEAD: each suite in all_suites,
+# host and services once per release in host_releases and services_releases
+# (host-<release>, services-<release>). The decision per entry is the `plan`
+# of .github/scripts/attest_carry.py, which the release check shares: an
+# entry is carried from the newest ancestor of HEAD whose valid, signed note
+# ran it, when it passed there, finished less than 30 days minus a margin
+# ago, and no file changed since then is shared, unmatched or of the entry's
+# suite in tests/suites.conf; every other entry runs. HEAD's own note is no
+# carry source, but an entry red there runs again. The map is checked first
+# (check-map at HEAD); a map error refuses to start (exit 2), so no carry is
+# published that the release check would refuse for the map.
+#
+# The entries to run go to tests/all.sh --keep-going --summary FILE <label>...;
+# when nothing runs (a docs-only commit), no runner is called and no Docker
+# is needed. It refuses to start while a variable that narrows or changes
+# what the suites run is set (coverage_knobs below; add a suite's new knob
+# there).
 #
 # What it publishes, for HEAD:
 #   - a git note under refs/notes/tests: "payload: <base64 JSON>" and an SSH
 #     signature over the payload (ssh-keygen -Y sign, namespace
 #     noixdev-infra-tests), pushed to origin;
-#   - a commit status "tests/local" on GitHub (gh api), success or failure.
+#   - a commit status "tests/local" on GitHub (gh api), success or failure:
+#     "<ran> ran, <passed> passed, <failed> failed, <carried> carried
+#     (<min> min, <arch>, signed)", plus "; notes: <label> <note>, ..." when
+#     an entry has notes, cut at 140 characters.
 # A red run is published too; the exit code is then 1 (0 when green, 2 when a
 # precondition fails or nothing was published).
 #
-# The payload is public: commit, tree, signer, each run entry's label, result
-# and seconds, the counts, the machine's architecture and OS, the Docker
-# server version and the start and end time (UTC). No host name, no user
-# name, no paths. "failed" counts the entries that did not pass plus the
-# expected entries (each suite; host-<release> per host release) without
-# one; green means failed 0, passed > 0.
+# The payload (schema 2, built by attest_carry.py build-payload) is public:
+# commit, tree, signer, each entry that ran with its label, result, seconds
+# and notes ("suites"), each carried entry with its label and carriedFrom,
+# the commit where it ran ("carried"), the counts (passed, failed,
+# carriedCount), the machine's architecture and OS, the Docker server
+# version ("none" when nothing ran) and the start and end time (UTC). No
+# host name, no user name, no paths. "failed" counts the entries that ran
+# and did not pass plus the entries to run without a summary line; green
+# means failed 0 and every expected entry present, ran or carried.
 #
 # Preconditions, checked before any suite runs: no coverage knob set, a clean
 # working tree (untracked files included), HEAD on a branch of origin (after
 # git fetch --prune origin), a signing key, a signer identity, ssh-keygen,
-# python3, Docker that runs linux/amd64 images (the harbor suite) and an
-# authenticated gh. After the run it refuses to
-# publish when HEAD moved or the working tree is not clean; that compares
-# the end state only (a file changed and restored during the run goes
-# unnoticed).
+# python3, an authenticated gh, a tests/suites.conf that check-map accepts,
+# and Docker when an entry runs (that it runs linux/amd64 images too when
+# harbor runs). --plan skips the signing key, signer, gh and Docker checks.
+# After the run it refuses to publish when HEAD moved or the working tree is
+# not clean; that compares the end state only (a file changed and restored
+# during the run goes unnoticed).
 #
-# Before the push, the local refs/notes/tests is replaced by origin's (or
-# removed when origin has none), so only origin's notes plus this run's note
-# are pushed. A note that exists only in the local ref is dropped.
+# Before planning, the local refs/notes/tests is replaced by origin's (or
+# removed when origin has none), also for --plan, so the plan sees exactly
+# origin's notes and only origin's notes plus this run's note are pushed. A
+# note that exists only in the local ref is dropped. The plan verifies the
+# notes against .github/tests-allowed-signers at HEAD.
 #
 # Signing key: $TESTS_SIGNING_KEY, else `git config user.signingkey`, else
 # ~/.ssh/id_ed25519.pub. A public key path signs through the SSH agent. A
@@ -50,35 +79,47 @@
 # For the self-test only (tests/attest/selftest.sh):
 #   ATTEST_DRY_RUN=1   skips the remote checks (git fetch, HEAD on origin),
 #                      gh, the notes fetch and push and the status call, and
-#                      prints what it would do. The note goes to the local
-#                      refs/notes/tests-dry-run, never to refs/notes/tests,
-#                      and its payload carries "dryRun":true, which the
-#                      release check refuses.
+#                      prints what it would do. It plans from the local
+#                      refs/notes/tests-dry-run (dry-run notes allowed), and
+#                      the note goes there, never to refs/notes/tests; its
+#                      payload carries "dryRun":true, which the release check
+#                      refuses.
 #   ATTEST_RUNNER=FILE (only with ATTEST_DRY_RUN=1) runs FILE (one
 #                      executable, no arguments of its own) instead of
 #                      tests/all.sh, with the same arguments (--keep-going
-#                      --summary FILE); Docker is then not required and the
-#                      payload's docker field is "unknown", which the
-#                      release check refuses too.
+#                      --summary FILE <label>...); Docker is then not
+#                      required and the payload's docker field is "unknown"
+#                      when anything ran, which the release check refuses too.
 set -euo pipefail
 
 NAMESPACE=noixdev-infra-tests
 NOTES_REF=refs/notes/tests
 DRY_RUN_NOTES_REF=refs/notes/tests-dry-run
 STATUS_CONTEXT=tests/local
+USAGE="usage: tests/attest.sh [--all | --plan]"
 # Variables of tests/all.sh and the suites that narrow or change what runs.
-coverage_knobs=(HOST_UBUNTU UBUNTU KEEP STUB_ONLY RC_STUB_ONLY RC_REAL_ONLY ANUBIS_REAL_ONLY ROUNDCUBE_OLD ROUNDCUBE_NEW MAILCOW_TAKEOVER_TAG ANSIBLE_RUN_TAGS ANSIBLE_SKIP_TAGS)
+coverage_knobs=(HOST_UBUNTU SERVICES_UBUNTU UBUNTU KEEP STUB_ONLY RC_STUB_ONLY RC_REAL_ONLY ANUBIS_REAL_ONLY ROUNDCUBE_OLD ROUNDCUBE_NEW MAILCOW_TAKEOVER_TAG ANSIBLE_RUN_TAGS ANSIBLE_SKIP_TAGS NOIXDEV_INFRA_SERVICES NOIXDEV_INFRA_N8N_TESTS NOIXDEV_INFRA_PAPERLESS_TESTS NOIXDEV_INFRA_TANDOOR_TESTS)
 
 fail() {
   echo "tests/attest.sh: $*" >&2
   exit 2
 }
 
-[ "$#" -eq 0 ] || fail "takes no arguments; an attestation always covers every suite of tests/all.sh"
+mode=run
+case "$#:${1:-}" in
+  0:) ;;
+  1:--all) mode=all ;;
+  1:--plan) mode=plan ;;
+  *)
+    echo "$USAGE" >&2
+    exit 2
+    ;;
+esac
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(git -C "$here" rev-parse --show-toplevel)" || fail "not inside a git repository"
 cd "$root"
+helper="$root/.github/scripts/attest_carry.py"
 
 case "${ATTEST_DRY_RUN:-0}" in
   0 | 1) dry_run="${ATTEST_DRY_RUN:-0}" ;;
@@ -124,161 +165,49 @@ else
   [ -n "$repo" ] || fail "cannot read the GitHub repository from the origin URL"
 fi
 
-key="${TESTS_SIGNING_KEY:-}"
-if [ -z "$key" ]; then
-  key="$(git config user.signingkey || true)"
-fi
-[ -n "$key" ] || key="$HOME/.ssh/id_ed25519.pub"
-case "$key" in
-  key::*) fail "the signing key is a \"key::\" literal (as git config user.signingkey allows), which is not supported. Set TESTS_SIGNING_KEY to the key file (a .pub file signs through the SSH agent)." ;;
-  [~]/*) key="$HOME/${key#?/}" ;; # a literal ~/ from git config
-esac
-[ -f "$key" ] || fail "signing key $key not found. Set TESTS_SIGNING_KEY (a .pub file signs through the SSH agent)."
+key=
+signer=
+if [ "$mode" != plan ]; then
+  key="${TESTS_SIGNING_KEY:-}"
+  if [ -z "$key" ]; then
+    key="$(git config user.signingkey || true)"
+  fi
+  [ -n "$key" ] || key="$HOME/.ssh/id_ed25519.pub"
+  case "$key" in
+    key::*) fail "the signing key is a \"key::\" literal (as git config user.signingkey allows), which is not supported. Set TESTS_SIGNING_KEY to the key file (a .pub file signs through the SSH agent)." ;;
+    [~]/*) key="$HOME/${key#?/}" ;; # a literal ~/ from git config
+  esac
+  [ -f "$key" ] || fail "signing key $key not found. Set TESTS_SIGNING_KEY (a .pub file signs through the SSH agent)."
 
-signer="${TESTS_SIGNER:-}"
-if [ -z "$signer" ]; then
-  signer="$(git config user.email || true)"
-fi
-[ -n "$signer" ] || fail "no signer identity. Set TESTS_SIGNER or git config user.email."
-case "$signer" in
-  *[[:space:]]*) fail "the signer identity \"$signer\" contains white space" ;;
-esac
+  signer="${TESTS_SIGNER:-}"
+  if [ -z "$signer" ]; then
+    signer="$(git config user.email || true)"
+  fi
+  [ -n "$signer" ] || fail "no signer identity. Set TESTS_SIGNER or git config user.email."
+  case "$signer" in
+    *[[:space:]]*) fail "the signer identity \"$signer\" contains white space" ;;
+  esac
 
-if [ "$dry_run" != 1 ]; then
-  command -v gh >/dev/null 2>&1 || fail "gh is required (it sets the commit status)"
-  gh auth status >/dev/null 2>&1 || fail "gh is not logged in. Run gh auth login."
+  if [ "$dry_run" != 1 ]; then
+    command -v gh >/dev/null 2>&1 || fail "gh is required (it sets the commit status)"
+    gh auth status >/dev/null 2>&1 || fail "gh is not logged in. Run gh auth login."
+  fi
 fi
-
-docker=unknown
-if [ -z "${ATTEST_RUNNER:-}" ]; then
-  docker="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" || fail "the Docker daemon is not reachable"
-  [ -n "$docker" ] || fail "the Docker daemon is not reachable"
-  # The harbor suite runs amd64-only images; without emulation it fails and
-  # the whole run would be published red for a reason outside the code.
-  amd64="$(docker run --rm --platform linux/amd64 alpine:3 uname -m 2>/dev/null | tail -n 1)" || true
-  [ "$amd64" = x86_64 ] ||
-    fail "Docker cannot run linux/amd64 images, which the harbor suite needs. Docker Desktop on Apple silicon: install Rosetta 2 (softwareupdate --install-rosetta), turn on its Rosetta emulation and restart Docker Desktop; Linux: register QEMU for amd64 (tonistiigi/binfmt)."
-fi
-[ -x "$runner" ] || fail "test runner $runner is not executable"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Sign once before the run, so a key the agent does not hold fails now and
-# not after the suites. A signer the release check would not accept only
-# warns here; the check decides.
-printf 'noixdev-infra-tests key check\n' >"$work/check"
-ssh-keygen -Y sign -q -f "$key" -n "$NAMESPACE" "$work/check" || fail "cannot sign with $key"
-if ! git show "HEAD:.github/tests-allowed-signers" >"$work/allowed_signers" 2>/dev/null ||
-  ! ssh-keygen -Y verify -f "$work/allowed_signers" -I "$signer" -n "$NAMESPACE" \
-    -s "$work/check.sig" <"$work/check" >/dev/null 2>&1; then
-  echo "tests/attest.sh: warning: $signer with this key is not in .github/tests-allowed-signers; the release check will refuse this attestation" >&2
+# The release check proves every carry against the map at the tested commit
+# and refuses all of them when check-map fails there; so refuse to start.
+if ! python3 -I "$helper" check-map --repo "$root" --commit "$commit" >"$work/check-map" 2>&1; then
+  sed 's/^::error::/  /' "$work/check-map" >&2
+  fail "tests/suites.conf at ${commit:0:7} has the errors above; the release check would refuse every carry under it. Fix it in a new commit first."
 fi
+cat "$work/check-map"
 
-# Builds the payload from the summary and all_suites/host_releases of
-# tests/all.sh at HEAD. Prints "<passed> <failed>"; exits non-zero with a
-# message on bad input.
-read -r -d '' payload_py <<'PY' || true
-import json, re, sys
-
-(out, summary_path, allsh_path, commit, tree, signer, arch, osname,
- docker, started, finished, dry_run) = sys.argv[1:]
-
-allsh = open(allsh_path, encoding="utf-8").read()
-
-def array(name):
-    lines = re.findall(r"^" + name + r"=\(([^)]*)\)[ \t]*$", allsh, re.M)
-    if len(lines) != 1:
-        sys.exit(f"tests/all.sh must have exactly one {name}=(...) line")
-    values = lines[0].split()
-    if not values or not all(re.fullmatch(r"[A-Za-z0-9._-]+", v) for v in values):
-        sys.exit(f"{name} in tests/all.sh is empty or malformed")
-    return values
-
-expected = []
-for suite in array("all_suites"):
-    if suite == "host":
-        expected += ["host-" + r for r in array("host_releases")]
-    elif suite == "services":
-        expected += ["services-" + r for r in array("services_releases")]
-    else:
-        expected.append(suite)
-
-suites = []
-for n, line in enumerate(open(summary_path, encoding="utf-8"), 1):
-    if not line.strip():
-        continue
-    fields = line.split()
-    if (len(fields) < 3 or not re.fullmatch(r"[A-Za-z0-9._-]+", fields[0])
-            or fields[1] not in ("pass", "fail", "skipped")
-            or not re.fullmatch(r"[0-9]+", fields[2])):
-        sys.exit(f"summary line {n} is malformed: {line.strip()!r}")
-    suites.append({"label": fields[0], "result": fields[1], "seconds": int(fields[2])})  # notes (fields[3:]) are ignored until Task 5
-
-labels = {e["label"] for e in suites}
-passed = sum(1 for e in suites if e["result"] == "pass")
-not_passed = sum(1 for e in suites if e["result"] != "pass")
-missing = [l for l in expected if l not in labels]
-failed = not_passed + len(missing)
-
-payload = {
-    "schema": 1,
-    "commit": commit,
-    "tree": tree,
-    "signer": signer,
-    "suites": suites,
-    "passed": passed,
-    "failed": failed,
-    "arch": arch,
-    "os": osname,
-    "docker": docker,
-    "startedAt": started,
-    "finishedAt": finished,
-}
-if dry_run == "1":
-    payload["dryRun"] = True
-with open(out, "w", encoding="utf-8") as f:
-    f.write(json.dumps(payload, separators=(",", ":")) + "\n")
-if missing:
-    print("missing from the summary: " + " ".join(missing), file=sys.stderr)
-print(passed, failed)
-PY
-
-echo "==== attesting ${commit:0:7}: $runner --keep-going --summary <file>"
-started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-start_epoch="$(date +%s)"
-rc=0
-"$runner" --keep-going --summary "$work/summary" || rc=$?
-finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-minutes=$((($(date +%s) - start_epoch + 30) / 60))
-
-if [ "$(git rev-parse HEAD)" != "$commit" ] || [ -n "$(git status --porcelain --untracked-files=all)" ]; then
-  fail "HEAD or the working tree changed during the run. Nothing published."
-fi
-[ -f "$work/summary" ] || fail "the test runner wrote no summary (exit $rc). Nothing published."
-
-git show "$commit:tests/all.sh" >"$work/all.sh" || fail "tests/all.sh is missing at ${commit:0:7}. Nothing published."
-arch="$(uname -m)"
-counts="$(python3 -I -c "$payload_py" "$work/payload.json" "$work/summary" "$work/all.sh" \
-  "$commit" "$tree" "$signer" "$arch" "$(uname -s)" "$docker" "$started" "$finished" "$dry_run")" ||
-  fail "cannot build the payload. Nothing published."
-read -r passed failed <<<"$counts"
-green=0
-if [ "$failed" = 0 ] && [ "$passed" -gt 0 ]; then
-  green=1
-fi
-if [ "$green" = 1 ] && [ "$rc" != 0 ]; then
-  fail "the test runner exited $rc although every entry passed. Nothing published."
-fi
-
-ssh-keygen -Y sign -q -f "$key" -n "$NAMESPACE" "$work/payload.json" || fail "signing failed. Nothing published."
-{
-  printf 'payload: %s\n' "$(base64 <"$work/payload.json" | tr -d '\n')"
-  cat "$work/payload.json.sig"
-} >"$work/note"
-
-# Notes are a shared ref. Start from exactly origin's, so the push
-# fast-forwards and carries nothing but origin's notes and this one.
+# Notes are a shared ref. Start from exactly origin's, so the plan sees what
+# the release check will see, and the push fast-forwards and carries nothing
+# but origin's notes and this one.
 if [ "$dry_run" = 1 ]; then
   echo "dry run: would replace the local $NOTES_REF by origin's"
 else
@@ -296,11 +225,134 @@ else
       fail "fetching $NOTES_REF from origin failed. Nothing published."
   fi
 fi
+
+# The plan (attest_carry.py plan): per expected entry, "run" with a reason,
+# or "carry" with carriedFrom.
+git show "HEAD:.github/tests-allowed-signers" >"$work/allowed_signers" 2>/dev/null || : >"$work/allowed_signers"
+plan_args=(plan --repo "$root" --head "$commit" --notes-ref "$notes_ref" --signers "$work/allowed_signers"
+  --now "$(date +%s)")
+[ "$mode" != all ] || plan_args+=(--all)
+[ "$dry_run" != 1 ] || plan_args+=(--allow-dry-run)
+python3 -I "$helper" "${plan_args[@]}" >"$work/plan.json" 2>"$work/plan.err" || {
+  cat "$work/plan.json" "$work/plan.err" | sed 's/^::error::/  /' >&2
+  fail "cannot plan the run of ${commit:0:7}. Nothing published."
+}
+
+# view MODE [ARG]: reads the plan. "lines NOW" prints the --plan lines, "run"
+# the labels to run, "count" the number of entries, "notes PAYLOAD" the notes
+# of the status ("<label> <note>, ...") of the entries that ran (from
+# PAYLOAD) and of the carried ones (from the plan), in the plan's order.
+read -r -d '' view_py <<'PY' || true
+import json, sys
+from datetime import datetime, timezone
+
+plan = json.load(open(sys.argv[1], encoding="utf-8"))
+mode = sys.argv[2]
+if mode == "lines":
+    now = int(sys.argv[3])
+    for e in plan:
+        if e["action"] == "run":
+            print(f"{e['label']}  run  {e['reason']}")
+        else:
+            finished = datetime.strptime(e["finishedAt"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            days = max(0, (now - int(finished.timestamp())) // 86400)
+            notes = "".join(", " + n for n in e.get("notes", []))
+            print(f"{e['label']}  carry from {e['carriedFrom'][:7]} ({days} days){notes}")
+elif mode == "run":
+    print(" ".join(e["label"] for e in plan if e["action"] == "run"))
+elif mode == "count":
+    print(len(plan))
+elif mode == "notes":
+    ran = {e["label"]: e.get("notes", []) for e in json.load(open(sys.argv[3], encoding="utf-8"))["suites"]}
+    print(", ".join(f"{e['label']} {n}" for e in plan
+                    for n in (ran.get(e["label"], []) if e["action"] == "run" else e.get("notes", []))))
+PY
+view() { python3 -I -c "$view_py" "$work/plan.json" "$@"; }
+
+plan_lines="$(view lines "$(date +%s)")" || fail "cannot read the plan. Nothing published."
+if [ "$mode" = plan ]; then
+  printf '%s\n' "$plan_lines"
+  exit 0
+fi
+labels="$(view run)" || fail "cannot read the plan. Nothing published."
+entries="$(view count)" || fail "cannot read the plan. Nothing published."
+to_run=()
+[ -z "$labels" ] || read -r -a to_run <<<"$labels"
+
+docker=unknown
+if [ "${#to_run[@]}" -gt 0 ] && [ -z "${ATTEST_RUNNER:-}" ]; then
+  docker="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" || fail "the Docker daemon is not reachable"
+  [ -n "$docker" ] || fail "the Docker daemon is not reachable"
+  case " ${to_run[*]} " in
+    *" harbor "*)
+      # The harbor suite runs amd64-only images; without emulation it fails
+      # and the run would be published red for a reason outside the code.
+      amd64="$(docker run --rm --platform linux/amd64 alpine:3 uname -m 2>/dev/null | tail -n 1)" || true
+      [ "$amd64" = x86_64 ] ||
+        fail "Docker cannot run linux/amd64 images, which the harbor suite needs. Docker Desktop on Apple silicon: install Rosetta 2 (softwareupdate --install-rosetta), turn on its Rosetta emulation and restart Docker Desktop; Linux: register QEMU for amd64 (tonistiigi/binfmt)."
+      ;;
+  esac
+fi
+[ "${#to_run[@]}" -eq 0 ] || [ -x "$runner" ] || fail "test runner $runner is not executable"
+
+# Sign once before the run, so a key the agent does not hold fails now and
+# not after the suites. A signer the release check would not accept only
+# warns here; the check decides.
+printf 'noixdev-infra-tests key check\n' >"$work/check"
+ssh-keygen -Y sign -q -f "$key" -n "$NAMESPACE" "$work/check" || fail "cannot sign with $key"
+if ! ssh-keygen -Y verify -f "$work/allowed_signers" -I "$signer" -n "$NAMESPACE" \
+  -s "$work/check.sig" <"$work/check" >/dev/null 2>&1; then
+  echo "tests/attest.sh: warning: $signer with this key is not in .github/tests-allowed-signers; the release check will refuse this attestation" >&2
+fi
+
+echo "==== plan of ${commit:0:7}"
+printf '%s\n' "$plan_lines"
+started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+start_epoch="$(date +%s)"
+rc=0
+if [ "${#to_run[@]}" -gt 0 ]; then
+  echo "==== attesting ${commit:0:7}: $runner --keep-going --summary <file> ${to_run[*]}"
+  "$runner" --keep-going --summary "$work/summary" "${to_run[@]}" || rc=$?
+else
+  echo "==== attesting ${commit:0:7}: nothing to run, every entry is carried"
+  : >"$work/summary"
+fi
+finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+minutes=$((($(date +%s) - start_epoch + 30) / 60))
+
+if [ "$(git rev-parse HEAD)" != "$commit" ] || [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+  fail "HEAD or the working tree changed during the run. Nothing published."
+fi
+[ -f "$work/summary" ] || fail "the test runner wrote no summary (exit $rc). Nothing published."
+
+arch="$(uname -m)"
+payload_args=(build-payload --plan "$work/plan.json" --summary "$work/summary" --out "$work/payload.json"
+  --commit "$commit" --tree "$tree" --signer "$signer" --arch "$arch" --os "$(uname -s)" --docker "$docker"
+  --started "$started" --finished "$finished")
+[ "$dry_run" != 1 ] || payload_args+=(--dry-run)
+# Prints "<ran> <passed> <failed> <carried>".
+counts="$(python3 -I "$helper" "${payload_args[@]}")" ||
+  fail "cannot build the payload (${counts#::error::}). Nothing published."
+read -r ran passed failed carried <<<"$counts"
+green=0
+if [ "$failed" = 0 ] && [ "$((ran + carried))" = "$entries" ]; then
+  green=1
+fi
+if [ "$green" = 1 ] && [ "$rc" != 0 ]; then
+  fail "the test runner exited $rc although every entry passed. Nothing published."
+fi
+
+ssh-keygen -Y sign -q -f "$key" -n "$NAMESPACE" "$work/payload.json" || fail "signing failed. Nothing published."
+{
+  printf 'payload: %s\n' "$(base64 <"$work/payload.json" | tr -d '\n')"
+  cat "$work/payload.json.sig"
+} >"$work/note"
 git notes --ref="$notes_ref" add -f -F "$work/note" "$commit" || fail "cannot write the note"
 
 state=failure
 [ "$green" = 1 ] && state=success
-description="$passed passed, $failed failed ($minutes min, $arch, signed)"
+notes="$(view notes "$work/payload.json")" || notes=
+description="$ran ran, $passed passed, $failed failed, $carried carried ($minutes min, $arch, signed)${notes:+; notes: $notes}"
 description="${description:0:140}"
 
 if [ "$dry_run" = 1 ]; then
