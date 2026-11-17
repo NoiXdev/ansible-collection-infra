@@ -70,10 +70,12 @@ started="$(date +%s)"
 [ "${RC_STUB_ONLY:-0}" != 1 ] || STUB_ONLY=1
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+# shellcheck source=/dev/null
+. "$here/../lib/suite.sh"
+noix_exit_guard
 
 mkdir -p "$out" "$tests/output/ansible_collections/noixdev"
-ln -sfn "$root" "$tests/output/ansible_collections/noixdev/infra"
+noix_link_collection "$root" "$tests/output"
 export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 
 fail() { echo "$*" >&2; exit 1; }
@@ -837,7 +839,7 @@ check_nginx install
 no_match "the nginx files have Anubis lines without mailcow_anubis_url" \
   -qi anubis "$dir/data/conf/nginx/noix.conf" "$dir/data/conf/nginx/site.noix.custom"
 hx test ! -e "$dir/docker-compose.override.yml" || fail "the install wrote a compose override without mailcow_anubis_url"
-[ "${RC_REAL_ONLY:-0}" != 1 ] || { rc_real; echo "== the Roundcube scenario of the real mailcow passed"; exit 0; }
+[ "${RC_REAL_ONLY:-0}" != 1 ] || { rc_real; noix_done; echo "== the Roundcube scenario of the real mailcow passed"; exit 0; }
 if [ "${ANUBIS_REAL_ONLY:-0}" != 1 ]; then
 
 echo "== /admin and /rspamd/ only from the allowed networks, over IPv4 and IPv6"
@@ -1273,7 +1275,7 @@ verify
 check_nginx takeover
 check_anubis takeover
 expect_idempotent "$here/anubis.yml"
-[ "${ANUBIS_REAL_ONLY:-0}" != 1 ] || { echo "== the Anubis scenarios of the real mailcow passed in $(($(date +%s) - started)) seconds"; exit 0; }
+[ "${ANUBIS_REAL_ONLY:-0}" != 1 ] || { noix_done; echo "== the Anubis scenarios of the real mailcow passed in $(($(date +%s) - started)) seconds"; exit 0; }
 # The stub needs none of mailcow's images; the machine needs the disk back.
 if [ -z "${NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME:-}" ]; then
   reset_host
@@ -1282,7 +1284,7 @@ fi
 fi
 
 extra_vars=(-e "@$here/stub-vars.yml")
-[ "${RC_STUB_ONLY:-0}" != 1 ] || { rc_stub; echo "== the Roundcube scenarios of the stub passed"; exit 0; }
+[ "${RC_STUB_ONLY:-0}" != 1 ] || { rc_stub; noix_done; echo "== the Roundcube scenarios of the stub passed"; exit 0; }
 
 echo "== update.sh asking to be started again is started again"
 stub_install
@@ -1607,4 +1609,5 @@ expect_idempotent
 
 rc_stub
 
+noix_done
 echo "== all mailcow tests passed in $(($(date +%s) - started)) seconds"

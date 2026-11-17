@@ -158,10 +158,12 @@ secrets=(
 )
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+# shellcheck source=/dev/null
+. "$here/../lib/suite.sh"
+noix_exit_guard
 
 mkdir -p "$out" "$tests/output/ansible_collections/noixdev"
-ln -sfn "$root" "$tests/output/ansible_collections/noixdev/infra"
+noix_link_collection "$root" "$tests/output"
 export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 export ANSIBLE_HOST_KEY_CHECKING=False
 
@@ -1374,4 +1376,5 @@ for scenario in ${NOIXDEV_INFRA_TANDOOR_TESTS:-settings install router s3 update
   esac
 done
 
+noix_done
 echo "== all tandoor tests passed"

@@ -417,6 +417,76 @@ g fetch -q origin "+$REAL:$REAL"
 expect "13. real: verifier allows the real green note" 0 "Tests attestation OK for ${c13:0:7}" -- "$V" "$c13"
 expect "13. real: verifier refuses the real red note" 1 "is red: " -- "$V" "$c13b"
 
+# --- suite helpers (tests/lib/suite.sh) ---------------------------------------------------------
+# A suite that stops on an unbound variable must not exit 0: bash 3.2 (macOS)
+# runs the EXIT trap with $?=0 there, so only a finished flag catches it.
+mkdir -p "$tmp/suite"
+cat >"$tmp/suite/stub.sh" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+. "$src/tests/lib/suite.sh"
+cleanup() { touch "$tmp/suite/cleaned"; }
+noix_exit_guard
+boom() { echo "\$not_set_anywhere"; }
+if [ "\${1:-}" = ok ]; then noix_done; echo stub-ok; exit 0; fi
+boom
+noix_done
+STUB
+bashes=(bash)
+if [ -x /bin/bash ] && [ "$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}')" = 3 ]; then
+  bashes+=(/bin/bash)
+else
+  echo "# skipped: /bin/bash is not bash 3, the 3.2 variants do not run"
+fi
+for b in "${bashes[@]}"; do
+  rm -f "$tmp/suite/cleaned"
+  expect "suite helpers: unbound variable exits non-zero under $b" 1 "stopped before the end" -- \
+    "$b" "$tmp/suite/stub.sh"
+  check "suite helpers: cleanup ran on the error exit under $b" test -e "$tmp/suite/cleaned"
+  rm -f "$tmp/suite/cleaned"
+  expect "suite helpers: noix_done keeps exit 0 under $b" 0 "stub-ok" -- "$b" "$tmp/suite/stub.sh" ok
+  check "suite helpers: cleanup ran on the ok exit under $b" test -e "$tmp/suite/cleaned"
+done
+unset b bashes
+
+suite_scripts=("$src"/tests/run.sh "$src"/tests/*/run.sh)
+for s in "${suite_scripts[@]}"; do
+  n="${s#"$src"/}"
+  check "suite helpers: $n sources lib/suite.sh" grep -q 'lib/suite\.sh' "$s"
+  check "suite helpers: $n calls noix_exit_guard" grep -q '^noix_exit_guard$' "$s"
+  check "suite helpers: $n calls noix_done" grep -q 'noix_done' "$s"
+  check "suite helpers: $n has no trap cleanup EXIT" sh -c '! grep -q "trap cleanup EXIT" "$1"' _ "$s"
+  check "suite helpers: $n has no ln -sfn of the collection" sh -c '! grep -qF "ln -sfn \"\$root\"" "$1"' _ "$s"
+done
+unset s n suite_scripts
+
+link_root="$tmp/suite/root"
+mkdir -p "$link_root"
+cat >"$tmp/suite/link.sh" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+. "$src/tests/lib/suite.sh"
+for _ in \$(seq 20); do noix_link_collection "$link_root" "\$1"; done
+STUB
+mkdir -p "$tmp/suite/out1"
+bash "$tmp/suite/link.sh" "$tmp/suite/out1" &
+p1=$!
+bash "$tmp/suite/link.sh" "$tmp/suite/out1" &
+p2=$!
+rc1=0
+rc2=0
+wait "$p1" || rc1=$?
+wait "$p2" || rc2=$?
+check "suite helpers: 20 parallel link calls all succeed" test "$rc1$rc2" = 00
+check "suite helpers: the link resolves to the root" \
+  test "$(readlink "$tmp/suite/out1/ansible_collections/noixdev/infra")" = "$link_root"
+mkdir -p "$tmp/suite/out2/ansible_collections/noixdev"
+ln -s /nonexistent "$tmp/suite/out2/ansible_collections/noixdev/infra"
+check "suite helpers: a wrong link is replaced" bash "$tmp/suite/link.sh" "$tmp/suite/out2"
+check "suite helpers: the replaced link resolves to the root" \
+  test "$(readlink "$tmp/suite/out2/ansible_collections/noixdev/infra")" = "$link_root"
+unset p1 p2 rc1 rc2 link_root
+
 # --- preconditions -----------------------------------------------------------------------
 expect "precondition: no arguments" 2 "takes no arguments" -- tests/attest.sh e2e
 expect "precondition: missing signing key" 2 "signing key $tmp/missing.pub not found" -- \

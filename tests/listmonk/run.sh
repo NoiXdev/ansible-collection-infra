@@ -30,10 +30,12 @@ postgres="$(sed -n 's/^listmonk_postgres_image: *//p' "$defaults" 2>/dev/null)" 
 older=v6.1.0
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+# shellcheck source=/dev/null
+. "$here/../lib/suite.sh"
+noix_exit_guard
 
 mkdir -p "$out" "$tests/output/ansible_collections/noixdev"
-ln -sfn "$root" "$tests/output/ansible_collections/noixdev/infra"
+noix_link_collection "$root" "$tests/output"
 export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 export ANSIBLE_HOST_KEY_CHECKING=False
 
@@ -422,4 +424,5 @@ wait_healthy
 expect_old_data
 play "$here/verify.yml" -e "verify_version=$older" -e verify_old_password=true
 
+noix_done
 echo "== all listmonk tests passed"

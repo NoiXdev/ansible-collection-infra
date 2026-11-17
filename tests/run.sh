@@ -9,10 +9,12 @@ host="${NOIXDEV_INFRA_TEST_HOST:-noixdev-infra-test}"
 out="$here/output"
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f "$host" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+# shellcheck source=/dev/null
+. "$here/lib/suite.sh"
+noix_exit_guard
 
 mkdir -p "$out/ansible_collections/noixdev"
-ln -sfn "$root" "$out/ansible_collections/noixdev/infra"
+noix_link_collection "$root" "$out"
 export ANSIBLE_COLLECTIONS_PATH="$out:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 export ANSIBLE_HOST_KEY_CHECKING=False
 
@@ -226,4 +228,5 @@ echo "== turning error pages off cleans up"
 play "$here/converge.yml" -e '{"traefik_error_pages_enabled": false}' >"$out/error-pages-off.log"
 play "$here/error_pages_disabled.yml"
 
+noix_done
 echo "== all tests passed"

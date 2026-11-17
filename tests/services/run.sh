@@ -25,10 +25,12 @@ cleanup() {
   [ "${KEEP:-0}" = 1 ] && return
   for name in ${started[@]+"${started[@]}"}; do docker rm -f -v "$name" >/dev/null 2>&1 || true; done
 }
-trap cleanup EXIT
+# shellcheck source=/dev/null
+. "$here/../lib/suite.sh"
+noix_exit_guard
 
 mkdir -p "$out" "$tests/output/ansible_collections/noixdev"
-ln -sfn "$root" "$tests/output/ansible_collections/noixdev/infra"
+noix_link_collection "$root" "$tests/output"
 export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 
 fail() { echo "$*" >&2; exit 1; }
@@ -2265,3 +2267,4 @@ echo "== services ($services) passed on ubuntu $ubuntu"
 if [ "$shim_used" = 1 ]; then
   echo "== WARNING: emulated amd64: mysql.service not exercised, systemctl shim in use"
 fi
+noix_done

@@ -10,10 +10,12 @@ host="${NOIXDEV_INFRA_HARBOR_TEST_HOST:-noixdev-infra-harbor-test}"
 out="$root/tests/output"
 
 cleanup() { [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+# shellcheck source=/dev/null
+. "$here/../lib/suite.sh"
+noix_exit_guard
 
 mkdir -p "$out/ansible_collections/noixdev"
-ln -sfn "$root" "$out/ansible_collections/noixdev/infra"
+noix_link_collection "$root" "$out"
 export ANSIBLE_COLLECTIONS_PATH="$out:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 export ANSIBLE_HOST_KEY_CHECKING=False
 
@@ -223,4 +225,5 @@ grep -q "moved Harbor's Redis data" "$out/harbor-restore-pg.log" || fail "harbor
 play "$here/verify.yml" -e harbor_version=v2.14.6 -e verify_push=false
 expect_idempotent -e harbor_version=v2.14.6
 
+noix_done
 echo "== all harbor tests passed"

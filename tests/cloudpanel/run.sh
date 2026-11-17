@@ -25,10 +25,12 @@ cleanup() {
   [ -z "$stub_pid" ] || { kill "$stub_pid" 2>/dev/null; wait "$stub_pid" 2>/dev/null; } || true
   [ "${KEEP:-0}" = 1 ] || docker rm -f -v "$host" "$jammy" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+# shellcheck source=/dev/null
+. "$here/../lib/suite.sh"
+noix_exit_guard
 
 mkdir -p "$out" "$tests/output/ansible_collections/noixdev"
-ln -sfn "$root" "$tests/output/ansible_collections/noixdev/infra"
+noix_link_collection "$root" "$tests/output"
 export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 
 fail() { echo "$*" >&2; exit 1; }
@@ -488,4 +490,5 @@ play "$here/verify.yml"
 expect_security
 expect_idempotent
 
+noix_done
 echo "== all cloudpanel tests passed"

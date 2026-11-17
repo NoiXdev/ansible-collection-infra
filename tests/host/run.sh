@@ -19,10 +19,12 @@ cleanup() {
   for dev in ${loops[@]+"${loops[@]}"}; do docker exec "$host" losetup -d "$dev" >/dev/null 2>&1 || true; done
   docker rm -f "$host" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+# shellcheck source=/dev/null
+. "$here/../lib/suite.sh"
+noix_exit_guard
 
 mkdir -p "$out" "$tests/output/ansible_collections/noixdev"
-ln -sfn "$root" "$tests/output/ansible_collections/noixdev/infra"
+noix_link_collection "$root" "$tests/output"
 export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 
 docker build -q --build-arg "UBUNTU=$ubuntu" -t "noixdev-infra-host:$ubuntu" "$here" >/dev/null
@@ -207,4 +209,5 @@ mounts_fail raw-data "base_mounts: $dev_spare has no filesystem but is not blank
 hx sh -c "dd if=/dev/zero of=$dev_spare bs=4096 seek=10 count=1 conv=notrunc status=none"
 
 [ "$mounts_failed" = 0 ] || exit 1
+noix_done
 echo "== host roles passed on ubuntu $ubuntu"
