@@ -180,8 +180,9 @@ Maintainers cut a release with the `release` workflow:
 What the workflow checks, in this order, before it writes anything:
 
 - It runs on `main`, and `ci.yml` has a green push run for that exact commit.
-- For a real run, the organization has the webhook as a secret or variable named
-  `DISCORD_WEBHOOK_RELEASE_NOTIFICATION` (no environment is needed). A real run refuses
+- For a real run, the webhook is an organization secret named
+  `DISCORD_WEBHOOK_RELEASE_NOTIFICATION`, shared with this repository (no environment is
+  needed; a variable is not read, as variables show unmasked in the logs). A real run refuses
   without it, so a release is never left unannounced.
 - The version in `galaxy.yml` has its tag `vX.Y.Z`. If it has none, an earlier release
   stopped half-way and the workflow refuses to bump past it (see below).
@@ -217,10 +218,15 @@ The error message of the `publish` job says what exists: the bump commit, the ta
 release, the README commit. Finish what is missing by hand, as in "Releasing by hand"
 (revert the bump commit, or tag it after checking its tree, or create the release for the
 tag, or bump the README install example). If only the README commit failed, the
-announcement still goes out and the run turns red afterwards. The workflow never repeats a
-step past what exists: when `galaxy.yml` on `main` has a version without a tag, it refuses to bump again,
-and the fix is to finish the previous release by hand. A failed Discord post does not undo
-the release.
+announcement still goes out and the run turns red afterwards. If only the Discord post
+failed, everything else is complete and the final step says so: post it by hand.
+Re-running a failed publish never writes twice: when the bump commit or the tag is
+already there, the commit step fails and its message names what it found (after "Re-run
+failed jobs", an earlier attempt of the run may have created it); it says "nothing was
+written" only when it found neither. The workflow never repeats a step past what exists:
+when `galaxy.yml` on `main` has a version without a tag, it refuses to bump again, and the
+fix is to finish the previous release by hand. A failed Discord post does not undo the
+release.
 
 ### Releasing by hand
 

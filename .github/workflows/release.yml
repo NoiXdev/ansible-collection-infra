@@ -96,12 +96,12 @@ jobs:
       - name: The announcement webhook must exist
         if: ${{ !inputs.dry_run }}
         env:
-          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_RELEASE_NOTIFICATION || vars.DISCORD_WEBHOOK_RELEASE_NOTIFICATION }}
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_RELEASE_NOTIFICATION }}
         run: |
           # Checked before anything is written: a release that cannot be
           # announced is better stopped than left half-announced.
           if [ -z "$WEBHOOK" ]; then
-            echo "::error::DISCORD_WEBHOOK_RELEASE_NOTIFICATION is missing as an organization secret or variable; the release would go out unannounced" >&2
+            echo "::error::DISCORD_WEBHOOK_RELEASE_NOTIFICATION is missing as an organization secret shared with this repository; the release would go out unannounced" >&2
             exit 1
           fi
 
@@ -160,8 +160,9 @@ jobs:
             git show --stat HEAD
             echo '```'
             echo
-            echo '### galaxy.yml'
+            echo '### CHANGELOG.md and galaxy.yml'
             echo '```diff'
+            git diff HEAD^ HEAD -- CHANGELOG.md | head -n 20
             git diff HEAD^ HEAD -- galaxy.yml
             echo '```'
             echo
@@ -249,7 +250,30 @@ jobs:
           # expectedHeadOid is the guarded SHA: the API refuses the commit if
           # main moved since prepare, so nothing is written in that case.
           if ! oid=$("$RUNNER_TEMP/commit.sh" "chore: bump the collection to $VERSION" "$SHA" CHANGELOG.md galaxy.yml); then
-            echo "::error::the bump commit was not created (main moved since the check, or the API refused it). Normally nothing was written: no commit, no tag, no release, no README commit. Look at main before starting again, in case the request landed and only the answer was lost." >&2
+            # A re-run of failed jobs starts from the same SHA, so an earlier
+            # attempt may already have written; look before saying otherwise.
+            git fetch --quiet origin main --tags || true
+            found=""
+            bump=""
+            while read -r h parent subject; do
+              if [ "$parent" = "$SHA" ] && [ "$subject" = "chore: bump the collection to $VERSION" ]; then
+                bump=$h
+              fi
+            done < <(git log --format='%H %P %s' "$SHA..origin/main" 2>/dev/null || true)
+            if [ -n "$bump" ]; then
+              found=" The bump commit $bump (parent $SHA) is already on main."
+            fi
+            if git rev-parse --quiet --verify "refs/tags/$TAG" > /dev/null; then
+              found="$found The tag $TAG already exists."
+            fi
+            if [ -n "$found" ]; then
+              if [ "${GITHUB_RUN_ATTEMPT:-1}" -gt 1 ]; then
+                found="$found An earlier attempt of this run may have created them."
+              fi
+              echo "::error::the bump commit was not created by this attempt.$found Check main, the tag and the Releases, and finish what is missing by hand; re-running does not write twice." >&2
+            else
+              echo "::error::the bump commit was not created (main moved since the check, or the API refused it). Nothing was written: no commit, no tag, no release, no README commit. Look at main before starting again, in case the request landed and only the answer was lost." >&2
+            fi
             exit 1
           fi
           if ! [[ "$oid" =~ ^[0-9a-f]{40}$ ]]; then
@@ -305,7 +329,7 @@ jobs:
             python3 -I .github/release/release.py readme --version "$VERSION" &&
             "$RUNNER_TEMP/commit.sh" "docs: point the install example at $TAG" "$OID" README.md > /dev/null
           }; then
-            echo "::warning::the bump commit $OID, the tag $TAG and the release exist and are complete; only the README commit failed. Bump the README install example to $TAG by hand." >&2
+            echo "::warning::the bump commit $OID, the tag $TAG and the release exist and are complete; the README commit probably failed, but commit.sh may have failed after the server created it: check main for \"docs: point the install example at $TAG\" before bumping the README install example to $TAG by hand." >&2
             echo "readme_ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -329,16 +353,22 @@ jobs:
         id: announce
         uses: NoiXdev/github-workflows/actions/announce-release@main
         with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_RELEASE_NOTIFICATION || vars.DISCORD_WEBHOOK_RELEASE_NOTIFICATION }}
+          webhook: ${{ secrets.DISCORD_WEBHOOK_RELEASE_NOTIFICATION }}
           tag: ${{ needs.prepare.outputs.tag }}
           body: ${{ steps.release.outputs.body }}
           url: ${{ steps.release.outputs.url }}
           product-name: noixdev.infra
 
-      - name: Fail the run if the README commit is missing
-        if: ${{ always() && steps.readme.outputs.readme_ok == 'false' }}
+      - name: Say what exists when the run ends red after the release
+        if: ${{ always() && steps.bump.outputs.oid != '' && (steps.readme.outputs.readme_ok == 'false' || steps.release.outcome == 'failure' || steps.announce.outcome == 'failure') }}
         env:
+          README_OK: ${{ steps.readme.outputs.readme_ok }}
+          RELEASE: ${{ steps.release.outcome }}
           ANNOUNCE: ${{ steps.announce.outcome }}
         run: |
-          echo "::error::the bump commit, the tag $TAG and the release exist, but the README commit failed. Bump the README install example to $TAG by hand. The Discord announcement step ended as '$ANNOUNCE' (success means it was posted)." >&2
+          if [ "$README_OK" = "false" ]; then
+            echo "::error::the bump commit, the tag $TAG and the release exist, but the README commit failed. Bump the README install example to $TAG by hand. The Discord announcement step ended as '$ANNOUNCE' (success means it was posted)." >&2
+          else
+            echo "::error::the bump commit, the tag $TAG, the release and the README commit exist and are complete; only the Discord announcement is missing (read the release: '$RELEASE', post: '$ANNOUNCE'). Post it by hand." >&2
+          fi
           exit 1
