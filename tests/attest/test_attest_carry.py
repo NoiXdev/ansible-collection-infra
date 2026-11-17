@@ -131,6 +131,26 @@ class AffectedSuites(unittest.TestCase):
         self.assertEqual(ac.affected_suites(self.m, []), set())
 
 
+class AlwaysAll(unittest.TestCase):
+    """The attestation's own files rerun every suite, whatever the map says."""
+    LAX = ("[ignore]\ntests/suites.conf\ntests/attest/\n.github/scripts/\n"
+           "[suite e2e]\ntests/all.sh\ntests/attest.sh\ntests/lib/\nroles/e2e/\n")
+    PATHS = ["tests/suites.conf", "tests/all.sh", "tests/attest.sh", "tests/attest/selftest.sh",
+             "tests/lib/suite.sh", ".github/scripts/attest_carry.py"]
+
+    def test_ignored_or_suite_mapped_still_all(self):
+        m = ac.parse_map(self.LAX)
+        for path in self.PATHS:
+            self.assertEqual(ac.classify(m, path)[0], "shared", path)
+            self.assertEqual(ac.affected_suites(m, [path]), "ALL", path)
+
+    def test_neighbours_follow_the_map(self):
+        m = ac.parse_map(self.LAX)
+        self.assertEqual(ac.affected_suites(m, ["roles/e2e/tasks/main.yml"]), {"e2e"})
+        self.assertEqual(ac.classify(m, "tests/attest.sh.orig")[0], "unmatched")
+        self.assertEqual(ac.classify(m, "tests/library/x")[0], "unmatched")
+
+
 class Rename(unittest.TestCase):
     """Review Focus 1: a file renamed out of a suite's path still reruns it."""
 

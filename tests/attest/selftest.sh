@@ -645,10 +645,12 @@ for s in "${suites[@]}"; do
   echo "$s" >"$repo/roles/$s/main.yml"
 done
 printf '# Changelog\n' >"$repo/CHANGELOG.md"
+printf 'namespace: noixdev\nname: infra\nversion: 0.1.0\n' >"$repo/galaxy.yml"
 g add -A && g commit -q -m "chore: gate repo"
 gb0="$(head_sha)"
 : >"$tmp/gate-empty"
 printf 'harbor pass 2\n' >"$tmp/gate-harbor"
+printf 'e2e pass 2\n' >"$tmp/gate-e2e"
 # gate_note COMMIT DAYS-AGO PLAN SUMMARY [KEY] [--dry-run]: the payload that
 # build-payload makes of PLAN and SUMMARY for COMMIT, finished DAYS-AGO
 # before $NOW, signed by KEY as COMMIT's note in refs/notes/tests.
@@ -843,8 +845,85 @@ change CHANGELOG.md
 t="$(head_sha)"
 gate_carry "$t" "$f"
 expect "15. gate: a source finished 2 days in the future is refused" 1 "in the future" -- "$VS" "$t"
+
+# map_edit PYTHON: runs PYTHON on the lines l of tests/suites.conf, commits it.
+map_edit() {
+  python3 -I -c 'import sys
+l = open(sys.argv[1]).read().splitlines()
+exec(sys.argv[2])
+open(sys.argv[1], "w").write("\n".join(l) + "\n")' "$repo/tests/suites.conf" "$1"
+  g add -A && g commit -q -m "test: edit the map"
+}
+g checkout -q -b g-mapmove "$g1"
+map_edit 'l.remove("tests/suites.conf"); l.insert(l.index("[suite e2e]") + 1, "tests/suites.conf")'
+t="$(head_sha)"
+gate_carry "$t" "$g1" "for e in p:
+    if e['label'] == 'e2e': e['action'] = 'run'" "$tmp/gate-e2e"
+expect "15. gate: a map that maps itself to one suite still reruns every suite" 1 \
+  "harbor is carried from ${g1:0:7}, but tests/suites.conf changed since then" -- "$VS" "$t"
+
+g checkout -q -b g-lax "$gb0"
+map_edit 'l.insert(l.index("[ignore]") + 1, "roles/")'
+m1="$(head_sha)"
+gate_full "$m1" 1
+change roles/harbor/main.yml
+t="$(head_sha)"
+gate_plan
+check "15. gate: the lax map lets the plan carry harbor past its change" plan_is harbor carry "" "$m1"
+gate_note "$t" 0.1 "$tmp/plan.json" "$tmp/gate-empty"
+expect "15. gate: a carry under a map that check-map refuses is refused" 1 "fix tests/suites.conf at ${t:0:7}" -- "$VS" "$t"
+check "15. gate: the map error is named" grep -qF "::error::[ignore] pattern roles/ in tests/suites.conf is too broad" "$tmp/out"
+gate_full "$t" 0.1
+expect "15. gate: the same map is not checked when nothing is carried" 0 "Tests attestation OK for ${t:0:7}" -- "$VS" "$t"
+
+g checkout -q -b g-unmatched "$g1"
+change foo/bar
+t="$(head_sha)"
+gate_carry "$t" "$g1"
+expect "15. gate: a carry across an unmatched path is refused" 1 \
+  "e2e is carried from ${g1:0:7}, but foo/bar changed since then (in no section of tests/suites.conf)" -- "$VS" "$t"
+
+g checkout -q -b g-tag "$g1"
+change CHANGELOG.md
+t="$(head_sha)"
+g tag -a -m "an annotated tag" gate-tag "$g1"
+tagobj="$(g rev-parse gate-tag)"
+gate_carry "$t" "$g1" "p[0]['carriedFrom'] = '$tagobj'"
+expect "15. gate: carriedFrom an annotated tag of the source is refused" 1 \
+  "carriedFrom $tagobj of ${suites[0]} is not a commit in this repository" -- "$VS" "$t"
+gate_carry "$t" "$g1"
+payload_of "$REAL" "$t" >"$tmp/gate-bad.json"
+json_edit "$tmp/gate-bad.json" 'p["carried"] = "x"'
+sign_note "$t" "$tmp/gate-bad.json" "$tmp/key"
+expect "15. gate: a schema 2 payload whose carried is not a list is refused" 1 \
+  "::error::The tests attestation payload is malformed (carried)." -- "$VS" "$t"
+
+g checkout -q -b g-badall "$g1"
+sed -i.bak 's/^all_suites=(.*)$/all_suites=()/' "$repo/tests/all.sh" && rm "$repo/tests/all.sh.bak"
+g add -A && g commit -q -m "test: break all_suites"
+t="$(head_sha)"
+g notes --ref="$REAL" add -f -m "$(note_of "$REAL" "$g1")" "$t"
+expect "15. gate: a malformed tests/all.sh at the tested commit is named with it" 1 \
+  "::error::tests/all.sh at ${t:0:7} cannot be read: all_suites in tests/all.sh is empty or malformed" -- "$VS" "$t"
+g checkout -q -b g-badmap "$g1"
+map_edit 'l.append("[bogus]")'
+t="$(head_sha)"
+gate_all "$g1"
+json_edit "$tmp/gate-all.json" "for e in p: e.update(action='carry', carriedFrom='$g1')"
+gate_note "$t" 0.1 "$tmp/gate-all.json" "$tmp/gate-empty"
+expect "15. gate: a malformed map at the tested commit is named with it" 1 \
+  "::error::tests/suites.conf at ${t:0:7} cannot be read: tests/suites.conf line" -- "$VS" "$t"
+
+g checkout -q -b g-bump "$t1"
+sed -i.bak 's/^version: .*/version: 0.2.0/' "$repo/galaxy.yml" && rm "$repo/galaxy.yml.bak"
+printf '\n## 0.2.0\n' >>"$repo/CHANGELOG.md"
+g add -A && g commit -q -m "chore: bump the collection to 0.2.0"
+expect "15. gate: a version bump on top of a carrying note passes with the parent's note" 0 \
+  "Tests attestation OK for ${t1:0:7}" -- "$VS" HEAD
+check "15. gate: the bump is checked through its parent" grep -qF "version bump only" "$tmp/out"
+check "15. gate: the bump's parent carries entries" grep -qF "$((entry_count - 1)) carried" "$tmp/out"
 repo="$selftest_repo"
-unset selftest_repo gb0 g1 t1 t s1 o x k r d f entry_count
+unset selftest_repo gb0 g1 t1 t s1 o x k r d f m1 tagobj entry_count
 
 # --- suite helpers (tests/lib/suite.sh) ---------------------------------------------------------
 # A suite that stops on an unbound variable must not exit 0: bash 3.2 (macOS)

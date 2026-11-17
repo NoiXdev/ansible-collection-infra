@@ -22,7 +22,8 @@ pattern ending in "/" matches the paths below it, any other pattern is an
 fnmatch pattern ("*" also matches "/", except in [ignore], where each "/"-
 separated segment is matched on its own). Per changed file: [ignore] touches
 no suite, [shared] every suite, a suite pattern that suite (a file may touch
-several), and a file no pattern matches every suite.
+several), and a file no pattern matches every suite. The attestation's own
+files (ALWAYS_ALL) touch every suite whatever the map says.
 
 check-map also checks that each suite lists, as roles/<r>/, every role that
 its listed roles (their tasks/, handlers/ and meta/ files) and its own test
@@ -54,6 +55,10 @@ LABEL_RE = re.compile(r"[A-Za-z0-9._-]+")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 # Top-level files outside any suite that [ignore] may name besides *.md.
 IGNORABLE_TOP_LEVEL = ("LICENSE", ".ansible-lint", ".yamllint", ".gitignore")
+# The attestation's own files: a change to one reruns every suite, whatever
+# the map says, so a map cannot unmap itself or the code that reads it.
+ALWAYS_ALL = ("tests/suites.conf", "tests/all.sh", "tests/attest.sh", "tests/attest/", "tests/lib/",
+              ".github/scripts/")
 RELEASE_SUITES = ("host", "services")  # one entry per release: <suite>-<release>
 ROLE_REF_RE = re.compile(r"noixdev\.infra\.([a-z0-9_]+)")
 ROLE_REF_DIRS = ("tasks", "handlers", "meta")  # where a role references other roles
@@ -123,7 +128,10 @@ def ignore_matches(path: str, pattern: str) -> bool:
 
 
 def classify(m: dict, path: str) -> tuple:
-    """("ignored"|"shared"|"unmatched", set()) or ("suites", {names})."""
+    """("ignored"|"shared"|"unmatched", set()) or ("suites", {names}). The
+    ALWAYS_ALL paths are "shared" before the map is asked."""
+    if any(matches(path, p) for p in ALWAYS_ALL):
+        return "shared", set()
     if any(ignore_matches(path, p) for p in m["ignore"]):
         return "ignored", set()
     if any(matches(path, p) for p in m["shared"]):
@@ -556,6 +564,17 @@ def build_payload(plan_entries, summary_text, commit, tree, signer, arch, os_nam
 
 # --- release check ----------------------------------------------------------
 
+def map_check(repo: str, commit: str) -> tuple:
+    """(map, role dirs, check_map errors) of the map at commit, with the
+    role and test files that check_map reads. parse_map raises ValueError."""
+    m = parse_map(_show(repo, commit, MAP_PATH))
+    tree = _git(repo, "ls-tree", commit, "roles/").stdout
+    roles = [line.split("\t", 1)[1] for line in tree.splitlines() if line.split()[1:2] == ["tree"]]
+    paths = [p for p in _git(repo, "ls-tree", "-r", "-z", "--name-only", commit, "--", "roles", "tests").stdout.split("\0")
+             if p.startswith("tests/") or (len(p.split("/")) >= 4 and p.split("/")[2] in ROLE_REF_DIRS)]
+    return m, roles, check_map(m, _show(repo, commit, ALLSH_PATH), roles, _read_files(repo, commit, paths))
+
+
 def _days(age: int) -> int:
     return -(-age // 86400)  # rounded up, so past the limit always reads as more than it
 
@@ -565,7 +584,8 @@ def _carry_error(repo, notes_ref, m, tested, label, suite, c, signers_path, tmp,
     """Why the entry label of suite, carried from c into tested, cannot be
     trusted, or None. Everything is proven from git and c's own note."""
     c7, t7 = c[:7], tested[:7]
-    if _git(repo, "rev-parse", "--verify", "--quiet", c + "^{commit}", ok=(0, 1)).returncode != 0:
+    r = _git(repo, "rev-parse", "--verify", "--quiet", c + "^{commit}", ok=(0, 1))
+    if r.returncode != 0 or r.stdout.strip() != c:  # an annotated tag's id peels to a commit, but is none
         return f"carriedFrom {c} of {label} is not a commit in this repository"
     if _git(repo, "merge-base", "--is-ancestor", c, tested, ok=(0, 1)).returncode != 0:
         return f"{label} is carried from {c7}, which is not an ancestor of {t7}"
@@ -640,7 +660,11 @@ def verify_release(repo, tested, release, notes_ref, now) -> str:
         signers_path = tmp + "/allowed_signers"
         with open(signers_path, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(_show(repo, release, SIGNERS_PATH))
-        entries = expected_entries(_show(repo, tested, ALLSH_PATH))
+        try:
+            entries = expected_entries(_show(repo, tested, ALLSH_PATH))
+        except ValueError as e:
+            raise NoteError(f"{ALLSH_PATH} at {t7} cannot be read: {e} - fix it in a new commit, then run "
+                            f"tests/attest.sh on that commit.")
         try:
             p = verify_note(text, signers_path, tmp)
             check_payload(p, tested, _git(repo, "rev-parse", tested + "^{tree}").stdout.strip(), False)
@@ -670,7 +694,15 @@ def verify_release(repo, tested, release, notes_ref, now) -> str:
         to_prove = [(label, suite) for label, suite in entries if label in carried]
         errors, notes = [], [f"{label}: {n}" for label, e in ran.items() for n in e.get("notes", [])]
         if to_prove:
-            m = parse_map(_show(repo, tested, MAP_PATH))
+            try:
+                m, _, map_errors = map_check(repo, tested)
+            except ValueError as e:
+                raise NoteError(f"{MAP_PATH} at {t7} cannot be read: {e} - fix {MAP_PATH} at {t7} in a new "
+                                f"commit, then run tests/attest.sh on that commit.")
+            if map_errors:
+                raise NoteError("\n".join(f"{e} - entries are carried by {MAP_PATH}, so fix {MAP_PATH} at {t7} "
+                                          f"in a new commit, then run tests/attest.sh on that commit."
+                                          for e in map_errors))
             runs, _ = _runs(repo, tested, notes_ref, signers_path, False)
             cache = {}
             for label, suite in to_prove:
@@ -695,12 +727,7 @@ def verify_release(repo, tested, release, notes_ref, now) -> str:
 
 def _cmd_check_map(a) -> int:
     commit = _commit(a.repo, a.commit)
-    m = parse_map(_show(a.repo, commit, MAP_PATH))
-    tree = _git(a.repo, "ls-tree", commit, "roles/").stdout
-    roles = [line.split("\t", 1)[1] for line in tree.splitlines() if line.split()[1:2] == ["tree"]]
-    paths = [p for p in _git(a.repo, "ls-tree", "-r", "-z", "--name-only", commit, "--", "roles", "tests").stdout.split("\0")
-             if p.startswith("tests/") or (len(p.split("/")) >= 4 and p.split("/")[2] in ROLE_REF_DIRS)]
-    errors = check_map(m, _show(a.repo, commit, ALLSH_PATH), roles, _read_files(a.repo, commit, paths))
+    m, roles, errors = map_check(a.repo, commit)
     for e in errors:
         print("::error::" + e)
     if errors:
