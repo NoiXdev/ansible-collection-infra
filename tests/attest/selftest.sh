@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # single-quoted $ is intended: stub scripts, sh -c
-# Self-test of the attestation: tests/attest.sh, tests/all.sh --summary and
-# .github/scripts/verify-tests-attestation.sh. No Docker, no network: it works
+# Self-test of the attestation: tests/attest.sh, tests/all.sh --summary,
+# .github/scripts/verify-tests-attestation.sh and their shared helper
+# .github/scripts/attest_carry.py (its unit tests, check-map on this
+# repository's HEAD, the run-or-carry plan). No Docker, no network: it works
 # in a throwaway git repository with throwaway ed25519 keys, a copy of the
 # three scripts and stub suites behind the real tests/all.sh. Most cases use
 # ATTEST_DRY_RUN=1; the "real mode" cases push to local bare repositories
@@ -432,6 +434,187 @@ check "13. real: the red status call" grep -qx "state=failure" "$tmp/gh-call"
 g fetch -q origin "+$REAL:$REAL"
 expect "13. real: verifier allows the real green note" 0 "Tests attestation OK for ${c13:0:7}" -- "$V" "$c13"
 expect "13. real: verifier refuses the real red note" 1 "is red: " -- "$V" "$c13b"
+
+# --- 14. the shared helper (.github/scripts/attest_carry.py) -----------------------------------
+H="$src/.github/scripts/attest_carry.py"
+check "14. helper: the unit tests pass" python3 -I -m unittest discover -s "$src/tests/attest" -p test_attest_carry.py
+expect "14. helper: check-map passes on this repository's HEAD" 0 "tests/suites.conf OK at" -- \
+  python3 -I "$H" check-map --repo "$src" --commit HEAD
+
+# plan in a repository of its own: one roles/<suite>/ per suite in its map,
+# dry-run notes in its refs/notes/tests, signed with the selftest's keys.
+selftest_repo="$repo"
+repo="$tmp/plan"
+NOW=1800000000
+echo "maintainer@example.com namespaces=\"noixdev-infra-tests\" $(cat "$tmp/key.pub")" >"$tmp/plan-signers"
+mkdir -p "$repo/tests"
+git init -q -b main "$repo"
+cp "$src/tests/all.sh" "$repo/tests/"
+{
+  printf '[ignore]\nCHANGELOG.md\n[shared]\ntests/all.sh\ntests/suites.conf\nshared/\n'
+  for s in "${suites[@]}"; do printf '[suite %s]\nroles/%s/\n' "$s" "$s"; done
+} >"$repo/tests/suites.conf"
+for s in "${suites[@]}"; do
+  mkdir -p "$repo/roles/$s"
+  echo "$s" >"$repo/roles/$s/main.yml"
+done
+printf '# Changelog\n' >"$repo/CHANGELOG.md"
+g add -A && g commit -q -m "chore: plan repo"
+b0="$(head_sha)"
+change() { # change FILE: a commit that changes FILE
+  mkdir -p "$repo/$(dirname "$1")"
+  echo change >>"$repo/$1"
+  g add -A && g commit -q -m "change $1"
+}
+iso_ago() { # iso_ago DAYS: the UTC time DAYS before $NOW
+  python3 -I -c 'import sys, time
+print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(sys.argv[1]) - int(float(sys.argv[2]) * 86400))))' "$NOW" "$1"
+}
+# plan_note COMMIT DAYS-AGO [FAILING-LABEL] [KEY]: a dry-run note of a full
+# run of COMMIT (plan --all, build-payload), finished DAYS-AGO before $NOW.
+plan_note() {
+  local finished
+  finished="$(iso_ago "$2")"
+  python3 -I "$H" plan --repo "$repo" --head "$1" --notes-ref "$REAL" --signers "$tmp/plan-signers" \
+    --now "$NOW" --all >"$tmp/note-plan.json"
+  printf '%s\n' "$all_pass" | sed "s/^${3:-none} pass /${3:-none} fail /" >"$tmp/note-summary"
+  python3 -I "$H" build-payload --plan "$tmp/note-plan.json" --summary "$tmp/note-summary" \
+    --out "$tmp/note-payload.json" --commit "$1" --tree "$(g rev-parse "$1^{tree}")" \
+    --signer maintainer@example.com --arch x86_64 --os Linux --docker unknown \
+    --started "$finished" --finished "$finished" --dry-run >/dev/null
+  sign_note "$1" "$tmp/note-payload.json" "${4:-$tmp/key}"
+}
+# plan_case DESCRIPTION [ARGS...]: the plan of HEAD (dry-run notes allowed)
+# into $tmp/plan.json.
+plan_case() {
+  local desc="$1"
+  shift
+  expect "$desc" 0 '"action"' -- python3 -I "$H" plan --repo "$repo" --head HEAD --notes-ref "$REAL" \
+    --signers "$tmp/plan-signers" --now "$NOW" --allow-dry-run "$@"
+  cp "$tmp/out" "$tmp/plan.json"
+}
+# plan_is LABEL ACTION REASON [CARRIED-FROM]: the entry LABEL of the plan, or
+# every entry for LABEL "*", has ACTION, a reason with REASON and that source.
+plan_is() {
+  python3 -I -c 'import json, sys
+path, label, action, reason, source = sys.argv[1:]
+entries = [e for e in json.load(open(path)) if label in ("*", e["label"])]
+bad = [e for e in entries if (e["action"], reason in e["reason"], e.get("carriedFrom", "")) != (action, True, source)]
+print("\n".join(json.dumps(e) for e in bad))
+sys.exit(1 if bad or not entries else 0)' "$tmp/plan.json" "$1" "$2" "$3" "${4:-}"
+}
+plan_count() { # plan_count ACTION N: N entries of the plan have ACTION
+  test "$(grep -c "\"action\": \"$1\"" "$tmp/plan.json")" = "$2"
+}
+entry_count="$(printf '%s\n' "$all_pass" | wc -l | tr -d ' ')"
+
+change CHANGELOG.md
+p0="$(head_sha)"
+plan_note "$p0" 1
+
+g checkout -q -b role "$p0"
+change roles/harbor/main.yml
+plan_case "14. plan: a change in one suite's role"
+check "14. plan: that entry runs, naming the file" plan_is harbor run "roles/harbor/main.yml changed since ${p0:0:7}"
+check "14. plan: the others are carried from the previous note" plan_is e2e carry "no file of e2e changed" "$p0"
+check "14. plan: only that entry runs" plan_count run 1
+plan_case "14. plan: --all" --all
+check "14. plan: --all runs every entry" plan_is "*" run "--all"
+
+g checkout -q -b shared "$p0"
+change shared/x
+plan_case "14. plan: a shared path"
+check "14. plan: a shared path runs every entry" plan_is "*" run "shared/x changed since ${p0:0:7} (a shared path)"
+
+g checkout -q -b unmatched "$p0"
+change foo/bar
+plan_case "14. plan: an unmatched path"
+check "14. plan: an unmatched path runs every entry" plan_is "*" run "foo/bar changed since ${p0:0:7} (in no section"
+
+g checkout -q -b docs "$p0"
+change CHANGELOG.md
+plan_case "14. plan: CHANGELOG.md only"
+check "14. plan: an ignored path carries every entry" plan_is "*" carry "" "$p0"
+check "14. plan: every entry is carried" plan_count carry "$entry_count"
+
+g checkout -q -b old29 "$p0"
+change CHANGELOG.md
+a29="$(head_sha)"
+plan_note "$a29" 29
+change CHANGELOG.md
+plan_case "14. plan: a source finished 29 days ago"
+check "14. plan: a source past the 28-day margin runs" plan_is "*" run "the run at ${a29:0:7} is 29 days old"
+
+g checkout -q -b old27 "$p0"
+change CHANGELOG.md
+a27="$(head_sha)"
+plan_note "$a27" 27
+change CHANGELOG.md
+plan_case "14. plan: a source finished 27 days ago"
+check "14. plan: a source within the margin is carried" plan_is "*" carry "" "$a27"
+
+g checkout -q -b red "$p0"
+change CHANGELOG.md
+r1="$(head_sha)"
+plan_note "$r1" 0.5 harbor
+change CHANGELOG.md
+plan_case "14. plan: a newer red run after an older green one"
+check "14. plan: the red entry runs, the older green run is not carried" plan_is harbor run "red at ${r1:0:7} (fail)"
+check "14. plan: the green entries are carried from the newer run" plan_is e2e carry "" "$r1"
+
+g checkout -q -b other "$b0"
+change CHANGELOG.md
+plan_case "14. plan: a source only on another branch"
+check "14. plan: a source that is not an ancestor is not used" plan_is "*" run "no signed run of"
+
+g checkout -q -b badsig "$p0"
+change CHANGELOG.md
+x1="$(head_sha)"
+plan_note "$x1" 0.5 "" "$tmp/other"
+change CHANGELOG.md
+plan_case "14. plan: a newer note with a bad signature"
+check "14. plan: the bad note is skipped, the older valid one is used" plan_is "*" carry "" "$p0"
+
+g checkout -q -b self "$p0"
+change CHANGELOG.md
+plan_note "$(head_sha)" 0.5
+plan_case "14. plan: a note on HEAD itself"
+check "14. plan: HEAD's own note is no source (the new note replaces it)" plan_is "*" carry "" "$p0"
+
+g checkout -q -b future "$p0"
+change CHANGELOG.md
+f1="$(head_sha)"
+plan_note "$f1" -2
+change CHANGELOG.md
+plan_case "14. plan: a source finished 2 days in the future"
+check "14. plan: a source in the future runs, not read as 0 days old" plan_is "*" run "the run at ${f1:0:7} cannot be carried"
+check "14. plan: the reason says it is in the future" grep -qF "in the future" "$tmp/plan.json"
+
+g checkout -q -b left "$p0"
+change CHANGELOG.md
+l1="$(head_sha)"
+plan_note "$l1" 0.5
+g checkout -q -b right "$p0"
+g commit -q --allow-empty -m "chore: right"
+plan_note "$(head_sha)" 0.5
+g merge -q --no-edit left
+plan_case "14. plan: runs of the entry on two merged branches"
+check "14. plan: runs on parallel branches are not carried" plan_is "*" run "on parallel branches"
+
+g checkout -q -b realonly "$p0"
+change CHANGELOG.md
+expect "14. plan: without --allow-dry-run" 0 '"action"' -- python3 -I "$H" plan --repo "$repo" --head HEAD \
+  --notes-ref "$REAL" --signers "$tmp/plan-signers" --now "$NOW"
+cp "$tmp/out" "$tmp/plan.json"
+check "14. plan: dry-run notes are no source of a real run" plan_is "*" run "no signed run of"
+
+mkdir -p "$repo/roles/zzz"
+echo zzz >"$repo/roles/zzz/main.yml"
+g add -A && g commit -q -m "feat: an unmapped role"
+expect "14. check-map: a role in no suite fails" 1 "::error::roles/zzz/ is in no [suite] section" -- \
+  python3 -I "$H" check-map --repo "$repo" --commit HEAD
+repo="$selftest_repo"
+unset selftest_repo b0 p0 a29 a27 r1 x1 f1 l1 entry_count
 
 # --- suite helpers (tests/lib/suite.sh) ---------------------------------------------------------
 # A suite that stops on an unbound variable must not exit 0: bash 3.2 (macOS)
