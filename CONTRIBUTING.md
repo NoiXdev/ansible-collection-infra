@@ -21,28 +21,39 @@ ansible-lint                     # configured in .ansible-lint (production profi
 shellcheck tests/**/*.sh         # the test scripts; CI also checks the stubs (ci.yml)
 tests/all.sh                     # the Docker test suites, one after the other
 tests/all.sh mailcow listmonk    # only the named suites
+tests/all.sh host-24.04          # or entries by label (host-<release>, services-<release>)
 UBUNTU=24.04 tests/services/run.sh  # the service roles, on their own (also UBUNTU=26.04)
 ```
 
-`tests/all.sh` runs `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
+`tests/all.sh` runs the suites `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
 `host` (`tests/host/run.sh` on Ubuntu 24.04 and 26.04, set `HOST_UBUNTU` for fewer),
 `harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow` and `cloudpanel` (`tests/<suite>/run.sh`). It stops at
 the first failing suite unless you pass `--keep-going`, and ends with a summary of each
 suite's result and runtime; the output of each suite is also in
 `tests/output/all/<suite>.log`. `--summary FILE` writes a machine-readable summary, one line
-per run (`<label> <pass|fail|skipped> <seconds>`). The `harbor` suite needs amd64 images: its test host
+per run (`<label> <pass|fail|skipped> <seconds>[ <note>...]`). The `harbor` suite needs amd64 images: its test host
 runs natively, and on another architecture (an arm64 Mac) the Harbor images inside it
 run as `linux/amd64` under emulation, which is slow. Docker Desktop on Apple silicon needs
 Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tests/attest.sh`
 check this first. The `mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
 (`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `tandoor` about 2 GB and `n8n` about 3 GB of images, `cloudpanel` runs CloudPanel's real installer.
-`tests/services/run.sh` (nodejs, redis, mariadb, mysql) is part of `tests/all.sh` as the
-`services` suite, once per Ubuntu release (`SERVICES_UBUNTU`); run it on its own with `UBUNTU=24.04` or `UBUNTU=26.04`.
+`tests/services/run.sh` (nodejs, redis, mariadb, mysql, php, composer, nginx) is part of `tests/all.sh` as the
+`services` suite, once per Ubuntu release (`SERVICES_UBUNTU`), so the signed run has the entries
+`services-24.04` and `services-26.04`; run it on its own with `UBUNTU=24.04` or `UBUNTU=26.04`.
+On Apple silicon the mysql role runs under emulation without a working `mysql.service`, so the
+suite uses a `systemctl` shim there and its entry carries the note "mysql via systemctl shim"
+(shown in the `tests/local` status and the release check's OK line). A real amd64 mysql run
+stays a manual step of the owner before a release.
 
 Each test converges the roles, converges again (the second run must change nothing),
 and then verifies the result. `KEEP=1` leaves the test container running for
 inspection.
+
+A suite sources `tests/lib/suite.sh`, links the collection with `noix_link_collection`, calls
+`noix_exit_guard` near the top and `noix_done` at its end and before any intended `exit 0`.
+Without `noix_done`, macOS bash 3.2 would exit 0 on a `set -u` error under the EXIT trap, and a
+broken run would look green.
 
 CI (GitHub Actions) runs `ansible-lint`, `shellcheck` and the self-test of the attestation
 (`tests/attest/selftest.sh`, no Docker) only.
@@ -50,17 +61,47 @@ CI (GitHub Actions) runs `ansible-lint`, `shellcheck` and the self-test of the a
 ### Signed test run
 
 A release needs proof that every suite passed on the released code. `tests/attest.sh`
-gives it: it runs `tests/all.sh --keep-going` (always every suite, `harbor` included) and
-signs the result for the commit it ran on.
+gives it: it runs what needs running, carries the rest from an earlier signed run, and
+signs the result for the commit.
 
 ```bash
 git push                         # the commit has to be on GitHub first
-tests/attest.sh                  # takes the full run's time; no arguments
+tests/attest.sh --plan           # what would run or be carried; changes nothing
+tests/attest.sh                  # runs the entries that need it, signs, publishes
+tests/attest.sh --all            # runs every entry, carries nothing
 ```
 
+The entries are those of `tests/all.sh`: each suite, `host` once per release as `host-<release>`
+and `services` once per release as `services-<release>`. For each entry it either runs or
+carries it from the newest valid, signed run of an ancestor of HEAD that RAN it. It runs when
+any of these holds: a file of its suite changed since that run; that run was red; that run
+is older than 28 days; a shared path changed; a changed file is in no section of the map.
+HEAD's own red run counts. `--plan` prints one line per entry, `run <reason>` or
+`carry from <sha7> (<N> days)`. A commit that changes only ignored files (such as
+`CHANGELOG.md`) is attested without running anything and without Docker.
+
+The map is `tests/suites.conf`, read by `.github/scripts/attest_carry.py`. Its sections are
+`[ignore]` (files that touch no suite), `[shared]` (every suite) and `[suite <name>]` (the
+suite's test files, the roles its playbooks converge, including the roles they pull in, and the
+fixtures it reads). A changed file is matched in this order: ignore, shared, suites, and no
+match means all suites. An ignore pattern matches segment by segment, and `check-map` accepts
+only narrow ignore patterns. `tests/suites.conf`, `tests/all.sh`, `tests/attest.sh`,
+`tests/attest/`, `tests/lib/` and `.github/scripts/` always mean all suites, whatever the map
+says. A new suite or role needs a map entry; check it with:
+
+```bash
+python3 -I .github/scripts/attest_carry.py check-map --repo . --commit HEAD
+```
+
+It checks that every suite has a section, every role is in some suite, and each suite lists
+every role that its roles and test files reference as `noixdev.infra.X`. CI runs it in the
+selftest, and `tests/attest.sh` runs it first.
+
 It refuses to start while a variable that narrows or changes what the suites run is set
-(`HOST_UBUNTU`, `UBUNTU`, `KEEP`, `STUB_ONLY` and the others in `coverage_knobs` of
-`tests/attest.sh`; a new suite knob belongs there). It needs a clean working tree
+(`HOST_UBUNTU`, `SERVICES_UBUNTU`, `UBUNTU`, `KEEP`, `STUB_ONLY`, `NOIXDEV_INFRA_SERVICES`,
+`NOIXDEV_INFRA_N8N_TESTS`, `NOIXDEV_INFRA_PAPERLESS_TESTS`, `NOIXDEV_INFRA_TANDOOR_TESTS`,
+`NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME` and the others in `coverage_knobs` of `tests/attest.sh`;
+a new suite knob belongs there). It needs a clean working tree
 (untracked files included), HEAD on a branch of `origin`, Docker,
 `python3`, `ssh-keygen`, `gh` logged in (`gh auth login`) and an SSH signing key:
 `TESTS_SIGNING_KEY`, else `git config user.signingkey`, else `~/.ssh/id_ed25519.pub` (a
@@ -69,22 +110,30 @@ It refuses to start while a variable that narrows or changes what the suites run
 working tree is not clean at the end of the run (it compares the end state only).
 
 It publishes, for HEAD, a git note under `refs/notes/tests` (the payload, one JSON line in
-base64: commit, tree, signer, each suite's result and runtime, the counts, architecture, OS,
+base64, schema 2: commit, tree, signer, each entry that ran with its result, runtime and notes,
+each carried entry with the commit it was carried from, the counts, architecture, OS,
 Docker version and times; no host names, user names or paths) with an SSH signature over it
 (`ssh-keygen -Y sign`, namespace `noixdev-infra-tests`), and a commit status `tests/local`
-(success or failure, with the counts). A red run is published too and exits 1. Before it
+(success or failure, reading "<ran> ran, <passed> passed, <failed> failed, <carried> carried (...)"). A red run is published too and exits 1. Before it
 pushes, it replaces the local `refs/notes/tests` by `origin`'s, so a note that exists only
 locally is dropped, never pushed.
 
 The tag workflow `release-gate.yml` (check "tests attestation") runs
 `.github/scripts/verify-tests-attestation.sh` on the tagged commit and flags a tag without a
-green attestation; it cannot stop the tag, so run the check before tagging. The check verifies
-the signature against `.github/tests-allowed-signers` of that commit, refuses dry-run results
-and results without a Docker version, and requires a green result that covers `tests/all.sh`
-at the tested commit: every suite in `all_suites` by its exact label, the `host` suite as
-`host-<release>` for each release in `host_releases`. The tested commit
-is the tagged commit itself or, when that has no note, its parent, if only `CHANGELOG.md`
-and the `version:` line of `galaxy.yml` differ between them.
+green attestation; it cannot stop the tag, so run the check before tagging. The check accepts
+schema 1 and schema 2 notes and verifies the signature against `.github/tests-allowed-signers`
+of that commit. It refuses dry-run results and results without a Docker version, and requires a
+green result that covers `tests/all.sh` at the tested commit: every suite in `all_suites` by its
+exact label, the `host` suite as `host-<release>` for each release in `host_releases` and
+`services` as `services-<release>`. Every entry, the ones that ran included, is at most 30
+days old when the check runs (the age is measured at check time, so a release check can fail
+days after a good run); `tests/attest.sh` therefore carries an entry only while its source is
+younger than 28 days. Each carried entry is re-verified against the signature of its source
+note, using the release commit's allowed-signers file: the source is an ancestor, the entry ran
+and passed there, no newer valid run ran it, no relevant file changed since, and the source is
+at most 30 days old at check time. When anything is carried, the check also runs `check-map`
+at the tested commit. The tested commit is the tagged commit itself or, when that has no note,
+its parent, if only `CHANGELOG.md` and the `version:` line of `galaxy.yml` differ between them.
 
 Owner setup, not done by the script: a maintainer's public key has to be listed in
 `.github/tests-allowed-signers` (principal, `namespaces="noixdev-infra-tests"`, key);
@@ -118,8 +167,9 @@ Maintainers cut a release like this:
 1. Bump `version` in `galaxy.yml`.
 2. Move the entries of `CHANGELOG.md` from *Unreleased* under the new version.
 3. Commit (`chore: bump the collection to X.Y.Z`) on `main` once CI is green, and push it.
-4. Run `tests/attest.sh` on the bump commit, unless you already attested its parent (the
-   last commit before step 1). The bump commit may then change only `CHANGELOG.md` and the
+4. Run `tests/attest.sh` on the bump commit (it runs nothing when only ignored files changed
+   since the last run), unless you already attested its parent (the last commit before step 1).
+   Run a real amd64 mysql test by hand first when the attested run used the systemctl shim. The bump commit may then change only `CHANGELOG.md` and the
    `version:` line of `galaxy.yml`.
 5. Check the attestation locally:
    `git fetch origin '+refs/notes/tests:refs/notes/tests'` and

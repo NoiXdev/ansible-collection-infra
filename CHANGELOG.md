@@ -750,14 +750,27 @@
   run (used by `cloudpanel`).
 - Tests: the Docker test suites run locally only, with `tests/all.sh` (all suites or the named
   ones, a summary with each suite's result and runtime). CI runs `ansible-lint` and `shellcheck`.
-- Tests: a release needs a signed attestation of the full local run: `tests/attest.sh` runs every
-  suite and publishes the SSH-signed result as a git note (`refs/notes/tests`) and the commit
+- Tests: a release needs a signed attestation of the local run: `tests/attest.sh` runs the suites
+  that need it and publishes the SSH-signed result as a git note (`refs/notes/tests`) and the commit
   status `tests/local`; the tag workflow `release-gate.yml` verifies it
   (`.github/scripts/verify-tests-attestation.sh`) and flags a tag without a green one.
   `tests/attest.sh` refuses to start while a variable that narrows the suites is set (such as
   `HOST_UBUNTU` or `STUB_ONLY`), or when Docker cannot run `linux/amd64` images (the harbor
   suite needs them; on Apple silicon Docker Desktop needs Rosetta 2). `tests/all.sh --summary
   FILE` writes a machine-readable summary.
+- Tests: the signed run is incremental. `tests/attest.sh` runs an entry (a suite, `host` and
+  `services` once per Ubuntu release) only when its files changed, its last run was red or is
+  older than 28 days, or a shared or unmapped file changed, and carries it from the newest valid
+  signed run otherwise; `--plan` shows the decision and changes nothing, `--all` runs everything,
+  and a commit that changes only ignored files (such as `CHANGELOG.md`) needs no Docker. The map
+  is `tests/suites.conf` (`[ignore]`, `[shared]`, `[suite <name>]`), checked by
+  `attest_carry.py check-map` in the selftest. The release check accepts schema 1 and 2 notes,
+  proves every carried entry against its source note, and refuses an entry older than 30 days at
+  check time. `services` is part of the signed run as `services-24.04` and `services-26.04`
+  (on Apple silicon with the note "mysql via systemctl shim"), and `tests/all.sh` accepts entry
+  labels. New knobs that `tests/attest.sh` refuses: `SERVICES_UBUNTU`, `NOIXDEV_INFRA_SERVICES`
+  and the n8n, paperless, tandoor and mailcow volume ones. Suites source `tests/lib/suite.sh`
+  (`noix_exit_guard`, `noix_done`) so that macOS bash 3.2 cannot report a `set -u` error as green.
 
 ## 0.4.0 — 2026-11-11
 
