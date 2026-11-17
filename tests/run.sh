@@ -21,7 +21,7 @@ export ANSIBLE_HOST_KEY_CHECKING=False
 docker rm -f "$host" >/dev/null 2>&1 || true
 docker run -d --privileged --name "$host" docker:29-dind >/dev/null
 until docker exec "$host" docker info >/dev/null 2>&1; do sleep 1; done
-docker exec "$host" apk add --no-cache python3 bind-tools >/dev/null
+docker exec "$host" apk add --no-cache python3 bind-tools curl >/dev/null
 # A second local address: queries to it come from outside dns_allow.
 docker exec "$host" ip addr add 192.0.2.53/32 dev lo
 # An /etc/hosts entry on the host must never be served by the dns role.
@@ -90,6 +90,31 @@ grep -q "portainer_agent_register_api_token is empty" "$out/portainer-register-i
   || { cat "$out/portainer-register-invalid.log" >&2; exit 1; }
 docker exec "$host" test ! -e /opt/portainer-register-invalid \
   || { echo "portainer changed the host before checking the registration settings" >&2; exit 1; }
+
+echo "== portainer agent registers itself"
+play "$here/portainer_agent.yml" >"$out/portainer-agent.log" 2>&1 \
+  || { cat "$out/portainer-agent.log" >&2; echo "portainer agent registration failed" >&2; exit 1; }
+grep -Eq 'changed=[1-9]' "$out/portainer-agent.log" || { echo "the first registration reported no change" >&2; exit 1; }
+play "$here/portainer_agent.yml" -e test_register_verify=true -v >"$out/portainer-agent-again.log" 2>&1 \
+  || { cat "$out/portainer-agent-again.log" >&2; exit 1; }
+grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/portainer-agent-again.log" \
+  || { echo "a second registration changed something" >&2; exit 1; }
+token="$(docker exec "$host" cat /tmp/portainer-register-token)"
+! grep -qF "$token" "$out/portainer-agent.log" "$out/portainer-agent-again.log" \
+  || { echo "the API token shows up in the output" >&2; exit 1; }
+
+echo "== portainer agent registration in check mode creates nothing"
+play "$here/portainer_agent.yml" --check -e test_register_name=check-agent >"$out/portainer-agent-check.log" 2>&1 \
+  || { cat "$out/portainer-agent-check.log" >&2; echo "check mode failed" >&2; exit 1; }
+play "$here/portainer_agent.yml" -e test_register_absent=check-agent >"$out/portainer-agent-absent.log" 2>&1 \
+  || { cat "$out/portainer-agent-absent.log" >&2; echo "check mode created an environment" >&2; exit 1; }
+
+echo "== portainer agent registration refuses a name with another URL"
+if play "$here/portainer_agent.yml" -e test_register_endpoint=tcp://192.0.2.10:9001 >"$out/portainer-agent-conflict.log" 2>&1; then
+  echo "portainer accepted an environment name that points elsewhere" >&2; exit 1
+fi
+grep -qF "tcp://192.0.2.10:9001" "$out/portainer-agent-conflict.log" \
+  || { cat "$out/portainer-agent-conflict.log" >&2; exit 1; }
 
 echo "== invalid dns settings must fail"
 if play "$here/dns_invalid.yml" >"$out/dns-invalid.log" 2>&1; then

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `portainer`: an agent registers itself as an environment on a Portainer server. Set
+  `portainer_agent_register_url` (the server, e.g. `https://portainer.example.com`) and
+  `portainer_agent_register_api_token` (an access token; the run fails before any change when it is
+  empty); `portainer_agent_register_address` pins the URL's host name to an address (curl
+  `--resolve`, IPv6 allowed, TLS is still verified), `portainer_agent_register_name` (default the
+  inventory host name) names the environment and `portainer_agent_register_endpoint` (default the
+  first `portainer_agent_bind` address, port 9001) is where the server dials the agent. The
+  environment is matched by exact name: missing is created (retried while the agent starts), the
+  same name with the same endpoint is left alone, and the same name with another endpoint fails
+  the run naming both and changes nothing. Nothing is created in check mode. The token only lives
+  in a temporary 0600 header file that curl reads and that is removed afterwards, never on a
+  command line or in the output. Removing or editing environments is not handled; the host needs
+  curl (the `base` role installs it).
 - `tailscale`: the first login gives up after `tailscale_login_timeout` seconds (default 120)
   instead of waiting forever. The run then fails with what `tailscale up` reported or, when the
   tailnet requires device approval, names the node to approve in the admin console. The auth key

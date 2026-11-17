@@ -21,7 +21,7 @@ are on the documentation site.
 | `docker` | Docker CE with the compose plugin and a managed `daemon.json` |
 | `tailscale` | Tailscale node, optionally a subnet router |
 | `traefik` | Standalone Traefik with DNS-01 certificates, a Docker socket proxy and optional error pages |
-| `portainer` | Portainer server or agent |
+| `portainer` | Portainer server or agent; an agent can register itself as an environment on a server through its API (`portainer_agent_register_url`, `portainer_agent_register_api_token`, see the role's argument specs) |
 | `dashy` | Dashy start page from configuration, behind Traefik |
 | `dns` | CoreDNS for internal names on private addresses, forwarding the rest |
 | `harbor` | Harbor registry behind Traefik, with safe upgrades and backup scripts |

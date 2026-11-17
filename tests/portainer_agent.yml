@@ -1,0 +1,113 @@
+---
+# An agent registers itself on the Portainer server of the main suite. The
+# server and the agent share this host; the server reaches the agent on the
+# host's default address.
+- name: Access token for the registration
+  hosts: testhost
+  vars_files: [vars.yml]
+  tasks:
+    - name: Look for the token file
+      ansible.builtin.stat:
+        path: /tmp/portainer-register-token
+      register: test_token_file
+      check_mode: false
+
+    - name: Log in
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/auth
+        method: POST
+        headers: { Host: portainer.test }
+        body_format: json
+        body: { username: admin, password: "{{ portainer_admin_password }}" }
+      register: test_login
+      no_log: true
+      check_mode: false
+      when: not test_token_file.stat.exists
+
+    - name: Create an access token
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/users/1/tokens
+        method: POST
+        headers:
+          Host: portainer.test
+          Authorization: "Bearer {{ test_login.json.jwt }}"
+        body_format: json
+        body: { description: agent-register-test, password: "{{ portainer_admin_password }}" }
+        status_code: [200, 201]
+      register: test_token
+      no_log: true
+      check_mode: false
+      when: not test_token_file.stat.exists
+
+    - name: Keep the token for the other runs of this suite
+      ansible.builtin.copy:
+        dest: /tmp/portainer-register-token
+        content: "{{ test_token.json.rawAPIKey }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      check_mode: false
+      when: not test_token_file.stat.exists
+
+    - name: Read the token
+      ansible.builtin.slurp:
+        src: /tmp/portainer-register-token
+      register: test_token_slurp
+      no_log: true
+      check_mode: false
+
+    - name: Remember the token
+      ansible.builtin.set_fact:
+        test_register_token: "{{ test_token_slurp.content | b64decode }}"
+      no_log: true
+
+- name: Portainer agent registers itself
+  hosts: testhost
+  vars_files: [vars.yml]
+  tasks:
+    - name: Run the portainer role as an agent
+      ansible.builtin.include_role:
+        name: noixdev.infra.portainer
+      vars:
+        portainer_mode: agent
+        portainer_dir: /opt/portainer-agent
+        portainer_project: portainer-agent
+        portainer_agent_bind: ["{{ ansible_default_ipv4.address }}"]
+        portainer_agent_register_url: http://portainer.test
+        portainer_agent_register_address: 127.0.0.1
+        portainer_agent_register_api_token: "{{ test_register_token }}"
+        portainer_agent_register_name: "{{ test_register_name | default('test-agent') }}"
+        portainer_agent_register_endpoint: "{{ test_register_endpoint | default('tcp://' ~ ansible_default_ipv4.address ~ ':9001') }}"
+      when: test_register_absent | default('') | length == 0
+
+- name: Check the environments
+  hosts: testhost
+  vars_files: [vars.yml]
+  tasks:
+    - name: List the environments
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/endpoints
+        headers:
+          Host: portainer.test
+          X-API-Key: "{{ test_register_token }}"
+        return_content: false
+      register: test_endpoints
+      no_log: true
+      check_mode: false
+      when: test_register_verify | default(false) | bool or test_register_absent | default('') | length > 0
+
+    - name: The agent is there exactly once
+      ansible.builtin.assert:
+        that:
+          - test_endpoints.json | selectattr('Name', 'equalto', 'test-agent') | list | length == 1
+          - (test_endpoints.json | selectattr('Name', 'equalto', 'test-agent') | first).Type == 2
+          - (test_endpoints.json | selectattr('Name', 'equalto', 'test-agent') | first).URL == 'tcp://' ~ ansible_default_ipv4.address ~ ':9001'
+        quiet: true
+      when: test_register_verify | default(false) | bool
+
+    - name: The named environment does not exist
+      ansible.builtin.assert:
+        that: test_endpoints.json | selectattr('Name', 'equalto', test_register_absent) | list | length == 0
+        quiet: true
+      when: test_register_absent | default('') | length > 0

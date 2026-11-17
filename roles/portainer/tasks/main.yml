@@ -87,3 +87,7 @@
     pull: missing
     recreate: "{{ 'always' if portainer_env is changed or portainer_admin_password_file is changed else 'auto' }}"
     remove_orphans: true
+
+- name: Register the agent on the server
+  ansible.builtin.include_tasks: register.yml
+  when: portainer_mode == 'agent' and portainer_agent_register_url | length > 0

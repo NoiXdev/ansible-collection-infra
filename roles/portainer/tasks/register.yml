@@ -1,0 +1,134 @@
+---
+# Register this agent as an environment on a Portainer server through its API.
+# Included in agent mode when portainer_agent_register_url is set. The access
+# token only ever lives in a temporary header file that curl reads, never on a
+# command line, and every task that sees the response is no_log.
+- name: Check for curl
+  ansible.builtin.command:
+    argv: [curl, --version]
+  register: portainer_register_curl_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Require curl
+  ansible.builtin.fail:
+    msg: portainer_agent_register_url needs curl on the host (the base role installs it).
+  when: portainer_register_curl_check.rc != 0
+
+- name: Work out the curl call
+  ansible.builtin.set_fact:
+    portainer_register_base: "{{ portainer_agent_register_url | regex_replace('/+$', '') }}"
+    portainer_register_resolve: >-
+      {{ (portainer_agent_register_url | urlsplit('hostname'))
+         ~ ':'
+         ~ (portainer_agent_register_url | urlsplit('port')
+            | default(443 if (portainer_agent_register_url | urlsplit('scheme')) == 'https' else 80, true))
+         ~ ':'
+         ~ (('[' ~ (portainer_agent_register_address | regex_replace('^\[|\]$', '')) ~ ']')
+            if ':' in portainer_agent_register_address
+            else portainer_agent_register_address) }}
+
+- name: Register the agent
+  block:
+    - name: Create the header file
+      ansible.builtin.tempfile:
+        state: file
+        prefix: portainer-register-
+      register: portainer_register_header
+      changed_when: false
+      check_mode: false
+
+    - name: Write the token header
+      ansible.builtin.copy:
+        dest: "{{ portainer_register_header.path }}"
+        content: "X-API-Key: {{ portainer_agent_register_api_token }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      changed_when: false
+      check_mode: false
+
+    - name: Set the curl arguments
+      ansible.builtin.set_fact:
+        portainer_register_curl: >-
+          {{ ['curl', '--silent', '--show-error', '--fail-with-body', '--max-time', '30',
+              '--header', '@' ~ portainer_register_header.path]
+             + (['--resolve', portainer_register_resolve] if portainer_agent_register_address | length > 0 else []) }}
+
+    - name: Read the environments
+      ansible.builtin.command:
+        argv: "{{ portainer_register_curl + [portainer_register_base ~ '/api/endpoints'] }}"
+      register: portainer_register_list
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Stop when the environments cannot be read
+      ansible.builtin.fail:
+        msg: >-
+          Could not read the environments from {{ portainer_register_base }}/api/endpoints
+          (curl rc {{ portainer_register_list.rc }}): {{ portainer_register_list.stderr }}
+          {{ portainer_register_list.stdout[:300] }}
+      when: portainer_register_list.rc != 0
+
+    - name: Find the environment of this name
+      ansible.builtin.set_fact:
+        portainer_register_existing: >-
+          {{ portainer_register_list.stdout | from_json
+             | selectattr('Name', 'equalto', portainer_agent_register_name) | list }}
+
+    - name: Refuse an environment of this name that points elsewhere
+      ansible.builtin.fail:
+        msg: >-
+          Portainer at {{ portainer_register_base }} already has an environment named
+          {{ portainer_agent_register_name }} with the URL {{ portainer_register_existing[0].URL }},
+          but this agent is {{ portainer_agent_register_endpoint }}
+          (portainer_agent_register_endpoint). Nothing was changed.
+      when:
+        - portainer_register_existing | length > 0
+        - portainer_register_existing[0].URL != portainer_agent_register_endpoint
+
+    # The server contacts the agent while it creates the environment, so this
+    # is retried while the agent starts.
+    - name: Create the environment
+      ansible.builtin.command:
+        argv: >-
+          {{ portainer_register_curl + [
+               '--request', 'POST',
+               '--form-string', 'Name=' ~ portainer_agent_register_name,
+               '--form-string', 'EndpointCreationType=2',
+               '--form-string', 'URL=' ~ portainer_agent_register_endpoint,
+               '--form-string', 'GroupID=1',
+               '--form-string', 'TLS=true',
+               '--form-string', 'TLSSkipVerify=true',
+               '--form-string', 'TLSSkipClientVerify=true',
+               portainer_register_base ~ '/api/endpoints'] }}
+      register: portainer_register_create
+      retries: 10
+      delay: 3
+      until: portainer_register_create.rc == 0
+      changed_when: true
+      failed_when: false
+      no_log: true
+      when: portainer_register_existing | length == 0
+
+    - name: Stop when the environment could not be created
+      ansible.builtin.fail:
+        msg: >-
+          Could not create the environment {{ portainer_agent_register_name }} at
+          {{ portainer_register_base }}/api/endpoints (curl rc {{ portainer_register_create.rc }}):
+          {{ portainer_register_create.stderr }} {{ portainer_register_create.stdout[:300] }}
+      when:
+        - portainer_register_create is not skipped
+        - portainer_register_create.rc != 0
+  always:
+    - name: Remove the header file
+      ansible.builtin.file:
+        path: "{{ portainer_register_header.path }}"
+        state: absent
+      changed_when: false
+      check_mode: false
+      when: portainer_register_header.path is defined
