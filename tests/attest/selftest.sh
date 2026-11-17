@@ -433,15 +433,22 @@ boom
 noix_done
 STUB
 bashes=(bash)
-if [ -x /bin/bash ] && [ "$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}')" = 3 ]; then
+# bash 4+ exits 1 on an unbound variable by itself, so the guard's message
+# only appears under bash 3; there only the exit status and cleanup count.
+bash_major() { "$1" -c 'echo ${BASH_VERSINFO[0]}'; }
+if [ -x /bin/bash ] && [ "$(bash_major /bin/bash)" = 3 ]; then
   bashes+=(/bin/bash)
 else
   echo "# skipped: /bin/bash is not bash 3, the 3.2 variants do not run"
 fi
 for b in "${bashes[@]}"; do
   rm -f "$tmp/suite/cleaned"
-  expect "suite helpers: unbound variable exits non-zero under $b" 1 "stopped before the end" -- \
-    "$b" "$tmp/suite/stub.sh"
+  if [ "$(bash_major "$b")" = 3 ]; then
+    expect "suite helpers: unbound variable exits non-zero under $b" 1 "stopped before the end" -- \
+      "$b" "$tmp/suite/stub.sh"
+  else
+    expect "suite helpers: unbound variable exits non-zero under $b" 1 "unbound variable" -- "$b" "$tmp/suite/stub.sh"
+  fi
   check "suite helpers: cleanup ran on the error exit under $b" test -e "$tmp/suite/cleaned"
   rm -f "$tmp/suite/cleaned"
   expect "suite helpers: noix_done keeps exit 0 under $b" 0 "stub-ok" -- "$b" "$tmp/suite/stub.sh" ok
