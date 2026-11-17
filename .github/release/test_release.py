@@ -132,6 +132,20 @@ class Preflight(RepoCase):
         self.assertIn("galaxy.yml", msg)
 
 
+class AfterRelease(RepoCase):
+    def test_real_shape_with_empty_unreleased_passes_structure_check(self):
+        with open(os.path.join(REPO_ROOT, "CHANGELOG.md"), encoding="utf-8", newline="") as f:
+            real = f.read()
+        i = real.index("## Unreleased") + len("## Unreleased")
+        j = real.index("\n## ", i)
+        empty = real[:i] + "\n" + real[j:]
+        with self.assertRaises(rl.ReleaseError) as cm:
+            rl.bump_changelog(empty, "9.9.9", "2026-01-01")
+        self.assertIn("empty", str(cm.exception))
+        marked = empty[:i] + "\n\n- placeholder entry" + empty[i:]
+        rl.bump_changelog(marked, "9.9.9", "2026-01-01")
+
+
 class Apply(RepoCase):
     def test_apply_writes_both_files(self):
         d = self.make_repo()
@@ -190,10 +204,28 @@ class Cli(RepoCase):
         self.assertEqual((r.returncode, r.stdout), (0, "0.6.0\n"))
         self.assertEqual(self.run_cli("apply", "--version", "0.6.0", "--date", "2026-11-20", "--repo", d).returncode, 0)
         r = self.run_cli("notes", "--version", "0.6.0", "--repo-slug", SLUG, "--repo", d)
-        self.assertEqual((r.returncode, r.stdout), (0, "- entry\n"))
+        self.assertEqual((r.returncode, r.stdout), (0, "- entry"))
         self.assertEqual(self.run_cli("readme", "--version", "0.6.0", "--repo", d).returncode, 0)
         with open(os.path.join(d, "README.md"), encoding="utf-8") as f:
             self.assertIn("    version: v0.6.0\n", f.read())
+
+
+class CliNotesSize(RepoCase):
+    def test_cli_notes_output_within_limit(self):
+        # Fixed-width lines, so one of the widths lands the body exactly on the limit.
+        for width in (1, 2, 3, 4, 5):
+            with self.subTest(width=width):
+                lines = ["x" * width] * (70000 // (width + 1))
+                cl = ("# Changelog\n\n## 0.6.0 \u2014 2026-11-20\n\n" + "\n".join(lines)
+                      + "\n\n## 0.5.0 \u2014 2026-11-14\n\n- old\n")
+                d = self.make_repo(changelog=cl, tags=("v0.5.0",))
+                r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "release.py"), "notes",
+                                    "--version", "0.6.0", "--repo-slug", SLUG, "--repo", d],
+                                   capture_output=True)
+                self.assertEqual(r.returncode, 0)
+                self.assertLessEqual(len(r.stdout), 60000)
+                self.assertGreater(len(r.stdout), 59000)
+                r.stdout.decode("utf-8")
 
 
 class RealRepo(unittest.TestCase):
@@ -201,7 +233,11 @@ class RealRepo(unittest.TestCase):
         def read(n):
             with open(os.path.join(REPO_ROOT, n), encoding="utf-8", newline="") as f:
                 return f.read()
-        rl.bump_changelog(read("CHANGELOG.md"), "9.9.9", "2026-01-01")
+        # Structure only: the real Unreleased section is empty right after a release.
+        cl = read("CHANGELOG.md")
+        marker = "## Unreleased"
+        i = cl.index(marker) + len(marker)
+        rl.bump_changelog(cl[:i] + "\n\n- placeholder entry" + cl[i:], "9.9.9", "2026-01-01")
         rl.set_galaxy_version(read("galaxy.yml"), "9.9.9")
         rl.set_readme_version(read("README.md"), "9.9.9")
 

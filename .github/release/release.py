@@ -224,7 +224,7 @@ def main(argv=None):
             apply(a.repo, a.version, a.date)
         elif a.cmd == "notes":
             body = release_notes(_read(a.repo, "CHANGELOG.md"), a.version, a.repo_slug)
-            sys.stdout.buffer.write((body + "\n").encode("utf-8"))
+            sys.stdout.buffer.write(body.encode("utf-8"))  # no newline: the body is capped at 60 000 bytes
         else:
             _write(a.repo, "README.md", set_readme_version(_read(a.repo, "README.md"), a.version))
     except ReleaseError as e:
