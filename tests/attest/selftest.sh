@@ -525,10 +525,15 @@ done
 printf '# Changelog\n' >"$repo/CHANGELOG.md"
 g add -A && g commit -q -m "chore: plan repo"
 b0="$(head_sha)"
-change() { # change FILE: a commit that changes FILE
+# change FILE: a commit that changes FILE. The counter in the message keeps
+# two such commits on the same parent apart when they fall in one second
+# (same tree, parent and time would be one commit, and one note).
+changes=0
+change() {
+  changes=$((changes + 1))
   mkdir -p "$repo/$(dirname "$1")"
   echo change >>"$repo/$1"
-  g add -A && g commit -q -m "change $1"
+  g add -A && g commit -q -m "change $1 ($changes)"
 }
 iso_ago() { # iso_ago DAYS: the UTC time DAYS before $NOW
   python3 -I -c 'import sys, time
