@@ -257,8 +257,18 @@ jobs:
             exit 1
           fi
           # From here on the commit exists on main.
-          git fetch --quiet origin main
-          actual=$(git rev-parse "$oid^{tree}")
+          if ! git fetch --quiet origin main; then
+            echo "::error::the bump commit $oid exists on main, untagged, with no release and no README commit, but fetching main to check it failed. Check $oid by hand: revert it, or tag it after checking its tree is $TREE." >&2
+            exit 1
+          fi
+          if ! actual=$(git rev-parse "$oid^{tree}"); then
+            echo "::error::the bump commit $oid exists on main, untagged, with no release and no README commit, but its tree could not be read. Check it by hand: revert it, or tag it after checking its tree is $TREE." >&2
+            exit 1
+          fi
+          if ! parent=$(git rev-parse "$oid^1") || [ "$parent" != "$SHA" ]; then
+            echo "::error::the bump commit $oid is on main, untagged, with no release and no README commit, but its parent is '${parent:-unreadable}', not the guarded $SHA. Revert $oid on main by hand." >&2
+            exit 1
+          fi
           if [ "$actual" != "$TREE" ]; then
             echo "::error::the bump commit $oid is on main but its tree $actual differs from the gated $TREE. It is untagged, there is no release and no README commit. Revert $oid on main by hand." >&2
             exit 1
@@ -270,30 +280,36 @@ jobs:
           OID: ${{ steps.bump.outputs.oid }}
         run: |
           set -euo pipefail
-          python3 -I .github/release/release.py notes --version "$VERSION" --repo-slug "$REPO" > "$RUNNER_TEMP/notes.md"
+          if ! python3 -I .github/release/release.py notes --version "$VERSION" --repo-slug "$REPO" > "$RUNNER_TEMP/notes.md"; then
+            echo "::error::the release notes could not be written. The bump commit $OID exists on main, untagged, with no release and no README commit. Revert it by hand, or create the release for $TAG on $OID once the notes work." >&2
+            exit 1
+          fi
           # --target on a tag that does not exist yet creates a lightweight
           # tag on that commit together with the release.
           if ! gh release create "$TAG" --target "$OID" --title "$TAG" \
               --notes-file "$RUNNER_TEMP/notes.md" --verify-tag=false; then
-            echo "::error::the bump commit $OID exists on main and is verified, but the tag $TAG and the release were not created, and there is no README commit. Create the release for $TAG on $OID by hand (or revert $OID), then bump the README." >&2
+            echo "::error::the bump commit $OID exists on main and is verified, and no README commit exists. The tag $TAG and the release were probably not created, but gh may have failed after the server created them: check the repository Releases and tags for $TAG first. If they are missing, create the release for $TAG on $OID by hand (or revert $OID); then bump the README." >&2
             exit 1
           fi
 
       - name: Point the README install example at the tag
+        id: readme
         env:
           OID: ${{ steps.bump.outputs.oid }}
         run: |
           set -euo pipefail
-          # A failure here leaves a complete release: warn, do not undo.
+          # A failure here leaves a complete release: warn and carry on to the
+          # announcement; the last step turns the run red afterwards.
           if ! {
             git reset --quiet --hard "$OID" &&
             python3 -I .github/release/release.py readme --version "$VERSION" &&
             "$RUNNER_TEMP/commit.sh" "docs: point the install example at $TAG" "$OID" README.md > /dev/null
           }; then
             echo "::warning::the bump commit $OID, the tag $TAG and the release exist and are complete; only the README commit failed. Bump the README install example to $TAG by hand." >&2
-            echo "::error::the README commit failed after a complete release of $TAG (bump commit, tag and release exist). Bump the README by hand; the announcement was skipped." >&2
-            exit 1
+            echo "readme_ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "readme_ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Read the release for the announcement
         id: release
@@ -317,3 +333,9 @@ jobs:
           body: ${{ steps.release.outputs.body }}
           url: ${{ steps.release.outputs.url }}
           product-name: noixdev.infra
+
+      - name: Fail the run if the README commit is missing
+        if: ${{ always() && steps.readme.outputs.readme_ok == 'false' }}
+        run: |
+          echo "::error::the release of $TAG is complete (bump commit, tag, release, announcement), but the README commit failed. Bump the README install example to $TAG by hand." >&2
+          exit 1
