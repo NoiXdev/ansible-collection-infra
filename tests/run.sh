@@ -95,13 +95,11 @@ echo "== portainer agent registers itself"
 play "$here/portainer_agent.yml" >"$out/portainer-agent.log" 2>&1 \
   || { cat "$out/portainer-agent.log" >&2; echo "portainer agent registration failed" >&2; exit 1; }
 grep -Eq 'changed=[1-9]' "$out/portainer-agent.log" || { echo "the first registration reported no change" >&2; exit 1; }
-play "$here/portainer_agent.yml" -e test_register_verify=true -v >"$out/portainer-agent-again.log" 2>&1 \
+play "$here/portainer_agent.yml" -e test_register_verify=true -v --diff >"$out/portainer-agent-again.log" 2>&1 \
   || { cat "$out/portainer-agent-again.log" >&2; exit 1; }
 grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/portainer-agent-again.log" \
   || { echo "a second registration changed something" >&2; exit 1; }
 token="$(docker exec "$host" cat /tmp/portainer-register-token)"
-! grep -qF "$token" "$out/portainer-agent.log" "$out/portainer-agent-again.log" \
-  || { echo "the API token shows up in the output" >&2; exit 1; }
 
 echo "== portainer agent registration in check mode creates nothing"
 play "$here/portainer_agent.yml" --check -e test_register_name=check-agent >"$out/portainer-agent-check.log" 2>&1 \
@@ -115,6 +113,13 @@ if play "$here/portainer_agent.yml" -e test_register_endpoint=tcp://192.0.2.10:9
 fi
 grep -qF "tcp://192.0.2.10:9001" "$out/portainer-agent-conflict.log" \
   || { cat "$out/portainer-agent-conflict.log" >&2; exit 1; }
+grep -Eq 'with the URL tcp://[0-9.]+:9001' "$out/portainer-agent-conflict.log" \
+  || { cat "$out/portainer-agent-conflict.log" >&2; echo "the conflict does not name the existing URL" >&2; exit 1; }
+play "$here/portainer_agent.yml" -e test_register_verify=true >"$out/portainer-agent-after-conflict.log" 2>&1 \
+  || { cat "$out/portainer-agent-after-conflict.log" >&2; echo "the conflict changed the existing environment" >&2; exit 1; }
+token="$(docker exec "$host" cat /tmp/portainer-register-token)"
+! grep -qF "$token" "$out"/portainer-agent*.log \
+  || { echo "the API token shows up in the output" >&2; exit 1; }
 
 echo "== invalid dns settings must fail"
 if play "$here/dns_invalid.yml" >"$out/dns-invalid.log" 2>&1; then

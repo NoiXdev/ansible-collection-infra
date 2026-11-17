@@ -58,6 +58,7 @@ argument_specs:
           --resolve). Empty uses normal name resolution.
       portainer_agent_register_api_token:
         type: str
+        no_log: true
         description: >-
           Agent only. Portainer access token (header X-API-Key) used to register.
           Required when portainer_agent_register_url is set. Keep it in a vault.

@@ -13,7 +13,8 @@
   same name with the same endpoint is left alone, and the same name with another endpoint fails
   the run naming both and changes nothing. Nothing is created in check mode. The token only lives
   in a temporary 0600 header file that curl reads and that is removed afterwards, never on a
-  command line or in the output. Removing or editing environments is not handled; the host needs
+  command line or in the output. An existing environment of another name for the same agent is
+  not detected (the match is by name only). Removing or editing environments is not handled; the host needs
   curl (the `base` role installs it).
 - `tailscale`: the first login gives up after `tailscale_login_timeout` seconds (default 120)
   instead of waiting forever. The run then fails with what `tailscale up` reported or, when the

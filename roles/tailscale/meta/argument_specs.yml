@@ -33,4 +33,4 @@ argument_specs:
         type: int
         description: >-
           Seconds the first login waits for the node to come up. A login that
-          takes longer fails the run, and names a pending device approval.
+          takes longer fails the run, and names a pending device approval. 0 waits forever.

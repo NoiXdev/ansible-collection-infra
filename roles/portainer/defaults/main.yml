@@ -36,4 +36,7 @@ portainer_agent_register_name: "{{ inventory_hostname }}"
 # Address the server dials to reach this agent (the first portainer_agent_bind
 # address; "first | default" because the argument validation also templates this
 # in server mode, where portainer_agent_bind is empty)
-portainer_agent_register_endpoint: "tcp://{{ portainer_agent_bind | first | default('') }}:9001"
+portainer_agent_register_endpoint: >-
+  tcp://{{ ('[' ~ (portainer_agent_bind | first | default('')) ~ ']')
+  if ':' in (portainer_agent_bind | first | default(''))
+  else (portainer_agent_bind | first | default('')) }}:9001
