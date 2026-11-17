@@ -292,7 +292,7 @@ expect_answer() {
   local status="$1" text="$2" path="$3" answer
   shift 3
   answer="$(request "$path" "$@")"
-  [ "${answer##*$'\n'}" = "$status" ] && [[ "${answer%$'\n'*}" == *"$text"* ]] \
+  { [ "${answer##*$'\n'}" = "$status" ] && [[ "${answer%$'\n'*}" == *"$text"* ]]; } \
     || fail "$path answered ${answer##*$'\n'} ($(printf '%s' "${answer%$'\n'*}" | head -c 200)), not $status with: $text"
 }
 # Traefik's own 403 of the ipAllowList middleware: the body is Forbidden.
@@ -305,7 +305,7 @@ expect_denied() {
 expect_reaches_n8n() {
   local answer
   answer="$(request "$@")"
-  [ "${answer##*$'\n'}" != 403 ] && [ "${answer##*$'\n'}" != 000 ] \
+  { [ "${answer##*$'\n'}" != 403 ] && [ "${answer##*$'\n'}" != 000 ]; } \
     || fail "$1 did not reach n8n: ${answer##*$'\n'} $(printf '%s' "${answer%$'\n'*}" | head -c 200)"
 }
 # Waits until Traefik denies the path (it reads new labels within seconds).
@@ -483,7 +483,7 @@ expect_worker_after_main() {
   log="$(hx sh -c "cd $dir && docker compose logs --no-color --no-log-prefix --timestamps n8n")"
   ready="$(grep -m 1 'Editor is now accessible' <<<"$log" | cut -c1-19)"
   started="$(hx sh -c "docker inspect --format '{{.State.StartedAt}}' \$(cd $dir && docker compose ps --quiet $1)" | cut -c1-19)"
-  [ -n "$ready" ] && [ -n "$started" ] || fail "cannot tell when n8n was ready ($ready) and $1 started ($started)"
+  { [ -n "$ready" ] && [ -n "$started" ]; } || fail "cannot tell when n8n was ready ($ready) and $1 started ($started)"
   [[ "$started" > "$ready" || "$started" == "$ready" ]] || fail "$1 started at $started, before the main instance was ready at $ready"
 }
 

@@ -926,7 +926,7 @@ test_db_check() {
   expect_unchanged noop-db-down
   # The bound the check had: the rest of paperless_health_timeout.
   seconds="$(sed -n 's/.*migrate --check did not finish within \([0-9]*\) seconds.*/\1/p' "$out/noop-db-down.log" | head -n 1)"
-  [ -n "$seconds" ] && [ "$seconds" -le 30 ] || fail "the database check was not bounded by paperless_health_timeout=30: ${seconds:-no time} seconds"
+  { [ -n "$seconds" ] && [ "$seconds" -le 30 ]; } || fail "the database check was not bounded by paperless_health_timeout=30: ${seconds:-no time} seconds"
   expect_idempotent -e "paperless_version=$old_version"
 }
 

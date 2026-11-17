@@ -85,8 +85,8 @@ play "$here/oh_my_zsh.yml" --diff >"$out/zshrc-link.log" 2>&1 \
   || { cat "$out/zshrc-link.log" >&2; echo "oh_my_zsh failed with a link as ~/.zshrc" >&2; exit 1; }
 ! grep -qF keep-zshrc-target "$out/zshrc-link.log" \
   || { echo "oh_my_zsh showed the content behind the link in its --diff output" >&2; exit 1; }
-[ "$(docker exec "$host" stat -c '%U:%G %a' /opt/zshrc-target)" = "root:root 600" ] \
-  && [ "$(docker exec "$host" cat /opt/zshrc-target)" = keep-zshrc-target ] \
+{ [ "$(docker exec "$host" stat -c '%U:%G %a' /opt/zshrc-target)" = "root:root 600" ] \
+  && [ "$(docker exec "$host" cat /opt/zshrc-target)" = keep-zshrc-target ]; } \
   || { echo "oh_my_zsh changed the target of the link" >&2; exit 1; }
 docker exec "$host" sh -c 'test -f /srv/deploy/.zshrc && test ! -L /srv/deploy/.zshrc \
   && head -n 1 /srv/deploy/.zshrc | grep -qF "Managed by noixdev.infra" \

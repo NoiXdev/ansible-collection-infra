@@ -278,7 +278,7 @@ expect_answer() {
   local status="$1" text="$2" path="$3" answer
   shift 3
   answer="$(request "$path" "$@")"
-  [ "${answer##*$'\n'}" = "$status" ] && [[ "${answer%$'\n'*}" == *"$text"* ]] \
+  { [ "${answer##*$'\n'}" = "$status" ] && [[ "${answer%$'\n'*}" == *"$text"* ]]; } \
     || fail "$path answered ${answer##*$'\n'} ($(printf '%s' "${answer%$'\n'*}" | head -c 200)), not $status with: $text"
 }
 # Traefik's own 403 of the ipAllowList middleware: the body is Forbidden.
@@ -1026,7 +1026,7 @@ test_db_check() {
   expect_unchanged noop-db-down
   # The bound the check had: the rest of tandoor_health_timeout.
   seconds="$(sed -n 's/.*migrate --check did not finish within \([0-9]*\) seconds.*/\1/p' "$out/noop-db-down.log" | head -n 1)"
-  [ -n "$seconds" ] && [ "$seconds" -le 30 ] || fail "the database check was not bounded by tandoor_health_timeout=30: ${seconds:-no time} seconds"
+  { [ -n "$seconds" ] && [ "$seconds" -le 30 ]; } || fail "the database check was not bounded by tandoor_health_timeout=30: ${seconds:-no time} seconds"
   expect_idempotent -e "tandoor_version=$old_version"
 }
 
