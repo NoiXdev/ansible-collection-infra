@@ -326,6 +326,7 @@ jobs:
       - name: Post to Discord
         # By @main, like Pulsix's release workflow: the shared action changes
         # without a pin bump here.
+        id: announce
         uses: NoiXdev/github-workflows/actions/announce-release@main
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_RELEASE_NOTIFICATION || vars.DISCORD_WEBHOOK_RELEASE_NOTIFICATION }}
@@ -336,6 +337,8 @@ jobs:
 
       - name: Fail the run if the README commit is missing
         if: ${{ always() && steps.readme.outputs.readme_ok == 'false' }}
+        env:
+          ANNOUNCE: ${{ steps.announce.outcome }}
         run: |
-          echo "::error::the release of $TAG is complete (bump commit, tag, release, announcement), but the README commit failed. Bump the README install example to $TAG by hand." >&2
+          echo "::error::the bump commit, the tag $TAG and the release exist, but the README commit failed. Bump the README install example to $TAG by hand. The Discord announcement step ended as '$ANNOUNCE' (success means it was posted)." >&2
           exit 1
