@@ -82,6 +82,15 @@ grep -q "Error pages entrypoints must exist" "$out/error-pages-invalid.log" \
 docker exec "$host" test ! -e /opt/traefik-invalid \
   || { echo "traefik touched the host before checking its settings" >&2; exit 1; }
 
+echo "== portainer agent registration without a token must fail"
+if play "$here/portainer_register_invalid.yml" >"$out/portainer-register-invalid.log" 2>&1; then
+  echo "portainer registered an agent without a token" >&2; exit 1
+fi
+grep -q "portainer_agent_register_api_token is empty" "$out/portainer-register-invalid.log" \
+  || { cat "$out/portainer-register-invalid.log" >&2; exit 1; }
+docker exec "$host" test ! -e /opt/portainer-register-invalid \
+  || { echo "portainer changed the host before checking the registration settings" >&2; exit 1; }
+
 echo "== invalid dns settings must fail"
 if play "$here/dns_invalid.yml" >"$out/dns-invalid.log" 2>&1; then
   echo "dns accepted a wildcard bind address" >&2

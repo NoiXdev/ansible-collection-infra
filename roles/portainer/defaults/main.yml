@@ -23,3 +23,17 @@ portainer_bind: []
 
 # agent: addresses the agent port (9001) is published on; required
 portainer_agent_bind: []
+
+# agent: register this host as an environment on a Portainer server. Empty URL:
+# no registration.
+portainer_agent_register_url: ""
+# Address the URL's host name is pinned to (curl --resolve); empty: normal resolution
+portainer_agent_register_address: ""
+# Portainer access token (header X-API-Key); required when the URL is set
+portainer_agent_register_api_token: ""
+# Environment name
+portainer_agent_register_name: "{{ inventory_hostname }}"
+# Address the server dials to reach this agent (the first portainer_agent_bind
+# address; "first | default" because the argument validation also templates this
+# in server mode, where portainer_agent_bind is empty)
+portainer_agent_register_endpoint: "tcp://{{ portainer_agent_bind | first | default('') }}:9001"

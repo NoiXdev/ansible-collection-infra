@@ -46,3 +46,26 @@ argument_specs:
         type: list
         elements: str
         description: Agent only. Addresses the agent port 9001 is published on.
+      portainer_agent_register_url:
+        type: str
+        description: >-
+          Agent only. Base URL of the Portainer server (http:// or https://) this
+          host registers itself on as an environment. Empty registers nothing.
+      portainer_agent_register_address:
+        type: str
+        description: >-
+          Agent only. Address the registration URL's host name is pinned to (curl
+          --resolve). Empty uses normal name resolution.
+      portainer_agent_register_api_token:
+        type: str
+        description: >-
+          Agent only. Portainer access token (header X-API-Key) used to register.
+          Required when portainer_agent_register_url is set. Keep it in a vault.
+      portainer_agent_register_name:
+        type: str
+        description: Agent only. Name of the environment; defaults to the inventory host name.
+      portainer_agent_register_endpoint:
+        type: str
+        description: >-
+          Agent only. Address the server dials to reach this agent; defaults to
+          the first portainer_agent_bind address on port 9001.

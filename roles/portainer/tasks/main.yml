@@ -14,6 +14,17 @@
     quiet: true
   when: portainer_mode == 'agent'
 
+- name: Check the agent registration settings
+  ansible.builtin.assert:
+    that:
+      - portainer_agent_register_url is match('^https?://')
+      - portainer_agent_register_api_token | length > 0
+    fail_msg: >-
+      portainer_agent_register_url is set, but portainer_agent_register_api_token
+      is empty (or the URL is not http:// or https://).
+    quiet: true
+  when: portainer_mode == 'agent' and portainer_agent_register_url | length > 0
+
 - name: Check the admin password
   ansible.builtin.assert:
     that: portainer_admin_password | length >= 12

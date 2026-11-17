@@ -1,0 +1,14 @@
+---
+# The portainer role must reject a registration URL without a token before it
+# touches the host.
+- name: Portainer agent registration without a token
+  hosts: testhost
+  vars_files: [vars.yml]
+  roles:
+    - role: noixdev.infra.portainer
+      vars:
+        portainer_mode: agent
+        portainer_dir: /opt/portainer-register-invalid
+        portainer_project: portainer-register-invalid
+        portainer_agent_bind: ["127.0.0.1"]
+        portainer_agent_register_url: http://portainer.test
