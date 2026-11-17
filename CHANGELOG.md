@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-11-17
+
 - `portainer`: an agent registers itself as an environment on a Portainer server. Set
   `portainer_agent_register_url` (the server, e.g. `https://portainer.example.com`) and
   `portainer_agent_register_api_token` (an access token; the run fails before any change when it is
