@@ -1,0 +1,319 @@
+# Cuts a release of the noixdev.infra collection from main. Started by hand
+# from the Actions tab.
+#
+# prepare: refuses anything but a green main, runs the release gate on the
+#   guarded SHA, applies the version bump (CHANGELOG.md and galaxy.yml) to a
+#   LOCAL commit, runs the gate again on that commit and records its tree. A
+#   dry run (the default) stops here and writes nothing: no commit, no tag,
+#   no release, no message.
+# publish: repeats the bump on the guarded SHA, checks it reproduces the gated
+#   tree, creates the bump commit on main through the API (a verified commit,
+#   only if main has not moved), checks that commit's tree against the gated
+#   one, and only then creates the lightweight tag together with the release.
+#   Then the README install example is bumped in a second commit, and the
+#   release is announced on Discord.
+#
+# The release logic (version arithmetic, the shapes of CHANGELOG.md, galaxy.yml
+# and README.md it accepts, the release notes) lives in .github/release/ so it
+# is unit-tested; this file only sequences it. That tag is created with the
+# workflow's own token, so it does not start release-gate.yml: the same check
+# (verify-tests-attestation.sh) already ran in prepare, before anything was
+# written.
+name: release
+run-name: Release noixdev.infra (${{ inputs.bump }}${{ inputs.dry_run && ', dry run' || '' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump"
+        type: choice
+        options: [patch, minor, major]
+        default: minor
+      dry_run:
+        description: "Check and prepare everything, write nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One release at a time, and never cancel one half-way through.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      date: ${{ steps.plan.outputs.date }}
+      tree: ${{ steps.tree.outputs.tree }}
+    steps:
+      - name: The release must start from main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::a release is only ever cut from main, not $REF" >&2
+            exit 1
+          fi
+
+      - name: CI must have passed for that commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          # The newest ci run for this exact commit that was a push to main.
+          # A run for the same SHA from a pull request or another branch does
+          # not count, and no run at all is a failure: "never tested" must not
+          # be released either.
+          conclusion=$(gh api \
+            "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::ci for $SHA concluded '$conclusion'; only a green commit is released" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Fetch the tags and the test attestations
+        run: |
+          git fetch --quiet origin '+refs/notes/tests:refs/notes/tests'
+          git fetch --quiet --tags
+
+      - name: The announcement webhook must exist
+        if: ${{ !inputs.dry_run }}
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_RELEASE_NOTIFICATION || vars.DISCORD_WEBHOOK_RELEASE_NOTIFICATION }}
+        run: |
+          # Checked before anything is written: a release that cannot be
+          # announced is better stopped than left half-announced.
+          if [ -z "$WEBHOOK" ]; then
+            echo "::error::DISCORD_WEBHOOK_RELEASE_NOTIFICATION is missing as an organization secret or variable; the release would go out unannounced" >&2
+            exit 1
+          fi
+
+      - name: Work out the version
+        id: plan
+        env:
+          BUMP: ${{ inputs.bump }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version=$(python3 -I .github/release/release.py preflight --bump "$BUMP")
+          {
+            echo "sha=$SHA"
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "date=$(date -u +%F)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: The guarded commit must carry a green test attestation
+        env:
+          SHA: ${{ github.sha }}
+        run: .github/scripts/verify-tests-attestation.sh "$SHA"
+
+      - name: Apply the bump to a local commit
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          DATE: ${{ steps.plan.outputs.date }}
+        run: |
+          set -euo pipefail
+          python3 -I .github/release/release.py apply --version "$VERSION" --date "$DATE"
+          git -c "user.name=github-actions[bot]" \
+              -c "user.email=41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "chore: bump the collection to $VERSION" -- CHANGELOG.md galaxy.yml
+
+      - name: The bump commit must pass the same gate
+        run: .github/scripts/verify-tests-attestation.sh HEAD
+
+      - name: Record the tree of the bump commit
+        id: tree
+        run: echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Release $TAG"
+            echo
+            echo "Version \`$VERSION\`, tag \`$TAG\`."
+            echo
+            echo '### Bump commit'
+            echo '```'
+            git show --stat HEAD
+            echo '```'
+            echo
+            echo '### galaxy.yml'
+            echo '```diff'
+            git diff HEAD^ HEAD -- galaxy.yml
+            echo '```'
+            echo
+            echo '### Release notes'
+            echo '````markdown'
+            python3 -I .github/release/release.py notes --version "$VERSION" --repo-slug "$REPO"
+            echo
+            echo '````'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: prepare
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      DATE: ${{ needs.prepare.outputs.date }}
+      TREE: ${{ needs.prepare.outputs.tree }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Repeat the bump and check it matches the gated tree
+        run: |
+          set -euo pipefail
+          python3 -I .github/release/release.py apply --version "$VERSION" --date "$DATE"
+          changed=$(git diff --name-only)
+          if [ "$changed" != $'CHANGELOG.md\ngalaxy.yml' ]; then
+            echo "::error::the bump changed unexpected files ($changed); nothing was written" >&2
+            exit 1
+          fi
+          git add CHANGELOG.md galaxy.yml
+          tree=$(git write-tree)
+          if [ "$tree" != "$TREE" ]; then
+            echo "::error::the bump produced tree $tree, not the gated $TREE; nothing was written" >&2
+            exit 1
+          fi
+
+      # The request body goes through a file: the changelog is far larger than
+      # one command-line argument may be, and it grows.
+      - name: Write the commit helper
+        run: |
+          cat > "$RUNNER_TEMP/commit.sh" <<'HELPER'
+          #!/usr/bin/env bash
+          # usage: commit.sh <headline> <expected-head-oid> <file>...
+          # Commits the working-tree contents of the files to main through the
+          # API and prints the new commit's oid. Fails if main is not at the
+          # expected oid.
+          set -euo pipefail
+          headline=$1 expected=$2
+          shift 2
+          args=(-n --arg repo "$REPO" --arg head "$expected" --arg headline "$headline")
+          adds=""
+          i=0
+          for f in "$@"; do
+            args+=(--arg "p$i" "$f" --rawfile "c$i" "$f")
+            adds="$adds${adds:+,}{path: \$p$i, contents: (\$c$i | @base64)}"
+            i=$((i + 1))
+          done
+          jq "${args[@]}" '{
+            query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+            variables: {input: {
+              branch: {repositoryNameWithOwner: $repo, branchName: "main"},
+              expectedHeadOid: $head,
+              message: {headline: $headline},
+              fileChanges: {additions: ['"$adds"']}
+            }}
+          }' > "$RUNNER_TEMP/request.json"
+          gh api graphql --input "$RUNNER_TEMP/request.json" --jq .data.createCommitOnBranch.commit.oid
+          HELPER
+          chmod +x "$RUNNER_TEMP/commit.sh"
+
+      - name: Create the bump commit on main
+        id: bump
+        run: |
+          set -euo pipefail
+          # expectedHeadOid is the guarded SHA: the API refuses the commit if
+          # main moved since prepare, so nothing is written in that case.
+          if ! oid=$("$RUNNER_TEMP/commit.sh" "chore: bump the collection to $VERSION" "$SHA" CHANGELOG.md galaxy.yml); then
+            echo "::error::the bump commit was not created (main moved since the check, or the API refused it). Normally nothing was written: no commit, no tag, no release, no README commit. Look at main before starting again, in case the request landed and only the answer was lost." >&2
+            exit 1
+          fi
+          if ! [[ "$oid" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::no commit id came back ('$oid'); check main by hand. Nothing is known to be written." >&2
+            exit 1
+          fi
+          # From here on the commit exists on main.
+          git fetch --quiet origin main
+          actual=$(git rev-parse "$oid^{tree}")
+          if [ "$actual" != "$TREE" ]; then
+            echo "::error::the bump commit $oid is on main but its tree $actual differs from the gated $TREE. It is untagged, there is no release and no README commit. Revert $oid on main by hand." >&2
+            exit 1
+          fi
+          echo "oid=$oid" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag and the release
+        env:
+          OID: ${{ steps.bump.outputs.oid }}
+        run: |
+          set -euo pipefail
+          python3 -I .github/release/release.py notes --version "$VERSION" --repo-slug "$REPO" > "$RUNNER_TEMP/notes.md"
+          # --target on a tag that does not exist yet creates a lightweight
+          # tag on that commit together with the release.
+          if ! gh release create "$TAG" --target "$OID" --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/notes.md" --verify-tag=false; then
+            echo "::error::the bump commit $OID exists on main and is verified, but the tag $TAG and the release were not created, and there is no README commit. Create the release for $TAG on $OID by hand (or revert $OID), then bump the README." >&2
+            exit 1
+          fi
+
+      - name: Point the README install example at the tag
+        env:
+          OID: ${{ steps.bump.outputs.oid }}
+        run: |
+          set -euo pipefail
+          # A failure here leaves a complete release: warn, do not undo.
+          if ! {
+            git reset --quiet --hard "$OID" &&
+            python3 -I .github/release/release.py readme --version "$VERSION" &&
+            "$RUNNER_TEMP/commit.sh" "docs: point the install example at $TAG" "$OID" README.md > /dev/null
+          }; then
+            echo "::warning::the bump commit $OID, the tag $TAG and the release exist and are complete; only the README commit failed. Bump the README install example to $TAG by hand." >&2
+            echo "::error::the README commit failed after a complete release of $TAG (bump commit, tag and release exist). Bump the README by hand; the announcement was skipped." >&2
+            exit 1
+          fi
+
+      - name: Read the release for the announcement
+        id: release
+        run: |
+          set -euo pipefail
+          {
+            echo "url=$(gh release view "$TAG" --json url --jq .url)"
+            echo "body<<NOTES_EOF_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            cat "$RUNNER_TEMP/notes.md"
+            echo ""
+            echo "NOTES_EOF_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post to Discord
+        # By @main, like Pulsix's release workflow: the shared action changes
+        # without a pin bump here.
+        uses: NoiXdev/github-workflows/actions/announce-release@main
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK_RELEASE_NOTIFICATION || vars.DISCORD_WEBHOOK_RELEASE_NOTIFICATION }}
+          tag: ${{ needs.prepare.outputs.tag }}
+          body: ${{ steps.release.outputs.body }}
+          url: ${{ steps.release.outputs.url }}
+          product-name: noixdev.infra
