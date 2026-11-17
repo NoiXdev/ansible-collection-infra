@@ -50,10 +50,15 @@ noix_link_collection() {
   if [ -L "$link" ]; then
     rm -f "$link"
   fi
-  if ! ln -s "$root" "$link" 2>/dev/null; then
-    [ "$(readlink "$link" 2>/dev/null || true)" = "$root" ] || {
-      echo "cannot link $link to $root" >&2
-      return 1
-    }
+  if [ -d "$link" ] && [ ! -L "$link" ]; then
+    echo "cannot link $link to $root: a directory is in the way" >&2
+    return 1
   fi
+  # -n: never follow an existing link or directory at $link into $root. Whether
+  # ln succeeded or lost a race, the link must now point at the root.
+  ln -sn "$root" "$link" 2>/dev/null || true
+  [ "$(readlink "$link" 2>/dev/null || true)" = "$root" ] || {
+    echo "cannot link $link to $root" >&2
+    return 1
+  }
 }

@@ -761,8 +761,9 @@
 - Tests: the signed run is incremental. `tests/attest.sh` runs an entry (a suite, `host` and
   `services` once per Ubuntu release) only when its files changed, its last run was red or is
   older than 28 days, or a shared or unmapped file changed, and carries it from the newest valid
-  signed run otherwise; `--plan` shows the decision and changes nothing, `--all` runs everything,
-  and a commit that changes only ignored files (such as `CHANGELOG.md`) needs no Docker. The map
+  signed run otherwise; `--plan` shows the decision and runs and signs nothing (it still
+  replaces the local notes with origin's, dropping notes that exist only locally), `--all`
+  runs everything, and a commit that changes only ignored files (such as `CHANGELOG.md`) needs no Docker. The map
   is `tests/suites.conf` (`[ignore]`, `[shared]`, `[suite <name>]`), checked by
   `attest_carry.py check-map` in the selftest. The release check accepts schema 1 and 2 notes,
   proves every carried entry against its source note, and refuses an entry older than 30 days at

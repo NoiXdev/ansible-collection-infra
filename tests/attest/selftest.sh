@@ -1228,6 +1228,14 @@ ln -s /nonexistent "$tmp/suite/out2/ansible_collections/noixdev/infra"
 check "suite helpers: a wrong link is replaced" bash "$tmp/suite/link.sh" "$tmp/suite/out2"
 check "suite helpers: the replaced link resolves to the root" \
   test "$(readlink "$tmp/suite/out2/ansible_collections/noixdev/infra")" = "$link_root"
+check "suite helpers: the parallel link calls add nothing to the root" test ! -e "$link_root/infra"
+sed 's/seq 20/seq 1/' "$tmp/suite/link.sh" >"$tmp/suite/link1.sh"
+mkdir -p "$tmp/suite/out3/ansible_collections/noixdev/infra"
+check "suite helpers: a real directory at the link path fails the call" \
+  sh -c '! bash "$1" "$2" 2>/dev/null' _ "$tmp/suite/link1.sh" "$tmp/suite/out3"
+check "suite helpers: a real directory at the link path gains no link inside" \
+  test ! -e "$tmp/suite/out3/ansible_collections/noixdev/infra/root"
+check "suite helpers: a real directory at the link path adds nothing to the root" test ! -e "$link_root/infra"
 unset p1 p2 rc1 rc2 link_root
 
 # --- preconditions -----------------------------------------------------------------------

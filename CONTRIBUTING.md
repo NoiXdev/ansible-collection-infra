@@ -66,10 +66,14 @@ signs the result for the commit.
 
 ```bash
 git push                         # the commit has to be on GitHub first
-tests/attest.sh --plan           # what would run or be carried; changes nothing
+tests/attest.sh --plan           # what would run or be carried; runs and signs nothing
 tests/attest.sh                  # runs the entries that need it, signs, publishes
 tests/attest.sh --all            # runs every entry, carries nothing
 ```
+
+`--plan` runs and signs nothing, but it still replaces your local `refs/notes/tests` with
+origin's first, so the plan sees what the release check will see. A note that exists only
+locally (for example from a run whose push was refused) is dropped.
 
 The entries are those of `tests/all.sh`: each suite, `host` once per release as `host-<release>`
 and `services` once per release as `services-<release>`. For each entry it either runs or
@@ -164,13 +168,15 @@ optionally, branch protection on `main` can require the status `tests/local`.
 
 Maintainers cut a release like this:
 
-1. Bump `version` in `galaxy.yml`.
-2. Move the entries of `CHANGELOG.md` from *Unreleased* under the new version.
-3. Commit (`chore: bump the collection to X.Y.Z`) on `main` once CI is green, and push it.
-4. Run `tests/attest.sh` on the bump commit (it runs nothing when only ignored files changed
-   since the last run), unless you already attested its parent (the last commit before step 1).
-   Run a real amd64 mysql test by hand first when the attested run used the systemctl shim. The bump commit may then change only `CHANGELOG.md` and the
-   `version:` line of `galaxy.yml`.
+1. Attest the last commit before the bump, once it is on `main` and CI is green: run
+   a real amd64 mysql test by hand first when the run would use the systemctl shim,
+   then `tests/attest.sh`. Do not attest the bump commit itself: it always changes
+   `galaxy.yml`, a shared file, so that would rerun every entry (hours).
+2. Bump `version` in `galaxy.yml`.
+3. Move the entries of `CHANGELOG.md` from *Unreleased* under the new version.
+4. Commit (`chore: bump the collection to X.Y.Z`) on `main` and push it. The bump commit
+   may change only `CHANGELOG.md` and the `version:` line of `galaxy.yml`, so that the
+   gate accepts the note of its parent.
 5. Check the attestation locally:
    `git fetch origin '+refs/notes/tests:refs/notes/tests'` and
    `.github/scripts/verify-tests-attestation.sh HEAD` (exit 0 = release allowed).
