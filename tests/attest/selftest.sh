@@ -30,7 +30,7 @@ read -r -a knobs <<<"$(sed -nE 's/^coverage_knobs=\(([^)]*)\)$/\1/p' "$src/tests
   echo "selftest: no coverage_knobs=(...) line in tests/attest.sh" >&2
   exit 1
 }
-unset SSH_AUTH_SOCK TESTS_SIGNING_KEY TESTS_SIGNER ATTEST_RUNNER STUB_FAIL "${knobs[@]}"
+unset SSH_AUTH_SOCK TESTS_SIGNING_KEY TESTS_SIGNER ATTEST_RUNNER STUB_FAIL STUB_NOTE STUB_HOOK "${knobs[@]}"
 
 failures=0
 count=0
@@ -142,10 +142,11 @@ if [ "${#suites[@]}" -eq 0 ] || [ "${#releases[@]}" -lt 2 ] || [ "${#sreleases[@
 fi
 last_suite="${suites[${#suites[@]} - 1]}"
 last_host="host-${releases[${#releases[@]} - 1]}"
-# A stub per suite: fails when its label is in STUB_FAIL.
+# A stub per suite: fails when its label is in STUB_FAIL, prints the note
+# STUB_NOTE, runs the executable STUB_HOOK first.
 stub() { # stub PATH LABEL-EXPRESSION
   mkdir -p "$(dirname "$1")"
-  printf '#!/usr/bin/env bash\nlabel="%s"\ncase " ${STUB_FAIL:-} " in *" $label "*) echo "$label failed"; exit 1 ;; esac\n[ -z "${STUB_NOTE:-}" ] || echo "noix-attest-note: $STUB_NOTE"\necho "$label passed"\n' "$2" >"$1"
+  printf '#!/usr/bin/env bash\nlabel="%s"\n[ -z "${STUB_HOOK:-}" ] || "$STUB_HOOK"\ncase " ${STUB_FAIL:-} " in *" $label "*) echo "$label failed"; exit 1 ;; esac\n[ -z "${STUB_NOTE:-}" ] || echo "noix-attest-note: $STUB_NOTE"\necho "$label passed"\n' "$2" >"$1"
   chmod +x "$1"
 }
 for suite in "${suites[@]}"; do
@@ -498,6 +499,33 @@ check "13. real: the all-carried status" grep -qx \
   "description=0 ran, 0 passed, 0 failed, $entries carried (0 min, $(uname -m), signed)" "$tmp/gh-call"
 g fetch -q origin "+$REAL:$REAL"
 expect "13. real: the release check allows the all-carried real note" 0 "Tests attestation OK for ${c13d:0:7}" -- "$V" "$c13d"
+# Another machine pushes notes while the suites run: one on another commit,
+# one on the commit under test. The push must still fast-forward, keep the
+# other commit's note and replace the one on this commit.
+git clone -q --bare "$origin" "$tmp/elsewhere.git"
+root_commit="$(g rev-list --max-parents=0 HEAD)"
+cat >"$tmp/hook" <<EOF
+#!/usr/bin/env bash
+[ ! -e "$tmp/hook-ran" ] || exit 0
+touch "$tmp/hook-ran"
+o=(git --git-dir="$tmp/elsewhere.git")
+"\${o[@]}" fetch -q origin "+$REAL:$REAL"
+"\${o[@]}" notes --ref="$REAL" add -f -m "payload: from elsewhere" "$root_commit"
+"\${o[@]}" notes --ref="$REAL" add -f -m "payload: elsewhere on this commit" "\$(git -C "$repo" rev-parse HEAD)"
+"\${o[@]}" push -q origin "$REAL"
+EOF
+chmod +x "$tmp/hook"
+role_change e2e
+g push -q origin main
+c13e="$(head_sha)"
+expect "13. real: notes pushed to origin during the run do not block the push" 0 "pushed, status tests/local set" -- \
+  real env STUB_HOOK="$tmp/hook" "$A"
+check "13. real: the hook pushed during the run" test -e "$tmp/hook-ran"
+check "13. real: origin keeps the other commit's note" \
+  sh -c 'git --git-dir="$1" notes --ref=refs/notes/tests show "$2" | grep -qx "payload: from elsewhere"' _ "$origin" "$root_commit"
+g fetch -q origin "+$REAL:$REAL"
+expect "13. real: this run's note replaced the one pushed on its commit" 0 "Tests attestation OK for ${c13e:0:7}" -- "$V" "$c13e"
+unset root_commit
 
 # --- 14. the shared helper (.github/scripts/attest_carry.py) -----------------------------------
 H="$src/.github/scripts/attest_carry.py"
@@ -1110,6 +1138,8 @@ check "16. the status description is cut at 140 characters" \
 rm -f "$tmp/runner-argv"
 expect "16. SERVICES_UBUNTU refuses to start" 2 "unset SERVICES_UBUNTU" -- r16 env SERVICES_UBUNTU=24.04 "$A"
 expect "16. NOIXDEV_INFRA_N8N_TESTS refuses to start" 2 "unset NOIXDEV_INFRA_N8N_TESTS" -- r16 env NOIXDEV_INFRA_N8N_TESTS=x "$A"
+expect "16. NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME refuses to start" 2 "unset NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME" -- \
+  r16 env NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME=cache "$A"
 check "16. the knobs never reach the runner" test ! -e "$tmp/runner-argv"
 
 mkdir -p "$repo/roles/zzz/tasks"

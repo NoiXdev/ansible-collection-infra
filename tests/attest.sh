@@ -66,9 +66,12 @@
 #
 # Before planning, the local refs/notes/tests is replaced by origin's (or
 # removed when origin has none), also for --plan, so the plan sees exactly
-# origin's notes and only origin's notes plus this run's note are pushed. A
-# note that exists only in the local ref is dropped. The plan verifies the
-# notes against .github/tests-allowed-signers at HEAD.
+# origin's notes. After the run it is replaced by origin's once more, then
+# this run's note is added (replacing one on this commit) and pushed, so
+# notes pushed during the run do not make the push fail, and only origin's
+# notes plus this run's note are pushed. A note that exists only in the
+# local ref is dropped. The plan verifies the notes against
+# .github/tests-allowed-signers at the tested commit.
 #
 # Signing key: $TESTS_SIGNING_KEY, else `git config user.signingkey`, else
 # ~/.ssh/id_ed25519.pub. A public key path signs through the SSH agent. A
@@ -98,7 +101,7 @@ DRY_RUN_NOTES_REF=refs/notes/tests-dry-run
 STATUS_CONTEXT=tests/local
 USAGE="usage: tests/attest.sh [--all | --plan]"
 # Variables of tests/all.sh and the suites that narrow or change what runs.
-coverage_knobs=(HOST_UBUNTU SERVICES_UBUNTU UBUNTU KEEP STUB_ONLY RC_STUB_ONLY RC_REAL_ONLY ANUBIS_REAL_ONLY ROUNDCUBE_OLD ROUNDCUBE_NEW MAILCOW_TAKEOVER_TAG ANSIBLE_RUN_TAGS ANSIBLE_SKIP_TAGS NOIXDEV_INFRA_SERVICES NOIXDEV_INFRA_N8N_TESTS NOIXDEV_INFRA_PAPERLESS_TESTS NOIXDEV_INFRA_TANDOOR_TESTS)
+coverage_knobs=(HOST_UBUNTU SERVICES_UBUNTU UBUNTU KEEP STUB_ONLY RC_STUB_ONLY RC_REAL_ONLY ANUBIS_REAL_ONLY ROUNDCUBE_OLD ROUNDCUBE_NEW MAILCOW_TAKEOVER_TAG ANSIBLE_RUN_TAGS ANSIBLE_SKIP_TAGS NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME NOIXDEV_INFRA_SERVICES NOIXDEV_INFRA_N8N_TESTS NOIXDEV_INFRA_PAPERLESS_TESTS NOIXDEV_INFRA_TANDOOR_TESTS)
 
 fail() {
   echo "tests/attest.sh: $*" >&2
@@ -205,13 +208,13 @@ if ! python3 -I "$helper" check-map --repo "$root" --commit "$commit" >"$work/ch
 fi
 cat "$work/check-map"
 
-# Notes are a shared ref. Start from exactly origin's, so the plan sees what
-# the release check will see, and the push fast-forwards and carries nothing
-# but origin's notes and this one.
-if [ "$dry_run" = 1 ]; then
-  echo "dry run: would replace the local $NOTES_REF by origin's"
-else
-  remote_rc=0
+# Notes are a shared ref. sync_notes replaces the local one by exactly
+# origin's (or removes it when origin has none). It runs before the plan, so
+# the plan sees what the release check will see, and again just before this
+# run's note is added, so the push fast-forwards over notes pushed during
+# the run and carries nothing but origin's notes and this one.
+sync_notes() {
+  local remote_rc=0
   git ls-remote --exit-code origin "$NOTES_REF" >/dev/null || remote_rc=$?
   case "$remote_rc" in
     0 | 2) ;;
@@ -224,11 +227,16 @@ else
     git fetch --quiet origin "+$NOTES_REF:$NOTES_REF" ||
       fail "fetching $NOTES_REF from origin failed. Nothing published."
   fi
+}
+if [ "$dry_run" = 1 ]; then
+  echo "dry run: would replace the local $NOTES_REF by origin's"
+else
+  sync_notes
 fi
 
 # The plan (attest_carry.py plan): per expected entry, "run" with a reason,
 # or "carry" with carriedFrom.
-git show "HEAD:.github/tests-allowed-signers" >"$work/allowed_signers" 2>/dev/null || : >"$work/allowed_signers"
+git show "$commit:.github/tests-allowed-signers" >"$work/allowed_signers" 2>/dev/null || : >"$work/allowed_signers"
 plan_args=(plan --repo "$root" --head "$commit" --notes-ref "$notes_ref" --signers "$work/allowed_signers"
   --now "$(date +%s)")
 [ "$mode" != all ] || plan_args+=(--all)
@@ -347,6 +355,13 @@ ssh-keygen -Y sign -q -f "$key" -n "$NAMESPACE" "$work/payload.json" || fail "si
   printf 'payload: %s\n' "$(base64 <"$work/payload.json" | tr -d '\n')"
   cat "$work/payload.json.sig"
 } >"$work/note"
+# Origin's notes may have moved during the run: start from them again. The
+# plan keeps the earlier snapshot; a note on this commit is replaced.
+if [ "$dry_run" = 1 ]; then
+  echo "dry run: would replace the local $NOTES_REF by origin's again"
+else
+  sync_notes
+fi
 git notes --ref="$notes_ref" add -f -F "$work/note" "$commit" || fail "cannot write the note"
 
 state=failure
