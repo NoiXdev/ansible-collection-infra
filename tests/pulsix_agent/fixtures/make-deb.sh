@@ -5,6 +5,7 @@
 # unit, anything else a small file. Files below /etc are conffiles, so that
 # removing the package leaves them behind (dpkg state rc). The postinst
 # enables every unit of the package that can run on its own.
+# FAIL_POSTINST=1 makes the postinst fail.
 set -eu
 
 name="$1" version="$2" list="$3"
@@ -54,5 +55,7 @@ done <"$list"
 
 printf 'Package: %s\nVersion: %s\nArchitecture: all\nMaintainer: test <test@example.test>\nDescription: fixture %s\n' \
   "$name" "$version" "$name" >"$work/DEBIAN/control"
+# FAIL_POSTINST=1: the package ends up half-configured when it is installed.
+[ -z "${FAIL_POSTINST:-}" ] || echo 'exit 1' >>"$work/DEBIAN/postinst"
 chmod 0755 "$work/DEBIAN/postinst"
 dpkg-deb --root-owner-group -b "$work" "/tmp/${name}_${version}_all.deb" >/dev/null

@@ -700,6 +700,79 @@ run_release() {
     changed_zero
   fi
 
+  if scenario zabbix_half_configured; then
+    echo "-- zabbix_half_configured"
+    removal_host
+    install_zabbix_agent fixture
+    host_sh 'echo /usr/sbin/zabbix_server >/tmp/zabbix-server.list
+      FAIL_POSTINST=1 sh /opt/fixtures/make-deb.sh zabbix-server-pgsql 1.0 /tmp/zabbix-server.list
+      dpkg -i /tmp/zabbix-server-pgsql_1.0_all.deb >/dev/null 2>&1; true'
+    [ "$(pkg_state zabbix-server-pgsql)" = half-configured ] || fail "the test server package is not half-configured"
+    remove_args zabbix_agent
+    # apt tries to finish the broken package while it purges the agent and
+    # fails; the run stops there and the shared items stay. (The selection of
+    # the other zabbix packages by state is checked in the report with the
+    # same expression.)
+    expect_fail "${tok[@]}" "${rm_args[@]}"
+    zabbix_shared_spec | assert_paths_there
+    assert_pkgs_installed zabbix-release
+    host_sh 'getent passwd zabbix >/dev/null' || fail "the zabbix user was removed"
+    [ "$(pkg_state zabbix-server-pgsql)" = half-configured ] || fail "the half-configured server package changed state"
+  fi
+
+  if scenario zabbix_orphan_server; then
+    echo "-- zabbix_orphan_server"
+    removal_host
+    install_zabbix_agent fixture
+    deb zabbix-server-pgsql 1.0 /usr/sbin/zabbix_server
+    host_sh 'apt-mark auto zabbix-server-pgsql >/dev/null'
+    remove_args zabbix_agent
+    converge "${tok[@]}" "${rm_args[@]}"
+    zabbix_agent_spec | assert_paths_gone
+    assert_pkgs_installed zabbix-server-pgsql zabbix-release
+    zabbix_shared_spec | assert_paths_there
+    host_sh 'getent passwd zabbix >/dev/null' || fail "the zabbix user was removed"
+  fi
+
+  if scenario unit_bad_setting; then
+    echo "-- unit_bad_setting"
+    removal_host
+    netdata_spec | seed_missing
+    host_sh "printf '[Unit]\nDescription=fixture\n[Service]\nExecStart=/bin/sleep 7777\n[Install]\nWantedBy=multi-user.target\n' >/etc/systemd/system/netdata.service
+      systemctl daemon-reload && systemctl enable --now netdata.service
+      echo fixture >/etc/systemd/system/netdata.service
+      systemctl daemon-reload"
+    host_sh 'pgrep -f "[s]leep 7777" >/dev/null' || fail "the unit does not run"
+    [ "$(host_sh 'systemctl show -p LoadState --value netdata')" != loaded ] || fail "the unit file is not bad"
+    remove_args netdata
+    converge "${tok[@]}" "${rm_args[@]}"
+    if host_sh 'pgrep -f "[s]leep 7777" >/dev/null'; then fail "the unit is still running"; fi
+    netdata_spec | assert_paths_gone
+    host_sh 'test ! -e /etc/systemd/system/multi-user.target.wants/netdata.service && test ! -L /etc/systemd/system/multi-user.target.wants/netdata.service' \
+      || fail "the enable link is still there"
+    netdata_units | assert_units_gone
+    converge "${tok[@]}" "${rm_args[@]}"
+    changed_zero
+  fi
+
+  if scenario unit_masked; then
+    echo "-- unit_masked"
+    removal_host
+    netdata_spec | seed_missing
+    host_sh "printf '[Unit]\nDescription=fixture\n[Service]\nExecStart=/bin/sleep 7778\n' >/usr/lib/systemd/system/netdata.service
+      rm -f /etc/systemd/system/netdata.service
+      systemctl daemon-reload && systemctl start netdata.service && systemctl mask netdata.service"
+    [ "$(host_sh 'systemctl show -p LoadState --value netdata')" = masked ] || fail "the unit is not masked"
+    host_sh 'pgrep -f "[s]leep 7778" >/dev/null' || fail "the masked unit does not run"
+    remove_args netdata
+    converge "${tok[@]}" "${rm_args[@]}"
+    if host_sh 'pgrep -f "[s]leep 7778" >/dev/null'; then fail "the masked unit is still running"; fi
+    netdata_spec | assert_paths_gone
+    netdata_units | assert_units_gone
+    converge "${tok[@]}" "${rm_args[@]}"
+    changed_zero
+  fi
+
   if scenario package_anchors; then
     echo "-- package_anchors"
     removal_host
@@ -720,12 +793,24 @@ run_release() {
   if scenario check_mode_removal; then
     echo "-- check_mode_removal"
     removal_host
-    host_sh 'mkdir -p /etc/netdata && touch /etc/netdata/marker'
+    install_netdata_package
+    install_zabbix_agent fixture
+    install_checkmk
     converge "${tok[@]}"
-    remove_args netdata
+    remove_args netdata zabbix_agent checkmk_agent
     converge --check "${tok[@]}" "${rm_args[@]}"
-    printf '%s\n' "$out" | grep -q 'Check mode: would remove netdata' || fail "the check run does not say what it would remove"
-    host_sh 'test -e /etc/netdata/marker' || fail "a check run removed Netdata files"
+    local word
+    for word in 'would remove netdata' 'would remove zabbix_agent' 'would remove checkmk_agent' \
+      'netdata-archive-keyring.gpg' '/etc/apt/sources.list.d/netdata*' '/etc/systemd/system/netdata*' '/lib/systemd/system/netdata*' \
+      '/etc/zabbix, /run/zabbix]' 'zabbix-release' '/etc/apt/sources.list.d/zabbix*' 'user [zabbix]' 'zabbix-sender' \
+      '/lib/systemd/system/check-mk-agent*' '/etc/systemd/system/cmk-agent-ctl*' 'user [cmk-agent]' 'user [netdata]'; do
+      printf '%s\n' "$out" | grep -qF -- "$word" || fail "the check run does not name: $word"
+    done
+    netdata_spec | assert_paths_there
+    zabbix_agent_spec | assert_paths_there
+    zabbix_shared_spec | assert_paths_there
+    checkmk_spec | assert_paths_there
+    assert_pkgs_installed netdata zabbix-agent zabbix-release check-mk-agent
   fi
 
   if scenario check_mode; then

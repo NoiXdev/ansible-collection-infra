@@ -9,15 +9,15 @@
     pulsix_agent_rm_user: "{{ pulsix_agent_tool_zabbix_agent.user }}"
 
 # The agent can pull in helpers (zabbix-sender on some releases) that nothing else
-# needs. Those go with it: zabbix-* packages that apt marked as auto-installed and
-# that an autoremove would take. Both reads are dry; only these names are purged.
+# needs. Those go with it: zabbix-sender and zabbix-get when apt marked them as
+# auto-installed and an autoremove would take them. Never anything else. Both reads are dry; only these names are purged.
 - name: Read the auto-installed packages
   ansible.builtin.command: apt-mark showauto
   register: pulsix_agent_zabbix_auto
   changed_when: false
 
 - name: Ask apt which packages nothing needs any more
-  ansible.builtin.command: apt-get --dry-run autoremove
+  ansible.builtin.command: apt-get --dry-run autoremove  # noqa: command-instead-of-module (a dry run has no module)
   environment:
     LC_ALL: C
   register: pulsix_agent_zabbix_autoremove
@@ -27,7 +27,7 @@
   ansible.builtin.set_fact:
     pulsix_agent_zabbix_helpers: >-
       {{ pulsix_agent_zabbix_autoremove.stdout_lines
-         | select('match', '^Remv zabbix-\S+')
+         | select('match', '^Remv zabbix-(sender|get) ')
          | map('regex_replace', '^Remv (\S+).*$', '\1')
          | select('in', pulsix_agent_zabbix_auto.stdout_lines)
          | reject('eq', 'zabbix-release')
@@ -50,8 +50,9 @@
   ansible.builtin.set_fact:
     pulsix_agent_zabbix_others: >-
       {{ pulsix_agent_zabbix_dpkg.stdout_lines
-         | select('match', '^zabbix-\S+ installed$')
+         | select('match', '^zabbix-\S+ ')
          | reject('match', '^zabbix-release ')
+         | reject('search', ' (not-installed|config-files)$')
          | list }}
 
 - name: Remove what only the Zabbix agent used

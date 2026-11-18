@@ -17,10 +17,19 @@
 - name: Say what a check run would remove
   ansible.builtin.debug:
     msg: >-
-      Check mode: would remove {{ item }}: units {{ vars['pulsix_agent_tool_' ~ item].units | join(', ') }};
-      packages matching {{ vars['pulsix_agent_tool_' ~ item].packages | join(', ') }};
-      paths {{ vars['pulsix_agent_tool_' ~ item].paths | join(', ') }}
-      {%- if vars['pulsix_agent_tool_' ~ item].user %}; user {{ vars['pulsix_agent_tool_' ~ item].user }}{% endif %}
+      Check mode: would remove {{ item }}.
+      {% for part in ([item] + (['zabbix_shared'] if item == 'zabbix_agent' else [])) %}
+      {% set tool = vars['pulsix_agent_tool_' ~ part] %}
+      {{ part }}: units [{{ tool.units | join(', ') }}];
+      packages matching [{{ tool.packages | join(', ') }}];
+      paths [{{ tool.paths | join(', ') }}];
+      files matching [{% for g in tool.globs %}{{ g.paths | product(g.patterns) | map('join', '/') | join(', ') }}{{ ', ' if not loop.last }}{% endfor %}];
+      user [{{ tool.user }}].
+      {% endfor %}
+      {% if item == 'zabbix_agent' %}
+      The zabbix_shared items go only when no other zabbix-* package is left;
+      auto-installed zabbix-sender and zabbix-get go with the agent.
+      {% endif %}
   loop: "{{ pulsix_agent_remove }}"
   when: ansible_check_mode
 
