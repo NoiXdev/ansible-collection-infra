@@ -62,6 +62,12 @@
 #             then a rollback that fails too (the previous image cannot be
 #             started), whose marker refuses every version, an older one
 #             before the downgrade refusal
+#   rollback_stop
+#             a rollback whose docker stop of a container that still runs
+#             fails (a wrapper for docker on the host fakes the race): with
+#             "No such container" only (it exited since docker ps) rolled
+#             back as usual; with a failure without a message the rollback
+#             fails and names the task, the marker recording no rollback
 #   interrupted
 #             updates that did not finish, with converges killed (SIGKILL to
 #             their process group) at a point of an update:
@@ -1003,6 +1009,53 @@ DOCKERFILE
   hx test -e "$marker" || fail "the refused run removed the marker"
 }
 
+# A docker on the test host, ahead of the real one in the PATH, that lists
+# one container of the n8n project (deadbeef) and fails its stop as the
+# rollback finds a container that went away: install_stop_wrapper <stderr
+# line, or none>. Everything else runs the real docker. A real stray
+# container would be removed by docker compose up --remove-orphans.
+install_stop_wrapper() {
+  local line="$1" stop="exit 1"
+  [ "$line" = none ] || stop="echo '$line' >&2; exit 1"
+  docker exec -i "$host" sh -c 'cat > /usr/local/sbin/docker && chmod +x /usr/local/sbin/docker' <<WRAPPER
+#!/bin/sh
+if [ "\$*" = "ps --quiet --filter label=com.docker.compose.project=n8n" ]; then
+  echo deadbeef
+  exit 0
+fi
+if [ "\$1" = stop ]; then
+  $stop
+fi
+exec /usr/local/bin/docker "\$@"
+WRAPPER
+}
+
+test_rollback_stop() {
+  echo "== a container gone since docker ps must not fail the rollback"
+  new_host
+  load_images
+  load_set "${old_images[@]}"
+  converge -e "n8n_version=$old_version"
+  play "$here/verify.yml"
+  install_stop_wrapper 'Error response from daemon: No such container: deadbeef'
+  failed_update stop-gone -vvv
+  hx rm /usr/local/sbin/docker
+  converge -e "n8n_version=$old_version"
+  hx test ! -e "$marker" || fail "a successful run with $old_version kept the marker"
+
+  echo "== a stop that fails without a message must fail the rollback"
+  install_stop_wrapper none
+  hx docker tag "$busybox" "test.invalid/n8n:$version"
+  play_fails stop-failed "$here/converge.yml" -vvv -e n8n_image=test.invalid/n8n -e n8n_health_timeout=30 \
+    -e n8n_rollback_timeout=300
+  # The task name is in the banner too: it must be in the failure message.
+  grep -E "and rolling back to $old_version failed too.*Stop the containers of n8n that still run" "$out/stop-failed.log" >/dev/null \
+    || { cat "$out/stop-failed.log" >&2; fail "stop-failed.log lacks the failed rollback with the stop task"; }
+  expect_no_secrets stop-failed
+  hx grep -qx "rolled_back_to: null" "$marker" || fail "the marker records a rollback: $(hx cat "$marker")"
+  hx rm /usr/local/sbin/docker
+}
+
 # Fails unless the refusal <name> of an interrupted update from $old_version
 # to $version names the backup <backup> and both ways out.
 expect_interrupted_refusal() {
@@ -1452,10 +1505,10 @@ test_mountpoint() {
 
 # All scenarios by default; NOIXDEV_INFRA_N8N_TESTS="refusals router" runs
 # only these (router installs a host when install did not run before).
-for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update queue_update failed_update interrupted missing_data mountpoint}; do
+for scenario in ${NOIXDEV_INFRA_N8N_TESTS:-refusals install router queue update queue_update failed_update rollback_stop interrupted missing_data mountpoint}; do
   case "$scenario" in
-    refusals | install | router | queue | update | queue_update | failed_update | interrupted | missing_data | mountpoint) "test_$scenario" ;;
-    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, queue_update, failed_update, interrupted, missing_data, mountpoint)" ;;
+    refusals | install | router | queue | update | queue_update | failed_update | rollback_stop | interrupted | missing_data | mountpoint) "test_$scenario" ;;
+    *) fail "unknown scenario $scenario (refusals, install, router, queue, update, queue_update, failed_update, rollback_stop, interrupted, missing_data, mountpoint)" ;;
   esac
 done
 

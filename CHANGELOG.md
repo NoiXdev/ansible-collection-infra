@@ -35,6 +35,8 @@
 - `portainer`: the errors of a failed registration no longer show credentials in
   `portainer_agent_register_url` (`https://user:password@host`) and mask the access token in the
   answer of the server. The registration itself still uses the URL as given.
+- `n8n`: the rollback of a failed update now fails when `docker stop` of a container of the stack
+  fails without a message; only "No such container" (it exited meanwhile) is still ignored.
 
 ## 0.6.0 — 2026-11-17
 

@@ -39,7 +39,8 @@
       changed_when: false
 
     # One that is gone since docker ps (it exited and was removed) needs no
-    # stop; any other error fails the rollback.
+    # stop; any other error fails the rollback, and so does a failure without
+    # a message: a container may still run and write to the database.
     - name: Stop the containers of n8n that still run
       ansible.builtin.command:
         argv: "{{ ['docker', 'stop'] + n8n_still_running.stdout_lines }}"
@@ -47,7 +48,8 @@
       changed_when: true
       failed_when: >-
         n8n_stopped.rc != 0
-        and n8n_stopped.stderr_lines | reject('search', 'No such container') | list | length > 0
+        and (n8n_stopped.stderr_lines | length == 0
+             or n8n_stopped.stderr_lines | reject('search', 'No such container') | list | length > 0)
       when: n8n_still_running.stdout_lines | length > 0
 
     # It holds the encryption key, the passwords and the owner's hash, so the
