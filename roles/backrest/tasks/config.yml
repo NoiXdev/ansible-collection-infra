@@ -1,0 +1,157 @@
+---
+# Works out what config.json and the other files of the role should hold and
+# which of them differ from the host. Nothing on the host changes here; the
+# files are written by apply.yml. Backrest keeps three things in config.json
+# that the role does not own: sync (its key pair), the repository's guid
+# (written back after the first init) and modno (the UI's write counter). They
+# are read from the file and carried over. Tasks that touch the file's content
+# or a secret are no_log and followed by a fail task with a fixed message.
+- name: Look for the installed apps
+  ansible.builtin.stat:
+    path: "{{ item.requires_path }}"
+  loop: "{{ backrest_apps | selectattr('requires_path', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: backrest_app_stats
+
+# An app without requires_path counts as installed.
+- name: Work out the active apps
+  ansible.builtin.set_fact:
+    backrest_active_apps: "{{ backrest_apps | rejectattr('name', 'in', missing) | list }}"
+  vars:
+    missing: "{{ backrest_app_stats.results | rejectattr('stat.exists') | map(attribute='item.name') | list }}"
+
+- name: Look at the configuration and the files and directories around it
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop:
+    - {key: config, path: "{{ backrest_config_file }}"}
+    - {key: active_apps, path: "{{ backrest_active_apps_file }}"}
+    - {key: excludes, path: "{{ backrest_excludes_file }}"}
+    - {key: config_dir, path: "{{ backrest_config_dir }}"}
+    - {key: data_dir, path: "{{ backrest_data_dir }}"}
+    - {key: cache_dir, path: "{{ backrest_cache_dir }}"}
+    - {key: dump_dir, path: "{{ backrest_dump_dir }}"}
+  loop_control:
+    label: "{{ item.key }}"
+  register: backrest_file_stats
+
+- name: Remember what exists
+  ansible.builtin.set_fact:
+    backrest_exists: "{{ dict(backrest_file_stats.results | map(attribute='item.key') | zip(backrest_file_stats.results | map(attribute='stat.exists'))) }}"
+    backrest_active_apps_old_sha1: "{{ (backrest_file_stats.results | selectattr('item.key', 'equalto', 'active_apps') | first).stat.checksum | default('') }}"
+    backrest_active_apps_content: "{{ names | join('\n') ~ ('\n' if names | length > 0 else '') }}"
+  vars:
+    names: "{{ backrest_active_apps | map(attribute='name') | list }}"
+
+- name: Read the configuration
+  ansible.builtin.slurp:
+    src: "{{ backrest_config_file }}"
+  register: backrest_config_raw
+  no_log: true
+  ignore_errors: true
+  when: backrest_exists.config
+
+- name: Stop when the configuration cannot be read
+  ansible.builtin.fail:
+    msg: "{{ backrest_config_file }} cannot be read."
+  when: backrest_config_raw is failed
+
+- name: Parse the configuration
+  ansible.builtin.set_fact:
+    backrest_current: "{{ backrest_config_raw.content | b64decode | from_json if backrest_exists.config else {} }}"
+  no_log: true
+  ignore_errors: true
+  register: backrest_parse
+
+- name: Stop when the configuration is not valid JSON
+  ansible.builtin.fail:
+    msg: >-
+      {{ backrest_config_file }} is not valid JSON, or not a JSON object. Nothing was changed;
+      repair or remove the file.
+  when: backrest_parse is failed or not (backrest_current is mapping)
+
+# Backrest drops keys it does not know and migrates older formats at start;
+# the role writes format version 6 only.
+- name: Read the format version
+  ansible.builtin.set_fact:
+    backrest_current_version: "{{ backrest_current.version | default(0) if backrest_exists.config else 6 }}"
+  no_log: true
+
+- name: Stop when the format version is not the one the role writes
+  ansible.builtin.fail:
+    msg: >-
+      {{ backrest_config_file }} has format version {{ backrest_current_version }}; the role writes
+      version 6. Nothing was changed.
+  when: backrest_current_version | string != '6'
+
+- name: Work out the paths of the plan
+  ansible.builtin.set_fact:
+    backrest_plan_paths: >-
+      {{ ([backrest_dump_dir] + backrest_active_apps | map(attribute='paths', default=[]) | flatten
+           + backrest_active_apps | selectattr('dump.type', 'defined') | selectattr('dump.type', 'equalto', 'command')
+             | map(attribute='dump.output') | list
+           + backrest_extra_paths) | unique | list }}
+
+- name: Work out the configuration the role wants
+  ansible.builtin.set_fact:
+    backrest_desired: >-
+      {{ {
+           'version': 6,
+           'instance': backrest_instance,
+           'repos': [repo],
+           'plans': [plan],
+           'auth': {'users': users},
+         } | combine(carried_sync) }}
+  vars:
+    users: >-
+      {% set out = [] %}{% for u in backrest_users %}{% set _ = out.append({'name': u.name, 'passwordBcrypt': u.password_bcrypt}) %}{% endfor %}{{ out }}
+    carried_sync: "{{ {'sync': backrest_current.sync} if backrest_current.sync is defined else {} }}"
+    current_repo: "{{ (backrest_current.repos | default([{}]))[0] | default({}) }}"
+    keep_guid: "{{ current_repo.guid | default('') | length > 0 and current_repo.uri | default('') == backrest_repo_uri }}"
+    clock_local: CLOCK_LOCAL
+    repo: >-
+      {{ {
+           'id': backrest_repo_id,
+           'uri': backrest_repo_uri,
+           'password': backrest_repo_password,
+           'env': backrest_repo_env | dictsort | map('join', '=') | list,
+           'prunePolicy': {'schedule': {'cron': backrest_prune_schedule, 'clock': clock_local}, 'maxUnusedPercent': 25},
+           'checkPolicy': {'schedule': {'cron': backrest_check_schedule, 'clock': clock_local},
+                           'readDataSubsetPercent': backrest_check_read_percent | int},
+         } | combine({'guid': current_repo.guid} if keep_guid | bool else {'autoInitialize': true})
+           | combine({'hooks': backrest_repo_hooks} if backrest_repo_hooks | length > 0 else {}) }}
+    plan: >-
+      {{ {
+           'id': backrest_plan_id,
+           'repo': backrest_repo_id,
+           'paths': backrest_plan_paths,
+           'schedule': {'cron': backrest_schedule, 'clock': clock_local},
+           'retention': {'policyTimeBucketed': backrest_retention | dict2items | rejectattr('value', 'equalto', 0) | list | items2dict},
+           'backup_flags': ['--exclude-file=' ~ backrest_excludes_file],
+         } | combine({'excludes': backrest_excludes} if backrest_excludes | length > 0 else {})
+           | combine({'hooks': backrest_plan_hooks} if backrest_plan_hooks | length > 0 else {}) }}
+  no_log: true
+  ignore_errors: true
+  register: backrest_build
+
+- name: Stop when the configuration cannot be built
+  ansible.builtin.fail:
+    msg: The configuration cannot be built from the role's variables; check backrest_users, backrest_repo_env, backrest_retention and the hooks.
+  when: backrest_build is failed
+
+- name: Compare what the role wants with the host
+  ansible.builtin.set_fact:
+    backrest_config_changed: "{{ not backrest_exists.config or current_core != backrest_desired }}"
+    backrest_modno: "{{ backrest_current.modno | default(1) }}"
+  vars:
+    current_core: "{{ backrest_current | dict2items | rejectattr('key', 'equalto', 'modno') | list | items2dict }}"
+  no_log: true
+
+- name: Work out whether a write is pending
+  ansible.builtin.set_fact:
+    backrest_writes_pending: >-
+      {{ backrest_binary_changed | bool or backrest_unit_changed | bool or backrest_config_changed | bool
+         or backrest_active_apps_content | hash('sha1') != backrest_active_apps_old_sha1
+         or not (backrest_exists.excludes and backrest_exists.config_dir and backrest_exists.data_dir
+                 and backrest_exists.cache_dir and backrest_exists.dump_dir) }}

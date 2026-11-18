@@ -11,7 +11,8 @@
 # to contract.md, and fails when the releases disagree.
 #
 # The scenario "refusals" runs the backrest role with settings it must refuse,
-# and "install" installs Backrest through the role and checks the service.
+# "install" installs Backrest through the role and checks the service, and
+# "config" checks that the role owns config.json.
 #
 # BACKREST_UBUNTU selects the releases (default "24.04 26.04");
 # NOIXDEV_INFRA_BACKREST_TESTS selects scenarios (see the end of the file);
@@ -116,6 +117,25 @@ print(json.dumps({
 role_converge() { converge -e "@$out/role-vars.json" "$@"; }
 role_converge_unchanged() { converge_unchanged -e "@$out/role-vars.json" "$@"; }
 role_converge_fails() { converge_fails -e "@$out/role-vars.json" "$@"; }
+
+# h_bg <sh command>: runs it in the test host, detached.
+h_bg() { docker exec -d "$host" sh -c "$1"; }
+
+# restic_stand_in <seconds>: a command line for h_bg that runs a process named
+# restic (what the role looks for) for that long. The name is the process's
+# comm, which a copied binary would not give on a release whose coreutils is a
+# single multi-call binary.
+restic_stand_in() {
+  printf 'python3 -c %s' "'open(\"/proc/self/comm\", \"w\").write(\"restic\"); import time; time.sleep($1)'"
+}
+
+# cfg <jq filter>: a value of config.json (null prints as "null").
+cfg() { h cat "$config" | jq -r "$1"; }
+# cfg_with <jq filter>: config.json with the filter applied, as JSON.
+cfg_with() { h cat "$config" | jq -c "$1"; }
+# save_config / restore_config: keep config.json aside and put it back.
+save_config() { h cp -p "$config" /tmp/config.saved; }
+restore_config() { h cp -p /tmp/config.saved "$config"; }
 
 # api <Rpc> [json]: POST /v1.Backrest/<Rpc> with the login. Prints the answer,
 # keeps its HTTP status for api_status and fails unless it is a 2xx.
@@ -491,13 +511,91 @@ test_install() {
   if [ -n "$user" ] && [ "$user" != root ]; then fail "Backrest runs as $user, not root"; fi
   [ "$(h stat -c %a /etc/backrest/backrest.env)" = 600 ] || fail "backrest.env is not mode 0600"
   role_converge_unchanged
-  # An app name with an underscore passes validation (a change of no state here).
+  # An app name with an underscore passes validation; the app joins the list of active apps.
+  role_converge -e '{"backrest_apps": [{"name": "my_app"}]}'
+  [ "$(h cat "$data_dir/active-apps")" = my_app ] || fail "the active app is not listed"
   role_converge_unchanged -e '{"backrest_apps": [{"name": "my_app"}]}'
+  role_converge
   # A failed download keeps the working binary and the service.
   sum="$(h sha256sum /usr/local/bin/backrest)"
   role_converge_fails -e backrest_version=9.9.9 -e '{"backrest_sha256": {"x86_64": "00", "arm64": "00"}}'
   [ "$(h sha256sum /usr/local/bin/backrest)" = "$sum" ] || fail "a failed download replaced the binary"
   h systemctl is-active backrest
+}
+
+test_config() {
+  local guid sync other_uri third_uri status
+  echo "== config (ubuntu $1)"
+  command -v jq >/dev/null || fail "jq is missing on this machine"
+  other_uri="s3:$s3_endpoint/$s3_bucket/config-other"
+  third_uri="s3:$s3_endpoint/$s3_bucket/config-third"
+  write_role_vars config
+  (
+    umask 077
+    python3 -c '
+import json
+print(json.dumps({"backrest_repo_password": "p\"a\x27ss $HOME \\n {x} #é"}))' >"$out/hard-password.json"
+  )
+  role_converge
+  guid="$(cfg '.repos[0].guid')"
+  [ "${#guid}" = 64 ] || fail "the repository id was not written back"
+  sync="$(cfg '.sync.identity.keyId')"
+  [ "$sync" != null ] && [ -n "$sync" ] || fail "no sync identity in config.json"
+  [ "$(h stat -c %a "$config")" = 600 ] || fail "config.json is not mode 0600"
+  [ "$(h stat -c %a "$data_dir/excludes")" = 600 ] || fail "the exclude file is not mode 0600"
+  # The UI requires a login.
+  [ "$(login_status "$ui_password")" = 200 ] || fail "the right password does not log in"
+  [ "$(login_status "wrong-$ui_password")" = 401 ] || fail "a wrong password does not answer 401"
+  status="$(h curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' "$ui_url/v1.Backrest/GetConfig")"
+  [ "$status" = 401 ] || fail "a request without a login answers $status"
+  # The guid and the sync identity are kept; the empty exclude file is left alone.
+  h sh -c "echo /nonexistent >$data_dir/excludes"
+  role_converge_unchanged
+  [ "$(cfg '.repos[0].guid')" = "$guid" ] || fail "the repository id changed"
+  [ "$(h cat "$data_dir/excludes")" = /nonexistent ] || fail "the exclude file was replaced"
+  h sh -c ": >$data_dir/excludes"
+  [ "$(cfg '.repos[0].prunePolicy.schedule.cron')" = '0 5 * * 0' ] || fail "prune schedule"
+  [ "$(cfg '.repos[0].checkPolicy.schedule.cron')" = '0 6 1 * *' ] || fail "check schedule"
+  [ "$(cfg '.repos[0].checkPolicy.readDataSubsetPercent')" = 5 ] || fail "check read percent"
+  [ "$(cfg '.plans[0].retention.policyTimeBucketed.monthly')" = 6 ] || fail "retention"
+  role_converge -e '{"backrest_extra_paths": ["/srv/extra"], "backrest_excludes": ["*.tmp"]}'
+  cfg '.plans[0].paths' | grep -q /srv/extra || fail "extra path missing"
+  cfg '.plans[0].excludes' | grep -qF '*.tmp' || fail "exclude pattern missing"
+  # A plan changed in the UI is put back.
+  api SetConfig "$(cfg_with '.plans[0].schedule.cron="0 9 * * *"')" >/dev/null || fail "SetConfig answered $(api_status)"
+  role_converge
+  [ "$(cfg '.plans[0].schedule.cron')" = '0 2 * * *' ] || fail "the plan changed in the UI was not put back"
+  [ "$(cfg '.sync.identity.keyId')" = "$sync" ] || fail "the sync identity changed"
+  role_converge_unchanged
+  # A new URI drops the guid and initialises the new repository.
+  role_converge -e backrest_repo_uri="$other_uri"
+  [ "$(cfg '.repos[0].guid')" != "$guid" ] || fail "the old repository id was kept"
+  # A hard password reaches restic.
+  role_converge -e backrest_repo_uri="$third_uri" -e "@$out/hard-password.json"
+  backup || fail "the backup answered $(api_status)"
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup did not succeed"
+  h python3 -m json.tool "$config" >/dev/null
+  # A broken file stops the run, unchanged and unprinted.
+  save_config
+  h sh -c 'echo "secret-line {" > /etc/backrest/config.json'
+  role_converge_fails
+  grep -q 'not valid JSON' "$out/converge.log" || fail "no message about invalid JSON"
+  ! grep -q secret-line "$out/converge.log" || fail "the broken content was printed"
+  [ "$(h cat "$config")" = 'secret-line {' ] || fail "the broken file was changed"
+  restore_config
+  h sh -c "sed -i 's/\"version\": *6/\"version\": 7/' $config"
+  role_converge_fails
+  grep -q 'format version 7' "$out/converge.log" || fail "no message about format version 7"
+  restore_config
+  # A change waits for a running backup, and gives up after the wait.
+  h_bg "$(restic_stand_in 20)"
+  role_converge -e backrest_repo_uri="$third_uri" -e "@$out/hard-password.json" -e '{"backrest_schedule": "0 3 * * *"}'
+  [ "$(cfg '.plans[0].schedule.cron')" = '0 3 * * *' ] || fail "the change did not follow the wait"
+  h_bg "$(restic_stand_in 600)"
+  role_converge_fails -e backrest_repo_uri="$third_uri" -e "@$out/hard-password.json" -e '{"backrest_schedule": "0 4 * * *"}' -e backrest_restart_wait=5
+  grep -q 'backup is running' "$out/converge.log" || fail "no message about the running backup"
+  [ "$(cfg '.plans[0].schedule.cron')" = '0 3 * * *' ] || fail "a failed wait changed the configuration"
+  h pkill -x restic || true
 }
 
 # write_contract <file>: the measured answers. No value may depend on the run.
@@ -540,7 +638,7 @@ CONTRACT
 }
 
 # All scenarios by default; NOIXDEV_INFRA_BACKREST_TESTS="refusals install" runs only these.
-scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install}"
+scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install config}"
 first=
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -549,7 +647,8 @@ for ubuntu in $releases; do
       contract) test_contract "$ubuntu" ;;
       refusals) test_refusals "$ubuntu" ;;
       install) test_install "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (contract, refusals, install)" ;;
+      config) test_config "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (contract, refusals, install, config)" ;;
     esac
   done
   case " $scenarios " in

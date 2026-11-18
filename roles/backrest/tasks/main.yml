@@ -9,6 +9,9 @@
     - name: Download and verify the release
       ansible.builtin.include_tasks: install.yml
 
+    - name: Work out the configuration
+      ansible.builtin.include_tasks: config.yml
+
     - name: Apply the changes
       ansible.builtin.include_tasks: apply.yml
   always:
