@@ -678,7 +678,11 @@ test_apps() {
   h sh -c 'echo a >/srv/shop/a.txt; echo late >/srv/late/data/b.txt'
   hi sh -c 'cat >/usr/local/bin/notes-dump && chmod 0755 /usr/local/bin/notes-dump' <<'NOTES'
 #!/bin/sh
-mkdir -p /srv/notes-dump && echo notes >/srv/notes-dump/out
+case "$(cat /srv/notes-mode 2>/dev/null)" in
+  file) rm -rf /srv/notes-dump; echo x >/srv/notes-dump ;;
+  fail) exit 1 ;;
+  *) [ -d /srv/notes-dump ] || rm -f /srv/notes-dump; mkdir -p /srv/notes-dump && echo notes >/srv/notes-dump/out ;;
+esac
 NOTES
   h sh -c "mkdir -p $dump_dir && mount -t tmpfs -o size=1m tmpfs $dump_dir"
   compose up -d --wait db
@@ -755,6 +759,27 @@ NOTES
   [ "$(last_status)" = STATUS_ERROR ] || fail "the failing script did not fail the backup"
   [ "$(newest_snapshot)" = "$n" ] || fail "a snapshot was taken although the script failed"
   h sh -c "rmdir $data_dir/excludes && : >$data_dir/excludes"
+
+  # A command that leaves a file instead of a directory fails the app.
+  h sh -c 'echo file >/srv/notes-mode'
+  run_backup
+  h grep -q '^notes: .*must be a directory' "$data_dir/prepare-failures" || fail "a file as command output is not recorded"
+  [ "$(last_status)" = STATUS_ERROR ] || fail "a file as command output did not fail the backup"
+  h sh -c 'rm -f /srv/notes-mode'
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the command dump did not recover"
+  in_snapshot /srv/notes-dump/out
+  # A failing command keeps its old output on disk, out of the snapshot.
+  h sh -c 'echo fail >/srv/notes-mode'
+  run_backup
+  [ "$(last_status)" = STATUS_ERROR ] || fail "a failing command did not fail the backup"
+  h grep -q '^notes: ' "$data_dir/prepare-failures" || fail "the failing command is not recorded"
+  h test -s /srv/notes-dump/out || fail "the old command output was removed"
+  [ -z "$(snapshot_children /srv/notes-dump)" ] || fail "the stale command output is in the snapshot"
+  in_snapshot /srv/shop/a.txt
+  h sh -c 'rm -f /srv/notes-mode'
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the command dump did not recover again"
 
   # None or two running containers.
   compose up -d --scale db=2 db

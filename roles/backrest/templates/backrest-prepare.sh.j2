@@ -80,12 +80,12 @@ dump_postgres() {
   dump_failed "$5" "the dump of database $4 failed, was not readable or took longer than $dump_timeout seconds"
 }
 
-# dump_command <command> <output>
+# dump_command <command> <output directory>
 dump_command() {
   if ! timeout "$dump_timeout" "$1" </dev/null; then
     dump_failed "$2" "$1 failed or took longer than $dump_timeout seconds"
-  elif [ ! -e "$2" ]; then
-    dump_failed "$2" "$1 left no $2"
+  elif [ ! -d "$2" ]; then
+    dump_failed "$2" "$1 left no directory at $2; the output of a command dump must be a directory, because restic keeps a path it is given and a single file could not be left out"
   fi
 }
 

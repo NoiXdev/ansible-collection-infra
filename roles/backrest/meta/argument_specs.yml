@@ -52,7 +52,8 @@ argument_specs:
       backrest_apps:
         type: list
         elements: dict
-        description: Apps to back up; see defaults/main.yml for the keys.
+        description: >-
+          Apps to back up; see defaults/main.yml for the keys. The output of a command dump must be a directory.
       backrest_extra_paths:
         type: list
         elements: path
