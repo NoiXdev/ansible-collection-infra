@@ -1,0 +1,67 @@
+---
+- name: Enroll the agent
+  when: not pulsix_agent_identity.stat.exists
+  block:
+    - name: Wait for the agent's certificate
+      ansible.builtin.wait_for:
+        path: /etc/pulsix/agent.crt
+        timeout: "{{ pulsix_agent_enroll_timeout }}"
+
+    - name: Remove the token from the settings
+      ansible.builtin.lineinfile:
+        path: /etc/pulsix/agent.env
+        regexp: ^PULSIX_ENROLL_TOKEN=
+        state: absent
+      no_log: true
+      diff: false
+
+    - name: Restart the agent so that it no longer holds the token
+      ansible.builtin.systemd_service:
+        name: pulsix-agent
+        state: restarted
+  rescue:
+    - name: Remove the token from the settings after a failed enrollment
+      ansible.builtin.lineinfile:
+        path: /etc/pulsix/agent.env
+        regexp: ^PULSIX_ENROLL_TOKEN=
+        state: absent
+      no_log: true
+      diff: false
+
+    - name: Stop the agent after a failed enrollment
+      ansible.builtin.systemd_service:
+        name: pulsix-agent
+        state: stopped
+
+    - name: Fail the enrollment
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} did not enroll within {{ pulsix_agent_enroll_timeout }} seconds.
+          The token was removed from /etc/pulsix/agent.env and the agent is stopped. See
+          journalctl -u pulsix-agent on the host. A token that was used or has expired needs a new
+          one; create it in Pulsix and run the role again.
+
+- name: Read the state of the agent
+  ansible.builtin.systemd_service:
+    name: pulsix-agent
+  register: pulsix_agent_state_before
+
+- name: Let the agent run for 10 seconds
+  ansible.builtin.wait_for:
+    timeout: 10
+
+- name: Read the state of the agent again
+  ansible.builtin.systemd_service:
+    name: pulsix-agent
+  register: pulsix_agent_state_after
+
+- name: Check that the agent stayed up
+  ansible.builtin.assert:
+    that:
+      - pulsix_agent_state_before.status.ActiveState == 'active'
+      - pulsix_agent_state_after.status.ActiveState == 'active'
+      - pulsix_agent_state_before.status.NRestarts == pulsix_agent_state_after.status.NRestarts
+    fail_msg: >-
+      The pulsix-agent service did not stay active for 10 seconds without restarting on
+      {{ inventory_hostname }}. See journalctl -u pulsix-agent on the host. Nothing was removed.
+    quiet: true

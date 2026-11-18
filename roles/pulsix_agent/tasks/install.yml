@@ -1,0 +1,85 @@
+---
+- name: Read the checksum of the agent binary
+  ansible.builtin.uri:
+    url: "{{ pulsix_agent_download_url }}.sha256"
+    return_content: true
+  register: pulsix_agent_sha256_file
+  check_mode: false
+  changed_when: false
+
+- name: Take the checksum from the first field
+  ansible.builtin.set_fact:
+    pulsix_agent_sha256: >-
+      {{ (pulsix_agent_sha256_file.content | replace('\r', '')).split() | first | default('') | lower }}
+
+- name: Check the checksum
+  ansible.builtin.assert:
+    that: pulsix_agent_sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: >-
+      {{ pulsix_agent_download_url }}.sha256 does not start with a 64-character hex SHA-256.
+    quiet: true
+
+- name: Install the agent binary
+  ansible.builtin.get_url:
+    url: "{{ pulsix_agent_download_url }}"
+    dest: /usr/local/bin/pulsix-agent
+    checksum: "sha256:{{ pulsix_agent_sha256 }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: pulsix_agent_binary
+
+- name: Create the configuration directory
+  ansible.builtin.file:
+    path: /etc/pulsix
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Remove the token left by a manual install
+  ansible.builtin.lineinfile:
+    path: /etc/pulsix/agent.env
+    regexp: ^PULSIX_ENROLL_TOKEN=
+    state: absent
+  when: pulsix_agent_identity.stat.exists
+  register: pulsix_agent_stale_token
+  no_log: true
+  diff: false
+
+- name: Write the agent's settings
+  ansible.builtin.template:
+    src: agent.env.j2
+    dest: /etc/pulsix/agent.env
+    owner: root
+    group: root
+    mode: "0600"
+  register: pulsix_agent_settings
+  no_log: true
+  diff: false
+
+- name: Look for the service unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/pulsix-agent.service
+  register: pulsix_agent_unit_before
+
+- name: Install the service unit
+  ansible.builtin.copy:
+    src: pulsix-agent.service
+    dest: /etc/systemd/system/pulsix-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: pulsix_agent_unit
+
+- name: Enable and start the agent
+  ansible.builtin.systemd_service:
+    name: pulsix-agent
+    enabled: true
+    state: "{{ 'restarted' if pulsix_agent_restart else 'started' }}"
+    daemon_reload: "{{ pulsix_agent_restart }}"
+  vars:
+    pulsix_agent_restart: >-
+      {{ pulsix_agent_binary is changed or pulsix_agent_stale_token is changed
+         or pulsix_agent_settings is changed or pulsix_agent_unit is changed }}
+  when: not ansible_check_mode or pulsix_agent_unit_before.stat.exists

@@ -28,10 +28,10 @@ export ANSIBLE_NOCOLOR=1
 
 # Tokens the stub agent knows: the first enrolls, the second is refused.
 token_valid=pxa1.NOIXTESTVALID.secret.pin
-# shellcheck disable=SC2034  # used by the scenarios of later tasks
 token_refused=pxa1.NOIXTESTREFUSED.secret.pin
 
 log=""
+common=(-e noixdev_infra_unused=1)
 
 # host_sh CMD: run a shell command in the container.
 host_sh() { docker exec "$host" sh -c "$*"; }
@@ -46,7 +46,7 @@ play() {
 expect_fail() {
   local before
   before="$(wc -l <"$log")"
-  if play "$@"; then
+  if play "${common[@]}" "$@"; then
     echo "expected the run to fail: $*" >&2
     exit 1
   fi
@@ -93,6 +93,30 @@ scenario() {
 }
 
 fail() { echo "$*" >&2; exit 1; }
+
+bin=/usr/local/bin/pulsix-agent
+out=""
+
+# converge ARGS: a run that must succeed; $out holds its output.
+converge() {
+  local before
+  before="$(wc -l <"$log")"
+  play "${common[@]}" "$@" || { tail -n +$((before + 1)) "$log" >&2; fail "the run failed: $*"; }
+  out="$(tail -n +$((before + 1)) "$log")"
+}
+
+# changed_zero: the last run changed nothing.
+changed_zero() { printf '%s\n' "$out" | grep -E '^testhost +:' | grep -q 'changed=0 ' || fail "the run was not idempotent"; }
+
+main_pid() { host_sh 'systemctl show -p MainPID --value pulsix-agent'; }
+agent_sha() { host_sh "sha256sum $bin" | cut -d' ' -f1; }
+sha_file() { echo "/srv/pulsix-stub-web/$1/pulsix-agent-linux-$(host_sh 'dpkg --print-architecture').sha256"; }
+
+# no_token_left PID: the token is neither in agent.env nor in the environment of PID.
+no_token_left() {
+  if host_sh 'grep -q PULSIX_ENROLL_TOKEN /etc/pulsix/agent.env'; then fail "agent.env still has the token"; fi
+  if host_sh "grep -aq NOIXTESTVALID /proc/$1/environ"; then fail "the agent still holds the token"; fi
+}
 
 start_host() {
   local ubuntu="$1"
@@ -150,6 +174,128 @@ run_release() {
     tail -n +$((before + 1)) "$log" | grep -q 'TASK \[noixdev.infra.pulsix_agent : Check the settings\]' \
       || fail "the settings check did not run for an IPv6 manager address"
     ! tail -n +$((before + 1)) "$log" | grep -q 'fatal:' || fail "an IPv6 manager address failed a check"
+  fi
+
+  # Settings every run shares: the manager stub and the stub's web server.
+  common=(-e pulsix_agent_manager_addr=127.0.0.1:18444
+    -e 'pulsix_agent_download_url=http://127.0.0.1:18080/{{ pulsix_agent_version }}/pulsix-agent-linux-{{ pulsix_agent_arch }}')
+  local tok=(-e "pulsix_agent_enroll_token=$token_valid") pid v=0.1.0-rc.4
+
+  if scenario install || scenario idempotence; then
+    echo "-- install, idempotence"
+    fresh_host
+    publish_stub "$v"
+    converge -v --diff "${tok[@]}"
+    [ "$(host_sh 'stat -c "%a %U %G" /etc/pulsix/agent.env')" = "600 root root" ] || fail "agent.env is not 600 root root"
+    [ "$(host_sh 'stat -c "%a" /etc/pulsix')" = 700 ] || fail "/etc/pulsix is not 700"
+    [ "$(host_sh "stat -c %a $bin")" = 755 ] || fail "the binary is not 755"
+    host_sh 'systemctl is-active --quiet pulsix-agent && systemctl is-enabled --quiet pulsix-agent' || fail "the service is not active and enabled"
+    host_sh 'test -e /etc/pulsix/agent.crt' || fail "agent.crt is missing"
+    pid="$(main_pid)"
+    no_token_left "$pid"
+    if printf '%s\n' "$out" | grep -q NOIXTESTVALID; then fail "the Ansible log shows the token"; fi
+    converge "${tok[@]}"
+    changed_zero
+    [ "$(main_pid)" = "$pid" ] || fail "a second run restarted the agent"
+  fi
+
+  if scenario whitespace_token; then
+    echo "-- whitespace_token"
+    fresh_host
+    publish_stub "$v"
+    converge -e "{\"pulsix_agent_enroll_token\": \"$token_valid\\n\"}"
+    host_sh 'test -e /etc/pulsix/agent.crt' || fail "a token with a trailing newline did not enroll"
+    fresh_host
+    converge "${tok[@]}" -e '{"pulsix_agent_enroll_tokens": {"testhost": ""}}'
+    host_sh 'test -e /etc/pulsix/agent.crt' || fail "an empty per-host token did not fall back to the shared one"
+  fi
+
+  if scenario checksum_forms; then
+    echo "-- checksum_forms"
+    fresh_host
+    publish_stub "$v"
+    host_sh "sed -i 's/^\\([0-9a-f]*\\)/\\U\\1/;s/\$/\\r/' $(sha_file "$v")"
+    host_sh "head -c 64 $(sha_file "$v") | grep -q '^[0-9A-F]*$' && grep -q \"\$(printf '\\r')\" $(sha_file "$v")" || fail "the test checksum file is not uppercase with CRLF"
+    converge "${tok[@]}"
+    [ "$(agent_sha)" = "$(host_sh "sha256sum /srv/pulsix-stub-web/$v/pulsix-agent-linux-\$(dpkg --print-architecture)" | cut -d' ' -f1)" ] \
+      || fail "the binary was not installed"
+  fi
+
+  if scenario upgrade; then
+    echo "-- upgrade"
+    fresh_host
+    publish_stub "$v"
+    converge "${tok[@]}"
+    pid="$(main_pid)"
+    crt="$(host_sh 'stat -c "%i %Y" /etc/pulsix/agent.crt')"
+    publish_stub 0.1.0-rc.5
+    converge -e pulsix_agent_version=0.1.0-rc.5
+    [ "$(agent_sha)" = "$(host_sh "cut -d' ' -f1 $(sha_file 0.1.0-rc.5)")" ] || fail "the binary was not upgraded"
+    [ "$(main_pid)" != "$pid" ] || fail "the agent was not restarted"
+    [ "$(host_sh 'stat -c "%i %Y" /etc/pulsix/agent.crt')" = "$crt" ] || fail "the upgrade touched agent.crt"
+  fi
+
+  if scenario takeover; then
+    echo "-- takeover"
+    fresh_host
+    publish_stub "$v"
+    docker cp "$root/roles/pulsix_agent/files/pulsix-agent.service" "$host:/etc/systemd/system/pulsix-agent.service"
+    host_sh "cp /srv/pulsix-stub-web/$v/pulsix-agent-linux-\$(dpkg --print-architecture) $bin
+      mkdir -p /etc/pulsix && chmod 700 /etc/pulsix && echo stub >/etc/pulsix/agent.crt
+      printf 'PULSIX_MANAGER_ADDR=127.0.0.1:18444\nPULSIX_ENROLL_TOKEN=$token_valid\n' >/etc/pulsix/agent.env && chmod 600 /etc/pulsix/agent.env
+      systemctl daemon-reload && systemctl enable --now pulsix-agent"
+    sleep 3
+    converge
+    no_token_left "$(main_pid)"
+    converge
+    changed_zero
+  fi
+
+  if scenario bad_download; then
+    echo "-- bad_download"
+    fresh_host
+    publish_stub "$v"
+    converge "${tok[@]}"
+    sha="$(agent_sha)"
+    publish_stub 0.1.0-rc.6 "$(printf '0%.0s' $(seq 64))"
+    expect_fail -e pulsix_agent_version=0.1.0-rc.6
+    [ "$(agent_sha)" = "$sha" ] || fail "a wrong checksum replaced the binary"
+    publish_stub 0.1.0-rc.7
+    host_sh "echo 'not-a-hash  file' >$(sha_file 0.1.0-rc.7)"
+    expect_fail -e pulsix_agent_version=0.1.0-rc.7
+    [ "$(agent_sha)" = "$sha" ] || fail "a bad checksum file replaced the binary"
+  fi
+
+  if scenario failed_enrollment; then
+    echo "-- failed_enrollment"
+    fresh_host
+    publish_stub "$v"
+    before="$(wc -l <"$log")"
+    expect_fail -e "pulsix_agent_enroll_token=$token_refused" -e pulsix_agent_enroll_timeout=10
+    tail -n +$((before + 1)) "$log" | grep -q 'journalctl -u pulsix-agent' || fail "the failure does not name journalctl"
+    if tail -n +$((before + 1)) "$log" | grep -q NOIXTESTREFUSED; then fail "the Ansible log shows the token"; fi
+    if host_sh 'grep -q NOIXTESTREFUSED /etc/pulsix/agent.env'; then fail "the refused token stayed in agent.env"; fi
+    [ "$(host_sh 'systemctl is-active pulsix-agent || true')" = inactive ] || fail "the service is not inactive"
+    converge "${tok[@]}"
+    host_sh 'test -e /etc/pulsix/agent.crt' || fail "enrolling again with a valid token failed"
+  fi
+
+  if scenario crash; then
+    echo "-- crash"
+    fresh_host
+    publish_stub "$v"
+    converge "${tok[@]}"
+    set_mode crash
+    expect_fail
+    set_mode ok
+  fi
+
+  if scenario check_mode; then
+    echo "-- check_mode"
+    fresh_host
+    publish_stub "$v"
+    converge --check "${tok[@]}"
+    host_sh "test ! -e $bin && test ! -e /etc/pulsix" || fail "a check run changed the host"
   fi
 }
 
