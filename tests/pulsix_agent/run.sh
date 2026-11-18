@@ -290,6 +290,47 @@ run_release() {
     set_mode ok
   fi
 
+  # A requested removal needs a proven connection. The marker stands in for the
+  # tool's files; every failure keeps it.
+  local rm=(-e '{"pulsix_agent_remove": ["netdata"]}')
+  local before mode
+  for mode in no_connection stream_failed refused drop; do
+    if scenario "$mode"; then
+      echo "-- $mode"
+      fresh_host
+      publish_stub "$v"
+      host_sh 'mkdir -p /etc/netdata && touch /etc/netdata/marker'
+      set_mode "${mode//_/-}"
+      before="$(wc -l <"$log")"
+      expect_fail "${tok[@]}" "${rm[@]}"
+      tail -n +$((before + 1)) "$log" | grep -q 'journalctl -u pulsix-agent' || fail "the failure does not name journalctl ($mode)"
+      host_sh 'test -e /etc/netdata/marker' || fail "the marker is gone after $mode"
+    fi
+  done
+
+  if scenario connected; then
+    echo "-- connected"
+    fresh_host
+    publish_stub "$v"
+    host_sh 'mkdir -p /etc/netdata && touch /etc/netdata/marker'
+    converge "${tok[@]}" "${rm[@]}"
+  fi
+
+  if scenario no_removal_no_proof; then
+    echo "-- no_removal_no_proof"
+    fresh_host
+    publish_stub "$v"
+    set_mode no-connection
+    converge "${tok[@]}"
+  fi
+
+  if scenario ipv6_port; then
+    echo "-- ipv6_port"
+    fresh_host
+    publish_stub "$v"
+    converge "${tok[@]}" -e 'pulsix_agent_manager_addr=[::1]:18444' "${rm[@]}"
+  fi
+
   if scenario check_mode; then
     echo "-- check_mode"
     fresh_host

@@ -1,0 +1,81 @@
+---
+- name: Look for the ss command
+  ansible.builtin.command: which ss
+  register: pulsix_agent_ss
+  changed_when: false
+  failed_when: false
+
+- name: Install iproute2
+  ansible.builtin.apt:
+    name: iproute2
+    update_cache: true
+    cache_valid_time: 3600
+  when: pulsix_agent_ss.rc != 0
+
+- name: Read the agent's main process
+  ansible.builtin.systemd_service:
+    name: pulsix-agent
+  register: pulsix_agent_unit
+
+- name: Wait for a connection from the agent to the manager
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      ss -Htnp state established '( dport = :{{ pulsix_agent_manager_port }} )'
+      | grep 'pid={{ pulsix_agent_unit.status.MainPID }},' | head -n 1 || true
+    executable: /bin/bash
+  register: pulsix_agent_connection
+  changed_when: false
+  until: pulsix_agent_connection.stdout | trim != ''
+  retries: 12
+  delay: 5
+  failed_when: false
+
+- name: Check that the agent is connected
+  ansible.builtin.assert:
+    that: pulsix_agent_connection.stdout | trim != ''
+    fail_msg: >-
+      The agent on {{ inventory_hostname }} holds no connection to port {{ pulsix_agent_manager_port }}
+      of the manager. Nothing was removed. See journalctl -u pulsix-agent on the host.
+    quiet: true
+
+- name: Note the local address of the connection
+  ansible.builtin.set_fact:
+    pulsix_agent_local: "{{ (pulsix_agent_connection.stdout | trim).split()[2] }}"
+
+- name: Note the time
+  ansible.builtin.command: date +%s
+  register: pulsix_agent_since
+  changed_when: false
+
+- name: Watch the connection for 30 seconds
+  ansible.builtin.wait_for:
+    timeout: 30
+
+- name: Read the connections of the agent again
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      ss -Htnp state established '( dport = :{{ pulsix_agent_manager_port }} )'
+      | grep 'pid={{ pulsix_agent_unit.status.MainPID }},' || true
+    executable: /bin/bash
+  register: pulsix_agent_connection_after
+  changed_when: false
+
+- name: Read the log of the agent
+  ansible.builtin.command: journalctl -u pulsix-agent --since @{{ pulsix_agent_since.stdout | trim }} -o cat
+  register: pulsix_agent_journal
+  changed_when: false
+
+- name: Check that the connection held
+  ansible.builtin.assert:
+    that:
+      - >-
+        pulsix_agent_connection_after.stdout_lines
+        | select('search', ' ' ~ pulsix_agent_local | regex_escape ~ ' ') | list | length > 0
+      - pulsix_agent_failure_lines | select('in', pulsix_agent_journal.stdout) | list | length == 0
+    fail_msg: >-
+      The connection of the agent on {{ inventory_hostname }} did not hold for 30 seconds: it was
+      lost or replaced, or the agent logged a failure. Nothing was removed. See
+      journalctl -u pulsix-agent on the host.
+    quiet: true

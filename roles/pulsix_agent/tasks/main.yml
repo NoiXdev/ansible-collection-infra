@@ -9,3 +9,7 @@
 - name: Enroll the agent and prove that it runs
   ansible.builtin.import_tasks: enroll.yml
   when: not ansible_check_mode
+
+- name: Prove that the agent is connected before anything is removed
+  ansible.builtin.import_tasks: connection.yml
+  when: pulsix_agent_remove | length > 0 and not ansible_check_mode
