@@ -16,9 +16,13 @@
     msg: portainer_agent_register_url needs curl on the host (the base role installs it).
   when: portainer_register_curl_check.rc != 0
 
+# no_log: the URL may carry credentials and the result would show it at -v.
 - name: Work out the curl call
   ansible.builtin.set_fact:
     portainer_register_base: "{{ portainer_agent_register_url | regex_replace('/+$', '') }}"
+    # What the error messages show: greedy up to the last @ before the first /,
+    # so a password with an @ goes too.
+    portainer_register_shown: "{{ portainer_agent_register_url | regex_replace('/+$', '') | regex_replace('^(https?://)[^/]*@', '\\1') }}"
     portainer_register_resolve: >-
       {{ (portainer_agent_register_url | urlsplit('hostname'))
          ~ ':'
@@ -28,6 +32,7 @@
          ~ (('[' ~ (portainer_agent_register_address | regex_replace('^\[|\]$', '')) ~ ']')
             if ':' in portainer_agent_register_address
             else portainer_agent_register_address) }}
+  no_log: true
 
 - name: Register the agent
   block:
@@ -71,9 +76,10 @@
         msg: >-
           {{ 'Could not read' if portainer_register_list.rc != 0
              else 'The server did not answer with a list of environments (a redirect? use the https:// URL), from' }}
-          the environments at {{ portainer_register_base }}/api/endpoints
-          (curl rc {{ portainer_register_list.rc }}): {{ portainer_register_list.stderr }}
-          {{ portainer_register_list.stdout[:300] }}
+          the environments at {{ portainer_register_shown }}/api/endpoints
+          (curl rc {{ portainer_register_list.rc }}):
+          {{ portainer_register_list.stderr | replace(portainer_agent_register_api_token, '********') }}
+          {{ (portainer_register_list.stdout | replace(portainer_agent_register_api_token, '********'))[:300] }}
       when: portainer_register_list.rc != 0 or not (portainer_register_list.stdout | trim).startswith('[')
 
     - name: Find the environment of this name
@@ -86,7 +92,7 @@
     - name: Refuse an environment of this name that points elsewhere
       ansible.builtin.fail:
         msg: >-
-          Portainer at {{ portainer_register_base }} already has an environment named
+          Portainer at {{ portainer_register_shown }} already has an environment named
           {{ portainer_agent_register_name }} with the URL {{ portainer_register_existing[0] }},
           but this agent is {{ portainer_agent_register_endpoint }}
           (portainer_agent_register_endpoint). Nothing was changed.
@@ -122,8 +128,9 @@
       ansible.builtin.fail:
         msg: >-
           Could not create the environment {{ portainer_agent_register_name }} at
-          {{ portainer_register_base }}/api/endpoints (curl rc {{ portainer_register_create.rc }}):
-          {{ portainer_register_create.stderr }} {{ portainer_register_create.stdout[:300] }}
+          {{ portainer_register_shown }}/api/endpoints (curl rc {{ portainer_register_create.rc }}):
+          {{ portainer_register_create.stderr | replace(portainer_agent_register_api_token, '********') }}
+          {{ (portainer_register_create.stdout | replace(portainer_agent_register_api_token, '********'))[:300] }}
       when:
         - portainer_register_create is not skipped
         - portainer_register_create.rc != 0

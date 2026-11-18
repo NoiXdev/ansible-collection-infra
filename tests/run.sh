@@ -119,6 +119,42 @@ play "$here/portainer_agent.yml" --check -e test_register_name=check-agent >"$ou
 play "$here/portainer_agent.yml" -e test_register_absent=check-agent >"$out/portainer-agent-absent.log" 2>&1 \
   || { cat "$out/portainer-agent-absent.log" >&2; echo "check mode created an environment" >&2; exit 1; }
 
+echo "== a failed registration hides the credentials of the URL"
+if play "$here/portainer_agent.yml" -v -e 'test_register_url=http://user:test-url-p@ssword@portainer.test:1' >"$out/portainer-agent-credentials.log" 2>&1; then
+  echo "portainer registered against a port nothing listens on" >&2; exit 1
+fi
+grep -qF "http://portainer.test:1/api/endpoints" "$out/portainer-agent-credentials.log" \
+  || { cat "$out/portainer-agent-credentials.log" >&2; echo "the error does not name the server" >&2; exit 1; }
+! grep -qF -e "test-url-p" -e "ssword@" "$out/portainer-agent-credentials.log" \
+  || { echo "the credentials of the URL show up in the output" >&2; exit 1; }
+
+echo "== a failed registration masks the token in the answer of the server"
+# Answers every request with 500 and the received X-API-Key as the body.
+docker exec -d "$host" python3 -c '
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = self.headers.get("X-API-Key", "").encode()
+        self.send_response(500)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", 18099), H).serve_forever()
+'
+for _ in $(seq 1 30); do
+  docker exec "$host" curl -s -o /dev/null http://127.0.0.1:18099 && break
+  sleep 1
+done
+if play "$here/portainer_agent.yml" -e test_register_url=http://127.0.0.1:18099 >"$out/portainer-agent-echo.log" 2>&1; then
+  docker exec "$host" pkill -f 18099 || true
+  echo "portainer registered against a server that answers 500" >&2; exit 1
+fi
+docker exec "$host" pkill -f 18099 || true
+grep -qF '********' "$out/portainer-agent-echo.log" \
+  || { cat "$out/portainer-agent-echo.log" >&2; echo "the answer of the server is not masked" >&2; exit 1; }
+
 echo "== portainer agent registration refuses a name with another URL"
 if play "$here/portainer_agent.yml" -e test_register_endpoint=tcp://192.0.2.10:9001 >"$out/portainer-agent-conflict.log" 2>&1; then
   echo "portainer accepted an environment name that points elsewhere" >&2; exit 1

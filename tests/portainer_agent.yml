@@ -74,7 +74,7 @@
         portainer_dir: /opt/portainer-agent
         portainer_project: portainer-agent
         portainer_agent_bind: ["{{ ansible_default_ipv4.address }}"]
-        portainer_agent_register_url: http://portainer.test
+        portainer_agent_register_url: "{{ test_register_url | default('http://portainer.test') }}"
         portainer_agent_register_address: 127.0.0.1
         portainer_agent_register_api_token: "{{ test_register_token }}"
         portainer_agent_register_name: "{{ test_register_name | default('test-agent') }}"

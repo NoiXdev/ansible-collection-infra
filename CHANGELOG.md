@@ -32,6 +32,9 @@
   as a change on every run; a recreate of them or a change to any other service still is.
 - `harbor`: Harbor v2.16.0 is supported and covered by the test suite; the default version stays.
   From v2.16.0 Harbor blocks webhooks to loopback, link-local and cloud metadata addresses.
+- `portainer`: the errors of a failed registration no longer show credentials in
+  `portainer_agent_register_url` (`https://user:password@host`) and mask the access token in the
+  answer of the server. The registration itself still uses the URL as given.
 
 ## 0.6.0 — 2026-11-17
 
