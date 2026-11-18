@@ -10,6 +10,13 @@ redirect_role() {
     -m ansible.builtin.include_role -a name=noixdev.infra.anubis
 }
 redirect_on=(-e anubis_public_url=https://anubis.example.test -e anubis_cookie_domain=example.test)
+# The converge playbook (Traefik, Anubis, the fixtures) with redirect-vars.yml.
+redirect_play() { play "$here/redirect-converge.yml" "$@"; }
+# redirect_play twice: the second run must change nothing.
+redirect_idempotent() {
+  redirect_play "$@" | tee "$out/redirect-rerun.log"
+  grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/redirect-rerun.log" || fail "a repeated redirect mode converge changed something"
+}
 
 new_host
 load_images
@@ -54,5 +61,45 @@ fails r-accepted redirect_role "${redirect_on[@]}" \
 expect_in_log r-accepted "/opt/traefik/dynamic"
 if grep -qF "anubis_cookie_domain" "$out/r-accepted.log"; then fail "r-accepted.log names anubis_cookie_domain"; fi
 untouched
+
+echo "== redirect mode: install, then the browser flow over HTTPS"
+redirect_play "${redirect_on[@]}"
+wait_healthy
+play "$here/redirect-verify.yml"
+redirect_idempotent "${redirect_on[@]}"
+
+loc='https://anubis.example.test/.within.website/?redir=https%3A%2F%2Fa.example.test%2Fp%3Fx%3D1'
+want_bearer='Bearer realm="noix-registry"'
+want_basic='Basic realm="noix-test"'
+[ "$(solve probe 'https://a.example.test/p?x=1' --response-header Location)" = "307 other $loc" ] || fail "no redirect"
+# A client cannot steer the target.
+[ "$(solve probe 'https://a.example.test/p?x=1' --header X-Forwarded-Host:evil.test --header X-Forwarded-Uri:/x --response-header Location)" = "307 other $loc" ] \
+  || fail "client headers steered the redirect"
+expect "200 backend" https://a.example.test/api/items
+[ "$(solve probe https://f.example.test/v2/ --ua curl/8.17.0 --response-header WWW-Authenticate)" = "401 other $want_bearer" ] || fail "backend 401 replaced"
+[ "$(solve probe https://e.example.test/ --ua curl/8.17.0 --response-header WWW-Authenticate)" = "401 other $want_basic" ] || fail "basicAuth 401 replaced"
+[ "$(solve probe https://f.example.test/api/x --response-header WWW-Authenticate)" = "401 other $want_bearer" ] || fail "401 on an ALLOWed path replaced"
+expect "200 other" https://anubis.example.test/.within.website/x/xess/xess.min.css
+[ "$(solve probe https://anubis.example.test/ | cut -d' ' -f1)" = 404 ] || fail "the Anubis host serves other paths"
+
+echo "== redirect mode: Anubis's own paths on an app host never reach the backend"
+for path in /.within.website/x/cmd/anubis/static/js/main.mjs /.within.website/x/xess/xess.min.css \
+  /.within.website/x/cmd/anubis/api/pass-challenge \
+  //.within.website/x/cmd/anubis/static/ \
+  /.within.website/x/cmd/anubis/static/../../../../../secret \
+  /.within.website/x/cmd/anubis/static/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/secret \
+  /.within.website/x/cmd/anubis/static/..%2F..%2F..%2F..%2F..%2Fsecret \
+  /.within.website%2F..%2Fsecret /.within.website/x/xess/../../../secret; do
+  not_backend "https://a.example.test$path"
+done
+
+echo "== redirect mode: one solve on the Anubis host, the cookie works on every app host"
+jar_r="$(jar redirect)"
+solve solve-redirect 'https://a.example.test/p?x=1' --jar "$jar_r" --cookie-domain example.test
+expect "200 backend" https://a.example.test/other --jar "$jar_r"
+[ "$(solve probe https://f.example.test/v2/ --jar "$jar_r" --response-header WWW-Authenticate)" = "401 other $want_bearer" ] \
+  || fail "backend 401 replaced with the cookie"
+[ "$(solve probe https://e.example.test/ --jar "$jar_r" --response-header WWW-Authenticate)" = "401 other $want_basic" ] \
+  || fail "basicAuth 401 replaced with the cookie"
 
 echo "== redirect part passed"

@@ -1,0 +1,36 @@
+---
+- name: Verify redirect mode
+  hosts: all
+  vars_files: [redirect-vars.yml]
+  tasks:
+    - name: Read the policy and the Traefik dynamic file
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - /opt/anubis/policy.yaml
+        - "{{ traefik_dir }}/dynamic/anubis.yml"
+      register: verify_raw
+
+    - name: Read the Anubis container
+      ansible.builtin.command:
+        cmd: docker inspect noixdev-anubis
+      register: verify_container
+      changed_when: false
+
+    - name: Check the files and the container
+      vars:
+        verify_policy: "{{ verify_raw.results[0].content | b64decode | from_yaml }}"
+        verify_dynamic: "{{ verify_raw.results[1].content | b64decode | from_yaml }}"
+        verify_env: "{{ (verify_container.stdout | from_json)[0].Config.Env }}"
+      ansible.builtin.assert:
+        that:
+          - verify_dynamic.http.middlewares.anubis.chain.middlewares == ['anubis-strip', 'anubis-check']
+          - "'anubis-challenge' not in verify_dynamic.http.middlewares"
+          - verify_dynamic.http.routers.keys() | list == ['anubis-sec']
+          - verify_dynamic.http.routers['anubis-sec'].rule == "Host(`anubis.example.test`) && PathPrefix(`/.within.website/`)"
+          - verify_dynamic.http.routers['anubis-sec'].priority == 100000
+          - verify_policy.bots | selectattr('name', 'defined') | selectattr('name', 'eq', 'anubis-own-paths') | list | length == 0
+          - verify_policy.bots[0].name == 'test-api'
+          - "'PUBLIC_URL=https://anubis.example.test' in verify_env"
+          - "'COOKIE_DOMAIN=example.test' in verify_env"
+        fail_msg: "Unexpected redirect mode output: {{ verify_dynamic }} {{ verify_policy.bots }} {{ verify_env }}"

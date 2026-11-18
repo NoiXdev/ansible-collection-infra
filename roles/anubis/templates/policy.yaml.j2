@@ -1,7 +1,7 @@
 # {{ ansible_managed }}
 # Anubis's own paths, the anubis_policy_allow rules, then Anubis's default bot
 # list. Read once at start; the role recreates the container on a change.
-{{ {'bots': [anubis_own_paths_rule] + anubis_policy_allow + [{'import': '(data)/meta/default-config.yaml'}]}
+{{ {'bots': ([] if anubis_redirect_mode | bool else [anubis_own_paths_rule]) + anubis_policy_allow + [{'import': '(data)/meta/default-config.yaml'}]}
    | to_nice_yaml(indent=2, width=1000, sort_keys=False) }}
 # Proxies read a 200 from the check as "pass": DENY must not be 200.
 status_codes:

@@ -7,7 +7,7 @@ http:
   middlewares:
     anubis:
       chain:
-        middlewares: [anubis-strip, anubis-challenge, anubis-check]
+        middlewares: [anubis-strip, {% if not anubis_redirect_mode | bool %}anubis-challenge, {% endif %}anubis-check]
     # Anubis checks the path of X-Original-Uri, else of X-Forwarded-Uri.
     # Traefik never sets the first, and forwardAuth with trustForwardHeader
     # keeps an existing second one, which a trusted proxy (trustedIPs) passes
@@ -20,6 +20,7 @@ http:
         customRequestHeaders:
           X-Original-Uri: ""
           X-Forwarded-Uri: ""
+{% if not anubis_redirect_mode | bool %}
     # Anubis answers 401 for a client that must solve the challenge; the page
     # comes from Anubis for the original URL (status 401, the address stays).
     anubis-challenge:
@@ -27,6 +28,7 @@ http:
         status: ["401"]
         service: anubis
         query: "/.within.website/?redir={url}"
+{% endif %}
     # trustForwardHeader keeps X-Real-Ip (set by the entrypoint), which Anubis
     # needs; without it the check answers 500 for clients on private addresses.
     anubis-check:
@@ -37,7 +39,7 @@ http:
   routers:
 {% for ep in anubis_traefik_entrypoints %}
     anubis-{{ ep }}:
-      rule: PathPrefix(`/.within.website/`)
+      rule: {% if anubis_redirect_mode | bool %}Host(`{{ anubis_public_host }}`) && {% endif %}PathPrefix(`/.within.website/`)
       priority: 100000
       entryPoints: [{{ ep }}]
       service: anubis

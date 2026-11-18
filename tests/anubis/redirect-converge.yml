@@ -1,0 +1,80 @@
+---
+- name: Converge
+  hosts: all
+  vars_files: [redirect-vars.yml]
+  roles:
+    - noixdev.infra.traefik
+    - noixdev.infra.anubis
+
+# Three routers on the entrypoint sec (HTTPS, Traefik's default certificate),
+# all behind anubis@file: a whoami; the same whoami with a basicAuth router
+# middleware (401, realm noix-test); a backend that answers every request with
+# 401 and its own WWW-Authenticate (a registry stand-in). Their TLS comes from
+# the entrypoint.
+- name: Redirect mode fixtures
+  hosts: all
+  vars_files: [redirect-vars.yml]
+  tasks:
+    - name: Create the fixtures directory
+      ansible.builtin.file:
+        path: "{{ fixtures_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the fixtures compose file
+      ansible.builtin.copy:
+        dest: "{{ fixtures_dir }}/compose.yaml"
+        content: "{{ fixtures_compose | to_nice_yaml(indent=2) }}"
+        mode: "0644"
+      vars:
+        fixtures_backend_code: |
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          class H(BaseHTTPRequestHandler):
+              def handle_any(self):
+                  body = b"registry-401"
+                  self.send_response(401)
+                  self.send_header("WWW-Authenticate", 'Bearer realm="noix-registry"')
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+              do_GET = do_POST = do_HEAD = handle_any
+          ThreadingHTTPServer(("0.0.0.0", 8080), H).serve_forever()
+        fixtures_compose:
+          services:
+            whoami:
+              image: "{{ fixtures_whoami_image }}"
+              networks: [proxy]
+              labels:
+                traefik.enable: "true"
+                traefik.http.routers.app.rule: Host(`a.example.test`)
+                traefik.http.routers.app.entrypoints: sec
+                traefik.http.routers.app.middlewares: anubis@file
+                traefik.http.middlewares.test-auth.basicauth.users: "{{ fixtures_basic_auth_user }}"
+                traefik.http.middlewares.test-auth.basicauth.realm: noix-test
+                traefik.http.routers.auth.rule: Host(`e.example.test`)
+                traefik.http.routers.auth.entrypoints: sec
+                traefik.http.routers.auth.middlewares: anubis@file,test-auth
+                traefik.http.services.whoami.loadbalancer.server.port: "80"
+              restart: unless-stopped
+            backend:
+              image: "{{ fixtures_backend_image }}"
+              command: ["python3", "-c", "{{ fixtures_backend_code }}"]
+              networks: [proxy]
+              labels:
+                traefik.enable: "true"
+                traefik.http.routers.registry.rule: Host(`f.example.test`)
+                traefik.http.routers.registry.entrypoints: sec
+                traefik.http.routers.registry.middlewares: anubis@file
+                traefik.http.services.backend.loadbalancer.server.port: "8080"
+              restart: unless-stopped
+          networks:
+            proxy:
+              name: "{{ anubis_traefik_network | default('proxy') }}"
+              external: true
+
+    - name: Start the fixtures
+      community.docker.docker_compose_v2:
+        project_src: "{{ fixtures_dir }}"
+        project_name: anubis-fixtures
+        state: present
+        pull: missing

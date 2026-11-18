@@ -21,6 +21,12 @@ It runs on the test host: tests/anubis/run.sh pipes it into python3 there.
   solve.py redirect URL --redir TARGET --jar FILE
       GET URL, solve the challenge and call pass-challenge with redir=TARGET;
       prints "<status> <Location>" of that answer without following it.
+  solve.py solve-redirect URL --jar FILE --cookie-domain DOMAIN
+      Redirect mode (anubis_public_url): GET URL, which must answer 307; GET
+      the Location, which must be the challenge on the Anubis host; solve it
+      with redir taken from the Location; the auth cookie must carry
+      Domain=DOMAIN; follow the redirects, which must end on the backend
+      (200). Prints "solved-redirect URL domain=DOMAIN".
 
 Every command also takes --expect TEXT (the backend is a page with TEXT, for
 backends that are not whoami), --resolve HOST=ADDRESS (connect to ADDRESS
@@ -28,8 +34,11 @@ for HOST, keeping HOST for the Host header and TLS) and --source ADDRESS
 (the local address to connect from). Paths go out as given (dot segments
 too); HTTPS certificates are not checked.
 
-Cookies are kept per host by hand: the suite runs on plain HTTP, and Anubis
-marks its cookies Secure, which a cookie jar would never send back there.
+Cookies are kept by hand: the suite runs on plain HTTP in part, and Anubis
+marks its cookies Secure, which a cookie jar would never send back there. A
+cookie without a Domain attribute is kept for its host, one with a Domain
+attribute under the jar key ".<domain>" and sent to that domain and its
+subdomains.
 """
 
 import argparse
@@ -89,11 +98,12 @@ def save_jar(path, jar):
 
 
 def store_cookies(jar, host, headers):
-    cookies = jar.setdefault(host, {})
     for line in headers.get_all("Set-Cookie") or []:
         parts = [p.strip() for p in line.split(";")]
         name, _, value = parts[0].partition("=")
         attrs = {p.split("=", 1)[0].lower(): p.partition("=")[2] for p in parts[1:]}
+        domain = attrs.get("domain", "").lstrip(".").lower()
+        cookies = jar.setdefault("." + domain if domain else host, {})
         if attrs.get("max-age") == "0" or (value == "" and "expires" in attrs):
             cookies.pop(name, None)
         else:
@@ -105,7 +115,10 @@ def get(url, jar, ua, extra=None):
     # An empty User-Agent goes out as an empty header line (urllib adds its
     # own only when none is set).
     headers = {"User-Agent": ua, "Accept": "text/html", "Accept-Encoding": "gzip", "Accept-Language": "en"}
-    cookies = jar.get(host, {})
+    cookies = dict(jar.get(host, {}))
+    for key, domain_cookies in jar.items():
+        if key.startswith(".") and (host == key[1:] or host.endswith(key)):
+            cookies.update(domain_cookies)
     if cookies:
         headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
     headers.update(extra or {})
@@ -131,6 +144,18 @@ def host_only_cookies(url, hdrs):
         attrs = [p.strip().split("=", 1)[0].lower() for p in rest.split(";")]
         if "domain" in attrs:
             die(f"{url}: pass-challenge set {name.partition('=')[0]} with a Domain attribute:{rest}")
+
+
+def domain_cookies(url, hdrs, domain):
+    """pass-challenge's Set-Cookie lines: at least one, all with Domain=domain."""
+    lines = hdrs.get_all("Set-Cookie") or []
+    if not lines:
+        die(f"{url}: pass-challenge set no cookie")
+    for line in lines:
+        name, _, rest = line.partition(";")
+        attrs = {p.strip().split("=", 1)[0].lower(): p.partition("=")[2].strip() for p in rest.split(";")}
+        if attrs.get("domain", "").lstrip(".").lower() != domain.lower():
+            die(f"{url}: pass-challenge set {name.partition('=')[0]} without Domain={domain}:{rest}")
 
 
 def challenge_data(body):
@@ -184,14 +209,51 @@ def pass_url(url, body, redir, want_difficulty):
     return f"{parts.scheme}://{parts.netloc}/.within.website/x/cmd/anubis/api/pass-challenge?{query}", difficulty
 
 
+def follow(nxt, jar, ua, first_hook=None):
+    """GET nxt and follow up to 5 redirects; returns the statuses and the last answer."""
+    hops = []
+    for _ in range(5):
+        status, hdrs, body = get(nxt, jar, ua)
+        if not hops and first_hook:
+            first_hook(nxt, hdrs)
+        hops.append(str(status))
+        if status in (301, 302, 303, 307, 308):
+            nxt = urllib.parse.urljoin(nxt, hdrs["Location"])
+            continue
+        break
+    return hops, status, body
+
+
+def solve_redirect(args, jar, ua):
+    if not args.cookie_domain:
+        die("solve-redirect needs --cookie-domain")
+    status, hdrs, body = get(args.url, jar, ua)
+    loc = hdrs.get("Location")
+    if status != 307 or not loc:
+        die(f"first GET {args.url}: {status}, expected a 307 to the Anubis host", body)
+    status, _, body = get(loc, jar, ua)
+    if kind(body) != "challenge":
+        die(f"GET {loc}: {status} {kind(body)}, expected the challenge", body)
+    redir = urllib.parse.parse_qs(urllib.parse.urlsplit(loc).query).get("redir", [None])[0]
+    if not redir:
+        die(f"{loc} carries no redir")
+    nxt, _ = pass_url(loc, body, redir, args.difficulty)
+    hops, status, body = follow(nxt, jar, ua, lambda url, hdrs: domain_cookies(url, hdrs, args.cookie_domain))
+    if status != 200 or kind(body) != "backend":
+        die(f"after pass-challenge: {status} {kind(body)} (hops {','.join(hops)}), expected the backend", body)
+    save_jar(args.jar, jar)
+    print(f"solved-redirect {args.url} domain={args.cookie_domain}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["probe", "solve", "redirect"])
+    ap.add_argument("command", choices=["probe", "solve", "redirect", "solve-redirect"])
     ap.add_argument("url")
     ap.add_argument("--jar")
     ap.add_argument("--ua", default=BROWSER_UA)
     ap.add_argument("--header", action="append", default=[])
     ap.add_argument("--redir")
+    ap.add_argument("--cookie-domain")
     ap.add_argument("--difficulty", type=int)
     ap.add_argument("--echo")
     ap.add_argument("--response-header", action="append", default=[])
@@ -216,6 +278,10 @@ def main():
         for name in args.response_header:
             out.append(hdrs.get(name) or "-")
         print(" ".join(out))
+        return
+
+    if args.command == "solve-redirect":
+        solve_redirect(args, jar, ua)
         return
 
     status, _, body = get(args.url, jar, ua)

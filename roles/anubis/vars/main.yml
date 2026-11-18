@@ -48,7 +48,9 @@ anubis_environment: >-
        'ED25519_PRIVATE_KEY_HEX_FILE': '/anubis/ed25519.key',
        'REDIRECT_DOMAINS': anubis_redirect_domains | join(','),
        'DIFFICULTY': anubis_difficulty | string,
-     } | combine(anubis_env) }}
+     } | combine(anubis_env)
+       | combine({'PUBLIC_URL': anubis_public_url, 'COOKIE_DOMAIN': anubis_cookie_domain | lower}
+                 if anubis_redirect_mode | bool else {}) }}
 # Anubis's own paths that must pass the check: assets, the extension CSS,
 # pass-challenge and the imprint. Not api/check (the check request's own
 # path, which path_regex also matches) and not /.within.website/ itself (the
