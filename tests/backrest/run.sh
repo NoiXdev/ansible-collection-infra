@@ -1,0 +1,478 @@
+#!/usr/bin/env bash
+# End-to-end test of Backrest on a throwaway systemd host per Ubuntu release,
+# with Docker inside (the docker role) running fixtures/compose.yaml: MinIO as
+# the S3 target, a server that records reports, and PostgreSQL in the compose
+# project "shop".
+#
+# The scenario "contract" installs the release binary and writes config.json by
+# hand, and measures how Backrest really behaves: the release archives, the
+# login hash, what Backrest writes back to its configuration, the backup RPC, an
+# exclude file, failing hooks and the reports they send. It writes the answers
+# to contract.md, and fails when the releases disagree.
+#
+# BACKREST_UBUNTU selects the releases (default "24.04 26.04");
+# NOIXDEV_INFRA_BACKREST_TESTS selects scenarios (see the end of the file);
+# KEEP=1 leaves the test hosts running.
+# The single-quoted scripts expand inside the test host, not here.
+# shellcheck disable=SC2016
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+tests="$(dirname "$here")"
+root="$(dirname "$tests")"
+out="$tests/output/backrest"
+releases="${BACKREST_UBUNTU:-24.04 26.04}"
+host=
+
+# The value of a top-level key in a YAML file: value_of <file> <key>.
+value_of() { sed -n "s/^$2: *//p" "$1" 2>/dev/null || true; }
+ui_bind="$(value_of "$here/vars.yml" test_backrest_bind)"
+ui_url="http://$ui_bind"
+s3_endpoint="$(value_of "$here/vars.yml" test_s3_endpoint)"
+s3_bucket="$(value_of "$here/vars.yml" test_s3_bucket)"
+capture_url="$(value_of "$here/vars.yml" test_capture_url)"
+
+version=1.14.1
+release_url="https://github.com/garethgeorge/backrest/releases/download/v$version"
+checksums="backrest_${version}_checksums.txt"
+config=/etc/backrest/config.json
+data_dir=/var/lib/backrest
+repo_id=offsite
+plan_id=nightly
+ui_user='admin'
+
+# Generated for this run, so that no test secret lives in the repository.
+ui_password="$(openssl rand -hex 16)"
+repo_password="$(openssl rand -hex 16)"
+s3_access_key="$(openssl rand -hex 10)"
+s3_secret_key="$(openssl rand -hex 20)"
+db_password="$(openssl rand -hex 16)"
+
+# The command the owner runs for backrest_users: it reads the password from the
+# variable, so the password is in no process list and no shell history.
+bcrypt_command='printf %s "$BACKREST_PASSWORD" | htpasswd -inBC 10 "" | tr -d ":\n" | base64 | tr -d "\n"'
+
+cleanup() {
+  [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
+}
+# shellcheck source=/dev/null
+. "$here/../lib/suite.sh"
+noix_exit_guard
+
+mkdir -p "$out" "$tests/output/ansible_collections/noixdev"
+noix_link_collection "$root" "$tests/output"
+export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
+
+fail() { echo "$*" >&2; exit 1; }
+
+# h <cmd...>: run in the test host; hi: the same with this script's stdin.
+h() { docker exec "$host" "$@"; }
+hi() { docker exec -i "$host" "$@"; }
+
+# converge [-e ...]: the test host's playbook; its output goes to converge.log.
+converge() {
+  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" "$@" >"$out/converge.log" 2>&1 \
+    || { cat "$out/converge.log" >&2; fail "converge failed"; }
+}
+# converge_unchanged [-e ...]: the same again, which must change nothing.
+# shellcheck disable=SC2120
+converge_unchanged() {
+  converge "$@"
+  grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/converge.log" \
+    || { cat "$out/converge.log" >&2; fail "the repeated converge changed something"; }
+}
+
+# api <Rpc> [json]: POST /v1.Backrest/<Rpc> with the login. Prints the answer,
+# keeps its HTTP status for api_status and fails unless it is a 2xx.
+api() {
+  local rpc="$1" body='{}' status
+  [ "$#" -lt 2 ] || body="$2"
+  status="$(h curl -sS -o /tmp/api-answer -w '%{http_code}' --max-time 900 -u "$ui_user:$ui_password" \
+    -H 'Content-Type: application/json' -d "$body" "$ui_url/v1.Backrest/$rpc")" || status=000
+  printf '%s\n' "$status" >"$out/api.status"
+  h cat /tmp/api-answer
+  case "$status" in 2??) return 0 ;; *) return 1 ;; esac
+}
+api_status() { cat "$out/api.status"; }
+
+# The status of the newest backup operation.
+last_status() {
+  api GetOperations '{"selector":{},"lastN":"200"}' | python3 -c '
+import json, sys
+ops = [o for o in json.load(sys.stdin).get("operations", []) if "operationBackup" in o]
+print(ops[-1].get("status", "") if ops else "none")'
+}
+snapshot_count() {
+  api ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
+import json, sys
+print(len(json.load(sys.stdin).get("snapshots", [])))'
+}
+# The entries of the directory <path> in the newest snapshot, one per line.
+snapshot_entries() {
+  local id
+  id="$(api ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
+import json, sys
+print(max(json.load(sys.stdin)["snapshots"], key=lambda s: int(s.get("unixTimeMs", 0)))["id"])')"
+  api ListSnapshotFiles "{\"repoId\":\"$repo_id\",\"snapshotId\":\"$id\",\"path\":\"$1\"}" | python3 -c '
+import json, sys
+for entry in json.load(sys.stdin).get("entries", []):
+    print(entry["path"])'
+}
+
+# The lines the capture server received, and how to start counting again.
+reports() { h sh -c 'cat /srv/capture/reports.log 2>/dev/null || true'; }
+reports_clear() { h sh -c ': >/srv/capture/reports.log'; }
+# How many reports arrived, once a failure has had the time to send them all.
+reports_settled() {
+  sleep 5
+  reports | wc -l | tr -d ' '
+}
+
+# Starts Backrest's plan and reports whether the RPC answered with a 2xx.
+backup() { api Backup "{\"value\":\"$plan_id\"}" >/dev/null; }
+
+wait_ui() {
+  local _
+  for _ in $(seq 1 180); do
+    if h curl -fsS -o /dev/null "$ui_url/" 2>/dev/null; then return 0; fi
+    sleep 1
+  done
+  h journalctl -u backrest --no-pager -n 50 >&2 || true
+  fail "Backrest did not answer on $ui_url"
+}
+
+# reconfigure <json>: stops Backrest, merges {"plan":{...},"repo":{...},
+# "auth":{...}} into the first plan, the first repository and the login, and
+# starts it again (Backrest reads its configuration only at start).
+reconfigure() {
+  h systemctl stop backrest
+  hi env "PATCH=$1" "CONFIG=$config" python3 -c '
+import json, os
+patch = json.loads(os.environ["PATCH"])
+with open(os.environ["CONFIG"], encoding="utf-8") as f:
+    c = json.load(f)
+c["plans"][0].update(patch.get("plan", {}))
+c["repos"][0].update(patch.get("repo", {}))
+c["auth"].update(patch.get("auth", {}))
+with open(os.environ["CONFIG"], "w", encoding="utf-8") as f:
+    json.dump(c, f, indent=2)'
+  h systemctl start backrest
+  wait_ui
+}
+# hooks <plan hooks> <repo hooks>: comma-separated JSON objects, either empty.
+hooks() { reconfigure "{\"plan\":{\"hooks\":[$1]},\"repo\":{\"hooks\":[$2]}}"; }
+
+# start_host <ubuntu>: a fresh systemd host with Docker and the fixtures.
+start_host() {
+  local ubuntu="$1" _
+  host="noixdev-infra-backrest-$ubuntu"
+  docker build -q --build-arg "UBUNTU=$ubuntu" -t "noixdev-infra-host:$ubuntu" "$tests/host" >/dev/null
+  docker rm -f -v "$host" >/dev/null 2>&1 || true
+  # The anonymous volumes give the inner Docker a file system it can mount
+  # overlays on; "docker rm -v" removes them with the host.
+  docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+    --tmpfs /run --tmpfs /run/lock -v /var/lib/docker -v /var/lib/containerd \
+    --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
+  until (h systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
+  # The image's policy-rc.d (exit 101) keeps package scripts from starting
+  # services; servers have none.
+  h rm -f /usr/sbin/policy-rc.d
+
+  echo "== test host (ubuntu $ubuntu)"
+  converge
+  # shellcheck disable=SC2119
+  converge_unchanged
+
+  h mkdir -p /opt/fixtures /srv/capture
+  docker cp -q "$here/fixtures/compose.yaml" "$host:/opt/fixtures/compose.yaml"
+  printf 'S3_ACCESS_KEY=%s\nS3_SECRET_KEY=%s\nS3_BUCKET=%s\nDB_PASSWORD=%s\n' \
+    "$s3_access_key" "$s3_secret_key" "$s3_bucket" "$db_password" | hi sh -c 'umask 077; cat >/opt/fixtures/.env'
+  h sh -c 'cd /opt/fixtures && docker compose up -d --quiet-pull --wait' >"$out/fixtures.log" 2>&1 \
+    || { cat "$out/fixtures.log" >&2; fail "the fixtures did not start"; }
+  for _ in $(seq 1 120); do
+    if h curl -fsS -o /dev/null "$s3_endpoint/minio/health/live" 2>/dev/null \
+      && h curl -fsS -o /dev/null "http://127.0.0.1:9099/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  fail "MinIO or the capture server did not answer"
+}
+
+# Downloads the release into the test host, checks both archives against the
+# checksum file and installs the binary for the host's architecture. Sets
+# sha256_x86_64, sha256_arm64 and binary_in_archive.
+install_release() {
+  local arch asset paths
+  h mkdir -p /opt/release
+  for asset in "$checksums" backrest_Linux_x86_64.tar.gz backrest_Linux_arm64.tar.gz; do
+    h curl -fsSL --retry 3 -o "/opt/release/$asset" "$release_url/$asset"
+  done
+  h sh -c "cd /opt/release && grep -E ' backrest_Linux_(x86_64|arm64)\.tar\.gz\$' $checksums | sha256sum -c --status" \
+    || fail "the release archives do not match $checksums"
+  sha256_x86_64="$(h sh -c "sed -n 's/  backrest_Linux_x86_64\.tar\.gz\$//p' /opt/release/$checksums")"
+  sha256_arm64="$(h sh -c "sed -n 's/  backrest_Linux_arm64\.tar\.gz\$//p' /opt/release/$checksums")"
+  if [ "${#sha256_x86_64}" != 64 ] || [ "${#sha256_arm64}" != 64 ]; then fail "$checksums lacks a Linux archive"; fi
+  binary_in_archive=
+  for asset in backrest_Linux_x86_64.tar.gz backrest_Linux_arm64.tar.gz; do
+    paths="$(h tar -tzf "/opt/release/$asset" | sed 's#^\./##' | grep -E '(^|/)backrest$')"
+    [ -z "$binary_in_archive" ] || [ "$binary_in_archive" = "$paths" ] || fail "the archives disagree on the binary: $paths"
+    binary_in_archive="$paths"
+  done
+  case "$(h dpkg --print-architecture)" in
+    amd64) arch=x86_64 ;;
+    arm64) arch=arm64 ;;
+    *) fail "no Backrest archive for this architecture" ;;
+  esac
+  h tar -xzf "/opt/release/backrest_Linux_$arch.tar.gz" -C /usr/local/bin "$binary_in_archive"
+  h chmod 0755 "/usr/local/bin/$binary_in_archive"
+}
+
+# write_config <login hash>: config.json by hand, with one repository on MinIO,
+# one plan and one login; and the systemd unit.
+write_config() {
+  h mkdir -p /etc/backrest "$data_dir" /var/cache/backrest
+  hi env "HASH=$1" "CONFIG=$config" "URI=s3:$s3_endpoint/$s3_bucket/contract" "REPO=$repo_id" "PLAN=$plan_id" \
+    "REPO_PASSWORD=$repo_password" "S3_ACCESS_KEY=$s3_access_key" "S3_SECRET_KEY=$s3_secret_key" "UI_USER=$ui_user" python3 -c '
+import json, os
+e = os.environ
+config = {
+    "modno": 1,
+    "version": 6,
+    "instance": "contract",
+    "repos": [{
+        "id": e["REPO"],
+        "uri": e["URI"],
+        "password": e["REPO_PASSWORD"],
+        "env": ["AWS_ACCESS_KEY_ID=" + e["S3_ACCESS_KEY"], "AWS_SECRET_ACCESS_KEY=" + e["S3_SECRET_KEY"]],
+        "autoInitialize": True,
+        "prunePolicy": {"schedule": {"disabled": True}},
+        "checkPolicy": {"schedule": {"disabled": True}},
+    }],
+    "plans": [{
+        "id": e["PLAN"],
+        "repo": e["REPO"],
+        "paths": ["/srv/data"],
+        "schedule": {"disabled": True},
+        "retention": {"policyKeepAll": True},
+    }],
+    "auth": {"users": [{"name": e["UI_USER"], "passwordBcrypt": e["HASH"]}]},
+}
+with open(e["CONFIG"], "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2)
+os.chmod(e["CONFIG"], 0o600)'
+  hi sh -c 'cat >/etc/systemd/system/backrest.service' <<UNIT
+[Unit]
+Description=Backrest
+After=network-online.target docker.service
+
+[Service]
+Environment=BACKREST_PORT=$ui_bind
+Environment=BACKREST_CONFIG=$config
+Environment=BACKREST_DATA=$data_dir
+Environment=XDG_CACHE_HOME=/var/cache/backrest
+ExecStart=/usr/local/bin/backrest
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  h systemctl daemon-reload
+}
+
+# Whether the first start wrote the repository id back: yes or no.
+guid_is_written() {
+  h env "CONFIG=$config" python3 -c '
+import json, os
+with open(os.environ["CONFIG"], encoding="utf-8") as f:
+    repo = json.load(f)["repos"][0]
+print("yes" if len(repo.get("guid", "")) == 64 and "autoInitialize" not in repo else "no")'
+}
+
+# login_status <password>: the HTTP status of an RPC with this password.
+login_status() {
+  h curl -s -o /dev/null -w '%{http_code}' -u "$ui_user:$1" -H 'Content-Type: application/json' -d '{}' \
+    "$ui_url/v1.Backrest/GetConfig"
+}
+
+test_contract() {
+  local ubuntu="$1" linux_hash local_hash before after entries _
+  local sleep_hook fail_start fail_finish report status count start elapsed
+  sleep_hook='{"conditions":["CONDITION_SNAPSHOT_START"],"onError":"ON_ERROR_FATAL","actionCommand":{"command":"sleep 4"}}'
+  fail_start='{"conditions":["CONDITION_SNAPSHOT_START"],"onError":"ON_ERROR_FATAL","actionCommand":{"command":"exit 1"}}'
+  fail_finish='{"conditions":["CONDITION_SNAPSHOT_SUCCESS"],"onError":"ON_ERROR_FATAL","actionCommand":{"command":"exit 1"}}'
+  report='{"conditions":["CONDITION_ANY_ERROR","CONDITION_SNAPSHOT_WARNING"],"actionDiscord":{"webhookUrl":"'"$capture_url"'","template":"contract report"}}'
+
+  echo "== contract: the release archives (ubuntu $ubuntu)"
+  install_release
+
+  echo "== contract: the first start"
+  h mkdir -p /srv/data/kept /srv/data/left-out
+  h sh -c 'echo kept >/srv/data/kept/file; echo left-out >/srv/data/left-out/file'
+  linux_hash="$(h env "BACKREST_PASSWORD=$ui_password" sh -c "$bcrypt_command")"
+  write_config "$linux_hash"
+  h systemctl start backrest
+  wait_ui
+  guid_written_back=no
+  for _ in $(seq 1 120); do
+    guid_written_back="$(guid_is_written)"
+    [ "$guid_written_back" = no ] || break
+    sleep 1
+  done
+  restic_binary="$(h sh -c "ls -d $data_dir/restic* 2>/dev/null | head -n 1")"
+
+  echo "== contract: the login"
+  [ "$(login_status "$ui_password")" = 200 ] || fail "the hash made on Linux does not log in"
+  api_wrong_password="$(login_status "wrong-$ui_password")"
+  api_no_login="$(h curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' "$ui_url/v1.Backrest/GetConfig")"
+  ui_status="$(h curl -s -o /dev/null -w '%{http_code}' "$ui_url/")"
+  command -v htpasswd >/dev/null || fail "htpasswd is missing on this machine: the login hash cannot be proved here"
+  local_hash="$(BACKREST_PASSWORD="$ui_password" sh -c "$bcrypt_command")"
+  reconfigure "{\"auth\":{\"users\":[{\"name\":\"$ui_user\",\"passwordBcrypt\":\"$local_hash\"}]}}"
+  [ "$(login_status "$ui_password")" = 200 ] || fail "the hash made on $(uname -s) does not log in"
+
+  echo "== contract: a plain restart"
+  before="$(h sha256sum "$config")"
+  h systemctl restart backrest
+  wait_ui
+  sleep 3
+  after="$(h sha256sum "$config")"
+  if [ "$before" = "$after" ]; then restart_rewrites_config=no; else restart_rewrites_config=yes; fi
+
+  echo "== contract: the backup RPC"
+  hooks "$sleep_hook" ""
+  start=$SECONDS
+  backup || fail "the backup failed: $(api_status)"
+  elapsed=$((SECONDS - start))
+  backup_rpc_status="$(api_status)"
+  status="$(last_status)"
+  count="$(snapshot_count)"
+  if [ "$status" != STATUS_SUCCESS ] || [ "$count" != 1 ]; then fail "the first backup: status $status, $count snapshots"; fi
+  if [ "$elapsed" -ge 4 ]; then backup_rpc_blocks=yes; else backup_rpc_blocks=no; fi
+
+  echo "== contract: an exclude file"
+  entries="$(snapshot_entries /srv/data)"
+  grep -qx /srv/data/left-out <<<"$entries" || fail "the path to leave out is not in a snapshot without the flag: $entries"
+  h sh -c "printf '/srv/data/left-out\n' >$data_dir/excludes"
+  reconfigure "{\"plan\":{\"hooks\":[],\"backup_flags\":[\"--exclude-file=$data_dir/excludes\"]}}"
+  backup || fail "the backup with the exclude file failed: $(api_status)"
+  entries="$(snapshot_entries /srv/data)"
+  exclude_file_flag=no
+  if grep -qx /srv/data/kept <<<"$entries" && ! grep -qx /srv/data/left-out <<<"$entries"; then
+    exclude_file_flag=yes
+  fi
+
+  echo "== contract: a failing start hook"
+  hooks "$fail_start" "$report"
+  reports_clear
+  count="$(snapshot_count)"
+  if backup; then start_hook_rpc=answered; else start_hook_rpc="$(api_status)"; fi
+  start_hook_status="$(last_status)"
+  start_hook_new_snapshots=$(($(snapshot_count) - count))
+  report_start_hook="$(reports_settled)"
+  start_hook_fatal=no
+  [ "$start_hook_status" != STATUS_ERROR ] || [ "$start_hook_new_snapshots" != 0 ] || start_hook_fatal=yes
+
+  echo "== contract: a failing hook after the snapshot"
+  hooks "$fail_finish" "$report"
+  reports_clear
+  count="$(snapshot_count)"
+  if backup; then finish_hook_rpc=answered; else finish_hook_rpc="$(api_status)"; fi
+  finish_hook_status="$(last_status)"
+  finish_hook_new_snapshots=$(($(snapshot_count) - count))
+  report_finish_hook="$(reports_settled)"
+  finish_marks_failed=no
+  [ "$finish_hook_status" != STATUS_ERROR ] || [ "$report_finish_hook" = 0 ] || finish_marks_failed=yes
+
+  echo "== contract: a failing restic"
+  reconfigure "{\"plan\":{\"hooks\":[],\"paths\":[\"/srv/does-not-exist\"]},\"repo\":{\"hooks\":[$report]}}"
+  reports_clear
+  if backup; then restic_error_rpc=answered; else restic_error_rpc="$(api_status)"; fi
+  restic_error_status="$(last_status)"
+  report_restic_error="$(reports_settled)"
+  reconfigure '{"plan":{"paths":["/srv/data"]}}'
+
+  echo "== contract: the other report types"
+  hooks "$fail_start" '{"conditions":["CONDITION_ANY_ERROR"],"actionHealthchecks":{"webhookUrl":"'"$capture_url"'","template":"contract report"}}'
+  reports_clear
+  backup || true
+  report_healthchecks="$(reports_settled)"
+  report_healthchecks_path="$(reports | sed -n '1s/^POST \([^ ]*\) .*/\1/p')"
+  hooks "$fail_start" '{"conditions":["CONDITION_ANY_ERROR"],"actionWebhook":{"webhookUrl":"'"$capture_url"'","method":"POST","template":"contract report"}}'
+  reports_clear
+  backup || true
+  report_webhook="$(reports_settled)"
+  webhook_status="$(last_status)"
+  hooks "" ""
+
+  write_contract "$out/contract-$ubuntu.md"
+}
+
+# write_contract <file>: the measured answers. No value may depend on the run.
+write_contract() {
+  cat >"$1" <<CONTRACT
+# Backrest $version: the measured contract
+
+Written by \`tests/backrest/run.sh\` (scenario \`contract\`) from a real Backrest
+$version. Do not edit it by hand; run \`NOIXDEV_INFRA_BACKREST_TESTS=contract
+tests/all.sh backrest\` instead.
+
+\`\`\`text
+sha256_x86_64: $sha256_x86_64
+sha256_arm64: $sha256_arm64
+binary_in_archive: $binary_in_archive
+bcrypt_command: $bcrypt_command
+guid_written_back: $guid_written_back
+restart_rewrites_config: $restart_rewrites_config
+exclude_file_flag: $exclude_file_flag
+start_hook_fatal: $start_hook_fatal
+finish_marks_failed: $finish_marks_failed
+report_count: start_hook=$report_start_hook finish_hook=$report_finish_hook restic_error=$report_restic_error
+backup_rpc: POST /v1.Backrest/Backup {"value":"<plan id>"}
+ui_status: $ui_status
+\`\`\`
+
+## Details
+
+\`\`\`text
+restic_binary: $restic_binary
+login: wrong password $api_wrong_password, no login $api_no_login
+backup_rpc_blocks: $backup_rpc_blocks (a 4 second start hook; answers $backup_rpc_status when the backup succeeded)
+start_hook: status $start_hook_status, new snapshots $start_hook_new_snapshots, RPC $start_hook_rpc
+finish_hook: status $finish_hook_status, new snapshots $finish_hook_new_snapshots, RPC $finish_hook_rpc, CONDITION_ANY_ERROR reports $report_finish_hook
+restic_error: status $restic_error_status, RPC $restic_error_rpc
+report_healthchecks: $report_healthchecks to $report_healthchecks_path
+report_webhook: $report_webhook (backup status $webhook_status)
+\`\`\`
+CONTRACT
+}
+
+# All scenarios by default; NOIXDEV_INFRA_BACKREST_TESTS="contract" runs only these.
+scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract}"
+first=
+for ubuntu in $releases; do
+  start_host "$ubuntu"
+  for scenario in $scenarios; do
+    case "$scenario" in
+      contract) test_contract "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (contract)" ;;
+    esac
+  done
+  case " $scenarios " in
+    *" contract "*)
+      if [ -z "$first" ]; then
+        first="$ubuntu"
+      else
+        diff "$out/contract-$first.md" "$out/contract-$ubuntu.md" >&2 \
+          || fail "Backrest behaves differently on Ubuntu $first and $ubuntu"
+      fi
+      ;;
+  esac
+  cleanup
+done
+case " $scenarios " in
+  *" contract "*) cp "$out/contract-$first.md" "$here/contract.md" ;;
+esac
+
+noix_done
+echo "== all backrest tests passed"

@@ -1,0 +1,8 @@
+---
+# Test-only values; nothing here is a secret. run.sh generates the passwords
+# and keys of each run. These are the addresses of fixtures/compose.yaml as the
+# test host sees them.
+test_backrest_bind: 127.0.0.1:9898
+test_s3_endpoint: http://127.0.0.1:9000
+test_s3_bucket: backrest
+test_capture_url: http://127.0.0.1:9099/report

@@ -1,0 +1,17 @@
+---
+# The test host: Docker, and what run.sh calls on the host. The backrest role
+# joins this play once it exists.
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  pre_tasks:
+    # The base role installs ca-certificates and curl on the servers; the test
+    # image has neither. apache2-utils brings htpasswd for the login hash.
+    - name: Install the packages the tests call
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, apache2-utils]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+  roles:
+    - noixdev.infra.docker
