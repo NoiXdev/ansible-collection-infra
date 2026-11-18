@@ -1,0 +1,42 @@
+---
+- name: Validate the settings
+  ansible.builtin.include_tasks: validate.yml
+
+# Everything that changes the host runs in the block, so the temporary
+# directory of the download is removed also when a step fails.
+- name: Install and run Backrest
+  block:
+    - name: Download and verify the release
+      ansible.builtin.include_tasks: install.yml
+
+    - name: Apply the changes
+      ansible.builtin.include_tasks: apply.yml
+  always:
+    - name: Remove the temporary directory
+      ansible.builtin.file:
+        path: "{{ backrest_work.path }}"
+        state: absent
+      when: backrest_work is defined and backrest_work.path is defined
+      changed_when: false
+
+- name: Read the state of the service
+  ansible.builtin.systemd_service:
+    name: backrest
+  register: backrest_service
+
+- name: Check that the service is active
+  ansible.builtin.assert:
+    that: backrest_service.status.ActiveState == 'active'
+    fail_msg: "The service backrest is {{ backrest_service.status.ActiveState }}; see journalctl -u backrest."
+    quiet: true
+
+- name: Wait for the web UI
+  ansible.builtin.uri:
+    url: "http://{{ backrest_bind }}/"
+    status_code: 200
+    return_content: false
+  register: backrest_ui
+  retries: 60
+  delay: 1
+  until: backrest_ui.status is defined and backrest_ui.status == 200
+  changed_when: false

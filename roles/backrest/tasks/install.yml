@@ -1,0 +1,66 @@
+---
+# Prepares and compares only: the release is downloaded, verified and unpacked
+# into a temporary directory, and the unit and the environment file are
+# rendered next to it. Nothing on the host changes before apply.yml.
+- name: Create a temporary directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: backrest-
+  register: backrest_work
+  changed_when: false
+
+- name: Download the release and verify its checksum
+  ansible.builtin.get_url:
+    url: "{{ backrest_archive_url }}"
+    dest: "{{ backrest_work.path }}/backrest.tar.gz"
+    checksum: "sha256:{{ backrest_checksum }}"
+    mode: "0600"
+    timeout: 60
+  changed_when: false
+
+- name: Unpack the release
+  ansible.builtin.unarchive:
+    src: "{{ backrest_work.path }}/backrest.tar.gz"
+    dest: "{{ backrest_work.path }}"
+    remote_src: true
+    include: ["{{ backrest_binary_in_archive }}"]
+  changed_when: false
+
+- name: Render the unit and the environment file for comparison
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ backrest_work.path }}/{{ item.name }}"
+    mode: "0600"
+  loop:
+    - {src: backrest.service.j2, name: backrest.service}
+    - {src: backrest.env.j2, name: backrest.env}
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+
+- name: Look at the new and the installed files
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    checksum_algorithm: sha256
+  loop:
+    - {key: new_binary, path: "{{ backrest_work.path }}/{{ backrest_binary_in_archive }}"}
+    - {key: binary, path: "{{ backrest_binary }}"}
+    - {key: new_unit, path: "{{ backrest_work.path }}/backrest.service"}
+    - {key: unit, path: "{{ backrest_unit_file }}"}
+    - {key: new_env, path: "{{ backrest_work.path }}/backrest.env"}
+    - {key: env, path: "{{ backrest_env_file }}"}
+  loop_control:
+    label: "{{ item.key }}"
+  register: backrest_stats
+
+- name: Compare them
+  ansible.builtin.set_fact:
+    backrest_binary_changed: >-
+      {{ not backrest_stat.binary.exists
+         or backrest_stat.binary.checksum != backrest_stat.new_binary.checksum }}
+    backrest_unit_changed: >-
+      {{ not backrest_stat.unit.exists or not backrest_stat.env.exists
+         or backrest_stat.unit.checksum != backrest_stat.new_unit.checksum
+         or backrest_stat.env.checksum != backrest_stat.new_env.checksum }}
+  vars:
+    backrest_stat: "{{ dict(backrest_stats.results | map(attribute='item.key') | zip(backrest_stats.results | map(attribute='stat')) | list) }}"

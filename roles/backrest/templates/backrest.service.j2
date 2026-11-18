@@ -1,0 +1,15 @@
+# Managed by Ansible.
+[Unit]
+Description=Backrest (restic web UI and scheduler)
+Documentation=https://github.com/garethgeorge/backrest
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile={{ backrest_env_file }}
+ExecStart={{ backrest_binary }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

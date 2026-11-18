@@ -1,0 +1,120 @@
+---
+# Everything is checked before the first change. A secret never reaches a
+# message: the tasks that read one are no_log and only set a flag, and a
+# separate task fails with a fixed message.
+- name: Check the architecture and the release
+  ansible.builtin.assert:
+    that:
+      - backrest_arch | length > 0
+      - backrest_checksum | length > 0
+    fail_msg: >-
+      There is no checksum for Backrest {{ backrest_version }} on
+      {{ ansible_facts['architecture'] }}. Known versions: {{ backrest_known_sha256.keys() | list | join(', ') }}.
+      Set backrest_sha256 ({x86_64: ..., arm64: ...}) for another version.
+    quiet: true
+
+- name: Check the repository
+  ansible.builtin.assert:
+    that: backrest_repo_uri | trim | length > 0
+    fail_msg: backrest_repo_uri must not be empty.
+    quiet: true
+
+- name: Check the listen address and the instance name
+  ansible.builtin.assert:
+    that:
+      - backrest_bind is match('^[^:\s]+:[0-9]+$')
+      - backrest_instance | trim | length > 0
+    fail_msg: backrest_bind must be host:port, and backrest_instance must not be empty.
+    quiet: true
+
+- name: Check the report type
+  ansible.builtin.assert:
+    that: backrest_notify_type in ['discord', 'healthchecks']
+    fail_msg: >-
+      backrest_notify_type must be discord or healthchecks; Backrest 1.14.1 has no handler for
+      other report types such as webhook.
+    quiet: true
+
+- name: Require logins
+  ansible.builtin.fail:
+    msg: backrest_users is empty; the web UI requires at least one {name, password_bcrypt}.
+  when: backrest_users | length == 0
+
+- name: Check the logins and the repository password
+  ansible.builtin.set_fact:
+    backrest_users_valid: >-
+      {{ backrest_users | length > 0
+         and (backrest_users | map(attribute='name') | reject('match', '^[A-Za-z0-9._@-]+$') | list | length == 0)
+         and (backrest_users | map(attribute='password_bcrypt') | reject('match', backrest_bcrypt_b64_pattern) | list | length == 0)
+         and (backrest_users | map(attribute='password_bcrypt') | map('b64decode', encoding='latin-1')
+              | reject('match', backrest_bcrypt_pattern) | list | length == 0) }}
+    backrest_password_valid: "{{ backrest_repo_password | trim | length > 0 }}"
+  no_log: true
+
+- name: Require valid logins
+  ansible.builtin.fail:
+    msg: >-
+      An entry of backrest_users is not valid: name needs letters, digits or . _ @ -, and
+      password_bcrypt is not the base64 of a bcrypt hash. See defaults/main.yml for the command that makes one.
+  when: not backrest_users_valid | bool
+
+- name: Require a repository password
+  ansible.builtin.fail:
+    msg: backrest_repo_password must not be empty.
+  when: not backrest_password_valid | bool
+
+- name: Check the app names
+  ansible.builtin.assert:
+    that: backrest_apps | map(attribute='name', default='') | reject('match', backrest_name_pattern) | list | length == 0
+    fail_msg: An app name is 1-63 lowercase letters, digits or hyphens, and every app has one.
+    quiet: true
+
+- name: Check that the app names are unique
+  ansible.builtin.assert:
+    that: backrest_apps | map(attribute='name') | unique | list | length == backrest_apps | length
+    fail_msg: An app name is used more than once in backrest_apps.
+    quiet: true
+
+- name: Check the dump type of each app
+  ansible.builtin.assert:
+    that: item.dump.type | default('') in ['postgres', 'command']
+    fail_msg: "App {{ item.name }}: dump.type must be postgres or command."
+    quiet: true
+  loop: "{{ backrest_apps | selectattr('dump', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the command dump of each app
+  ansible.builtin.assert:
+    that:
+      - item.dump.command | default('') is match('^/')
+      - item.dump.output | default('') is match('^/')
+    fail_msg: "App {{ item.name }}: a command dump needs dump.command and dump.output as absolute paths."
+    quiet: true
+  loop: "{{ backrest_apps | selectattr('dump', 'defined') | selectattr('dump.type', 'equalto', 'command') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the postgres dump of each app
+  ansible.builtin.assert:
+    that:
+      - item.dump.project | default('') | length > 0
+      - item.dump.service | default('') | length > 0
+      - item.dump.user | default('') | length > 0
+      - item.dump.database | default('') | length > 0
+    fail_msg: "App {{ item.name }}: a postgres dump needs dump.project, dump.service, dump.user and dump.database."
+    quiet: true
+  loop: "{{ backrest_apps | selectattr('dump', 'defined') | selectattr('dump.type', 'equalto', 'postgres') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check the paths of each app
+  ansible.builtin.assert:
+    that:
+      - (item.paths | default([])) | reject('match', '^/') | list | length == 0
+      - item.requires_path | default('/') is match('^/')
+    fail_msg: "App {{ item.name }}: paths and requires_path must be absolute."
+    quiet: true
+  loop: "{{ backrest_apps }}"
+  loop_control:
+    label: "{{ item.name }}"

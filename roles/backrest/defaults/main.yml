@@ -1,0 +1,47 @@
+---
+backrest_version: 1.14.1
+# SHA-256 of the release archive by architecture (x86_64, arm64), for a
+# version the role does not know. Overrides the role's own checksums.
+backrest_sha256: {}
+
+# Where the web UI listens. Keep it on loopback or a private address.
+backrest_bind: 127.0.0.1:9898
+# The instance name Backrest records in its snapshots; do not change it later.
+backrest_instance: "{{ inventory_hostname }}"
+
+# Required, no default (see meta/argument_specs.yml):
+#   backrest_users: [{name: admin, password_bcrypt: <base64 of a bcrypt hash>}]
+#   backrest_repo_uri: s3:https://host/bucket/prefix
+#   backrest_repo_password: <repository password>
+# The base64 of a bcrypt hash, made without putting the password on a command line:
+#   BACKREST_PASSWORD=... sh -c 'printf %s "$BACKREST_PASSWORD" | htpasswd -inBC 10 "" | tr -d ":\n" | base64 | tr -d "\n"'
+# Environment of restic for the repository, for example the S3 keys.
+backrest_repo_env: {}
+
+# Apps to back up. Keys: name (required), requires_path, paths, dump
+# ({type: postgres, project, service, user, database} or
+# {type: command, command, output}).
+backrest_apps: []
+backrest_extra_paths: []
+backrest_excludes: []
+
+backrest_schedule: "0 2 * * *"
+backrest_retention:
+  daily: 7
+  weekly: 4
+  monthly: 6
+backrest_prune_schedule: "0 5 * * 0"
+backrest_check_schedule: "0 6 1 * *"
+backrest_check_read_percent: 5
+
+backrest_dump_dir: /var/lib/backrest-dumps
+backrest_dump_timeout: 3600
+
+# discord or healthchecks; nothing is sent while the URL is empty.
+backrest_notify_type: discord
+backrest_notify_url: ""
+
+# The role run fails when the last good backup is older than this.
+backrest_max_age_hours: 25
+# Seconds to wait for a running backup before a restart.
+backrest_restart_wait: 1800

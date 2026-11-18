@@ -1,0 +1,93 @@
+---
+argument_specs:
+  main:
+    short_description: Backrest (restic with a web UI) running natively under systemd
+    description:
+      - Installs a checksum-verified Backrest release at /usr/local/bin/backrest,
+        runs it as the systemd service backrest and checks that its web UI answers.
+      - A release without a known SHA-256 is refused before any change, unless
+        backrest_sha256 provides one.
+      - The web UI requires a login; backrest_users is a non-empty list.
+    options:
+      backrest_version:
+        type: str
+        description: Backrest release (no leading v).
+      backrest_sha256:
+        type: dict
+        description: SHA-256 of the release archive by architecture (x86_64, arm64); overrides the role's own checksums.
+      backrest_bind:
+        type: str
+        description: Listen address of the web UI, host:port.
+      backrest_instance:
+        type: str
+        description: Instance name; do not change it later.
+      backrest_users:
+        type: list
+        elements: dict
+        required: true
+        description: UI logins, a non-empty list.
+        options:
+          name:
+            type: str
+            required: true
+            description: Login name.
+          password_bcrypt:
+            type: str
+            required: true
+            description: The base64 of the bcrypt hash of the password (see defaults/main.yml for the command).
+      backrest_repo_uri:
+        type: str
+        required: true
+        description: restic repository URI, for example s3:https://host/bucket/prefix.
+      backrest_repo_password:
+        type: str
+        required: true
+        description: Repository password. Without a copy outside the host and the vault the snapshots cannot be read.
+      backrest_repo_env:
+        type: dict
+        description: Environment of restic for the repository, for example the S3 keys.
+      backrest_apps:
+        type: list
+        elements: dict
+        description: Apps to back up; see defaults/main.yml for the keys.
+      backrest_extra_paths:
+        type: list
+        elements: path
+        description: More paths in the plan.
+      backrest_excludes:
+        type: list
+        elements: str
+        description: Exclude patterns of the plan.
+      backrest_schedule:
+        type: str
+        description: Cron expression of the backup.
+      backrest_retention:
+        type: dict
+        description: Snapshots to keep, with the keys daily, weekly and monthly.
+      backrest_prune_schedule:
+        type: str
+        description: Cron expression of the prune.
+      backrest_check_schedule:
+        type: str
+        description: Cron expression of the repository check.
+      backrest_check_read_percent:
+        type: int
+        description: Share of the data in percent a check reads.
+      backrest_dump_dir:
+        type: path
+        description: Directory of the database dumps (mode 0700).
+      backrest_dump_timeout:
+        type: int
+        description: Seconds a dump may take.
+      backrest_notify_type:
+        type: str
+        description: Report type, discord or healthchecks.
+      backrest_notify_url:
+        type: str
+        description: Report target; nothing is sent while it is empty.
+      backrest_max_age_hours:
+        type: int
+        description: Oldest allowed age in hours of the last good backup before the role run fails.
+      backrest_restart_wait:
+        type: int
+        description: Seconds to wait for a running backup before a restart.

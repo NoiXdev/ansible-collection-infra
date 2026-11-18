@@ -1,0 +1,31 @@
+---
+# SHA-256 of the release archives, from backrest_<version>_checksums.txt
+# (checked by tests/backrest/run.sh, scenario contract).
+backrest_known_sha256:
+  "1.14.1":
+    x86_64: acc7835a9c55b3d254f0fa285cacbe87ac912cb7e069d0211924838020e6921c
+    arm64: b53718cd6e042e7d99538cb652968ab966a5c53fabd556785648ceb13320a320
+
+# ansible_facts.architecture to the name in the archive.
+backrest_archive_arch:
+  x86_64: x86_64
+  aarch64: arm64
+
+backrest_arch: "{{ backrest_archive_arch[ansible_facts['architecture']] | default('') }}"
+backrest_checksum: "{{ backrest_sha256[backrest_arch] | default(backrest_known_sha256[backrest_version][backrest_arch] | default('')) }}"
+backrest_archive_url: >-
+  https://github.com/garethgeorge/backrest/releases/download/v{{ backrest_version }}/backrest_Linux_{{ backrest_arch }}.tar.gz
+backrest_binary_in_archive: backrest
+
+backrest_binary: /usr/local/bin/backrest
+backrest_config_dir: /etc/backrest
+backrest_env_file: /etc/backrest/backrest.env
+backrest_config_file: /etc/backrest/config.json
+backrest_data_dir: /var/lib/backrest
+backrest_cache_dir: /var/cache/backrest
+backrest_unit_file: /etc/systemd/system/backrest.service
+
+# A bcrypt hash as htpasswd writes it, and the base64 of that (60 characters).
+backrest_bcrypt_pattern: '^\$2[abxy]\$[0-9]{2}\$[./A-Za-z0-9]{53}$'
+backrest_bcrypt_b64_pattern: '^[A-Za-z0-9+/]{80}$'
+backrest_name_pattern: '^[a-z0-9][a-z0-9-]{0,62}$'

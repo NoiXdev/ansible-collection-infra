@@ -10,11 +10,14 @@
 # exclude file, failing hooks and the reports they send. It writes the answers
 # to contract.md, and fails when the releases disagree.
 #
+# The scenario "refusals" runs the backrest role with settings it must refuse,
+# and "install" installs Backrest through the role and checks the service.
+#
 # BACKREST_UBUNTU selects the releases (default "24.04 26.04");
 # NOIXDEV_INFRA_BACKREST_TESTS selects scenarios (see the end of the file);
 # KEEP=1 leaves the test hosts running.
 # The single-quoted scripts expand inside the test host, not here.
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016,SC2119,SC2120
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -69,10 +72,17 @@ fail() { echo "$*" >&2; exit 1; }
 h() { docker exec "$host" "$@"; }
 hi() { docker exec -i "$host" "$@"; }
 
-# converge [-e ...]: the test host's playbook; its output goes to converge.log.
+# play [-e ...]: the test host's playbook; its output goes to converge.log.
+play() {
+  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" "$@" >"$out/converge.log" 2>&1
+}
+# converge [-e ...]: play, which must succeed.
 converge() {
-  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" "$@" >"$out/converge.log" 2>&1 \
-    || { cat "$out/converge.log" >&2; fail "converge failed"; }
+  play "$@" || { cat "$out/converge.log" >&2; fail "converge failed"; }
+}
+# converge_fails [-e ...]: play, which must fail.
+converge_fails() {
+  if play "$@"; then cat "$out/converge.log" >&2; fail "converge succeeded, but must fail"; fi
 }
 # converge_unchanged [-e ...]: the same again, which must change nothing.
 # shellcheck disable=SC2120
@@ -81,6 +91,31 @@ converge_unchanged() {
   grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/converge.log" \
     || { cat "$out/converge.log" >&2; fail "the repeated converge changed something"; }
 }
+
+# The variables of the backrest role in this run (secrets of the run, mode
+# 0600), and the converge calls that run the role.
+write_role_vars() {
+  local hash
+  hash="$(BACKREST_PASSWORD="$ui_password" sh -c "$bcrypt_command")"
+  (
+    umask 077
+    env "HASH=$hash" "USER_NAME=$ui_user" "URI=s3:$s3_endpoint/$s3_bucket/$1" "REPO_PASSWORD=$repo_password" \
+      "S3_ACCESS_KEY=$s3_access_key" "S3_SECRET_KEY=$s3_secret_key" "BIND=$ui_bind" python3 -c '
+import json, os
+e = os.environ
+print(json.dumps({
+    "test_backrest": True,
+    "backrest_bind": e["BIND"],
+    "backrest_users": [{"name": e["USER_NAME"], "password_bcrypt": e["HASH"]}],
+    "backrest_repo_uri": e["URI"],
+    "backrest_repo_password": e["REPO_PASSWORD"],
+    "backrest_repo_env": {"AWS_ACCESS_KEY_ID": e["S3_ACCESS_KEY"], "AWS_SECRET_ACCESS_KEY": e["S3_SECRET_KEY"]},
+}))' >"$out/role-vars.json"
+  )
+}
+role_converge() { converge -e "@$out/role-vars.json" "$@"; }
+role_converge_unchanged() { converge_unchanged -e "@$out/role-vars.json" "$@"; }
+role_converge_fails() { converge_fails -e "@$out/role-vars.json" "$@"; }
 
 # api <Rpc> [json]: POST /v1.Backrest/<Rpc> with the login. Prints the answer,
 # keeps its HTTP status for api_status and fails unless it is a 2xx.
@@ -406,6 +441,61 @@ test_contract() {
   hooks "" ""
 
   write_contract "$out/contract-$ubuntu.md"
+  contract_cleanup
+}
+
+# Leaves the host as the next scenario expects it: no Backrest at all.
+contract_cleanup() {
+  h systemctl disable --now backrest
+  h rm -rf /etc/systemd/system/backrest.service /usr/local/bin/backrest /etc/backrest "$data_dir" \
+    /var/cache/backrest /opt/release /srv/data
+  h systemctl daemon-reload
+}
+
+# refused <message> [-e ...]: the role stops before any change, with a message.
+refused() {
+  local message="$1"
+  shift
+  role_converge_fails "$@"
+  grep -qF -- "$message" "$out/converge.log" \
+    || { cat "$out/converge.log" >&2; fail "the refusal lacks \"$message\""; }
+  h test ! -e /usr/local/bin/backrest || fail "$message: the binary was installed"
+  h test ! -e /etc/backrest || fail "$message: /etc/backrest was created"
+}
+
+test_refusals() {
+  echo "== refusals (ubuntu $1)"
+  write_role_vars refusals
+  refused 'backrest_users is empty' -e '{"backrest_users": []}'
+  refused 'not the base64 of a bcrypt' -e '{"backrest_users": [{"name": "a", "password_bcrypt": "plain"}]}'
+  refused 'no checksum for' -e backrest_version=1.14.0
+  refused 'backrest_repo_uri' -e backrest_repo_uri=
+  refused 'backrest_repo_password' -e backrest_repo_password=
+  refused 'app name' -e '{"backrest_apps": [{"name": "Bad Name"}]}'
+  refused 'more than once' -e '{"backrest_apps": [{"name": "a"}, {"name": "a"}]}'
+  refused 'dump.type' -e '{"backrest_apps": [{"name": "a", "dump": {"type": "mysql"}}]}'
+  refused 'dump.output' -e '{"backrest_apps": [{"name": "a", "dump": {"type": "command", "command": "/bin/true"}}]}'
+  refused 'backrest_notify_type' -e backrest_notify_type=mail -e backrest_notify_url=https://x.invalid
+  refused 'backrest_notify_type' -e backrest_notify_type=webhook -e backrest_notify_url=https://x.invalid
+}
+
+test_install() {
+  local sum status user
+  echo "== install (ubuntu $1)"
+  write_role_vars install
+  role_converge
+  h systemctl is-active backrest
+  status="$(h curl -s -o /dev/null -w '%{http_code}' "$ui_url/")"
+  [ "$status" = "$(value_of "$here/contract.md" ui_status)" ] || fail "the UI answers $status"
+  user="$(h systemctl show backrest -p User --value)"
+  if [ -n "$user" ] && [ "$user" != root ]; then fail "Backrest runs as $user, not root"; fi
+  [ "$(h stat -c %a /etc/backrest/backrest.env)" = 600 ] || fail "backrest.env is not mode 0600"
+  role_converge_unchanged
+  # A failed download keeps the working binary and the service.
+  sum="$(h sha256sum /usr/local/bin/backrest)"
+  role_converge_fails -e backrest_version=9.9.9 -e '{"backrest_sha256": {"x86_64": "00", "arm64": "00"}}'
+  [ "$(h sha256sum /usr/local/bin/backrest)" = "$sum" ] || fail "a failed download replaced the binary"
+  h systemctl is-active backrest
 }
 
 # write_contract <file>: the measured answers. No value may depend on the run.
@@ -447,15 +537,17 @@ report_webhook: $report_webhook (backup status $webhook_status)
 CONTRACT
 }
 
-# All scenarios by default; NOIXDEV_INFRA_BACKREST_TESTS="contract" runs only these.
-scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract}"
+# All scenarios by default; NOIXDEV_INFRA_BACKREST_TESTS="refusals install" runs only these.
+scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install}"
 first=
 for ubuntu in $releases; do
   start_host "$ubuntu"
   for scenario in $scenarios; do
     case "$scenario" in
       contract) test_contract "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (contract)" ;;
+      refusals) test_refusals "$ubuntu" ;;
+      install) test_install "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (contract, refusals, install)" ;;
     esac
   done
   case " $scenarios " in

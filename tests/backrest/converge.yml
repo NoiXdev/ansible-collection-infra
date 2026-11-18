@@ -1,6 +1,6 @@
 ---
 # The test host: Docker, and what run.sh calls on the host. The backrest role
-# joins this play once it exists.
+# runs only when run.sh passes test_backrest=true.
 - name: Converge
   hosts: all
   vars_files: [vars.yml]
@@ -15,3 +15,5 @@
         cache_valid_time: 3600
   roles:
     - noixdev.infra.docker
+    - role: noixdev.infra.backrest
+      when: test_backrest | default(false) | bool

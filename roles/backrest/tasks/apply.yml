@@ -1,0 +1,52 @@
+---
+# Every change to the host and the running service happens here, from what
+# install.yml prepared.
+- name: Create the directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ backrest_config_dir }}"
+    - "{{ backrest_data_dir }}"
+    - "{{ backrest_cache_dir }}"
+
+# copy replaces the file atomically, so a running Backrest keeps its binary.
+- name: Install the binary
+  ansible.builtin.copy:
+    src: "{{ backrest_work.path }}/{{ backrest_binary_in_archive }}"
+    dest: "{{ backrest_binary }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: backrest_binary_changed | bool
+
+- name: Write the environment file
+  ansible.builtin.template:
+    src: backrest.env.j2
+    dest: "{{ backrest_env_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Write the unit
+  ansible.builtin.template:
+    src: backrest.service.j2
+    dest: "{{ backrest_unit_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: backrest_unit_changed | bool
+
+- name: Enable the service and start it, or restart it after a change
+  ansible.builtin.systemd_service:
+    name: backrest
+    enabled: true
+    state: "{{ 'restarted' if (backrest_binary_changed | bool or backrest_unit_changed | bool) else 'started' }}"
