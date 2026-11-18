@@ -13,3 +13,20 @@
 - name: Prove that the agent is connected before anything is removed
   ansible.builtin.import_tasks: connection.yml
   when: pulsix_agent_remove | length > 0 and not ansible_check_mode
+
+- name: Say what a check run would remove
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: would remove {{ item }}: units {{ vars['pulsix_agent_tool_' ~ item].units | join(', ') }};
+      packages matching {{ vars['pulsix_agent_tool_' ~ item].packages | join(', ') }};
+      paths {{ vars['pulsix_agent_tool_' ~ item].paths | join(', ') }}
+      {%- if vars['pulsix_agent_tool_' ~ item].user %}; user {{ vars['pulsix_agent_tool_' ~ item].user }}{% endif %}
+  loop: "{{ pulsix_agent_remove }}"
+  when: ansible_check_mode
+
+- name: Remove the requested tools
+  ansible.builtin.include_tasks: "remove_{{ pulsix_agent_tool }}.yml"
+  loop: "{{ pulsix_agent_remove }}"
+  loop_control:
+    loop_var: pulsix_agent_tool
+  when: not ansible_check_mode

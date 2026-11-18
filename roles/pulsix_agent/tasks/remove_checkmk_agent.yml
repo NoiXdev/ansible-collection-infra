@@ -1,0 +1,31 @@
+---
+- name: Look for the xinetd service of the agent
+  ansible.builtin.stat:
+    path: /etc/xinetd.d/check-mk-agent
+  register: pulsix_agent_checkmk_xinetd
+
+- name: Remove the Checkmk agent
+  ansible.builtin.include_tasks: remove_common.yml
+  vars:
+    pulsix_agent_rm_units: "{{ pulsix_agent_tool_checkmk_agent.units }}"
+    pulsix_agent_rm_packages: "{{ pulsix_agent_tool_checkmk_agent.packages }}"
+    pulsix_agent_rm_paths: "{{ pulsix_agent_tool_checkmk_agent.paths }}"
+    pulsix_agent_rm_globs: "{{ pulsix_agent_tool_checkmk_agent.globs }}"
+    pulsix_agent_rm_user: "{{ pulsix_agent_tool_checkmk_agent.user }}"
+
+- name: Read the state of xinetd
+  ansible.builtin.systemd_service:
+    name: xinetd
+  register: pulsix_agent_xinetd
+  # The module fails for a unit that does not exist.
+  failed_when: false
+  when: pulsix_agent_checkmk_xinetd.stat.exists
+
+- name: Make xinetd drop the service of the agent
+  ansible.builtin.systemd_service:
+    name: xinetd
+    state: reloaded
+  when:
+    - pulsix_agent_checkmk_xinetd.stat.exists
+    - (pulsix_agent_xinetd.status | default({})).LoadState | default('not-found') == 'loaded'
+    - (pulsix_agent_xinetd.status | default({})).ActiveState | default('inactive') == 'active'

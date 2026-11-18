@@ -1,0 +1,9 @@
+---
+- name: Remove Netdata
+  ansible.builtin.include_tasks: remove_common.yml
+  vars:
+    pulsix_agent_rm_units: "{{ pulsix_agent_tool_netdata.units }}"
+    pulsix_agent_rm_packages: "{{ pulsix_agent_tool_netdata.packages }}"
+    pulsix_agent_rm_paths: "{{ pulsix_agent_tool_netdata.paths }}"
+    pulsix_agent_rm_globs: "{{ pulsix_agent_tool_netdata.globs }}"
+    pulsix_agent_rm_user: "{{ pulsix_agent_tool_netdata.user }}"

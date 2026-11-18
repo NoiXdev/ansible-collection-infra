@@ -13,3 +13,95 @@ pulsix_agent_manager_port: "{{ pulsix_agent_manager_addr.split(':')[-1] }}"
 pulsix_agent_failure_lines:
   - agent stream failed
   - the manager refused this agent's certificate
+
+# What each tool leaves on a host, from the table in the design. A glob is a
+# directory list and a pattern list for `find`; nothing is removed that those
+# do not name. The unit directories are shared by the two systemd globs below.
+pulsix_agent_systemd_dirs:
+  - /etc/systemd/system
+  - /lib/systemd/system
+
+pulsix_agent_tool_netdata:
+  units:
+    - netdata
+    - netdata-updater.timer
+    - netdata-updater.service
+  packages:
+    - '^netdata($|-)'
+  paths:
+    - /usr/share/keyrings/netdata-archive-keyring.gpg
+    - /opt/netdata
+    - /usr/libexec/netdata
+    - /usr/lib/netdata
+    - /usr/share/netdata
+    - /usr/sbin/netdata
+    - /usr/sbin/netdatacli
+    - /etc/cron.daily/netdata-updater
+    - /etc/logrotate.d/netdata
+    - /etc/default/netdata
+    - /etc/netdata
+    - /var/lib/netdata
+    - /var/cache/netdata
+    - /var/log/netdata
+  globs:
+    - paths: [/etc/apt/sources.list.d]
+      patterns: ['netdata*']
+    - paths: "{{ pulsix_agent_systemd_dirs }}"
+      patterns: ['netdata*']
+  user: netdata
+
+# Only the agent's own units, packages and files. The sources, the release
+# package, /etc/zabbix, /run/zabbix and the user belong to the shared list.
+pulsix_agent_tool_zabbix_agent:
+  units:
+    - zabbix-agent
+    - zabbix-agent2
+  packages:
+    - '^zabbix-agent2?$'
+    - '^zabbix-agent2-plugin-'
+  paths:
+    - /etc/zabbix/zabbix_agentd.conf
+    - /etc/zabbix/zabbix_agentd.d
+    - /etc/zabbix/zabbix_agent2.conf
+    - /etc/zabbix/zabbix_agent2.d
+    - /var/log/zabbix-agent
+    - /var/log/zabbix-agent2
+  globs: []
+  user: ""
+
+# Removed only when no other installed zabbix-* package is left.
+pulsix_agent_tool_zabbix_shared:
+  units: []
+  packages:
+    - '^zabbix-release$'
+  paths:
+    - /etc/zabbix
+    - /run/zabbix
+  globs:
+    - paths: [/etc/apt/sources.list.d]
+      patterns: ['zabbix*']
+  user: zabbix
+
+pulsix_agent_tool_checkmk_agent:
+  units:
+    - check-mk-agent.socket
+    - check-mk-agent-async
+    - cmk-agent-ctl-daemon
+  packages:
+    - '^check-mk-agent$'
+  paths:
+    - /usr/lib/check_mk_agent
+    - /usr/bin/check_mk_agent
+    - /usr/bin/check_mk_caching_agent
+    - /usr/bin/mk-job
+    - /usr/bin/waitmax
+    - /usr/bin/cmk-agent-ctl
+    - /usr/bin/cmk-update-agent
+    - /etc/xinetd.d/check-mk-agent
+    - /etc/check_mk
+    - /var/lib/check_mk_agent
+    - /var/lib/cmk-agent
+  globs:
+    - paths: "{{ pulsix_agent_systemd_dirs }}"
+      patterns: ['check-mk-agent*', 'cmk-agent-ctl*']
+  user: cmk-agent

@@ -1,0 +1,32 @@
+---
+- name: Remove the Zabbix agent
+  ansible.builtin.include_tasks: remove_common.yml
+  vars:
+    pulsix_agent_rm_units: "{{ pulsix_agent_tool_zabbix_agent.units }}"
+    pulsix_agent_rm_packages: "{{ pulsix_agent_tool_zabbix_agent.packages }}"
+    pulsix_agent_rm_paths: "{{ pulsix_agent_tool_zabbix_agent.paths }}"
+    pulsix_agent_rm_globs: "{{ pulsix_agent_tool_zabbix_agent.globs }}"
+    pulsix_agent_rm_user: "{{ pulsix_agent_tool_zabbix_agent.user }}"
+
+- name: Read the packages that are left
+  ansible.builtin.command: dpkg-query -W -f='${Package} ${db:Status-Status}\n'
+  register: pulsix_agent_zabbix_dpkg
+  changed_when: false
+
+- name: Look for other Zabbix packages
+  ansible.builtin.set_fact:
+    pulsix_agent_zabbix_others: >-
+      {{ pulsix_agent_zabbix_dpkg.stdout_lines
+         | select('match', '^zabbix-\S+ installed$')
+         | reject('match', '^zabbix-release ')
+         | list }}
+
+- name: Remove what only the Zabbix agent used
+  ansible.builtin.include_tasks: remove_common.yml
+  vars:
+    pulsix_agent_rm_units: "{{ pulsix_agent_tool_zabbix_shared.units }}"
+    pulsix_agent_rm_packages: "{{ pulsix_agent_tool_zabbix_shared.packages }}"
+    pulsix_agent_rm_paths: "{{ pulsix_agent_tool_zabbix_shared.paths }}"
+    pulsix_agent_rm_globs: "{{ pulsix_agent_tool_zabbix_shared.globs }}"
+    pulsix_agent_rm_user: "{{ pulsix_agent_tool_zabbix_shared.user }}"
+  when: pulsix_agent_zabbix_others | length == 0

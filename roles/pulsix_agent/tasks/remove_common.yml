@@ -1,0 +1,102 @@
+---
+# Removes one tool's services, packages, files and user. Takes
+# pulsix_agent_rm_units, pulsix_agent_rm_packages (regexes), pulsix_agent_rm_paths,
+# pulsix_agent_rm_globs ({paths, patterns} for find) and pulsix_agent_rm_user
+# (may be empty). Everything absent is tolerated.
+- name: Read the state of the units
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+  loop: "{{ pulsix_agent_rm_units }}"
+  register: pulsix_agent_rm_unit_state
+  # The module fails for a unit that does not exist, and for a unit file with a
+  # bad setting; both are handled by what follows, and the files go below anyway.
+  failed_when: false
+
+- name: Stop and disable the units that exist
+  ansible.builtin.systemd_service:
+    name: "{{ item.item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ pulsix_agent_rm_unit_state.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.status.LoadState | default('not-found') not in ['not-found', 'masked']
+
+- name: Read the installed packages
+  ansible.builtin.command: dpkg-query -W -f='${Package} ${db:Status-Status}\n'
+  register: pulsix_agent_rm_dpkg
+  changed_when: false
+
+- name: Select the packages to purge
+  ansible.builtin.set_fact:
+    pulsix_agent_rm_found: >-
+      {%- set found = [] -%}
+      {%- for line in pulsix_agent_rm_dpkg.stdout_lines -%}
+      {%- set parts = line.split(' ') -%}
+      {%- if parts | length == 2 and parts[1] in ['installed', 'config-files'] -%}
+      {%- for rx in pulsix_agent_rm_packages -%}
+      {%- if parts[0] is match(rx) and parts[0] not in found -%}
+      {%- set _ = found.append(parts[0]) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ found }}
+
+- name: Purge the packages
+  ansible.builtin.apt:
+    name: "{{ pulsix_agent_rm_found }}"
+    state: absent
+    purge: true
+    lock_timeout: 120
+  when: pulsix_agent_rm_found | length > 0
+
+- name: Find the files that match the tool's patterns
+  ansible.builtin.find:
+    paths: "{{ item.paths }}"
+    patterns: "{{ item.patterns }}"
+    file_type: any
+    recurse: false
+  loop: "{{ pulsix_agent_rm_globs }}"
+  loop_control:
+    label: "{{ item.patterns | join(' ') }}"
+  register: pulsix_agent_rm_matches
+
+- name: List what to remove
+  ansible.builtin.set_fact:
+    pulsix_agent_rm_targets: >-
+      {{ (pulsix_agent_rm_paths
+          + pulsix_agent_rm_matches.results | map(attribute='files') | flatten | map(attribute='path') | list)
+         | unique }}
+
+- name: Check that only named locations are removed
+  ansible.builtin.assert:
+    that: pulsix_agent_rm_targets | select('match', '^/[^/]+/[^/]+') | list | length == pulsix_agent_rm_targets | length
+    quiet: true
+
+- name: Remove the files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ pulsix_agent_rm_targets }}"
+
+- name: Reload systemd when units were removed
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: >-
+    (pulsix_agent_rm_unit_state.results
+     | rejectattr('status.LoadState', 'undefined')
+     | rejectattr('status.LoadState', 'eq', 'not-found') | list | length > 0)
+    or (pulsix_agent_rm_targets | select('search', '/systemd/system/') | list | length > 0)
+
+- name: Remove the user
+  ansible.builtin.user:
+    name: "{{ pulsix_agent_rm_user }}"
+    state: absent
+  when: pulsix_agent_rm_user | length > 0
+
+- name: Remove the group
+  ansible.builtin.group:
+    name: "{{ pulsix_agent_rm_user }}"
+    state: absent
+  when: pulsix_agent_rm_user | length > 0
