@@ -225,5 +225,24 @@ grep -q "moved Harbor's Redis data" "$out/harbor-restore-pg.log" || fail "harbor
 play "$here/verify.yml" -e harbor_version=v2.14.6 -e verify_push=false
 expect_idempotent -e harbor_version=v2.14.6
 
+echo "== upgrade from v2.15.4 to v2.16.0"
+play "$here/converge.yml" -e harbor_version=v2.15.4
+if hx grep -q '^    - registry$' /opt/harbor/installer/v2.15.4/harbor.yml; then
+  fail "harbor.yml of v2.15.4 lists registry in proxy.components"
+fi
+play "$here/converge.yml" -e harbor_version=v2.16.0
+expect_idempotent -e harbor_version=v2.16.0
+play "$here/verify.yml" -e harbor_version=v2.16.0 -e verify_push=false
+play "$here/verify.yml" -e harbor_version=v2.16.0
+hx grep -q '^    - registry$' /opt/harbor/installer/v2.16.0/harbor.yml || fail "harbor.yml of v2.16.0 lacks registry in proxy.components"
+expect_installed v2.16.0
+
+echo "== harbor-restore of the v2.15.4 backup after the upgrade to v2.16.0"
+backup_v2154="$(hx sh -c 'ls -d /opt/harbor/backups/*-v2.15.4 | tail -n 1')"
+hx sh -c 'echo v2.15.4 >/opt/harbor/installed-version'
+hx /usr/local/sbin/harbor-restore "$backup_v2154"
+play "$here/verify.yml" -e harbor_version=v2.15.4 -e verify_push=false
+expect_idempotent -e harbor_version=v2.15.4
+
 noix_done
 echo "== all harbor tests passed"

@@ -75,6 +75,11 @@ proxy:
     - core
     - jobservice
     - trivy
+{# Harbor v2.16.0's own harbor.yml.tmpl lists registry here; earlier versions do not, and a changed
+   harbor.yml makes the role run prepare and restart Harbor. #}
+{% if harbor_version[1:] is version('2.16.0', '>=') %}
+    - registry
+{% endif %}
 
 upload_purging:
   enabled: true

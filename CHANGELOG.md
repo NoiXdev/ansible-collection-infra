@@ -30,6 +30,8 @@
   not handled by the role. Existing setups without `anubis_public_url` are unchanged.
 - `pulsix_manager`: starting the finished enrollment containers of the workers is no longer reported
   as a change on every run; a recreate of them or a change to any other service still is.
+- `harbor`: Harbor v2.16.0 is supported and covered by the test suite; the default version stays.
+  From v2.16.0 Harbor blocks webhooks to loopback, link-local and cloud metadata addresses.
 
 ## 0.6.0 — 2026-11-17
 
