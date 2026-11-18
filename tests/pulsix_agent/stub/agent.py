@@ -12,7 +12,7 @@ scenario can change the mode of a running agent:
   no-connection  run, connect nowhere
   stream-failed  connected, log "agent stream failed" every 3 s
   refused        connected, log the certificate refusal every 3 s
-  drop           connect, close the connection after 10 s, keep running
+  drop           connect, close the connection after 30 s, keep running
 
 It logs to stderr (the journal).
 """
@@ -107,7 +107,7 @@ def main():
             if conn is None and not dropped:
                 conn = connect(addr)
                 connected_at = now
-            if mode == "drop" and conn is not None and now - connected_at >= 10:
+            if mode == "drop" and conn is not None and now - connected_at >= 30:
                 conn.close()
                 conn = None
                 dropped = True

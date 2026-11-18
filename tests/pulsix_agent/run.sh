@@ -92,6 +92,15 @@ scenario() {
   return 1
 }
 
+# failure_text MODE: what the role says when the connection check fails in MODE.
+failure_text() {
+  case "$1" in
+    no_connection) echo "holds no connection" ;;
+    drop) echo "did not hold for 30 seconds" ;;
+    *) echo "logged a failure" ;;
+  esac
+}
+
 fail() { echo "$*" >&2; exit 1; }
 
 bin=/usr/local/bin/pulsix-agent
@@ -294,6 +303,8 @@ run_release() {
   # tool's files; every failure keeps it.
   local rm=(-e '{"pulsix_agent_remove": ["netdata"]}')
   local before mode
+  # Each mode fails in its own check; the drop closes after 30 s, inside the
+  # 30-second window that follows the first sighting of the connection.
   for mode in no_connection stream_failed refused drop; do
     if scenario "$mode"; then
       echo "-- $mode"
@@ -304,6 +315,7 @@ run_release() {
       before="$(wc -l <"$log")"
       expect_fail "${tok[@]}" "${rm[@]}"
       tail -n +$((before + 1)) "$log" | grep -q 'journalctl -u pulsix-agent' || fail "the failure does not name journalctl ($mode)"
+      tail -n +$((before + 1)) "$log" | grep -q "$(failure_text "$mode")" || fail "$mode did not fail with: $(failure_text "$mode")"
       host_sh 'test -e /etc/netdata/marker' || fail "the marker is gone after $mode"
     fi
   done

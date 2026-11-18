@@ -69,13 +69,18 @@
 
 - name: Check that the connection held
   ansible.builtin.assert:
-    that:
-      - >-
-        pulsix_agent_connection_after.stdout_lines
-        | select('search', ' ' ~ pulsix_agent_local | regex_escape ~ ' ') | list | length > 0
-      - pulsix_agent_failure_lines | select('in', pulsix_agent_journal.stdout) | list | length == 0
+    that: >-
+      pulsix_agent_connection_after.stdout_lines
+      | select('search', ' ' ~ pulsix_agent_local | regex_escape ~ ' ') | list | length > 0
     fail_msg: >-
       The connection of the agent on {{ inventory_hostname }} did not hold for 30 seconds: it was
-      lost or replaced, or the agent logged a failure. Nothing was removed. See
-      journalctl -u pulsix-agent on the host.
+      lost or replaced. Nothing was removed. See journalctl -u pulsix-agent on the host.
+    quiet: true
+
+- name: Check that the agent logged no failure
+  ansible.builtin.assert:
+    that: pulsix_agent_failure_lines | select('in', pulsix_agent_journal.stdout) | list | length == 0
+    fail_msg: >-
+      The agent on {{ inventory_hostname }} logged a failure while it was connected. Nothing was
+      removed. See journalctl -u pulsix-agent on the host.
     quiet: true
