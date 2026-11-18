@@ -62,6 +62,11 @@ expect_in_log r-accepted "/opt/traefik/dynamic"
 if grep -qF "anubis_cookie_domain" "$out/r-accepted.log"; then fail "r-accepted.log names anubis_cookie_domain"; fi
 untouched
 
+echo "== redirect mode: same-host baseline, then the switch"
+redirect_play
+wait_healthy
+expect "401 challenge" https://a.example.test/
+
 echo "== redirect mode: install, then the browser flow over HTTPS"
 redirect_play "${redirect_on[@]}"
 wait_healthy
@@ -101,5 +106,47 @@ expect "200 backend" https://a.example.test/other --jar "$jar_r"
   || fail "backend 401 replaced with the cookie"
 [ "$(solve probe https://e.example.test/ --jar "$jar_r" --response-header WWW-Authenticate)" = "401 other $want_basic" ] \
   || fail "basicAuth 401 replaced with the cookie"
+
+# Test-only keys; the first one is anubis_private_key of redirect-vars.yml.
+key_main="$(sed -n 's/^anubis_private_key: *//p' "$here/redirect-vars.yml")"
+key_other=a1b2c3d4e5f60718a1b2c3d4e5f60718a1b2c3d4e5f60718a1b2c3d4e5f60718
+[ "${#key_main}" = 64 ] || fail "no test key in redirect-vars.yml"
+second_server=(-e anubis_public_url=https://anubis-b.example.test -e anubis_cookie_domain=example.test
+  -e '{"anubis_policy_allow": [{"name": "other", "action": "ALLOW", "path_regex": "^/other/"}]}')
+
+echo "== redirect mode: a second server with the same key accepts the cookie"
+redirect_play "${second_server[@]}"
+wait_healthy
+expect "200 backend" https://a.example.test/x --jar "$jar_r"
+
+echo "== redirect mode: a second server with another key rejects it"
+# Anubis clears a cookie it cannot verify: $jar_r may be empty from here on.
+redirect_play "${second_server[@]}" -e anubis_private_key="$key_other"
+wait_healthy
+expect "307 other" https://a.example.test/x --jar "$jar_r"
+
+echo "== redirect mode: the keys stay out of a verbose run"
+redirect_play "${redirect_on[@]}" -v >"$out/redirect-verbose.log" 2>&1
+grep -q 'PLAY RECAP' "$out/redirect-verbose.log" || fail "the verbose log is incomplete"
+[ "$(wc -l <"$out/redirect-verbose.log")" -gt 50 ] || fail "the verbose log is too short to trust"
+if grep -qF -e "$key_main" -e "$key_other" "$out/redirect-verbose.log"; then fail "a private key occurs in the verbose log"; fi
+wait_healthy
+
+echo "== redirect mode: Anubis down fails closed"
+hx docker stop "$anubis" >/dev/null
+expect "500 other" https://a.example.test/
+redirect_play "${redirect_on[@]}"
+wait_healthy
+
+echo "== redirect mode: back to the same host"
+redirect_play
+wait_healthy
+expect "401 challenge" https://a.example.test/
+hx grep -q anubis-challenge /opt/traefik/dynamic/anubis.yml || fail "anubis.yml lacks anubis-challenge"
+[ "$(hx grep -m1 'name:' /opt/anubis/policy.yaml | sed 's/.*name: *//')" = anubis-own-paths ] || fail "policy.yaml does not start with anubis-own-paths"
+env_now="$(hx docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$anubis")"
+[ -n "$env_now" ] || fail "no environment read from the container"
+if printf '%s\n' "$env_now" | grep -Eq '^(PUBLIC_URL|COOKIE_DOMAIN)='; then fail "the container still has PUBLIC_URL or COOKIE_DOMAIN"; fi
+redirect_idempotent
 
 echo "== redirect part passed"
