@@ -147,13 +147,18 @@ for _ in $(seq 1 30); do
   docker exec "$host" curl -s -o /dev/null http://127.0.0.1:18099 && break
   sleep 1
 done
+docker exec "$host" curl -s -o /dev/null http://127.0.0.1:18099 \
+  || { docker exec "$host" pkill -f 18099 || true; echo "the echo server did not come up" >&2; exit 1; }
 if play "$here/portainer_agent.yml" -e test_register_url=http://127.0.0.1:18099 >"$out/portainer-agent-echo.log" 2>&1; then
   docker exec "$host" pkill -f 18099 || true
   echo "portainer registered against a server that answers 500" >&2; exit 1
 fi
 docker exec "$host" pkill -f 18099 || true
-grep -qF '********' "$out/portainer-agent-echo.log" \
+# Not a bare '********': the banners of Ansible are full of asterisks.
+grep -Eq 'curl rc [0-9]+\): .*\*{8}' "$out/portainer-agent-echo.log" \
   || { cat "$out/portainer-agent-echo.log" >&2; echo "the answer of the server is not masked" >&2; exit 1; }
+! grep -qF "$token" "$out/portainer-agent-echo.log" \
+  || { echo "the API token shows up in the output of the echo test" >&2; exit 1; }
 
 echo "== portainer agent registration refuses a name with another URL"
 if play "$here/portainer_agent.yml" -e test_register_endpoint=tcp://192.0.2.10:9001 >"$out/portainer-agent-conflict.log" 2>&1; then
