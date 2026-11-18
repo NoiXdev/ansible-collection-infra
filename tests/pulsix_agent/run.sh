@@ -571,14 +571,16 @@ run_release() {
     removal_host
     install_zabbix_agent
     remove_args zabbix_agent
-    # The agent of some releases pulls in zabbix-sender, another zabbix-*
-    # package, which keeps the shared parts (see zabbix_shared); this scenario
-    # is the agent alone.
-    host_sh 'dpkg --purge --force-depends zabbix-sender >/dev/null 2>&1; true'
+    # The helper the agent pulls in (zabbix-sender on some releases, a fixture
+    # elsewhere) is auto-installed and goes with it.
+    if [ "$(pkg_state zabbix-sender)" != installed ]; then
+      deb zabbix-sender 1.0 /usr/bin/zabbix_sender
+    fi
+    host_sh 'apt-mark auto zabbix-sender >/dev/null'
     converge "${tok[@]}" "${rm_args[@]}"
     { zabbix_agent_spec; zabbix_shared_spec; } | assert_paths_gone
     zabbix_units | assert_units_gone
-    assert_pkg_gone zabbix-agent zabbix-agent2 zabbix-agent2-plugin-fixture zabbix-release
+    assert_pkg_gone zabbix-agent zabbix-agent2 zabbix-agent2-plugin-fixture zabbix-release zabbix-sender
     assert_user_gone zabbix
     converge "${tok[@]}" "${rm_args[@]}"
     changed_zero
@@ -679,6 +681,25 @@ run_release() {
     changed_zero
   fi
 
+  if scenario zabbix_manual_tool; then
+    echo "-- zabbix_manual_tool"
+    removal_host
+    install_zabbix_agent fixture
+    deb zabbix-sender 1.0 /usr/bin/zabbix_sender
+    host_sh 'apt-mark manual zabbix-sender >/dev/null'
+    deb noixdev-unrelated 1.0 /usr/share/noixdev-unrelated/data
+    host_sh 'apt-mark auto noixdev-unrelated >/dev/null'
+    remove_args zabbix_agent
+    converge "${tok[@]}" "${rm_args[@]}"
+    zabbix_agent_spec | assert_paths_gone
+    assert_pkg_gone zabbix-agent zabbix-agent2 zabbix-agent2-plugin-fixture
+    zabbix_shared_spec | assert_paths_there
+    assert_pkgs_installed zabbix-sender zabbix-release noixdev-unrelated
+    host_sh 'getent passwd zabbix >/dev/null' || fail "the zabbix user was removed"
+    converge "${tok[@]}" "${rm_args[@]}"
+    changed_zero
+  fi
+
   if scenario package_anchors; then
     echo "-- package_anchors"
     removal_host
@@ -694,6 +715,17 @@ run_release() {
     assert_pkgs_installed netdataish zabbix-agent-extras check-mk-agent-extra
     # zabbix-agent-extras is another zabbix package: the shared parts stay.
     zabbix_shared_spec | assert_paths_there
+  fi
+
+  if scenario check_mode_removal; then
+    echo "-- check_mode_removal"
+    removal_host
+    host_sh 'mkdir -p /etc/netdata && touch /etc/netdata/marker'
+    converge "${tok[@]}"
+    remove_args netdata
+    converge --check "${tok[@]}" "${rm_args[@]}"
+    printf '%s\n' "$out" | grep -q 'Check mode: would remove netdata' || fail "the check run does not say what it would remove"
+    host_sh 'test -e /etc/netdata/marker' || fail "a check run removed Netdata files"
   fi
 
   if scenario check_mode; then

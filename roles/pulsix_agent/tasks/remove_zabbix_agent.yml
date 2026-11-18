@@ -8,6 +8,39 @@
     pulsix_agent_rm_globs: "{{ pulsix_agent_tool_zabbix_agent.globs }}"
     pulsix_agent_rm_user: "{{ pulsix_agent_tool_zabbix_agent.user }}"
 
+# The agent can pull in helpers (zabbix-sender on some releases) that nothing else
+# needs. Those go with it: zabbix-* packages that apt marked as auto-installed and
+# that an autoremove would take. Both reads are dry; only these names are purged.
+- name: Read the auto-installed packages
+  ansible.builtin.command: apt-mark showauto
+  register: pulsix_agent_zabbix_auto
+  changed_when: false
+
+- name: Ask apt which packages nothing needs any more
+  ansible.builtin.command: apt-get --dry-run autoremove
+  environment:
+    LC_ALL: C
+  register: pulsix_agent_zabbix_autoremove
+  changed_when: false
+
+- name: Select the helpers of the agent
+  ansible.builtin.set_fact:
+    pulsix_agent_zabbix_helpers: >-
+      {{ pulsix_agent_zabbix_autoremove.stdout_lines
+         | select('match', '^Remv zabbix-\S+')
+         | map('regex_replace', '^Remv (\S+).*$', '\1')
+         | select('in', pulsix_agent_zabbix_auto.stdout_lines)
+         | reject('eq', 'zabbix-release')
+         | list }}
+
+- name: Purge the helpers of the agent
+  ansible.builtin.apt:
+    name: "{{ pulsix_agent_zabbix_helpers }}"
+    state: absent
+    purge: true
+    lock_timeout: 120
+  when: pulsix_agent_zabbix_helpers | length > 0
+
 - name: Read the packages that are left
   ansible.builtin.command: dpkg-query -W -f='${Package} ${db:Status-Status}\n'
   register: pulsix_agent_zabbix_dpkg
