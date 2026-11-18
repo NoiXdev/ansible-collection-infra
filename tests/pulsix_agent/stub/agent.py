@@ -1,8 +1,9 @@
 #!/usr/bin/python3
 """Stand-in for the Pulsix agent in the pulsix_agent role's tests.
 
-Without /etc/pulsix/agent.crt it enrolls: the test token below writes the file,
-any other token exits with 2, like the real agent after a refusal. Then it
+Without /etc/pulsix/agent.crt it enrolls: the token pxa1.NOIXTESTVALID.secret.pin
+writes the file; pxa1.NOIXTESTREFUSED.secret.pin and any other token exit with 2,
+like the real agent after a refusal. Then it
 follows /var/lib/pulsix-stub/mode, which it polls about once a second, so a
 scenario can change the mode of a running agent:
 
@@ -20,7 +21,8 @@ import socket
 import sys
 import time
 
-VALID_TOKEN = "pxa1.test-valid"
+VALID_TOKEN = "pxa1.NOIXTESTVALID.secret.pin"
+REFUSED_TOKEN = "pxa1.NOIXTESTREFUSED.secret.pin"
 CERT = "/etc/pulsix/agent.crt"
 MODE_FILE = "/var/lib/pulsix-stub/mode"
 LINES = {
@@ -50,7 +52,8 @@ def read_mode():
 def enroll():
     if os.path.exists(CERT):
         return
-    if os.environ.get("PULSIX_ENROLL_TOKEN", "") != VALID_TOKEN:
+    token = os.environ.get("PULSIX_ENROLL_TOKEN", "")
+    if token == REFUSED_TOKEN or token != VALID_TOKEN:
         log("enrollment refused")
         sys.exit(2)
     os.makedirs(os.path.dirname(CERT), mode=0o700, exist_ok=True)

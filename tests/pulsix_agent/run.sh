@@ -26,6 +26,11 @@ noix_link_collection "$root" "$tests/output"
 export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections}"
 export ANSIBLE_NOCOLOR=1
 
+# Tokens the stub agent knows: the first enrolls, the second is refused.
+token_valid=pxa1.NOIXTESTVALID.secret.pin
+# shellcheck disable=SC2034  # used by the scenarios of later tasks
+token_refused=pxa1.NOIXTESTREFUSED.secret.pin
+
 log=""
 
 # host_sh CMD: run a shell command in the container.
@@ -126,7 +131,7 @@ run_release() {
   if scenario refusals; then
     echo "-- refusals"
     fresh_host
-    local token=pxa1.test-valid addr=manager.test:18444
+    local token="$token_valid" addr=manager.test:18444
     expect_fail -e "pulsix_agent_manager_addr=" -e "pulsix_agent_enroll_token=$token"
     expect_fail -e "pulsix_agent_manager_addr=no-port.test" -e "pulsix_agent_enroll_token=$token"
     expect_fail -e "pulsix_agent_manager_addr=$addr" -e "pulsix_agent_enroll_token=$token" -e pulsix_agent_version=v1.2.3
