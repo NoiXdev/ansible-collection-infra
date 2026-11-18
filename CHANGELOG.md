@@ -34,7 +34,9 @@
   From v2.16.0 Harbor blocks webhooks to loopback, link-local and cloud metadata addresses.
 - `portainer`: the errors of a failed registration no longer show credentials in
   `portainer_agent_register_url` (`https://user:password@host`) and mask the access token in the
-  answer of the server. The registration itself still uses the URL as given.
+  answer of the server. The registration itself still uses the URL as given. A URL with an
+  unencoded `/`, `?` or `#` in its user name or password is refused up front; percent-encode
+  reserved characters there.
 - `n8n`: the rollback of a failed update now fails when `docker stop` of a container of the stack
   fails without a message; only "No such container" (it exited meanwhile) is still ignored.
 

@@ -103,6 +103,20 @@ grep -q "portainer_agent_register_api_token is empty" "$out/portainer-register-i
 docker exec "$host" test ! -e /opt/portainer-register-invalid \
   || { echo "portainer changed the host before checking the registration settings" >&2; exit 1; }
 
+echo "== portainer agent registration refuses a URL with unencoded reserved characters"
+# A / or ? in the password ends the user info early; the URL must not reach any message.
+for url in 'http://deploy:S3cretHead/tail@portainer.invalid' 'http://deploy:12345/S3cretTail@portainer.invalid'; do
+  if play "$here/portainer_register_invalid.yml" -v -e "test_register_url=$url" >"$out/portainer-register-reserved.log" 2>&1; then
+    echo "portainer accepted $url" >&2; exit 1
+  fi
+  grep -qF "Percent-encode reserved characters" "$out/portainer-register-reserved.log" \
+    || { cat "$out/portainer-register-reserved.log" >&2; echo "the URL was not refused by the settings check" >&2; exit 1; }
+  ! grep -qF -e "S3cret" -e "tail@" "$out/portainer-register-reserved.log" \
+    || { echo "the password of the URL shows up in the output" >&2; exit 1; }
+  docker exec "$host" test ! -e /opt/portainer-register-invalid \
+    || { echo "portainer changed the host before checking the registration settings" >&2; exit 1; }
+done
+
 echo "== portainer agent registers itself"
 play "$here/portainer_agent.yml" >"$out/portainer-agent.log" 2>&1 \
   || { cat "$out/portainer-agent.log" >&2; echo "portainer agent registration failed" >&2; exit 1; }

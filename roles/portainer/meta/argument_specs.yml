@@ -50,7 +50,8 @@ argument_specs:
         type: str
         description: >-
           Agent only. Base URL of the Portainer server (http:// or https://) this
-          host registers itself on as an environment. Empty registers nothing.
+          host registers itself on as an environment. Empty registers nothing. Percent-encode
+          reserved characters in the user name and password of the URL.
       portainer_agent_register_address:
         type: str
         description: >-

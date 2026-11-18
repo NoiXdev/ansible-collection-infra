@@ -17,11 +17,15 @@
 - name: Check the agent registration settings
   ansible.builtin.assert:
     that:
-      - portainer_agent_register_url is match('^https?://')
+      # Reserved characters in the user name or password must be percent-encoded,
+      # or the URL cannot be split and its credentials would show in errors.
+      - portainer_agent_register_url is match('^https?://(?:[^/?#]*@)?(?:\[[0-9A-Fa-f:.]+\]|[^/?#@:\[\]]+)(?::[0-9]*)?(?:[/?#][^@]*)?$')
       - portainer_agent_register_api_token | length > 0
     fail_msg: >-
       portainer_agent_register_url is set, but portainer_agent_register_api_token
-      is empty (or the URL is not http:// or https://).
+      is empty, or the URL is not http:// or https://, or it has a reserved
+      character (such as / ? #) in its user name or password. Percent-encode reserved
+      characters in the user name and password of the URL.
     quiet: true
   when: portainer_mode == 'agent' and portainer_agent_register_url | length > 0
 
