@@ -1,0 +1,7 @@
+---
+# No become: the docker connection already runs as root, and the container has
+# no sudo.
+- name: Converge the pulsix_agent role
+  hosts: testhost
+  roles:
+    - noixdev.infra.pulsix_agent

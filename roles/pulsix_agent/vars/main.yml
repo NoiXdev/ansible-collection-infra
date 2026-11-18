@@ -1,0 +1,15 @@
+---
+pulsix_agent_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts.architecture] }}"
+
+# The token of this host: its own, otherwise the shared one.
+pulsix_agent_token: >-
+  {{ (pulsix_agent_enroll_tokens[inventory_hostname] | default('', true) | string | trim)
+     or (pulsix_agent_enroll_token | default('', true) | string | trim) }}
+
+# The port of the manager endpoint (the part after the last colon).
+pulsix_agent_manager_port: "{{ pulsix_agent_manager_addr.split(':')[-1] }}"
+
+# What the agent logs when it has no working connection to the manager.
+pulsix_agent_failure_lines:
+  - agent stream failed
+  - the manager refused this agent's certificate

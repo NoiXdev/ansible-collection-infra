@@ -1,0 +1,50 @@
+---
+- name: Gather the facts the checks need
+  ansible.builtin.setup:
+    gather_subset: [min]
+  when: >-
+    ansible_facts.distribution is not defined
+    or ansible_facts.distribution_version is not defined
+    or ansible_facts.architecture is not defined
+    or ansible_facts.service_mgr is not defined
+
+- name: Check the host
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version in ['24.04', '26.04']
+      - ansible_facts.service_mgr == 'systemd'
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+    fail_msg: >-
+      pulsix_agent supports Ubuntu 24.04 and 26.04 on x86_64 or aarch64 with systemd; this host is
+      {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }} on
+      {{ ansible_facts.architecture }} with {{ ansible_facts.service_mgr }}.
+    quiet: true
+
+- name: Check the settings
+  ansible.builtin.assert:
+    that:
+      - pulsix_agent_manager_addr | string is match('^(\[[0-9A-Fa-f:]+\]|[^:\[\]]+):[0-9]+$')
+      - pulsix_agent_version | string is match('^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$')
+      - pulsix_agent_remove is sequence and pulsix_agent_remove is not string
+      - pulsix_agent_remove | difference(['netdata', 'zabbix_agent', 'checkmk_agent']) | length == 0
+      - pulsix_agent_token == '' or pulsix_agent_token is match('^pxa1[.]')
+    fail_msg: >-
+      pulsix_agent_manager_addr must be host:port ([address]:port for IPv6), pulsix_agent_version a
+      release like 0.1.0 or 0.1.0-rc.4 (no leading v), pulsix_agent_remove a list of netdata,
+      zabbix_agent, checkmk_agent, and an enrollment token must start with pxa1.
+    quiet: true
+
+- name: Look for the agent's identity
+  ansible.builtin.stat:
+    path: /etc/pulsix/agent.crt
+  register: pulsix_agent_identity
+
+- name: Require a token for a host without identity
+  ansible.builtin.assert:
+    that: pulsix_agent_identity.stat.exists or pulsix_agent_token != ''
+    fail_msg: >-
+      {{ inventory_hostname }} has no identity yet and no enrollment token. Create one in Pulsix
+      (Agent card of the host, or a shared one) and pass it within its lifetime as
+      pulsix_agent_enroll_token or pulsix_agent_enroll_tokens.
+    quiet: true

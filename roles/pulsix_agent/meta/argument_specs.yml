@@ -1,0 +1,45 @@
+---
+argument_specs:
+  main:
+    short_description: Pulsix agent installed, enrolled and upgraded on Ubuntu hosts
+    description:
+      - Installs the Pulsix agent from a pinned release, verifies its checksum,
+        enrolls it with a one-time token and keeps it running.
+      - A host that already has an identity needs no token.
+      - On request, removes Netdata, the Zabbix agent and the Checkmk agent
+        once the agent is proven to run and to be connected to the manager.
+    options:
+      pulsix_agent_version:
+        type: str
+        description: Agent release, without a leading v.
+      pulsix_agent_download_url:
+        type: str
+        description: >-
+          URL of the binary; the checksum file sits next to it as <url>.sha256.
+          May use {{ pulsix_agent_arch }} (amd64 or arm64).
+      pulsix_agent_manager_addr:
+        type: str
+        required: true
+        description: The manager's agent endpoint, host:port; an IPv6 host is written in brackets.
+      pulsix_agent_server_name:
+        type: str
+        description: Name in the manager's certificate, when it differs from the dialed host.
+      pulsix_agent_name:
+        type: str
+        description: Agent name; empty means the host name.
+      pulsix_agent_enroll_token:
+        type: str
+        no_log: true
+        description: A token shared by several new hosts. Pass at run time.
+      pulsix_agent_enroll_tokens:
+        type: dict
+        no_log: true
+        description: Tokens by inventory_hostname; wins over the shared token. Pass at run time.
+      pulsix_agent_enroll_timeout:
+        type: int
+        description: Seconds to wait for a new agent's identity.
+      pulsix_agent_remove:
+        type: list
+        elements: str
+        choices: [netdata, zabbix_agent, checkmk_agent]
+        description: Monitoring tools to remove completely, once the agent is proven connected.

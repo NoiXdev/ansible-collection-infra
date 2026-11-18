@@ -1,0 +1,4 @@
+---
+- name: Check the settings and the host
+  ansible.builtin.import_tasks: check.yml
+  tags: [pulsix_agent_check]
