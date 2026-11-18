@@ -14,8 +14,9 @@
 # own internal network and an extra one, the role's own Traefik file removed
 # and a foreign one kept).
 # Every successful converge is repeated and must change nothing.
-# The redirect mode (anubis_public_url) is tested in redirect.sh, after the
-# above or alone with ANUBIS_SUITE_PART=redirect.
+# The redirect part (anubis_public_url: the Anubis host, the cookie domain,
+# switching between the modes, a second server and the refusals) is tested in
+# redirect.sh, run after the above or alone with ANUBIS_SUITE_PART=redirect.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

@@ -17,12 +17,21 @@ argument_specs:
         an entrypoint (the chain anubis-strip, anubis-challenge,
         anubis-check) and a /.within.website/ router per entrypoint. While
         Anubis is down, every router that uses it answers 500 (fails closed).
-        Every 401 from behind anubis@file (backend, the router's own
-        middlewares, ALLOWed paths too) is replaced by the challenge page,
-        WWW-Authenticate and body included, so routers whose legitimate
-        clients get a 401 (registries, Basic auth, token APIs) must not use
-        it. A PUBLIC_URL redirect mode would avoid this; not part of the role
-        yet.
+        In same-host mode (anubis_public_url empty) every 401 from behind
+        anubis@file (backend, the router's own middlewares, ALLOWed paths
+        too) is replaced by the challenge page, WWW-Authenticate and body
+        included, so routers whose legitimate clients get a 401 (registries,
+        Basic auth, token APIs) must not use it.
+      - >-
+        Redirect mode (anubis_public_url, traefik mode only): Anubis answers
+        on its own https host and sends the browser back after the challenge.
+        The chain is anubis-strip and anubis-check without anubis-challenge,
+        so 401s pass through unchanged, and the /.within.website/ routers
+        match the Anubis host only. The pass cookie is valid for
+        anubis_cookie_domain and a shared anubis_private_key is required. The
+        protected apps must be served over HTTPS too; DNS and the certificate
+        of the Anubis host are not handled by the role. Existing setups
+        without anubis_public_url are unchanged.
       - >-
         nginx mode, for nginx auth_request: the container joins its own
         internal network anubis_nginx_network (created by the role), which the
@@ -76,7 +85,12 @@ argument_specs:
           mode; each must be one of traefik_entrypoints when that is set). TLS
           entrypoints only, or set COOKIE_SECURE through anubis_env. The
           routers have no tls section: the entrypoint sets TLS at entrypoint
-          level, as the traefik role does.
+          level, as the traefik role does. In redirect mode
+          (anubis_public_url) it names the entrypoints that serve the Anubis
+          host, and the router matches that host only. Such an entrypoint must
+          not carry anubis@file (the Anubis host would check itself and loop;
+          refused when traefik_entrypoints is set); routers on other
+          entrypoints may use anubis@file without being listed.
       anubis_nginx_network:
         type: str
         description: >-
@@ -101,9 +115,11 @@ argument_specs:
         type: str
         description: >-
           Redirect mode (traefik mode only): the Anubis host's URL,
-          https://host[:port] without a path or trailing slash. Empty keeps
-          the same-host behaviour. Needs anubis_cookie_domain and
-          anubis_private_key.
+          https://host[:port] without a path or trailing slash; https only
+          (http:// is refused). Empty keeps the same-host behaviour. Needs
+          anubis_cookie_domain and anubis_private_key. The protected apps must
+          be served over HTTPS too; DNS and the certificate of the Anubis host
+          are the operator's job.
       anubis_cookie_domain:
         type: str
         description: >-
@@ -140,13 +156,17 @@ argument_specs:
         no_log: true
         description: >-
           Signing key, 64 hex digits (an ed25519 seed). Empty: the role
-          generates one on the host once and keeps it.
+          generates one on the host once and keeps it. Required with
+          anubis_public_url (servers that share a cookie domain must share
+          the key).
       anubis_env:
         type: dict
         description: >-
           Extra container environment. It cannot set BIND, METRICS_BIND,
           TARGET, PUBLIC_URL, REDIRECT_DOMAINS, DIFFICULTY,
-          ED25519_PRIVATE_KEY_HEX(_FILE) or HS512_SECRET; names have no = or
+          ED25519_PRIVATE_KEY_HEX(_FILE) or HS512_SECRET, and in redirect mode
+          (anubis_public_url) not COOKIE_DOMAIN or COOKIE_DYNAMIC_DOMAIN
+          either (same-host mode may set COOKIE_DOMAIN); names have no = or
           whitespace, values no line breaks. Written to compose.yaml (0600)
           and a 0600 env file for the check container, never to a command line
           or the log; keep a secret here in a vault.

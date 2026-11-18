@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- `anubis`: redirect mode for traefik mode. Set `anubis_public_url` to the Anubis host's own URL
+  (`https://anubis.example.test`, `https://` only, no path or trailing slash) and Anubis answers
+  the challenge on that host and sends the browser back to the protected one, so 401s from
+  protected apps pass through unchanged (no `anubis-challenge`; the chain is `anubis-strip` and
+  `anubis-check`). `anubis_cookie_domain` (new; the domain the pass cookie is valid for, no port,
+  at least one dot) is required with it, the Anubis host and every `anubis_redirect_domains` entry
+  must lie within it, and `anubis_private_key` must be set (servers that share a cookie domain
+  must share the key). In redirect mode `anubis_traefik_entrypoints` names the entrypoints that
+  serve the Anubis host, the `/.within.website/` routers match that host only, and such an
+  entrypoint must not carry `anubis@file` (refused when `traefik_entrypoints` is set); routers on
+  other entrypoints may use `anubis@file` without being listed. The role's policy drops the
+  `anubis-own-paths` rule in this mode. The run is refused, before any change, for
+  `anubis_public_url` outside traefik mode or not `https://host[:port]`, an empty
+  `anubis_cookie_domain` or `anubis_private_key`, `anubis_cookie_domain` without
+  `anubis_public_url`, hosts outside the cookie domain, and `COOKIE_DOMAIN` or
+  `COOKIE_DYNAMIC_DOMAIN` in `anubis_env` (same-host mode may still set `COOKIE_DOMAIN`). The
+  protected apps must be served over HTTPS as well; DNS and the certificate of the Anubis host are
+  not handled by the role. Existing setups without `anubis_public_url` are unchanged.
+
 ## 0.6.0 — 2026-11-17
 
 - `portainer`: an agent registers itself as an environment on a Portainer server. Set

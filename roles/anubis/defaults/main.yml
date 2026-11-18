@@ -20,14 +20,19 @@ anubis_dir: /opt/anubis
 #   anubis-check@file      forwardAuth to Anubis
 #   router anubis-<entrypoint> per anubis_traefik_entrypoints entry, for
 #   PathPrefix(`/.within.website/`) at priority 100000, to service anubis
-# Every 401 from behind anubis@file (the backend's, the router's own
-# middlewares' such as basicAuth, also on ALLOWed paths) reaches the client
-# as the challenge page, without WWW-Authenticate and body: routers whose
-# legitimate clients get a 401 (registries, Basic auth, token APIs, SPAs)
-# must not use it, and an entrypoint with such a router must not carry it.
-# nginx mode passes upstream 401s through. A redirect mode with its own
-# Anubis host (Anubis's PUBLIC_URL setup) would avoid this; not part of the
-# role yet.
+# Same-host mode (anubis_public_url empty): every 401 from behind anubis@file
+# (the backend's, the router's own middlewares' such as basicAuth, also on
+# ALLOWed paths) reaches the client as the challenge page, without
+# WWW-Authenticate and body: routers whose legitimate clients get a 401
+# (registries, Basic auth, token APIs, SPAs) must not use it, and an
+# entrypoint with such a router must not carry it.
+# Redirect mode (anubis_public_url set, see below): no anubis-challenge, so
+# the chain is anubis-strip and anubis-check and a 401 passes through
+# unchanged; the routers match only the Anubis host,
+# Host(`<host of anubis_public_url>`) && PathPrefix(`/.within.website/`),
+# and the role's policy no longer carries the anubis-own-paths rule (the
+# Anubis host answers its own paths itself).
+# nginx mode passes upstream 401s through.
 # nginx: the container joins anubis_nginx_network, which the role creates
 # (an internal bridge network, so it never becomes a gateway of the nginx
 # container that joins it; Anubis has no internet access there), and
@@ -51,7 +56,12 @@ anubis_traefik_network: "{{ traefik_network | default('proxy') }}"
 anubis_traefik_dynamic_dir: "{{ traefik_dir | default('/opt/traefik') }}/dynamic"
 # Entrypoints that get the /.within.website/ router: every entrypoint with a
 # router that uses anubis@file (required in traefik mode; each one of
-# traefik_entrypoints when that is set). TLS entrypoints only: Anubis's
+# traefik_entrypoints when that is set). In redirect mode (anubis_public_url)
+# it names the entrypoints that serve the Anubis host instead: such an
+# entrypoint must not carry anubis@file (the Anubis host would check itself
+# and loop; the role refuses it when traefik_entrypoints is set), while
+# routers on other entrypoints may use anubis@file without being listed.
+# TLS entrypoints only: Anubis's
 # cookies are Secure, so a browser on plain HTTP is challenged on every
 # visit, unless anubis_env sets COOKIE_SECURE: "false". The routers have no
 # tls section of their own: the entrypoint must set TLS at entrypoint level,
@@ -78,14 +88,17 @@ anubis_host_port: 8923
 anubis_redirect_domains: []
 
 # Redirect mode (traefik mode only). Empty: Anubis answers on the host it
-# protects. Set to the Anubis host's own URL, https://host[:port] without a
-# path or trailing slash (http:// is refused: a browser drops Anubis's Secure
-# cookie there and would loop). anubis_cookie_domain, the domain the pass
-# cookie is valid for (no port, at least one dot; the Anubis host and every
-# anubis_redirect_domains entry lie within it), and anubis_private_key are
-# then required, and anubis_env cannot set COOKIE_DOMAIN or
-# COOKIE_DYNAMIC_DOMAIN. anubis_cookie_domain without anubis_public_url is
-# refused.
+# protects (same-host mode). Set to the Anubis host's own URL,
+# https://host[:port] without a path or trailing slash (https only: http://
+# is refused, a browser drops Anubis's Secure cookie there and would loop).
+# anubis_cookie_domain, the domain the pass cookie is valid for (no port, at
+# least one dot; the Anubis host and every anubis_redirect_domains entry lie
+# within it), and anubis_private_key are then required, and anubis_env cannot
+# set COOKIE_DOMAIN or COOKIE_DYNAMIC_DOMAIN (same-host mode may still set
+# COOKIE_DOMAIN there). anubis_cookie_domain without anubis_public_url is
+# refused. Limits: the protected apps must be served over HTTPS too, and DNS
+# and the certificate of the Anubis host are the operator's job; the role
+# creates neither.
 anubis_public_url: ""
 anubis_cookie_domain: ""
 
@@ -108,12 +121,15 @@ anubis_impressum: {}
 
 # 64 hex digits (ed25519 seed). Empty: the role generates one on the host
 # once and keeps it (also a key written from this variable earlier), so
-# cookies survive restarts. A new key ends every issued cookie.
+# cookies survive restarts. A new key ends every issued cookie. Required with
+# anubis_public_url: servers that share a cookie domain must share the key.
 anubis_private_key: ""
 
 # Extra container environment (such as COOKIE_SECURE or SLOG_LEVEL). It
 # cannot set BIND, METRICS_BIND, TARGET, PUBLIC_URL, REDIRECT_DOMAINS,
-# DIFFICULTY, ED25519_PRIVATE_KEY_HEX(_FILE) or HS512_SECRET. Names without
+# DIFFICULTY, ED25519_PRIVATE_KEY_HEX(_FILE) or HS512_SECRET, and in
+# redirect mode (anubis_public_url) not COOKIE_DOMAIN or COOKIE_DYNAMIC_DOMAIN
+# either; same-host mode may set COOKIE_DOMAIN. Names without
 # = or whitespace, values without line breaks. The values are written to
 # compose.yaml (mode 0600) and to a 0600 env file for the check container,
 # never to the command line or the log; a secret here belongs in a vault.
