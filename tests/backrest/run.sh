@@ -491,6 +491,8 @@ test_install() {
   if [ -n "$user" ] && [ "$user" != root ]; then fail "Backrest runs as $user, not root"; fi
   [ "$(h stat -c %a /etc/backrest/backrest.env)" = 600 ] || fail "backrest.env is not mode 0600"
   role_converge_unchanged
+  # An app name with an underscore passes validation (a change of no state here).
+  role_converge_unchanged -e '{"backrest_apps": [{"name": "my_app"}]}'
   # A failed download keeps the working binary and the service.
   sum="$(h sha256sum /usr/local/bin/backrest)"
   role_converge_fails -e backrest_version=9.9.9 -e '{"backrest_sha256": {"x86_64": "00", "arm64": "00"}}'

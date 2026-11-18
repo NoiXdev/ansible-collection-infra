@@ -34,6 +34,7 @@ argument_specs:
           password_bcrypt:
             type: str
             required: true
+            no_log: true
             description: The base64 of the bcrypt hash of the password (see defaults/main.yml for the command).
       backrest_repo_uri:
         type: str
@@ -43,9 +44,11 @@ argument_specs:
         type: str
         required: true
         description: Repository password. Without a copy outside the host and the vault the snapshots cannot be read.
+        no_log: true
       backrest_repo_env:
         type: dict
         description: Environment of restic for the repository, for example the S3 keys.
+        no_log: true
       backrest_apps:
         type: list
         elements: dict
@@ -85,6 +88,7 @@ argument_specs:
       backrest_notify_url:
         type: str
         description: Report target; nothing is sent while it is empty.
+        no_log: true
       backrest_max_age_hours:
         type: int
         description: Oldest allowed age in hours of the last good backup before the role run fails.
