@@ -77,6 +77,18 @@ anubis_host_port: 8923
 # here the challenge shows but pass-challenge answers 400.
 anubis_redirect_domains: []
 
+# Redirect mode (traefik mode only). Empty: Anubis answers on the host it
+# protects. Set to the Anubis host's own URL, https://host[:port] without a
+# path or trailing slash (http:// is refused: a browser drops Anubis's Secure
+# cookie there and would loop). anubis_cookie_domain, the domain the pass
+# cookie is valid for (no port, at least one dot; the Anubis host and every
+# anubis_redirect_domains entry lie within it), and anubis_private_key are
+# then required, and anubis_env cannot set COOKIE_DOMAIN or
+# COOKIE_DYNAMIC_DOMAIN. anubis_cookie_domain without anubis_public_url is
+# refused.
+anubis_public_url: ""
+anubis_cookie_domain: ""
+
 # Leading zeros of the proof of work for every client the policy weighs above
 # 0 (browsers get 10 from the default bot list). Unlike Anubis's own default
 # thresholds (metarefresh for weight 1-9, difficulty 2 for browsers, more

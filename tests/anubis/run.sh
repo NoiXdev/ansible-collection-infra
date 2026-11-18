@@ -14,6 +14,8 @@
 # own internal network and an extra one, the role's own Traefik file removed
 # and a foreign one kept).
 # Every successful converge is repeated and must change nothing.
+# The redirect mode (anubis_public_url) is tested in redirect.sh, after the
+# above or alone with ANUBIS_SUITE_PART=redirect.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -94,6 +96,7 @@ new_host() {
     --add-host a.example.test:127.0.0.1 --add-host b.other.test:127.0.0.1 \
     --add-host c.example.test:127.0.0.1 --add-host d.other.test:127.0.0.1 \
     --add-host e.example.test:127.0.0.1 --add-host f.example.test:127.0.0.1 --add-host g.other.test:127.0.0.1 \
+    --add-host anubis.example.test:127.0.0.1 --add-host anubis-b.example.test:127.0.0.1 \
     docker:29-dind >/dev/null
   until hx docker info >/dev/null 2>&1; do sleep 1; done
   # Retried: the host's first DNS lookups fail now and then.
@@ -108,6 +111,7 @@ load_images() {
   images+=("$(sed -n 's/^traefik_socket_proxy_image: *//p' "$root/roles/traefik/defaults/main.yml")")
   images+=("$(sed -n 's/^traefik_error_pages_image: *//p' "$root/roles/traefik/defaults/main.yml")")
   images+=("$(sed -n 's/^fixtures_whoami_image: *//p' "$here/vars.yml")")
+  images+=("$(sed -n 's/^fixtures_backend_image: *//p' "$here/redirect-vars.yml")")
   for image in "${images[@]}"; do [ -n "$image" ] || fail "an image name is missing in the defaults"; done
   tar="$out/images-$(printf '%s\n' "${images[@]}" | shasum | cut -c1-12).tar"
   if [ ! -s "$tar" ]; then
@@ -116,6 +120,13 @@ load_images() {
   fi
   docker exec -i "$host" docker load <"$tar" >/dev/null
 }
+
+if [ "${ANUBIS_SUITE_PART:-all}" = redirect ]; then
+  # shellcheck source=tests/anubis/redirect.sh
+  . "$here/redirect.sh"
+  noix_done
+  exit 0
+fi
 
 new_host
 load_images
@@ -471,6 +482,9 @@ wait_healthy
 # shellcheck disable=SC2016
 [ "$(hx docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$anubis")" = "noixdev-anubis " ] \
   || fail "anubis is not back on noixdev-anubis only"
+
+# shellcheck source=tests/anubis/redirect.sh
+. "$here/redirect.sh"
 
 noix_done
 echo "== all anubis tests passed"

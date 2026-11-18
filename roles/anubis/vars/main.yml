@@ -57,3 +57,10 @@ anubis_own_paths_rule:
   name: anubis-own-paths
   action: ALLOW
   path_regex: ^/\.within\.website/x/(xess/|cmd/anubis/(static/|ext/|api/(pass-challenge|imprint)$))
+
+# Redirect mode: anubis_public_url is set (the Anubis host answers the
+# challenge and sends the browser back to the protected host).
+anubis_redirect_mode: "{{ anubis_public_url | length > 0 }}"
+anubis_public_host: "{{ anubis_public_url | urlsplit('hostname') | lower }}"
+# Set by the role in redirect mode; anubis_env cannot set them.
+anubis_redirect_env_reserved: [COOKIE_DOMAIN, COOKIE_DYNAMIC_DOMAIN]

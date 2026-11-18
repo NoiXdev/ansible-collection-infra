@@ -55,6 +55,108 @@
   no_log: true
   when: anubis_private_key | length > 0
 
+# Redirect mode (anubis_public_url): each check names its variable.
+- name: Check that anubis_public_url suits the mode
+  ansible.builtin.assert:
+    that: anubis_mode == 'traefik'
+    fail_msg: anubis_public_url works in traefik mode only (anubis_mode is {{ anubis_mode }}).
+    quiet: true
+  when: anubis_redirect_mode | bool
+
+- name: Check anubis_public_url
+  ansible.builtin.assert:
+    that: anubis_public_url is match('^https://[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+(:[0-9]+)?$')
+    fail_msg: >-
+      anubis_public_url must be https://host[:port]: https, a host name with
+      at least one dot, no path and no trailing slash.
+    quiet: true
+  when: anubis_redirect_mode | bool
+
+- name: Check that anubis_cookie_domain is set
+  ansible.builtin.assert:
+    that: anubis_cookie_domain | length > 0
+    fail_msg: anubis_cookie_domain is required with anubis_public_url.
+    quiet: true
+  when: anubis_redirect_mode | bool
+
+- name: Check that anubis_cookie_domain has its anubis_public_url
+  ansible.builtin.assert:
+    that: anubis_cookie_domain | length == 0
+    fail_msg: anubis_cookie_domain needs anubis_public_url (redirect mode); leave it empty without.
+    quiet: true
+  when: not (anubis_redirect_mode | bool)
+
+- name: Check anubis_cookie_domain
+  ansible.builtin.assert:
+    that: anubis_cookie_domain is match('^[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+$')
+    fail_msg: >-
+      anubis_cookie_domain must be a host name with at least one dot and no
+      port, such as example.com.
+    quiet: true
+  when: anubis_redirect_mode | bool
+
+- name: Check that anubis_private_key is set for the redirect mode
+  ansible.builtin.assert:
+    that: anubis_private_key | length > 0
+    fail_msg: >-
+      anubis_private_key is required with anubis_public_url: servers that
+      share a cookie domain must share the key, else each deletes the
+      other's cookies.
+    quiet: true
+  no_log: true
+  when: anubis_redirect_mode | bool
+
+- name: Check that the redirect mode hosts lie within anubis_cookie_domain
+  ansible.builtin.assert:
+    that:
+      - anubis_public_host == anubis_cookie_domain | lower
+        or anubis_public_host is search('[.]' ~ (anubis_cookie_domain | lower | regex_escape) ~ '$')
+    fail_msg: >-
+      The Anubis host is outside anubis_cookie_domain: {{ anubis_public_host }}
+      must equal {{ anubis_cookie_domain }} or end in .{{ anubis_cookie_domain }}.
+    quiet: true
+  when: anubis_redirect_mode | bool
+
+- name: Check that anubis_redirect_domains lie within anubis_cookie_domain
+  ansible.builtin.assert:
+    that: anubis_redirect_outside | length == 0
+    fail_msg: >-
+      anubis_redirect_domains entries outside anubis_cookie_domain
+      {{ anubis_cookie_domain }}: {{ anubis_redirect_outside | join(', ') }}.
+    quiet: true
+  vars:
+    anubis_redirect_outside: >-
+      {{ anubis_redirect_domains | map('string') | map('lower')
+         | map('regex_replace', '^[*][.]', '') | map('regex_replace', ':[0-9]+$', '')
+         | reject('equalto', anubis_cookie_domain | lower)
+         | reject('search', '[.]' ~ (anubis_cookie_domain | lower | regex_escape) ~ '$') | list }}
+  when: anubis_redirect_mode | bool
+
+- name: Check anubis_env in the redirect mode
+  ansible.builtin.assert:
+    that: anubis_env.keys() | map('upper') | intersect(anubis_redirect_env_reserved) | length == 0
+    fail_msg: >-
+      anubis_env cannot set {{ anubis_redirect_env_reserved | join(' or ') }}
+      with anubis_public_url: the role sets the cookie domain.
+    quiet: true
+  when: anubis_redirect_mode | bool
+
+- name: Check the entrypoints of the redirect mode
+  ansible.builtin.assert:
+    that: >-
+      traefik_entrypoints | selectattr('name', 'in', anubis_traefik_entrypoints)
+      | map(attribute='middlewares', default=[]) | flatten
+      | select('equalto', 'anubis@file') | list | length == 0
+    fail_msg: >-
+      An entrypoint in anubis_traefik_entrypoints carries anubis@file in
+      traefik_entrypoints and cannot serve the Anubis host: the host would
+      check itself. Name only entrypoints without it there, and put
+      anubis@file on the routers of the protected hosts.
+    quiet: true
+  when:
+    - anubis_redirect_mode | bool
+    - traefik_entrypoints is defined
+
 - name: Check the Traefik mode settings
   when: anubis_mode == 'traefik'
   block:

@@ -97,6 +97,20 @@ argument_specs:
         description: >-
           host mode: the port on 127.0.0.1 Anubis is published on (8923 by
           default; the nginx role's nginx_anubis_port).
+      anubis_public_url:
+        type: str
+        description: >-
+          Redirect mode (traefik mode only): the Anubis host's URL,
+          https://host[:port] without a path or trailing slash. Empty keeps
+          the same-host behaviour. Needs anubis_cookie_domain and
+          anubis_private_key.
+      anubis_cookie_domain:
+        type: str
+        description: >-
+          Redirect mode: the domain the pass cookie is valid for (no port, at
+          least one dot). The Anubis host and every anubis_redirect_domains
+          entry must equal it or end in .<domain>. Refused without
+          anubis_public_url.
       # Not required here: the role's own check names it when it is missing.
       anubis_redirect_domains:
         type: list
