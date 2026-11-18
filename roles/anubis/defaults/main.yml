@@ -60,13 +60,19 @@ anubis_traefik_dynamic_dir: "{{ traefik_dir | default('/opt/traefik') }}/dynamic
 # it names the entrypoints that serve the Anubis host instead: such an
 # entrypoint must not carry anubis@file (the Anubis host would check itself
 # and loop; the role refuses it when traefik_entrypoints is set), while
-# routers on other entrypoints may use anubis@file without being listed.
-# TLS entrypoints only: Anubis's
-# cookies are Secure, so a browser on plain HTTP is challenged on every
-# visit, unless anubis_env sets COOKIE_SECURE: "false". The routers have no
-# tls section of their own: the entrypoint must set TLS at entrypoint level,
-# as the traefik role does (tls: true), else HTTPS requests for
-# /.within.website/ miss them and no challenge can be solved.
+# routers on other entrypoints may use anubis@file without being listed. With
+# traefik_entrypoints defined (as a play or group variable: the role cannot
+# see it in another role's vars) the role also refuses, in redirect mode, a
+# TCP entrypoint that publishes the port of anubis_public_url (host_port, else
+# port; 443 without a port in the URL) and carries anubis@file, listed or not,
+# and a list that names none of the entrypoints publishing that port. Without
+# one publishing it (a load balancer maps the port) the check passes.
+# TLS entrypoints only: Anubis's cookies are Secure, so a browser on plain
+# HTTP is challenged on every visit, unless anubis_env sets COOKIE_SECURE:
+# "false". The routers have no tls section of their own: the entrypoint must
+# set TLS at entrypoint level, as the traefik role does (tls: true), else
+# HTTPS requests for /.within.website/ miss them and no challenge can be
+# solved.
 anubis_traefik_entrypoints: []
 # nginx mode: Anubis's own network (created when missing; an existing one
 # must be internal) and further existing networks to join. Only containers
@@ -98,7 +104,10 @@ anubis_redirect_domains: []
 # COOKIE_DOMAIN there). anubis_cookie_domain without anubis_public_url is
 # refused. Limits: the protected apps must be served over HTTPS too, and DNS
 # and the certificate of the Anubis host are the operator's job; the role
-# creates neither.
+# creates neither. The Anubis host needs the same address families (A and
+# AAAA) as every protected host: Anubis ties the pass cookie to the visitor's
+# address, so a dual-stack browser that solves over IPv4 and returns over IPv6
+# is challenged again and loops.
 anubis_public_url: ""
 anubis_cookie_domain: ""
 

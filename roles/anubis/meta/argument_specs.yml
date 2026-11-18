@@ -89,8 +89,13 @@ argument_specs:
           (anubis_public_url) it names the entrypoints that serve the Anubis
           host, and the router matches that host only. Such an entrypoint must
           not carry anubis@file (the Anubis host would check itself and loop;
-          refused when traefik_entrypoints is set); routers on other
-          entrypoints may use anubis@file without being listed.
+          refused when traefik_entrypoints is set, as a play or group
+          variable); routers on other entrypoints may use anubis@file without
+          being listed. With traefik_entrypoints set the role also refuses a
+          TCP entrypoint that publishes the port of anubis_public_url
+          (host_port, else port; 443 without a port) and carries anubis@file,
+          listed or not, and a list that names none of the entrypoints
+          publishing that port; if none publishes it, the check passes.
       anubis_nginx_network:
         type: str
         description: >-
@@ -117,16 +122,18 @@ argument_specs:
           Redirect mode (traefik mode only): the Anubis host's URL,
           https://host[:port] without a path or trailing slash; https only
           (http:// is refused). Empty keeps the same-host behaviour. Needs
-          anubis_cookie_domain and anubis_private_key. The protected apps must
-          be served over HTTPS too; DNS and the certificate of the Anubis host
-          are the operator's job.
+          anubis_cookie_domain and anubis_private_key. A line break or a port
+          outside 1 to 65535 is refused. The protected apps must be served
+          over HTTPS too; DNS and the certificate of the Anubis host are the
+          operator's job, and the Anubis host needs the same address families
+          (A and AAAA) as every protected host.
       anubis_cookie_domain:
         type: str
         description: >-
           Redirect mode: the domain the pass cookie is valid for (no port, at
-          least one dot). The Anubis host and every anubis_redirect_domains
-          entry must equal it or end in .<domain>. Refused without
-          anubis_public_url.
+          least one dot, no line break). The Anubis host and every
+          anubis_redirect_domains entry must equal it or end in .<domain>.
+          Refused without anubis_public_url.
       # Not required here: the role's own check names it when it is missing.
       anubis_redirect_domains:
         type: list

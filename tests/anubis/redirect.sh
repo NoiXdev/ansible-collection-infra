@@ -49,6 +49,17 @@ refuse r-env-dynamic "anubis_env cannot set COOKIE_DOMAIN or COOKIE_DYNAMIC_DOMA
   -e '{"anubis_env": {"COOKIE_DYNAMIC_DOMAIN": "true"}}'
 refuse r-entrypoint "cannot serve the Anubis host" \
   -e '{"traefik_entrypoints": [{"name": "sec", "port": 443, "middlewares": ["anubis@file"]}]}'
+# traefik_entrypoints with a port mapped by host_port; the Anubis URL has no port (443).
+ep_internal='{"name": "internal", "port": 443, "bind": [127.0.0.1], "tls": true}'
+refuse r-port-mw "carry anubis@file in traefik_entrypoints" \
+  -e "{\"traefik_entrypoints\": [$ep_internal, {\"name\": \"public\", \"port\": 8443, \"host_port\": 443, \"tls\": true, \"middlewares\": [\"anubis@file\"]}], \"anubis_traefik_entrypoints\": [\"internal\"]}"
+refuse r-port-unnamed "names none of them" \
+  -e "{\"traefik_entrypoints\": [$ep_internal, {\"name\": \"other\", \"port\": 9443, \"tls\": true}], \"anubis_traefik_entrypoints\": [\"other\"]}"
+# A trailing line break passes a regex that ends in $; a port needs 1 to 65535.
+refuse r-url-newline "anubis_public_url must be https://host[:port]" -e '{"anubis_public_url": "https://anubis.example.test\n"}'
+refuse r-cookie-newline "anubis_cookie_domain must be a host name" -e '{"anubis_cookie_domain": "example.test\n"}'
+refuse r-port-zero "anubis_public_url has the port 0" -e anubis_public_url=https://anubis.example.test:0
+refuse r-port-high "anubis_public_url has the port 99999" -e anubis_public_url=https://anubis.example.test:99999
 
 fails cookie-alone redirect_role -e anubis_cookie_domain=example.test
 expect_in_log cookie-alone "anubis_cookie_domain needs anubis_public_url"
@@ -62,6 +73,14 @@ expect_in_log r-accepted "/opt/traefik/dynamic"
 if grep -qF "anubis_cookie_domain" "$out/r-accepted.log"; then fail "r-accepted.log names anubis_cookie_domain"; fi
 untouched
 
+# The Anubis host on public (container port 8443, published as 443), which
+# carries no anubis@file, passes checks 10 and 11 up to the missing directory.
+fails r-port-ok redirect_role "${redirect_on[@]}" \
+  -e "{\"traefik_entrypoints\": [$ep_internal, {\"name\": \"public\", \"port\": 8443, \"host_port\": 443, \"tls\": true}], \"anubis_traefik_entrypoints\": [\"public\"]}"
+expect_in_log r-port-ok "/opt/traefik/dynamic"
+if grep -qF "anubis_public_url" "$out/r-port-ok.log"; then fail "r-port-ok.log names anubis_public_url"; fi
+untouched
+
 echo "== redirect mode: same-host baseline, then the switch"
 redirect_play
 wait_healthy
@@ -72,6 +91,18 @@ redirect_play "${redirect_on[@]}"
 wait_healthy
 play "$here/redirect-verify.yml"
 redirect_idempotent "${redirect_on[@]}"
+
+# A URL in mixed case with a port routes the lower-case host without it. The
+# normal redirect state follows, so that the later sections still hold.
+redirect_play -e anubis_public_url=https://Anubis.Example.TEST:8443 -e anubis_cookie_domain=example.test
+wait_healthy
+# shellcheck disable=SC2016  # the backticks are Traefik's rule syntax
+host_rule='rule: Host(`anubis.example.test`) && PathPrefix(`/.within.website/`)'
+hx grep -qF "$host_rule" /opt/traefik/dynamic/anubis.yml \
+  || fail "the mixed-case URL with a port did not give the lower-case host without a port"
+redirect_play "${redirect_on[@]}"
+wait_healthy
+play "$here/redirect-verify.yml"
 
 loc='https://anubis.example.test/.within.website/?redir=https%3A%2F%2Fa.example.test%2Fp%3Fx%3D1'
 want_bearer='Bearer realm="noix-registry"'
@@ -89,7 +120,8 @@ expect "200 other" https://anubis.example.test/.within.website/x/xess/xess.min.c
 
 echo "== redirect mode: Anubis's own paths on an app host never reach the backend"
 for path in /.within.website/x/cmd/anubis/static/js/main.mjs /.within.website/x/xess/xess.min.css \
-  /.within.website/x/cmd/anubis/api/pass-challenge \
+  /.within.website/x/cmd/anubis/api/pass-challenge /.within.website/x/cmd/anubis/api/imprint \
+  /.within.website/x/cmd/anubis/ext/x.css \
   //.within.website/x/cmd/anubis/static/ \
   /.within.website/x/cmd/anubis/static/../../../../../secret \
   /.within.website/x/cmd/anubis/static/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/secret \
@@ -125,8 +157,8 @@ redirect_play "${second_server[@]}" -e anubis_private_key="$key_other"
 wait_healthy
 expect "307 other" https://a.example.test/x --jar "$jar_r"
 
-echo "== redirect mode: the keys stay out of a verbose run"
-redirect_play "${redirect_on[@]}" -v >"$out/redirect-verbose.log" 2>&1
+echo "== redirect mode: the keys stay out of a verbose run with --diff"
+redirect_play "${redirect_on[@]}" -v --diff >"$out/redirect-verbose.log" 2>&1
 grep -q 'PLAY RECAP' "$out/redirect-verbose.log" || fail "the verbose log is incomplete"
 [ "$(wc -l <"$out/redirect-verbose.log")" -gt 50 ] || fail "the verbose log is too short to trust"
 if grep -qF -e "$key_main" -e "$key_other" "$out/redirect-verbose.log"; then fail "a private key occurs in the verbose log"; fi

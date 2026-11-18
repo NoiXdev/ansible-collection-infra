@@ -1,6 +1,13 @@
 # {{ ansible_managed }}
+{% if anubis_redirect_mode | bool %}
+# The anubis_policy_allow rules, then Anubis's default bot list. No rule for
+# Anubis's own paths: on an app host they belong to the app, and the Anubis
+# host does not use this check. Read once at start; the role recreates the
+# container on a change.
+{% else %}
 # Anubis's own paths, the anubis_policy_allow rules, then Anubis's default bot
 # list. Read once at start; the role recreates the container on a change.
+{% endif %}
 {{ {'bots': ([] if anubis_redirect_mode | bool else [anubis_own_paths_rule]) + anubis_policy_allow + [{'import': '(data)/meta/default-config.yaml'}]}
    | to_nice_yaml(indent=2, width=1000, sort_keys=False) }}
 # Proxies read a 200 from the check as "pass": DENY must not be 200.

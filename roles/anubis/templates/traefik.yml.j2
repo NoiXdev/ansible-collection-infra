@@ -1,7 +1,7 @@
 # {{ ansible_managed }}
 {{ anubis_traefik_marker }}
 # Anubis in front of Traefik routers. Add anubis@file to a router's or an
-# entrypoint's middlewares; it chains the three parts below in this order.
+# entrypoint's middlewares; it chains the {{ 'two' if anubis_redirect_mode | bool else 'three' }} parts below in this order.
 # While Anubis is down, every router that uses it answers 500 (fails closed).
 http:
   middlewares:
@@ -35,7 +35,12 @@ http:
       forwardAuth:
         address: {{ anubis_url }}/.within.website/x/cmd/anubis/api/check
         trustForwardHeader: true
+{% if anubis_redirect_mode | bool %}
+  # Anubis's own paths on the Anubis host ({{ anubis_public_host }}) of these
+  # entrypoints, above any router. Other hosts and paths are not routed here.
+{% else %}
   # Anubis's own paths on every host of these entrypoints, above any router.
+{% endif %}
   routers:
 {% for ep in anubis_traefik_entrypoints %}
     anubis-{{ ep }}:

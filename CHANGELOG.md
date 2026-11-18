@@ -17,7 +17,15 @@
   `anubis_public_url` outside traefik mode or not `https://host[:port]`, an empty
   `anubis_cookie_domain` or `anubis_private_key`, `anubis_cookie_domain` without
   `anubis_public_url`, hosts outside the cookie domain, and `COOKIE_DOMAIN` or
-  `COOKIE_DYNAMIC_DOMAIN` in `anubis_env` (same-host mode may still set `COOKIE_DOMAIN`). The
+  `COOKIE_DYNAMIC_DOMAIN` in `anubis_env` (same-host mode may still set `COOKIE_DOMAIN`), a line
+  break in `anubis_public_url` or `anubis_cookie_domain`, and a port outside 1 to 65535. With
+  `traefik_entrypoints` defined (as a play or group variable) it also refuses a TCP entrypoint that
+  publishes the port of `anubis_public_url` (`host_port`, else `port`; 443 without a port) and
+  carries `anubis@file`, whether `anubis_traefik_entrypoints` names it or not (the Anubis host
+  would redirect to itself), and an `anubis_traefik_entrypoints` that names none of the entrypoints
+  publishing that port (no router for the Anubis host); when none publishes it, the check passes.
+  The Anubis host needs the same address families (A and AAAA) as every protected host, because
+  Anubis ties the pass cookie to the visitor's address. The
   protected apps must be served over HTTPS as well; DNS and the certificate of the Anubis host are
   not handled by the role. Existing setups without `anubis_public_url` are unchanged.
 

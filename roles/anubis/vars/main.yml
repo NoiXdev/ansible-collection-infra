@@ -66,3 +66,12 @@ anubis_redirect_mode: "{{ anubis_public_url | length > 0 }}"
 anubis_public_host: "{{ anubis_public_url | urlsplit('hostname') | lower }}"
 # Set by the role in redirect mode; anubis_env cannot set them.
 anubis_redirect_env_reserved: [COOKIE_DOMAIN, COOKIE_DYNAMIC_DOMAIN]
+# The port of anubis_public_url (443 without one), by hand: urlsplit raises on
+# a port above 65535 and reads 0 as no port.
+anubis_public_port: >-
+  {{ anubis_public_url.split(':')[2] | int if anubis_public_url.split(':') | length > 2 else 443 }}
+# The TCP entrypoints of traefik_entrypoints that publish that port
+# (host_port, else port, as the traefik role does).
+anubis_port_names: >-
+  {% set found = [] %}{% for ep in traefik_entrypoints %}{% if ep.protocol | default('tcp') != 'udp'
+  and (ep.host_port | default(ep.port)) | int == anubis_public_port | int %}{% set _ = found.append(ep.name) %}{% endif %}{% endfor %}{{ found }}
