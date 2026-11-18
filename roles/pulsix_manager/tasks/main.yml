@@ -46,6 +46,9 @@
     group: root
     mode: "0644"
 
+# Once the setup wizard is done, the enroll containers have exited with 0 and
+# compose starts them again on every run. That start is not a change; a
+# recreate of them, or any other action, still is.
 - name: Start Pulsix
   community.docker.docker_compose_v2:
     project_src: "{{ pulsix_manager_dir }}"
@@ -53,6 +56,18 @@
     state: present
     pull: missing
     remove_orphans: true
+  register: pulsix_manager_up
+  vars:
+    pulsix_manager_enroll_ids: >-
+      {{ pulsix_manager_workers | map(attribute='name')
+      | map('regex_replace', '^', pulsix_manager_project ~ '-worker-')
+      | map('regex_replace', '$', '-enroll-1')
+      | list }}
+    pulsix_manager_actions: "{{ pulsix_manager_up.actions | default([]) }}"
+  changed_when: >-
+    (pulsix_manager_actions | rejectattr('status', 'eq', 'Starting') | list
+    + pulsix_manager_actions | selectattr('status', 'eq', 'Starting')
+    | rejectattr('id', 'in', pulsix_manager_enroll_ids) | list) | length > 0
 
 # The manager image has no shell or HTTP client; a manager that cannot
 # start shows up as "Restarting" or as an uptime that never grows.

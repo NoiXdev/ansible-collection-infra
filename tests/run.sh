@@ -58,6 +58,18 @@ grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/idempotence.log" \
 echo "== verify"
 play "$here/verify.yml"
 
+echo "== idempotence once the workers have enrolled"
+play "$here/converge.yml" | tee "$out/idempotence-enrolled.log"
+grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/idempotence-enrolled.log" \
+  || { echo "converge changed something after the workers enrolled" >&2; exit 1; }
+
+echo "== a changed Pulsix service still reports changed"
+play "$here/converge.yml" -e '{"pulsix_manager_extra_env": {"NOIX_TEST": "1"}}' >"$out/pulsix-recreate.log"
+awk '/^TASK \[/ { task = $0 } /^changed:/ && task ~ /noixdev\.infra\.pulsix_manager : Start Pulsix/ { print task }' "$out/pulsix-recreate.log" >"$out/pulsix-recreate-changed.log"
+[ -s "$out/pulsix-recreate-changed.log" ] \
+  || { echo "a recreated Pulsix service was not reported as changed" >&2; exit 1; }
+play "$here/converge.yml" >"$out/pulsix-restored.log"
+
 echo "== roles without Docker must fail in their Docker check"
 play "$here/docker_missing.yml" >"$out/docker-missing.log" 2>&1 \
   || { cat "$out/docker-missing.log" >&2; echo "a role did not stop in its Docker check" >&2; exit 1; }
@@ -255,8 +267,8 @@ for _ in $(seq 30); do
 done
 [ "$(dashy_title)" = "Test" ] \
   || { echo "restored dashy config not served, got: $(dashy_title)" >&2; exit 1; }
-# The earlier verify step leaves other roles (Pulsix) with a recreate on the
-# next converge, so only the dashy tasks are held to "nothing changed" here.
+# Only the dashy tasks are held to "nothing changed" here; the whole converge
+# is checked once the Pulsix workers have enrolled.
 play "$here/converge.yml" >"$out/dashy-idempotence.log"
 awk '/^TASK \[/ { task = $0 } /^changed:/ && task ~ /noixdev\.infra\.dashy/ { print task }' "$out/dashy-idempotence.log" >"$out/dashy-changed-tasks.log"
 [ ! -s "$out/dashy-changed-tasks.log" ] \

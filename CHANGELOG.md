@@ -28,6 +28,8 @@
   Anubis ties the pass cookie to the visitor's address. The
   protected apps must be served over HTTPS as well; DNS and the certificate of the Anubis host are
   not handled by the role. Existing setups without `anubis_public_url` are unchanged.
+- `pulsix_manager`: starting the finished enrollment containers of the workers is no longer reported
+  as a change on every run; a recreate of them or a change to any other service still is.
 
 ## 0.6.0 — 2026-11-17
 
