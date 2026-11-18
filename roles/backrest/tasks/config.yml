@@ -85,13 +85,15 @@
       version 6. Nothing was changed.
   when: backrest_current_version | string != '6'
 
+# Backrest sorts the plan's paths when it starts (byte order); the role sorts them
+# the same way, or every run would see a difference and restart the service.
 - name: Work out the paths of the plan
   ansible.builtin.set_fact:
     backrest_plan_paths: >-
       {{ ([backrest_dump_dir] + backrest_active_apps | map(attribute='paths', default=[]) | flatten
            + backrest_active_apps | selectattr('dump.type', 'defined') | selectattr('dump.type', 'equalto', 'command')
              | map(attribute='dump.output') | list
-           + backrest_extra_paths) | unique | list }}
+           + backrest_extra_paths) | unique | sort(case_sensitive=true) | list }}
 
 - name: Work out the configuration the role wants
   ansible.builtin.set_fact:
@@ -152,6 +154,7 @@
   ansible.builtin.set_fact:
     backrest_writes_pending: >-
       {{ backrest_binary_changed | bool or backrest_unit_changed | bool or backrest_config_changed | bool
+         or backrest_scripts_changed | bool
          or backrest_active_apps_content | hash('sha1') != backrest_active_apps_old_sha1
          or not (backrest_exists.excludes and backrest_exists.config_dir and backrest_exists.data_dir
                  and backrest_exists.cache_dir and backrest_exists.dump_dir) }}

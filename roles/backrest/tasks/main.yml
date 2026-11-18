@@ -9,6 +9,9 @@
     - name: Download and verify the release
       ansible.builtin.include_tasks: install.yml
 
+    - name: Work out the scripts and the hooks that call them
+      ansible.builtin.include_tasks: scripts.yml
+
     - name: Work out the configuration
       ansible.builtin.include_tasks: config.yml
 

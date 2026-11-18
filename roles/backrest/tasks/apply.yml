@@ -61,6 +61,19 @@
     group: root
     mode: "0644"
 
+- name: Write the scripts
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - {src: backrest-prepare.sh.j2, dest: "{{ backrest_prepare_script }}"}
+    - {src: backrest-finish.sh.j2, dest: "{{ backrest_finish_script }}"}
+  loop_control:
+    label: "{{ item.dest }}"
+
 - name: Write the configuration
   ansible.builtin.copy:
     content: "{{ backrest_desired | combine({'modno': backrest_modno | int}) | to_nice_json(indent=2) }}\n"

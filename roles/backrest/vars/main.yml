@@ -38,6 +38,14 @@ backrest_excludes_file: /var/lib/backrest/excludes
 # One installed app name per line, as of the last run of the role.
 backrest_active_apps_file: /var/lib/backrest/active-apps
 
+# The scripts the plan's hooks call, and the files they keep. prepare-failures
+# holds one line "<app>: <reason>" per failure of the last prepare run;
+# last-success is touched by backrest-finish after a complete backup.
+backrest_prepare_script: /usr/local/sbin/backrest-prepare
+backrest_finish_script: /usr/local/sbin/backrest-finish
+backrest_failures_file: /var/lib/backrest/prepare-failures
+backrest_last_success_file: /var/lib/backrest/last-success
+
 # Hooks of the plan and of the repository. The prepare/finish scripts and the
 # reports set these facts; the configuration only renders what they hold.
 backrest_plan_hooks: []

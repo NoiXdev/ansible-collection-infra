@@ -1,0 +1,17 @@
+#!/bin/sh
+# Managed by Ansible. Run by Backrest after each snapshot. Exits 0 and touches
+# the last-success file when backrest-prepare recorded no failure; otherwise
+# prints the failures and exits 1, so the backup shows as failed.
+failures={{ backrest_failures_file | quote }}
+last_success={{ backrest_last_success_file | quote }}
+
+if [ ! -f "$failures" ]; then
+  echo "backrest-finish: $failures is missing; backrest-prepare did not run" >&2
+  exit 1
+fi
+if [ -s "$failures" ]; then
+  echo "backrest-finish: the backup is incomplete:" >&2
+  cat "$failures" >&2
+  exit 1
+fi
+touch "$last_success" || { echo "backrest-finish: cannot touch $last_success" >&2; exit 1; }

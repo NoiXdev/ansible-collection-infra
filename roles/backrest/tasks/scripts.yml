@@ -1,0 +1,46 @@
+---
+# Prepares and compares only: the two scripts are rendered into the temporary
+# directory and compared with the installed ones; apply.yml writes them after
+# the wait for a running backup. The plan's hooks call them: the prepare script
+# before each snapshot, the finish script after it, both fatal, so a failure of
+# either marks the backup as failed.
+- name: Render the scripts for comparison
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ backrest_work.path }}/{{ item.name }}"
+    mode: "0600"
+  loop:
+    - {src: backrest-prepare.sh.j2, name: backrest-prepare}
+    - {src: backrest-finish.sh.j2, name: backrest-finish}
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+
+- name: Look at the new and the installed scripts
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    checksum_algorithm: sha256
+  loop:
+    - {key: new_prepare, path: "{{ backrest_work.path }}/backrest-prepare"}
+    - {key: prepare, path: "{{ backrest_prepare_script }}"}
+    - {key: new_finish, path: "{{ backrest_work.path }}/backrest-finish"}
+    - {key: finish, path: "{{ backrest_finish_script }}"}
+  loop_control:
+    label: "{{ item.key }}"
+  register: backrest_script_stats
+
+- name: Compare them and set the hooks of the plan
+  ansible.builtin.set_fact:
+    backrest_scripts_changed: >-
+      {{ not stat.prepare.exists or not stat.finish.exists
+         or stat.prepare.checksum != stat.new_prepare.checksum
+         or stat.finish.checksum != stat.new_finish.checksum }}
+    backrest_plan_hooks:
+      - conditions: [CONDITION_SNAPSHOT_START]
+        onError: ON_ERROR_FATAL
+        actionCommand: {command: "{{ backrest_prepare_script | quote }}"}
+      - conditions: [CONDITION_SNAPSHOT_SUCCESS]
+        onError: ON_ERROR_FATAL
+        actionCommand: {command: "{{ backrest_finish_script | quote }}"}
+  vars:
+    stat: "{{ dict(backrest_script_stats.results | map(attribute='item.key') | zip(backrest_script_stats.results | map(attribute='stat')) | list) }}"

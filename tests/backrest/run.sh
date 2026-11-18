@@ -11,8 +11,10 @@
 # to contract.md, and fails when the releases disagree.
 #
 # The scenario "refusals" runs the backrest role with settings it must refuse,
-# "install" installs Backrest through the role and checks the service, and
-# "config" checks that the role owns config.json.
+# "install" installs Backrest through the role and checks the service,
+# "config" checks that the role owns config.json, and "apps" backs up two apps
+# with a failing dump, an empty path, a late app and odd paths: the healthy app
+# is saved, the failed part is left out and the backup is marked failed.
 #
 # BACKREST_UBUNTU selects the releases (default "24.04 26.04");
 # NOIXDEV_INFRA_BACKREST_TESTS selects scenarios (see the end of the file);
@@ -162,16 +164,40 @@ snapshot_count() {
 import json, sys
 print(len(json.load(sys.stdin).get("snapshots", [])))'
 }
-# The entries of the directory <path> in the newest snapshot, one per line.
-snapshot_entries() {
-  local id
-  id="$(api ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
+# The id of the newest snapshot. Retention keeps one snapshot per day, so the
+# number of snapshots is no sign of a new one.
+newest_snapshot() {
+  api ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
 import json, sys
-print(max(json.load(sys.stdin)["snapshots"], key=lambda s: int(s.get("unixTimeMs", 0)))["id"])')"
-  api ListSnapshotFiles "{\"repoId\":\"$repo_id\",\"snapshotId\":\"$id\",\"path\":\"$1\"}" | python3 -c '
+print(max(json.load(sys.stdin)["snapshots"], key=lambda s: int(s.get("unixTimeMs", 0)))["id"])'
+}
+# The entries of the directory <path> in the newest snapshot, one per line.
+# Fails when the directory is not in the snapshot.
+snapshot_entries() {
+  local body
+  body="$(python3 -c '
+import json, sys
+print(json.dumps({"repoId": sys.argv[1], "snapshotId": sys.argv[2], "path": sys.argv[3]}))' "$repo_id" "$(newest_snapshot)" "$1")"
+  api ListSnapshotFiles "$body" | python3 -c '
 import json, sys
 for entry in json.load(sys.stdin).get("entries", []):
     print(entry["path"])'
+}
+# The entries below the directory <path>: the listing starts with the directory itself.
+snapshot_children() { snapshot_entries "$1" | grep -vxF -- "$1" || true; }
+# in_snapshot <path>...: every path is in the newest snapshot.
+in_snapshot() {
+  local p
+  for p in "$@"; do
+    snapshot_entries "$(dirname "$p")" | grep -qxF -- "$p" || fail "$p is not in the newest snapshot"
+  done
+}
+# not_in_snapshot <path>...: none of the paths is in the newest snapshot.
+not_in_snapshot() {
+  local p
+  for p in "$@"; do
+    if snapshot_entries "$(dirname "$p")" 2>/dev/null | grep -qxF -- "$p"; then fail "$p is in the newest snapshot"; fi
+  done
 }
 
 # The lines the capture server received, and how to start counting again.
@@ -185,6 +211,11 @@ reports_settled() {
 
 # Starts Backrest's plan and reports whether the RPC answered with a 2xx.
 backup() { api Backup "{\"value\":\"$plan_id\"}" >/dev/null; }
+# run_backup: a backup whose result is read from the operations; the RPC
+# answers 200 for a good backup and 500 for a failed one, and nothing else.
+run_backup() {
+  backup || case "$(api_status)" in 500) ;; *) fail "the backup answered $(api_status)" ;; esac
+}
 
 wait_ui() {
   local _
@@ -598,6 +629,188 @@ print(json.dumps({"backrest_repo_password": "p\"a\x27ss $HOME \\n {x} #é"}))' >
   h pkill -x restic || true
 }
 
+# compose <args>: docker compose in the fixtures' project.
+compose() { h sh -c "cd /opt/fixtures && docker compose $*" >"$out/compose.log" 2>&1 || { cat "$out/compose.log" >&2; fail "docker compose $* failed"; }; }
+
+# pg_restore_list_ok <file>: the dump is readable by pg_restore.
+pg_restore_list_ok() {
+  h sh -c "docker exec -i \$(docker ps -q --filter label=com.docker.compose.project=shop --filter label=com.docker.compose.service=db) pg_restore --list <'$1' >/dev/null"
+}
+
+# The dump directory is a 1 MB file system for the scenario "apps", so that
+# fill_dump_dir can fill it without touching the disk of the test host.
+dump_dir=/var/lib/backrest-dumps
+fill_dump_dir() { h sh -c "dd if=/dev/zero of=$dump_dir/.filler bs=64k 2>/dev/null || true"; h sh -c "! dd if=/dev/zero of=$dump_dir/.probe bs=4k count=1 2>/dev/null"; }
+free_dump_dir() { h rm -f "$dump_dir/.filler" "$dump_dir/.probe"; }
+
+# write_apps_vars: the app lists of the scenario "apps" as extra-vars files in
+# $out. A paths value with shell characters, escapes and globs must stay literal.
+write_apps_vars() {
+  python3 -c '
+import json, sys
+out = sys.argv[1]
+odd = "/srv/odd $(touch \\/tmp\\/pwned) *[a]?"
+sibling = "/srv/odd $(touch \\/tmp\\/pwned) xaz"
+shop = {"name": "shop", "paths": ["/srv/shop"],
+        "dump": {"type": "postgres", "project": "shop", "service": "db", "user": "shop", "database": "shop"}}
+notes = {"name": "notes", "dump": {"type": "command", "command": "/usr/local/bin/notes-dump", "output": "/srv/notes-dump"}}
+late = {"name": "late", "requires_path": "/srv/late/installed", "paths": ["/srv/late/data"]}
+oddapp = {"name": "odd", "paths": [odd, sibling]}
+odd_dumps = "/srv/odd-dumps $(touch \\/tmp\\/pwned) *[a]?"
+with open("%s/with-odd-dump-dir.json" % out, "w", encoding="utf-8") as f:
+    json.dump({"backrest_dump_dir": odd_dumps, "backrest_extra_paths": ["/srv/odd-dumps $(touch \\/tmp\\/pwned) xaz"]}, f)
+for name, apps in (("apps", [shop, notes]), ("with-late-app", [shop, notes, late]), ("with-odd-path", [shop, notes, oddapp])):
+    with open("%s/%s.json" % (out, name), "w", encoding="utf-8") as f:
+        json.dump({"backrest_apps": apps}, f)' "$out"
+}
+
+test_apps() {
+  local before n good pid failed_status=STATUS_ERROR odd sibling odd_dumps odd_dumps_sibling
+  odd='/srv/odd $(touch \/tmp\/pwned) *[a]?'
+  sibling='/srv/odd $(touch \/tmp\/pwned) xaz'
+  odd_dumps='/srv/odd-dumps $(touch \/tmp\/pwned) *[a]?'
+  odd_dumps_sibling='/srv/odd-dumps $(touch \/tmp\/pwned) xaz'
+  echo "== apps (ubuntu $1)"
+  command -v shellcheck >/dev/null || fail "shellcheck is missing on this machine"
+  write_role_vars apps
+  write_apps_vars
+  h mkdir -p /srv/shop /srv/notes-dump /srv/late/data
+  h sh -c 'echo a >/srv/shop/a.txt; echo late >/srv/late/data/b.txt'
+  hi sh -c 'cat >/usr/local/bin/notes-dump && chmod 0755 /usr/local/bin/notes-dump' <<'NOTES'
+#!/bin/sh
+mkdir -p /srv/notes-dump && echo notes >/srv/notes-dump/out
+NOTES
+  h sh -c "mkdir -p $dump_dir && mount -t tmpfs -o size=1m tmpfs $dump_dir"
+  compose up -d --wait db
+  h sh -c 'docker exec $(docker ps -q --filter label=com.docker.compose.service=db) psql -q -U shop -c "create table if not exists t (i int); insert into t values (1)"' >/dev/null
+
+  role_converge -e "@$out/apps.json"
+  role_converge_unchanged -e "@$out/apps.json"
+  [ "$(cfg '.plans[0].hooks | length')" = 2 ] || fail "the plan has no hooks"
+  [ "$(cfg '.plans[0].hooks[0].conditions[0]')" = CONDITION_SNAPSHOT_START ] || fail "the first hook is not on the start"
+  [ "$(cfg '.plans[0].hooks[1].conditions[0]')" = CONDITION_SNAPSHOT_SUCCESS ] || fail "the second hook is not after the snapshot"
+  [ "$(cfg '.plans[0].hooks[0].onError')" = ON_ERROR_FATAL ] || fail "the start hook is not fatal"
+  [ "$(cfg '.plans[0].hooks[1].onError')" = ON_ERROR_FATAL ] || fail "the finish hook is not fatal"
+  [ "$(h stat -c '%U %a' /usr/local/sbin/backrest-prepare /usr/local/sbin/backrest-finish | tr '\n' ' ')" = 'root 700 root 700 ' ] \
+    || fail "the scripts are not root 0700"
+  h cat /usr/local/sbin/backrest-prepare >"$out/backrest-prepare.sh"
+  h cat /usr/local/sbin/backrest-finish >"$out/backrest-finish.sh"
+  shellcheck -s sh "$out/backrest-prepare.sh" "$out/backrest-finish.sh" || fail "shellcheck found problems in the scripts"
+  # A changed script alone is written, and the service is not restarted.
+  h sh -c 'echo "# edited" >>/usr/local/sbin/backrest-finish'
+  pid="$(h systemctl show backrest -p MainPID --value)"
+  role_converge -e "@$out/apps.json"
+  [ "$(h systemctl show backrest -p MainPID --value)" = "$pid" ] || fail "a changed script restarted the service"
+  ! h grep -q '# edited' /usr/local/sbin/backrest-finish || fail "the changed script was not put back"
+  role_converge_unchanged -e "@$out/apps.json"
+
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the first backup did not succeed"
+  h test -f "$data_dir/last-success"
+  in_snapshot "$dump_dir/shop.dump" /srv/shop/a.txt /srv/notes-dump/out
+  pg_restore_list_ok "$dump_dir/shop.dump"
+
+  # One failed dump: the other app is saved, the stale dump is not.
+  before="$(h stat -c %Y "$data_dir/last-success")"
+  compose stop db
+  run_backup
+  [ "$(last_status)" = "$failed_status" ] || fail "a failed dump did not fail the backup"
+  in_snapshot /srv/shop/a.txt /srv/notes-dump/out
+  not_in_snapshot "$dump_dir/shop.dump"
+  h test -s "$dump_dir/shop.dump" || fail "the last good dump was removed"
+  h grep -q '^shop: ' "$data_dir/prepare-failures" || fail "the failure is not recorded"
+  [ "$(h stat -c %Y "$data_dir/last-success")" = "$before" ] || fail "last-success moved after a failed backup"
+  compose up -d --wait db
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the healthy run did not succeed"
+  in_snapshot "$dump_dir/shop.dump"
+  h test ! -s "$data_dir/prepare-failures" || fail "the failures were not cleared"
+
+  # An empty path (an unmounted volume) is left out and reported.
+  h mount -t tmpfs tmpfs /srv/shop
+  run_backup
+  # restic never leaves out a path it was given, only what is below it.
+  [ -z "$(snapshot_children /srv/shop)" ] || fail "the empty path has entries in the snapshot"
+  h grep -q '^shop: /srv/shop' "$data_dir/prepare-failures" || fail "the empty path is not recorded"
+  h umount /srv/shop
+  [ "$(last_status)" = "$failed_status" ] || fail "an empty path did not fail the backup"
+
+  # An app that is not installed is skipped; once installed it fails until the next run.
+  role_converge -e "@$out/with-late-app.json"
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "a missing app failed the backup"
+  h touch /srv/late/installed
+  run_backup
+  h grep -q '^late: .*run the playbook' "$data_dir/prepare-failures" || fail "the app that joined late is not recorded"
+  [ "$(last_status)" = "$failed_status" ] || fail "the app that joined late did not fail the backup"
+  role_converge -e "@$out/with-late-app.json"
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the app did not join after the playbook"
+  in_snapshot /srv/late/data/b.txt
+
+  # The script's own failure: no snapshot, a failed backup.
+  n="$(newest_snapshot)"
+  h sh -c "rm -f $data_dir/excludes && mkdir $data_dir/excludes"
+  run_backup
+  [ "$(last_status)" = STATUS_ERROR ] || fail "the failing script did not fail the backup"
+  [ "$(newest_snapshot)" = "$n" ] || fail "a snapshot was taken although the script failed"
+  h sh -c "rmdir $data_dir/excludes && : >$data_dir/excludes"
+
+  # None or two running containers.
+  compose up -d --scale db=2 db
+  run_backup
+  h grep -q '^shop: .*2 containers' "$data_dir/prepare-failures" || fail "two containers are not recorded"
+  compose up -d --scale db=1 --wait db
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "one container again did not succeed"
+
+  # A full disk keeps the last good dump.
+  good="$(h sha256sum "$dump_dir/shop.dump")"
+  fill_dump_dir
+  run_backup
+  [ "$(last_status)" = "$failed_status" ] || fail "a full disk did not fail the backup"
+  [ "$(h sha256sum "$dump_dir/shop.dump")" = "$good" ] || fail "a full disk changed the last good dump"
+  not_in_snapshot "$dump_dir/shop.dump"
+  h grep -q '^shop: ' "$data_dir/prepare-failures" || fail "the full disk is not recorded"
+  h test ! -e "$dump_dir/shop.dump.tmp" || fail "the temporary dump was left"
+  free_dump_dir
+
+  # Paths with spaces, shell characters and globs stay literal: the one that is
+  # left out is not confused with its neighbour that matches it as a pattern.
+  h mkdir -p "$odd" "$sibling"
+  h sh -c "echo a >'$odd/a'; echo a >'$sibling/a'"
+  role_converge -e "@$out/with-odd-path.json"
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the odd paths did not back up"
+  in_snapshot "$odd/a" "$sibling/a"
+  h test ! -e /tmp/pwned || fail "a path was executed"
+  h mount -t tmpfs tmpfs "$odd"
+  run_backup
+  [ -z "$(snapshot_children "$odd")" ] || fail "the emptied odd path has entries in the snapshot"
+  in_snapshot "$sibling/a"
+  h grep -qF "odd: $odd is missing or empty" "$data_dir/prepare-failures" || fail "the odd path is not recorded"
+  h test ! -e /tmp/pwned || fail "a path was executed"
+  h umount "$odd"
+  # restic does not leave out a path it was given, so the exclude line is proved
+  # with a stale dump below an odd dump directory, next to a file of the same
+  # name in a directory that the unescaped line would match.
+  h umount "$dump_dir"
+  h mkdir -p "$odd_dumps" "$odd_dumps_sibling"
+  h sh -c "echo kept >'$odd_dumps_sibling/shop.dump'"
+  role_converge -e "@$out/apps.json" -e "@$out/with-odd-dump-dir.json"
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the odd dump directory did not back up"
+  in_snapshot "$odd_dumps/shop.dump" "$odd_dumps_sibling/shop.dump"
+  compose stop db
+  run_backup
+  [ "$(last_status)" = "$failed_status" ] || fail "a failed dump in the odd directory did not fail the backup"
+  not_in_snapshot "$odd_dumps/shop.dump"
+  in_snapshot "$odd_dumps_sibling/shop.dump"
+  h test -s "$odd_dumps/shop.dump" || fail "the last good dump was removed"
+  h test ! -e /tmp/pwned || fail "a path was executed"
+  compose up -d --wait db
+}
+
 # write_contract <file>: the measured answers. No value may depend on the run.
 write_contract() {
   cat >"$1" <<CONTRACT
@@ -638,7 +851,7 @@ CONTRACT
 }
 
 # All scenarios by default; NOIXDEV_INFRA_BACKREST_TESTS="refusals install" runs only these.
-scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install config}"
+scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install config apps}"
 first=
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -648,7 +861,8 @@ for ubuntu in $releases; do
       refusals) test_refusals "$ubuntu" ;;
       install) test_install "$ubuntu" ;;
       config) test_config "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (contract, refusals, install, config)" ;;
+      apps) test_apps "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (contract, refusals, install, config, apps)" ;;
     esac
   done
   case " $scenarios " in
