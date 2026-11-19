@@ -23,4 +23,5 @@ for user in netdata zabbix cmk-agent; do
   groupdel "$user" >/dev/null 2>&1 || true
 done
 systemctl daemon-reload
+systemctl reset-failed >/dev/null 2>&1
 exit 0

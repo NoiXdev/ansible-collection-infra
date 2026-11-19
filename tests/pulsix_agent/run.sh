@@ -703,17 +703,18 @@ run_release() {
   if scenario zabbix_half_configured; then
     echo "-- zabbix_half_configured"
     removal_host
-    install_zabbix_agent fixture
+    # No agent package: nothing is purged, so apt is skipped and the selection of
+    # the other zabbix packages by state is reached. A server that is not fully
+    # configured still counts as another package.
+    deb zabbix-release 1.0 /etc/apt/sources.list.d/zabbix.list
+    add_user zabbix
+    zabbix_shared_spec | seed_missing
     host_sh 'echo /usr/sbin/zabbix_server >/tmp/zabbix-server.list
       FAIL_POSTINST=1 sh /opt/fixtures/make-deb.sh zabbix-server-pgsql 1.0 /tmp/zabbix-server.list
       dpkg -i /tmp/zabbix-server-pgsql_1.0_all.deb >/dev/null 2>&1; true'
     [ "$(pkg_state zabbix-server-pgsql)" = half-configured ] || fail "the test server package is not half-configured"
     remove_args zabbix_agent
-    # apt tries to finish the broken package while it purges the agent and
-    # fails; the run stops there and the shared items stay. (The selection of
-    # the other zabbix packages by state is checked in the report with the
-    # same expression.)
-    expect_fail "${tok[@]}" "${rm_args[@]}"
+    converge "${tok[@]}" "${rm_args[@]}"
     zabbix_shared_spec | assert_paths_there
     assert_pkgs_installed zabbix-release
     host_sh 'getent passwd zabbix >/dev/null' || fail "the zabbix user was removed"
@@ -753,6 +754,41 @@ run_release() {
     netdata_units | assert_units_gone
     converge "${tok[@]}" "${rm_args[@]}"
     changed_zero
+  fi
+
+  if scenario unit_bad_inactive; then
+    echo "-- unit_bad_inactive"
+    removal_host
+    netdata_spec | seed_missing
+    host_sh "printf '[Unit]\nDescription=fixture\n[Service]\nExecStart=/bin/sleep 7780\n[Install]\nWantedBy=multi-user.target\n' >/etc/systemd/system/netdata.service
+      systemctl daemon-reload && systemctl enable netdata.service
+      echo fixture >/etc/systemd/system/netdata.service
+      systemctl daemon-reload"
+    [ "$(host_sh 'systemctl show -p ActiveState --value netdata')" = inactive ] || fail "the unit is not inactive"
+    [ "$(host_sh 'systemctl show -p LoadState --value netdata')" != loaded ] || fail "the unit file is not bad"
+    remove_args netdata
+    converge "${tok[@]}" "${rm_args[@]}"
+    netdata_spec | assert_paths_gone
+    host_sh 'test ! -L /etc/systemd/system/multi-user.target.wants/netdata.service' || fail "the enable link is still there"
+    netdata_units | assert_units_gone
+    converge "${tok[@]}" "${rm_args[@]}"
+    changed_zero
+  fi
+
+  if scenario unit_stop_fails; then
+    echo "-- unit_stop_fails"
+    removal_host
+    netdata_spec | seed_missing
+    host_sh "printf '[Unit]\nDescription=fixture\nRefuseManualStop=yes\n[Service]\nExecStart=/bin/sleep 7779\n[Install]\nWantedBy=multi-user.target\n' >/etc/systemd/system/netdata.service
+      systemctl daemon-reload && systemctl enable --now netdata.service"
+    host_sh 'pgrep -f "[s]leep 7779" >/dev/null' || fail "the unit does not run"
+    host_sh 'systemctl stop netdata' 2>/dev/null && fail "the unit can be stopped, the test does not work"
+    remove_args netdata
+    expect_fail "${tok[@]}" "${rm_args[@]}"
+    host_sh 'pgrep -f "[s]leep 7779" >/dev/null' || fail "the unit was stopped"
+    netdata_spec | assert_paths_there
+    host_sh 'test -e /etc/systemd/system/netdata.service' || fail "the unit file was removed although the stop failed"
+    host_sh 'pkill -f "[s]leep 7779"; true'
   fi
 
   if scenario unit_masked; then

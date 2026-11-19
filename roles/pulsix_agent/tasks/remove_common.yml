@@ -11,17 +11,28 @@
   register: pulsix_agent_rm_unit_state
   changed_when: false
 
-- name: Stop and disable the units that exist
-  ansible.builtin.command: systemctl disable --now {{ item.item }}  # noqa: command-instead-of-module
+# Stop and disable are separate: systemd refuses to stop an inactive unit whose
+# file cannot be loaded, and some versions drop the result of the stop that
+# "disable --now" does. A stop that fails must fail the run.
+- name: Stop the units that run
+  ansible.builtin.command: systemctl stop {{ item.item }}  # noqa: command-instead-of-module
+  loop: "{{ pulsix_agent_rm_unit_state.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - "'LoadState=not-found' not in item.stdout_lines"
+    - "'ActiveState=inactive' not in item.stdout_lines"
+  changed_when: true
+
+- name: Disable the units that exist
+  ansible.builtin.command: systemctl disable {{ item.item }}  # noqa: command-instead-of-module
   loop: "{{ pulsix_agent_rm_unit_state.results }}"
   loop_control:
     label: "{{ item.item }}"
   when: "'LoadState=not-found' not in item.stdout_lines"
   changed_when: >-
-    (item.stdout_lines | select('in', ['ActiveState=active', 'ActiveState=activating',
-       'ActiveState=reloading', 'ActiveState=deactivating']) | list | length > 0)
-    or (item.stdout_lines | select('in', ['UnitFileState=enabled', 'UnitFileState=enabled-runtime',
-       'UnitFileState=linked', 'UnitFileState=linked-runtime', 'UnitFileState=alias']) | list | length > 0)
+    item.stdout_lines | select('in', ['UnitFileState=enabled', 'UnitFileState=enabled-runtime',
+       'UnitFileState=linked', 'UnitFileState=linked-runtime', 'UnitFileState=alias']) | list | length > 0
 
 - name: Read the installed packages
   ansible.builtin.command: dpkg-query -W -f='${Package} ${db:Status-Status}\n'
