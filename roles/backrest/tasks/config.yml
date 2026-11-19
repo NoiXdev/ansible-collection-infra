@@ -154,7 +154,7 @@
   ansible.builtin.set_fact:
     backrest_writes_pending: >-
       {{ backrest_binary_changed | bool or backrest_unit_changed | bool or backrest_config_changed | bool
-         or backrest_scripts_changed | bool
+         or backrest_scripts_changed | bool or backrest_notify_changed | bool
          or backrest_active_apps_content | hash('sha1') != backrest_active_apps_old_sha1
          or not (backrest_exists.excludes and backrest_exists.config_dir and backrest_exists.data_dir
                  and backrest_exists.cache_dir and backrest_exists.dump_dir) }}

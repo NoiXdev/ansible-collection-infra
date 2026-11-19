@@ -3,7 +3,13 @@
 # directory and compared with the installed ones; apply.yml writes them after
 # the wait for a running backup. The plan's hooks call them: the prepare script
 # before each snapshot, the finish script after it, both fatal, so a failure of
-# either marks the backup as failed.
+# either marks the backup as failed. The report is sent in two ways, so that one
+# failure sends one message: Backrest's own hook on the repository for what it
+# sees fail (restic, the start hook), and backrest-finish for the failures the
+# prepare script recorded, which Backrest does not count as an error. The URL
+# of the report is a secret: it is written to a 0600 curl configuration and
+# otherwise only handed to the hook in config.json; the tasks that handle it
+# are no_log, with a fixed message when they fail.
 - name: Render the scripts for comparison
   ansible.builtin.template:
     src: "{{ item.src }}"
@@ -44,3 +50,40 @@
         actionCommand: {command: "{{ backrest_finish_script | quote }}"}
   vars:
     stat: "{{ dict(backrest_script_stats.results | map(attribute='item.key') | zip(backrest_script_stats.results | map(attribute='stat')) | list) }}"
+
+- name: Work out the report
+  ansible.builtin.set_fact:
+    backrest_notify_content: >-
+      {{ 'url = "' ~ (backrest_notify_target | replace('\\', '\\\\') | replace('"', '\\"')) ~ '"\n' if backrest_notify_url | length > 0 else '' }}
+    backrest_repo_hooks: >-
+      {{ [{
+           'conditions': ['CONDITION_ANY_ERROR', 'CONDITION_SNAPSHOT_WARNING'],
+           'onError': 'ON_ERROR_IGNORE',
+           backrest_notify_action: {'webhookUrl': backrest_notify_url},
+         }] if backrest_notify_url | length > 0 else [] }}
+  vars:
+    backrest_notify_action: "{{ 'actionDiscord' if backrest_notify_type == 'discord' else 'actionHealthchecks' }}"
+    # backrest-finish posts to the same address that Backrest's healthchecks hook does.
+    backrest_notify_target: "{{ backrest_notify_url if backrest_notify_type == 'discord' else (backrest_notify_url | regex_replace('/+$', '')) ~ '/fail' }}"
+  no_log: true
+  ignore_errors: true
+  register: backrest_notify_build
+
+- name: Stop when the report cannot be worked out
+  ansible.builtin.fail:
+    msg: The report cannot be worked out from backrest_notify_type and backrest_notify_url.
+  when: backrest_notify_build is failed
+
+- name: Look at the report file
+  ansible.builtin.stat:
+    path: "{{ backrest_notify_file }}"
+  register: backrest_notify_stat
+
+- name: Compare the report file
+  ansible.builtin.set_fact:
+    backrest_notify_changed: >-
+      {{ (backrest_notify_content | length > 0 and (not backrest_notify_stat.stat.exists
+            or backrest_notify_stat.stat.checksum != backrest_notify_content | hash('sha1')
+            or backrest_notify_stat.stat.mode != '0600'))
+         or (backrest_notify_content | length == 0 and backrest_notify_stat.stat.exists) }}
+  no_log: true

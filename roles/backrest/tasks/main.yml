@@ -2,6 +2,9 @@
 - name: Validate the settings
   ansible.builtin.include_tasks: validate.yml
 
+- name: Check the age of the last good backup
+  ansible.builtin.include_tasks: age.yml
+
 # Everything that changes the host runs in the block, so the temporary
 # directory of the download is removed also when a step fails.
 - name: Install and run Backrest
@@ -46,3 +49,9 @@
   delay: 1
   until: backrest_ui.status is defined and backrest_ui.status == 200
   changed_when: false
+
+# The last task: everything has converged, and a missed night still fails the run.
+- name: Stop when the last good backup is too old
+  ansible.builtin.fail:
+    msg: "{{ backrest_age_failed }}"
+  when: backrest_age_failed | length > 0

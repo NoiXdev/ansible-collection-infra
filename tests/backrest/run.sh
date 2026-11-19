@@ -15,6 +15,8 @@
 # "config" checks that the role owns config.json, and "apps" backs up two apps
 # with a failing dump, an empty path, a late app and odd paths: the healthy app
 # is saved, the failed part is left out and the backup is marked failed.
+# The scenario "reports" checks the failure reports (one message per failed
+# backup, secret URL) and the age check.
 #
 # BACKREST_UBUNTU selects the releases (default "24.04 26.04");
 # NOIXDEV_INFRA_BACKREST_TESTS selects scenarios (see the end of the file);
@@ -207,6 +209,15 @@ reports_clear() { h sh -c ': >/srv/capture/reports.log'; }
 reports_settled() {
   sleep 5
   reports | wc -l | tr -d ' '
+}
+
+# reports_to <name>: the lines the capture server received for the URL <capture>/<name>.
+capture_path="/${capture_url#*://*/}"
+reports_to() { reports | grep -F " $capture_path/$1" || true; }
+# reports_settled_to <name>: how many reports arrived for that URL, once a failure has had the time to send them.
+reports_settled_to() {
+  sleep 5
+  reports_to "$1" | wc -l | tr -d ' '
 }
 
 # Starts Backrest's plan and reports whether the RPC answered with a 2xx.
@@ -836,6 +847,155 @@ NOTES
   compose up -d --wait db
 }
 
+# force_restic_failure: restic fails for the plan (its only path does not exist),
+# while the start hook still succeeds. heal_restic puts the configuration back.
+force_restic_failure() {
+  save_config
+  reconfigure '{"plan":{"paths":["/srv/does-not-exist"]}}'
+}
+heal_restic() {
+  h systemctl stop backrest
+  restore_config
+  h systemctl start backrest
+  wait_ui
+}
+
+# finish_fails: runs backrest-finish by hand, which must exit 1; its output is in $out/finish.out.
+finish_fails() {
+  if h /usr/local/sbin/backrest-finish >"$out/finish.out" 2>&1; then fail "backrest-finish succeeded, but must fail"; fi
+}
+
+test_reports() {
+  local type notify=/etc/backrest/notify.curl finish=/usr/local/sbin/backrest-finish body
+  echo "== reports (ubuntu $1)"
+  command -v jq >/dev/null || fail "jq is missing on this machine"
+  command -v shellcheck >/dev/null || fail "shellcheck is missing on this machine"
+  write_role_vars reports
+  python3 -c '
+import json, sys
+shop = {"name": "shop", "paths": ["/srv/shop"],
+        "dump": {"type": "postgres", "project": "shop", "service": "db", "user": "shop", "database": "shop"}}
+with open(sys.argv[1] + "/reports-apps.json", "w", encoding="utf-8") as f:
+    json.dump({"backrest_apps": [shop]}, f)' "$out"
+  h mkdir -p /srv/shop
+  h sh -c 'echo a >/srv/shop/a.txt'
+  compose up -d --wait db
+  h sh -c 'docker exec $(docker ps -q --filter label=com.docker.compose.service=db) psql -q -U shop -c "create table if not exists t (i int); insert into t values (1)"' >/dev/null 2>&1
+  # The scenario starts from a host without a good backup yet, inside its grace period.
+  h rm -f "$data_dir/last-success"
+  role_converge -e "@$out/reports-apps.json"
+
+  # A failure that Backrest itself sees is reported once, for each report type.
+  for type in discord healthchecks; do
+    role_converge -e "@$out/reports-apps.json" -e backrest_notify_type="$type" -e backrest_notify_url="$capture_url/$type"
+    h cat "$finish" >"$out/backrest-finish-$type.sh"
+    shellcheck -s sh "$out/backrest-finish-$type.sh" || fail "shellcheck found problems in the $type finish script"
+    reports_clear
+    force_restic_failure
+    run_backup
+    [ "$(reports_settled_to "$type")" = 1 ] || fail "a failing restic did not send exactly one $type report"
+    heal_restic
+  done
+  reports_to healthchecks | grep -qF "POST $capture_path/healthchecks/fail " || fail "healthchecks did not get the report on /fail"
+  [ "$(cfg '.repos[0].hooks[0].onError')" = ON_ERROR_IGNORE ] || fail "the report hook is not ignored on error"
+  cfg '.repos[0].hooks[0].conditions' | grep -q CONDITION_SNAPSHOT_WARNING || fail "the report hook is not on warnings"
+  cfg '.repos[0].hooks[0].conditions' | grep -q CONDITION_ANY_ERROR || fail "the report hook is not on errors"
+
+  # One failed app sends exactly one report, from backrest-finish.
+  role_converge -e "@$out/reports-apps.json" -e backrest_notify_type=discord -e backrest_notify_url="$capture_url/partial"
+  reports_clear
+  compose stop db
+  run_backup
+  [ "$(reports_settled_to partial)" = 1 ] || fail "one failed app did not send exactly one report"
+  reports_to partial | grep -q shop || fail "the report does not name the failed app"
+  compose up -d --wait db
+
+  # The URL is a secret.
+  ! h grep -qF "$capture_url" "$finish" || fail "the notify URL is in the finish script"
+  ! h grep -qF "$capture_url" /usr/local/sbin/backrest-prepare || fail "the notify URL is in the prepare script"
+  [ "$(h stat -c '%U %a' "$notify")" = 'root 600' ] || fail "the notify file is not root 0600"
+  ! grep -qF "$capture_url" "$out/converge.log" || fail "the notify URL is in the output of the role"
+  role_converge_unchanged -e "@$out/reports-apps.json" -e backrest_notify_type=discord -e backrest_notify_url="$capture_url/partial"
+
+  # A failure line with quotes and backslashes arrives as valid JSON.
+  role_converge -e "@$out/reports-apps.json" -e backrest_notify_type=discord -e backrest_notify_url="$capture_url/json"
+  reports_clear
+  hi sh -c "cat >$data_dir/prepare-failures" <<'FAILURES'
+shop: /srv/q"uo\te is missing or empty
+shop: caf'é $(x) `y`
+FAILURES
+  finish_fails
+  body="$(reports_to json | sed 's/^POST [^ ]* //')"
+  [ "$(printf '%s\n' "$body" | wc -l | tr -d ' ')" = 1 ] || fail "the report did not arrive as one message"
+  printf '%s\n' "$body" | python3 -c '
+import json, sys
+content = json.load(sys.stdin)["content"]
+assert "shop: /srv/q\"uo\\te is missing or empty" in content, content
+assert "caf\x27é $(x) `y`" in content, content' || fail "the report is not the expected JSON: $body"
+
+  # A very long list stays below Discord's limit, with a marker.
+  reports_clear
+  hi sh -c "cat >$data_dir/prepare-failures" < <(python3 -c '
+for i in range(120):
+    print("shop: /srv/shop/%03d-%s is missing or empty" % (i, "x" * 40))')
+  finish_fails
+  body="$(reports_to json | sed 's/^POST [^ ]* //')"
+  printf '%s\n' "$body" | python3 -c '
+import json, sys
+content = json.load(sys.stdin)["content"]
+assert len(content) < 2000, len(content)
+assert "truncated" in content' || fail "a long report is not truncated below 2000 characters"
+
+  # A failed send never changes the exit status and prints nothing of the URL.
+  role_converge -e "@$out/reports-apps.json" -e backrest_notify_type=discord -e backrest_notify_url="http://127.0.0.1:9/secret-token-42"
+  hi sh -c "echo 'shop: broken' >$data_dir/prepare-failures"
+  finish_fails
+  ! grep -q secret-token-42 "$out/finish.out" || fail "the notify URL is in the output of the finish script"
+  grep -q 'report could not be sent' "$out/finish.out" || fail "no message about the failed send"
+  grep -q 'shop: broken' "$out/finish.out" || fail "the failures are not printed"
+
+  # Healthchecks gets the text on /fail.
+  role_converge -e "@$out/reports-apps.json" -e backrest_notify_type=healthchecks -e backrest_notify_url="$capture_url/hc/"
+  reports_clear
+  finish_fails
+  reports_to hc | grep -F "POST $capture_path/hc/fail " | grep -qF 'shop: broken' || fail "healthchecks did not get the failures: $(reports)"
+  # A missing failures file is reported as well.
+  reports_clear
+  h rm -f "$data_dir/prepare-failures"
+  finish_fails
+  reports_to hc | grep -q 'prepare-failures is missing' || fail "a missing failures file was not reported"
+
+  # No URL, no hooks, no file.
+  role_converge -e "@$out/reports-apps.json" -e backrest_notify_url=
+  [ "$(cfg '.repos[0].hooks | length')" = 0 ] || fail "the report hook was not removed"
+  h test ! -e "$notify" || fail "the notify file was not removed"
+  role_converge_unchanged -e "@$out/reports-apps.json" -e backrest_notify_url=
+  # A URL with a line break could add options to the curl file.
+  role_converge_fails -e "@$out/reports-apps.json" -e '{"backrest_notify_url": "http://127.0.0.1:9/a\nb"}'
+  grep -q 'backrest_notify_url must' "$out/converge.log" || fail "no message about the notify URL"
+
+  # A fresh install has its grace period, from the first-run marker.
+  h rm -f "$data_dir/last-success"
+  h touch "$data_dir/first-run"
+  role_converge -e "@$out/reports-apps.json"
+  # Too old: everything converges first, then the run fails, naming the age.
+  h touch -d '26 hours ago' "$data_dir/first-run"
+  role_converge_fails -e "@$out/reports-apps.json" -e '{"backrest_schedule": "0 1 * * *"}'
+  grep -q 'older than 25 hours' "$out/converge.log" || fail "no message about the age"
+  [ "$(cfg '.plans[0].schedule.cron')" = '0 1 * * *' ] || fail "the configuration was not applied before the age check failed"
+  # The verdict is read before the role starts a stopped service.
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup did not succeed"
+  h touch -d '26 hours ago' "$data_dir/last-success"
+  h systemctl stop backrest
+  role_converge_fails -e "@$out/reports-apps.json"
+  grep -q 'older than 25 hours' "$out/converge.log" || fail "a stopped service hid the missed night"
+  [ "$(h systemctl is-active backrest)" = active ] || fail "the role did not start the service"
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup did not succeed again"
+  role_converge_unchanged -e "@$out/reports-apps.json"
+}
+
 # write_contract <file>: the measured answers. No value may depend on the run.
 write_contract() {
   cat >"$1" <<CONTRACT
@@ -876,7 +1036,7 @@ CONTRACT
 }
 
 # All scenarios by default; NOIXDEV_INFRA_BACKREST_TESTS="refusals install" runs only these.
-scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install config apps}"
+scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install config apps reports}"
 first=
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -887,7 +1047,8 @@ for ubuntu in $releases; do
       install) test_install "$ubuntu" ;;
       config) test_config "$ubuntu" ;;
       apps) test_apps "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (contract, refusals, install, config, apps)" ;;
+      reports) test_reports "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (contract, refusals, install, config, apps, reports)" ;;
     esac
   done
   case " $scenarios " in

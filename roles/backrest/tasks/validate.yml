@@ -35,6 +35,16 @@
       other report types such as webhook.
     quiet: true
 
+- name: Check the notify URL
+  ansible.builtin.set_fact:
+    backrest_notify_url_valid: "{{ backrest_notify_url == '' or backrest_notify_url is match('^https?://[^\\s]+$') }}"
+  no_log: true
+
+- name: Require a valid notify URL
+  ansible.builtin.fail:
+    msg: backrest_notify_url must be empty or an http(s) URL without spaces or line breaks.
+  when: not backrest_notify_url_valid | bool
+
 - name: Require logins
   ansible.builtin.fail:
     msg: backrest_users is empty; the web UI requires at least one {name, password_bcrypt}.

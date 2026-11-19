@@ -1,0 +1,33 @@
+---
+# Reads the age of the last good backup and decides; nothing changes on the
+# host, and this runs before anything does, so that a stopped service cannot
+# hide a missed night. The verdict is acted on by the last task of main.yml,
+# after everything has converged. Without a good backup the age counts from
+# the first run of the role (apply.yml writes the marker); a host with neither
+# file is in its grace period.
+- name: Look at the marks of the last backup
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    get_checksum: false
+  loop:
+    - "{{ backrest_last_success_file }}"
+    - "{{ backrest_first_run_file }}"
+  register: backrest_age_stats
+
+- name: Read the clock of the host
+  ansible.builtin.command: date +%s
+  register: backrest_clock
+  changed_when: false
+  check_mode: false
+
+- name: Work out the age
+  ansible.builtin.set_fact:
+    backrest_age_failed: >-
+      {{ (what ~ ' is older than ' ~ backrest_max_age_hours ~ ' hours (' ~ (age_hours | round(1)) ~ ' hours); check the backups, see journalctl -u backrest.')
+         if mark is defined and age_hours | float > backrest_max_age_hours | float else '' }}
+  vars:
+    last: "{{ backrest_age_stats.results[0].stat }}"
+    first: "{{ backrest_age_stats.results[1].stat }}"
+    mark: "{{ last.mtime if last.exists else (first.mtime if first.exists) }}"
+    what: "{{ 'The last good backup' if last.exists else 'The first run of the role (there is no good backup yet)' }}"
+    age_hours: "{{ ((backrest_clock.stdout | int) - (mark | int)) / 3600 }}"

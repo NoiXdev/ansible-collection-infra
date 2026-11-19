@@ -1,17 +1,54 @@
 #!/bin/sh
 # Managed by Ansible. Run by Backrest after each snapshot. Exits 0 and touches
 # the last-success file when backrest-prepare recorded no failure; otherwise
-# prints the failures and exits 1, so the backup shows as failed.
+# prints the failures, sends them as one report when there is a notify file,
+# and exits 1, so the backup shows as failed. Backrest sends no report for a
+# failing hook of this kind, so this script does. A failed send changes
+# nothing about the exit status.
 failures={{ backrest_failures_file | quote }}
 last_success={{ backrest_last_success_file | quote }}
+notify={{ backrest_notify_file | quote }}
+
+# report <text>: sends the text to the address in the notify file. curl reads
+# the address from that file, so it is on no command line, and its own output
+# is dropped, because it could name the address.
+report() {
+  [ -f "$notify" ] || return 0
+  text="backrest on $(hostname): $1"
+{% if backrest_notify_type == 'discord' %}
+  # Discord takes JSON with at most 2000 characters; python3 escapes the text.
+  body="$(printf '%s' "$text" | python3 -c '
+import json, sys
+text = sys.stdin.buffer.read().decode("utf-8", "replace")
+marker = "\n[truncated]"
+if len(text) > 1900:
+    text = text[:1900 - len(marker)] + marker
+sys.stdout.write(json.dumps({"content": text, "allowed_mentions": {"parse": []}}))' 2>/dev/null)"
+  content_type="application/json"
+{% else %}
+  body="$(printf '%s' "$text" | head -c 10000)"
+  content_type="text/plain"
+{% endif %}
+  if [ -z "$body" ] || ! printf '%s' "$body" \
+    | curl --config "$notify" --silent --fail --max-time 20 -H "Content-Type: $content_type" --data-binary @- >/dev/null 2>&1; then
+    echo "backrest-finish: the failure report could not be sent" >&2
+  fi
+}
 
 if [ ! -f "$failures" ]; then
   echo "backrest-finish: $failures is missing; backrest-prepare did not run" >&2
+  report "$failures is missing; backrest-prepare did not run"
   exit 1
 fi
 if [ -s "$failures" ]; then
   echo "backrest-finish: the backup is incomplete:" >&2
   cat "$failures" >&2
+  report "the backup is incomplete:
+$(cat "$failures")"
   exit 1
 fi
-touch "$last_success" || { echo "backrest-finish: cannot touch $last_success" >&2; exit 1; }
+if ! touch "$last_success"; then
+  echo "backrest-finish: cannot touch $last_success" >&2
+  report "cannot touch $last_success"
+  exit 1
+fi
