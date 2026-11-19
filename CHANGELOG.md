@@ -82,6 +82,27 @@
   a changed configuration waits for a running backup. The run fails when the last good backup is
   older than `backrest_max_age_hours`. Nothing secret reaches the output or a process list.
   Needs `docker` only for Compose dumps.
+- `php`: the role installs PHP from packages.sury.org instead of the ondrej/php PPA, and supports
+  Ubuntu 24.04 and 26.04 (`noble` and `resolute`). The source is
+  `/etc/apt/sources.list.d/sury-php.sources`, the key `/etc/apt/keyrings/sury-php.gpg`, the pin
+  `/etc/apt/preferences.d/sury-php` and the unattended-upgrades file
+  `/etc/apt/apt.conf.d/52noixdev-php-sury`; the four files of the PPA setup (`ondrej-php.sources`,
+  `ondrej-php.asc`, `preferences.d/ondrej-php`, `52noixdev-php-ppa`) are removed on the switch. A
+  host that has PHP from the PPA switches on its next run. That run changes no PHP package and
+  restarts or reloads no pool; the packages move to packages.sury.org with the next
+  unattended-upgrades run, and the apt hook restarts the pools of a version one at a time (per pool
+  mode, as before). The run is refused, and the host stays on the PPA, when packages.sury.org lacks
+  a package the host has from the PPA (checked 2026-11-19: on 24.04 `sqlsrv`, `libvirt-php`,
+  `tideways`, `pinba` for 8.2, `opentelemetry` and `swoole` for 8.0 and 8.1, `php-imap`,
+  `php-pspell` and `php-pear`; on 26.04 also `uopz` and `zmq`). A host with `php_versions` empty
+  keeps the PPA, the role does not touch the repository then. `php_apt_key_url` is fetched and
+  checked against `php_apt_key_fingerprint` on every run; a different key leaves the key in place
+  and stops the run, and so does an expired key. The run is refused, before any change, for the
+  PPA's values in `php_apt_url`, `php_apt_key_url` or `php_apt_key_fingerprint`, for another
+  source file that enables packages.sury.org/php (two entries with different keys stop apt for
+  every source), and for Ubuntu's own `php<v>-*` packages of a version in `php_versions`. The
+  unattended-upgrades origin is `deb.sury.org`; it also matches another repository of
+  packages.sury.org that a host added itself.
 
 ## 0.6.0 — 2026-11-17
 
