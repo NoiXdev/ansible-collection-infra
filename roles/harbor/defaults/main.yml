@@ -1,7 +1,7 @@
 ---
 # Harbor release (tag of github.com/goharbor/harbor). A newer version than
 # the installed one is an upgrade; an older one is refused.
-harbor_version: v2.15.4
+harbor_version: v2.16.0
 # Full URL of the online installer; empty builds the GitHub release URL from
 # harbor_version (and, from v2.16.0, the host architecture).
 harbor_installer_url: ""

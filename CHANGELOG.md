@@ -30,7 +30,9 @@
   not handled by the role. Existing setups without `anubis_public_url` are unchanged.
 - `pulsix_manager`: starting the finished enrollment containers of the workers is no longer reported
   as a change on every run; a recreate of them or a change to any other service still is.
-- `harbor`: Harbor v2.16.0 is supported and covered by the test suite; the default version stays.
+- `harbor`: Harbor v2.16.0 is supported and covered by the test suite, and it is the new default
+  `harbor_version` (was `v2.15.4`). A host that does not set `harbor_version` upgrades to v2.16.0
+  on its next run, with the usual backup before the upgrade.
   From v2.16.0 Harbor blocks webhooks to loopback, link-local and cloud metadata addresses.
 - `portainer`: the errors of a failed registration no longer show credentials in
   `portainer_agent_register_url` (`https://user:password@host`) and mask the access token in the
