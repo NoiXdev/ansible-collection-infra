@@ -2179,21 +2179,11 @@ nginx_images() {
   docker exec -i "$prefix-nginx" docker load <"$tar" >/dev/null
 }
 
-# php_unit: the unit of prod's pool (the php role's on 24.04, Ubuntu's
-# php-fpm on 26.04; converge.yml).
-php_unit() {
-  if [ "$ubuntu" = 24.04 ]; then
-    echo php-fpm@production
-  else
-    echo "php$(hx nginx sh -c 'ls /etc/php | head -n 1')-fpm"
-  fi
-}
-
 # nginx_error_pages: the noix pages for nginx's own errors (verify.yml has
 # the 404s and the 413), the 502 of a stopped pool, and nginx_error_pages
 # false.
 nginx_error_pages() {
-  local dir="$here/nginx" fast=(-e nginx_test_prepare=false) answer unit
+  local dir="$here/nginx" fast=(-e nginx_test_prepare=false) answer unit=php-fpm@production
   echo "== nginx: the error pages come through the export's link"
   # error_pages_export publishes a release through the link current; root
   # owns the link and its target, so disable_symlinks if_not_owner follows it.
@@ -2201,7 +2191,6 @@ nginx_error_pages() {
   [ "$answer" = "root symbolic link" ] || fail "nginx: /var/www/noix-error-pages/current is '$answer', not root's link"
 
   echo "== nginx: a stopped pool gives the noix 502 page"
-  unit="$(php_unit)"
   hx nginx systemctl stop "$unit"
   answer="$(ncurl https://prod.example.test/ | tr -d '\r')"
   hx nginx systemctl start "$unit"

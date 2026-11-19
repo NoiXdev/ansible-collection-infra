@@ -1,8 +1,7 @@
 ---
 # The backends first: the site users and web roots, a self-signed certificate
 # for *.example.test, the upstream of the proxy site and the php pool
-# production (the php role on 24.04; the php role has no 26.04 packages yet,
-# so there a pool of Ubuntu's php-fpm on the same socket stands in). Then the
+# production (the php role). Then the
 # nginx role with three sites: prod takes its certificate from Let's Encrypt,
 # here the Pebble of pebble.yml (run before), node and static the self-signed
 # one. Docker (docker.yml, run before) exports the error pages. The knobs
@@ -165,53 +164,6 @@
         - name: Run the pool with the php role
           ansible.builtin.include_role:
             name: noixdev.infra.php
-          when: ansible_facts['distribution_release'] == 'noble'
-
-        - name: Run the pool with Ubuntu's php-fpm
-          when: ansible_facts['distribution_release'] != 'noble'
-          vars:
-            nginx_test_php_dir: "{{ nginx_test_php_dirs.files | map(attribute='path') | first }}"
-          block:
-            - name: Install Ubuntu's php-fpm
-              ansible.builtin.apt:
-                name: php-fpm
-                state: present
-
-            - name: Find Ubuntu's php version
-              ansible.builtin.find:
-                paths: /etc/php
-                file_type: directory
-                recurse: false
-              register: nginx_test_php_dirs
-
-            - name: Write the pool production
-              ansible.builtin.copy:
-                content: |
-                  [production]
-                  user = app_prod
-                  group = app_prod
-                  listen = /run/php/production.sock
-                  listen.owner = app_prod
-                  listen.group = www-data
-                  listen.mode = 0660
-                  pm = ondemand
-                  pm.max_children = 2
-                dest: "{{ nginx_test_php_dir }}/fpm/pool.d/production.conf"
-                owner: root
-                group: root
-                mode: "0644"
-              register: nginx_test_php_pool
-
-            - name: Remove the package's www pool
-              ansible.builtin.file:
-                path: "{{ nginx_test_php_dir }}/fpm/pool.d/www.conf"
-                state: absent
-              register: nginx_test_php_www
-
-            - name: Restart php-fpm for the pool
-              ansible.builtin.systemd_service:
-                name: "php{{ nginx_test_php_dir | basename }}-fpm"
-                state: "{{ 'restarted' if nginx_test_php_pool is changed or nginx_test_php_www is changed else 'started' }}"
 
 - name: Converge the nginx role
   hosts: testhost
