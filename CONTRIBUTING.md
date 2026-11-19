@@ -27,7 +27,7 @@ UBUNTU=24.04 tests/services/run.sh  # the service roles, on their own (also UBUN
 
 `tests/all.sh` runs the suites `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
 `host` (`tests/host/run.sh` on Ubuntu 24.04 and 26.04, set `HOST_UBUNTU` for fewer),
-`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow`, `cloudpanel` and `pulsix_agent` (`tests/<suite>/run.sh`). It stops at
+`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow`, `cloudpanel`, `pulsix_agent` and `backrest` (`tests/<suite>/run.sh`). It stops at
 the first failing suite unless you pass `--keep-going`, and ends with a summary of each
 suite's result and runtime; the output of each suite is also in
 `tests/output/all/<suite>.log`. `--summary FILE` writes a machine-readable summary, one line
@@ -37,6 +37,8 @@ run as `linux/amd64` under emulation, which is slow. Docker Desktop on Apple sil
 Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tests/attest.sh`
 check this first. The `pulsix_agent` suite runs a stub agent and manager, but its
 `release_match` scenario downloads the pinned Pulsix release and needs network access. The
+`backrest` suite downloads the pinned Backrest release, runs MinIO and PostgreSQL beside it and
+checks Ubuntu 24.04 and 26.04 in one entry (`BACKREST_UBUNTU` for fewer). The
 `mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
 (`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `tandoor` about 2 GB and `n8n` about 3 GB of images, `cloudpanel` runs CloudPanel's real installer.
