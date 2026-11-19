@@ -891,8 +891,9 @@ run_release() {
     host_sh 'rm -f /etc/systemd/system/zabbix-agent.service && systemctl daemon-reload && systemctl reset-failed; true'
   fi
 
-  # A package that depends on a tool's package would go with an apt purge: the
-  # run refuses, names it, and removes nothing.
+  # A package that depends on a tool's package would go with an apt purge, or
+  # be upgraded to a version without that dependency: the run refuses, names
+  # it, and changes nothing.
   if scenario purge_dependents; then
     echo "-- purge_dependents"
     removal_host
@@ -905,7 +906,8 @@ run_release() {
     host_sh 'test -e /usr/sbin/netdata' || fail "a file of the tool was removed"
     host_sh 'dpkg --purge noixdev-site-monitoring >/dev/null'
     # The same for an auto-installed helper of the Zabbix agent: an orphaned
-    # server that needs zabbix-sender is not purged with it.
+    # server that needs zabbix-sender is not purged with it (24.04), nor
+    # upgraded to the release's own server, which does not need it (26.04).
     removal_host
     install_zabbix_agent fixture
     deb zabbix-sender 1.0 /usr/bin/zabbix_sender
@@ -915,6 +917,7 @@ run_release() {
     expect_fail "${tok[@]}" "${rm_args[@]}"
     [[ $out == *zabbix-server-pgsql* ]] || fail "the refusal does not name the server package"
     assert_pkgs_installed zabbix-sender zabbix-server-pgsql zabbix-release
+    [ "$(host_sh "dpkg-query -W -f='\${Version}' zabbix-server-pgsql")" = 1.0 ] || fail "the server package was upgraded"
     zabbix_shared_spec | assert_paths_there
     host_sh 'dpkg --purge zabbix-server-pgsql >/dev/null'
   fi

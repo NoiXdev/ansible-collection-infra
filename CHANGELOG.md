@@ -54,13 +54,13 @@
   `checkmk_agent` in `pulsix_agent_remove`. Only then does the role also prove that the agent holds
   a connection to the manager; a lost connection, a stream failure or a refused certificate fails
   the run, and nothing is removed. After the proof the role removes exactly the listed tools
-  completely. It refuses a purge that would also remove other packages depending on a tool's
-  packages, and names them. On a shared Zabbix host (any other `zabbix-*` package except
-  `zabbix-release` in a state other than `not-installed`, including a server that was removed with
-  its configuration files kept and a manually installed `zabbix-sender` or `zabbix-get`) the shared
-  configuration, package sources, `zabbix-release` and `zabbix` user stay, while auto-installed
-  `zabbix-sender` and `zabbix-get` are purged with the agent. The test
-  suite `pulsix_agent` runs against a stub agent and manager, not a real one: enrollment against a
+  completely. It refuses a purge that would also remove, install or upgrade other packages
+  because they depend on a tool's packages, and names them. On a shared Zabbix host (any other
+  `zabbix-*` package except `zabbix-release` in a state other than `not-installed`, including a
+  server that was removed with its configuration files kept and a manually installed
+  `zabbix-sender` or `zabbix-get`) the shared configuration, package sources, `zabbix-release` and
+  `zabbix` user stay, while auto-installed `zabbix-sender` and `zabbix-get` are purged with the
+  agent. The test suite `pulsix_agent` runs against a stub agent and manager, not a real one: enrollment against a
   real manager is not part of the tests. Its scenario `release_match` runs on the controller, once
   per run, needs network access, and fails when the pinned release and the role's unit file or
   failure lines disagree.
