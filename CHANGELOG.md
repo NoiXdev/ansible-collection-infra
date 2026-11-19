@@ -88,21 +88,32 @@
   `/etc/apt/preferences.d/sury-php` and the unattended-upgrades file
   `/etc/apt/apt.conf.d/52noixdev-php-sury`; the four files of the PPA setup (`ondrej-php.sources`,
   `ondrej-php.asc`, `preferences.d/ondrej-php`, `52noixdev-php-ppa`) are removed on the switch. A
-  host that has PHP from the PPA switches on its next run. That run changes no PHP package and
-  restarts or reloads no pool; the packages move to packages.sury.org with the next
-  unattended-upgrades run, and the apt hook restarts the pools of a version one at a time (per pool
-  mode, as before). The run is refused, and the host stays on the PPA, when packages.sury.org lacks
-  a package the host has from the PPA (checked 2026-11-19: on 24.04 `sqlsrv`, `libvirt-php`,
-  `tideways`, `pinba` for 8.2, `opentelemetry` and `swoole` for 8.0 and 8.1, `php-imap`,
-  `php-pspell` and `php-pear`; on 26.04 also `uopz` and `zmq`). A host with `php_versions` empty
-  keeps the PPA, the role does not touch the repository then. `php_apt_key_url` is fetched and
-  checked against `php_apt_key_fingerprint` on every run; a different key leaves the key in place
-  and stops the run, and so does an expired key. The run is refused, before any change, for the
-  PPA's values in `php_apt_url`, `php_apt_key_url` or `php_apt_key_fingerprint`, for another
-  source file that enables packages.sury.org/php (two entries with different keys stop apt for
-  every source), and for Ubuntu's own `php<v>-*` packages of a version in `php_versions`. The
-  unattended-upgrades origin is `deb.sury.org`; it also matches another repository of
-  packages.sury.org that a host added itself.
+  host that has PHP from the PPA switches on its next run. The switch itself changes no PHP
+  package and restarts or reloads no pool, and the unattended-upgrades file for packages.sury.org
+  is in place before the PPA goes, so a run that fails after the switch leaves PHP with its
+  security updates. The packages move to packages.sury.org with the next unattended-upgrades run;
+  in the default per-pool mode the apt hook restarts the pools of a version one at a time; in
+  classic mode (`php_fpm_per_pool_service: false`) the package's own restart applies. Many
+  extensions (such as `redis`, `apcu`, `imagick`, `igbinary`, `memcached`, `xdebug` and `mongodb`)
+  have a build on packages.sury.org that sorts below the PPA's build of the same release: they
+  keep the PPA's build until packages.sury.org has a newer release of them, and are never
+  downgraded. The run is refused, and the host stays on the PPA, when packages.sury.org lacks a
+  package the host has from the PPA, also an installed build the PPA has replaced since (checked
+  2026-11-19, on 24.04: `sqlsrv`, `libvirt-php`, `tideways`, `pinba` for 8.2, `opentelemetry` and
+  `swoole` for 8.0 and 8.1, `php-imap`, `php-pspell` and `php-pear`). On 26.04 packages.sury.org
+  also lacks extensions that 24.04 has (`uopz` and `zmq`, checked 2026-11-19); listing one makes
+  the install fail, naming the package. A host with `php_versions` empty keeps the PPA; the role
+  does not touch the repository then. `php_apt_key_url` is fetched and checked against
+  `php_apt_key_fingerprint` on every run, from packages.sury.org by default also when
+  `php_apt_url` names a mirror (a host that reaches only the mirror sets it as well); a file with a
+  different key, or with another key besides the pinned one, leaves the key in place and stops
+  the run, and so does an expired key. The run is refused, before any change, for the PPA's
+  values in `php_apt_url`, `php_apt_key_url` or `php_apt_key_fingerprint`, for another source
+  file that enables packages.sury.org/php or the URL in `php_apt_url` (two entries with different
+  keys stop apt for every source; this also catches a `php_apt_url` that points at a mirror of
+  the PPA), and for Ubuntu's own `php<v>-*` packages of a version in `php_versions`, also at a
+  version an Ubuntu update has replaced. The unattended-upgrades origin is `deb.sury.org`; it
+  also matches another repository of packages.sury.org that a host added itself.
 
 ## 0.6.0 — 2026-11-17
 
