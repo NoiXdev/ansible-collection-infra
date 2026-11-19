@@ -1602,7 +1602,7 @@ suite_php_switch() {
   local dir="$here/php" old="$out/v0.6.0" tree="$out/v0.6.0/ansible_collections/noixdev/infra"
   local old_files='sources.list.d/ondrej-php.sources keyrings/ondrej-php.asc preferences.d/ondrej-php apt.conf.d/52noixdev-php-ppa'
   local new_files='sources.list.d/sury-php.sources keyrings/sury-php.gpg preferences.d/sury-php apt.conf.d/52noixdev-php-sury'
-  local message log rc before after prod staging pkg='' candidate versions down count line p v pool was installed sury now ahead=''
+  local message log rc before after prod staging pkg='' candidate versions down count journal k p v pool was installed sury now ahead=''
   if [ "$ubuntu" != 24.04 ]; then
     echo "== php_switch: skipped on $ubuntu: the ondrej/php PPA has packages for 24.04 only"
     return 0
@@ -1738,14 +1738,26 @@ suite_php_switch() {
     v="${v%-fpm}"
     if [ "$v" = 8.3 ]; then pool=production was="$prod"; else pool=staging was="$staging"; fi
     [ "$(pid php_switch "php-fpm@$pool")" != "$was" ] || fail "php_switch: $pool did not restart on PHP $v's upgrade"
-    for line in "PHP $v packages were upgraded: restarting the pools one at a time" "restarting $pool (PHP $v)" "$pool answers"; do
-      [ "$(rr_since "$count" php_switch | grep -cxF "$line" || true)" = 1 ] \
-        || fail "php_switch: the journal does not have '$line' once: $(rr_since "$count" php_switch)"
-    done
+    # The hook runs once per dpkg run that upgraded a php$v-* package, and
+    # unattended-upgrades may split the upgrade into several: per such run,
+    # one restart of the pool, which answers before anything else.
+    journal="$(rr_since "$count" php_switch)"
+    k="$(grep -cxF "PHP $v packages were upgraded: restarting the pools one at a time" <<<"$journal" || true)"
+    [ "$k" -ge 1 ] || fail "php_switch: the journal has no upgrade of PHP $v: $journal"
+    [ "$(grep -cxF "restarting $pool (PHP $v)" <<<"$journal" || true)" = "$k" ] \
+      || fail "php_switch: the journal does not restart $pool once per upgrade of PHP $v ($k): $journal"
+    awk -v r="restarting $pool (PHP $v)" -v a="$pool answers" '
+        prev == r && $0 != a { bad = 1 }
+        { prev = $0 }
+        END { exit bad || prev == r }' <<<"$journal" \
+      || fail "php_switch: a restart of $pool is not directly followed by '$pool answers': $journal"
   done <<<"$ahead"
   [ -n "$ahead" ] || echo "   packages.sury.org is not ahead of the PPA here: nothing went down"
   switch_pools_answer unattended-upgrade
   play php_switch "$dir/verify.yml"
+  # The v0.6.0 tree has scripts of its own, which a shellcheck over tests/
+  # would find. KEEP=1 keeps it with the container.
+  [ "${KEEP:-0}" = 1 ] || rm -rf "$old"
 }
 
 # ncurl URL [curl args]: the headers and body of URL, asked in the nginx
