@@ -81,7 +81,7 @@ dpkg_post_invoke() {
   # A log rotated in between starts again.
   [ "$size" -ge "$mark" ] || mark=0
   # "<date> <time> upgrade php8.3-intl:<arch> <old> <new>", also for a
-  # reinstall of the same version. The role's pin keeps php<v>-* to the PPA.
+  # reinstall of the same version. The role's pin keeps php<v>-* to packages.sury.org.
   for version in $(tail -c +"$((mark + 1))" "$dpkg_log" \
       | sed -n -E 's/^[^ ]+ [^ ]+ upgrade php([0-9]+[.][0-9]+)-[^: ]+:[^ ]+ .*$/\1/p' | sort -u -V); do
     log "PHP $version packages were upgraded: restarting the pools one at a time"

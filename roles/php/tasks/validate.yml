@@ -2,6 +2,35 @@
 # Every message names the entry. The loops use the pools without their env
 # and ini; the env check alone sees the env, under no_log, the ini checks
 # loop over the names, and all of them name keys only.
+# The old PPA is gone: its values stay refused before any other check.
+- name: Check that php_apt_url is not the PPA
+  ansible.builtin.assert:
+    that: php_apt_url | string is not regex('(?i)^[a-z]+://(ppa\.launchpadcontent\.net|ppa\.launchpad\.net)(/|$)')
+    fail_msg: >-
+      php: php_apt_url points at the ondrej/php PPA ({{ php_apt_url }}); the role installs from
+      packages.sury.org now, remove the override
+    quiet: true
+
+- name: Check that php_apt_key_fingerprint is not the PPA's
+  ansible.builtin.assert:
+    that: php_apt_key_fingerprint | string | upper != php_ppa_key_fingerprint
+    fail_msg: >-
+      php: php_apt_key_fingerprint points at the ondrej/php PPA ({{ php_apt_key_fingerprint }}); the role
+      installs from packages.sury.org now, remove the override
+    quiet: true
+
+- name: Check that php_apt_key_url is not the PPA's
+  ansible.builtin.assert:
+    that:
+      - php_apt_key_url | string is not regex('(?i)^[a-z]+://[^/]*(launchpad|launchpadcontent)\.net(/|$)')
+      - >-
+        not (php_apt_key_url | string is regex('(?i)^[a-z]+://keyserver\.ubuntu\.com(/|$)')
+        and php_ppa_key_fingerprint in (php_apt_key_url | string | upper))
+    fail_msg: >-
+      php: php_apt_key_url points at the ondrej/php PPA ({{ php_apt_key_url }}); the role installs from
+      packages.sury.org now, remove the override
+    quiet: true
+
 - name: Check the versions
   ansible.builtin.assert:
     that:

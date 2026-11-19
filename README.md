@@ -43,7 +43,7 @@ are on the documentation site.
 | `oh_my_zsh` | zsh with one shared, pinned Oh My Zsh checkout and a managed `~/.zshrc` per user, with the noix theme or your own |
 | `motd` | Login banner in `/etc/update-motd.d` with a title, your own lines and system information |
 | `nodejs` | Node.js from NodeSource, one pinned major series, with global npm packages at exact versions |
-| `php` | PHP versions from the ondrej/php PPA (Ubuntu 24.04 only for now) with one PHP-FPM master per pool on a socket without a version in its path, an optional classic mode, and a rolling restart of the pools after security updates |
+| `php` | PHP versions from packages.sury.org (Ubuntu 24.04 and 26.04) with one PHP-FPM master per pool on a socket without a version in its path, an optional classic mode, and a rolling restart of the pools after security updates |
 | `composer` | Composer from the official phar at a pinned version and SHA-256, Composer 1 on request, and per-user `auth.json` (0600, written as the user) |
 | `nginx` | nginx from nginx.org, pinned to a stable series, with PHP-pool, proxy and static sites, Let's Encrypt, hardening, Basic auth, rate limits, error pages and optional Anubis |
 | `redis` | Redis from packages.redis.io, pinned to a series, as the default instance or one instance per environment on a port or a unix socket |

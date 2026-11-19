@@ -1,10 +1,10 @@
 ---
 argument_specs:
   main:
-    short_description: PHP versions from the ondrej/php PPA, with one PHP-FPM master per pool
+    short_description: PHP versions from packages.sury.org, with one PHP-FPM master per pool
     description:
       - >-
-        Installs PHP versions from Ondřej Surý's PPA (Ubuntu 24.04 only for now; any other
+        Installs PHP versions from packages.sury.org (Ubuntu 24.04 and 26.04; any other
         release is refused before any change). Ubuntu's own packages of the listed versions
         are pinned out.
       - >-
@@ -19,7 +19,7 @@ argument_specs:
         group restarts it. Switching modes moves every pool; files in pool.d without the role's
         header are left alone.
       - >-
-        Security updates: unattended-upgrades also installs the PPA's updates, in both modes.
+        Security updates: unattended-upgrades also installs the updates of packages.sury.org, in both modes.
         With one master per pool, an apt hook restarts the pools of each version with an
         upgraded php<v>-* package (fpm, cli or an extension), one at a time
         (/usr/local/sbin/php-fpm-rolling-restart). Each must answer its ping before the next
@@ -131,13 +131,15 @@ argument_specs:
           positive number).
       php_apt_url:
         type: str
-        description: The PPA's URL.
+        description: The packages.sury.org URL (Ubuntu 24.04 and 26.04). A value that points at the ondrej/php PPA is refused.
       php_apt_suite:
         type: str
-        description: Suite of the PPA; the host's release codename by default.
+        description: Suite of packages.sury.org; the host's release codename by default.
       php_apt_key_url:
         type: str
-        description: Where the PPA's key is downloaded from.
+        description: Where the packages.sury.org key is downloaded from (Ubuntu 24.04 and 26.04). A value that points at the ondrej/php PPA is refused.
       php_apt_key_fingerprint:
         type: str
-        description: Fingerprint the key must carry; any other key is removed and the run fails.
+        description: >-
+          Fingerprint the packages.sury.org key must carry (Ubuntu 24.04 and 26.04); any other key
+          is removed and the run fails. The ondrej/php PPA's fingerprint is refused.

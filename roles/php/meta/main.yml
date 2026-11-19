@@ -1,10 +1,10 @@
 ---
 galaxy_info:
   author: NoiXdev
-  description: PHP versions from the ondrej/php PPA, with one PHP-FPM master per pool
+  description: PHP versions from packages.sury.org, with one PHP-FPM master per pool
   license: MIT
   min_ansible_version: "2.16"
   platforms:
     - name: Ubuntu
-      versions: [noble]
+      versions: [noble, resolute]
 dependencies: []

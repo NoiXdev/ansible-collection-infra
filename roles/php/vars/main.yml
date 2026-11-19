@@ -20,9 +20,12 @@ php_pm_defaults:
 # Pool ini keys the role sets itself.
 php_role_ini_keys: [open_basedir, error_log, session.save_path, upload_tmp_dir, sys_temp_dir]
 
-# The releases the PPA has packages for, and the origin its Release file names.
-php_supported_releases: [noble]
-php_apt_origin: LP-PPA-ondrej-php
+# The releases packages.sury.org has packages for, the origin its Release file
+# names, and the old PPA's origin and key (for the switch and to refuse them).
+php_supported_releases: [noble, resolute]
+php_apt_origin: deb.sury.org
+php_ppa_origin: LP-PPA-ondrej-php
+php_ppa_key_fingerprint: B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6
 
 # Each pool's group: the one it names, or its user's primary group. Needs the
 # getent facts of tasks/validate.yml.

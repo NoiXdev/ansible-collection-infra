@@ -813,15 +813,19 @@ suite_php() {
   local secrets=('$d e' 'APP_ENV' 's3cr3t-ini')
   start php
 
-  if [ "$ubuntu" != 24.04 ]; then
-    echo "== php: Ubuntu $ubuntu is refused before any change"
-    codename="$(hx php sh -c '. /etc/os-release && echo "$VERSION_CODENAME"')"
-    refused php release "php: Ubuntu $ubuntu is not supported yet: the ondrej/php PPA has no packages for $codename" \
-      "$dir/converge.yml" -e php_test_prepare=false
-    hx php sh -c 'test ! -e /etc/apt/sources.list.d/ondrej-php.sources && test ! -e /etc/apt/keyrings/ondrej-php.asc && test ! -e /etc/apt/preferences.d/ondrej-php' \
-      || fail "php: the refused run left repository files"
-    return 0
-  fi
+  echo "== php: a release without packages and a PPA override are refused before any change"
+  codename="$(hx php sh -c '. /etc/os-release && echo "$VERSION_CODENAME"')"
+  refused php release "php: Ubuntu $ubuntu is not supported yet: packages.sury.org has no packages for $codename" \
+    "$dir/converge.yml" -e php_test_prepare=false -e '{"php_supported_releases": ["jammy"]}'
+  hx php sh -c 'cd /etc/apt && test ! -e sources.list.d/sury-php.sources && test ! -e keyrings/sury-php.gpg && test ! -e preferences.d/sury-php && test ! -e apt.conf.d/52noixdev-php-sury \
+    && test ! -e sources.list.d/ondrej-php.sources && test ! -e keyrings/ondrej-php.asc && test ! -e preferences.d/ondrej-php && test ! -e apt.conf.d/52noixdev-php-ppa' \
+    || fail "php: the refused run left repository files"
+  refused php ppa-url "php: php_apt_url points at the ondrej/php PPA (https://ppa.launchpadcontent.net/ondrej/php/ubuntu)" \
+    "$dir/converge.yml" -e php_test_prepare=false -e php_apt_url=https://ppa.launchpadcontent.net/ondrej/php/ubuntu
+  refused php ppa-fingerprint "php: php_apt_key_fingerprint points at the ondrej/php PPA (B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6)" \
+    "$dir/converge.yml" -e php_test_prepare=false -e php_apt_key_fingerprint=B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6
+  refused php ppa-key-url "php: php_apt_key_url points at the ondrej/php PPA (https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6)" \
+    "$dir/converge.yml" -e php_test_prepare=false -e 'php_apt_key_url=https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6'
 
   echo "== php: a run whose PPA refresh failed is not followed by Ubuntu's php"
   # The first run adds the source and the pin, then its refresh fails: the

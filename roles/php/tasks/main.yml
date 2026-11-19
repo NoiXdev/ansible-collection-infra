@@ -3,7 +3,7 @@
   ansible.builtin.fail:
     msg: >-
       php: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} is not
-      supported yet: the ondrej/php PPA has no packages for {{ ansible_facts['distribution_release'] }}
+      supported yet: packages.sury.org has no packages for {{ ansible_facts['distribution_release'] }}
   when: >-
     ansible_facts['distribution'] != 'Ubuntu'
     or ansible_facts['distribution_release'] not in php_supported_releases
@@ -11,7 +11,7 @@
 - name: Check the versions, php_ini and the pools
   ansible.builtin.include_tasks: validate.yml
 
-- name: Add the PPA
+- name: Add packages.sury.org
   ansible.builtin.include_tasks: repository.yml
   when: php_versions | length > 0
 
