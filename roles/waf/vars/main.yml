@@ -1,0 +1,135 @@
+---
+# The keys a waf_sites entry, an exclusion and a router can have.
+waf_site_keys:
+  - name
+  - domains
+  - backend
+  - mode
+  - paranoia
+  - detection_paranoia
+  - anomaly_inbound
+  - anomaly_outbound
+  - allowed_methods
+  - allowed_content_types
+  - request_body_limit
+  - bypass_paths
+  - exclusions
+  - routers
+waf_exclusion_keys: [path, remove_tags, remove_ids, remove_targets]
+waf_router_keys: [entrypoints, middlewares, rule, priority]
+waf_site_modes: [detect, block, "off"]
+waf_router_priority: 1000
+
+# The sites with every key and its default, for the checks and the
+# templates. A value of the wrong type stays as given, so the checks can
+# refuse it (the key checks read waf_sites itself). YAML reads an unquoted
+# mode: off as false; both mean off here. Computed fields, which win over a
+# key of the same name in waf_sites:
+#   index       the entry's place in waf_sites, from 0 (the base of the
+#               site's rule IDs, 9500000 + 100 * index)
+#   host_regex  ^(?:d1|d2)(?::[0-9]+)?$ of the domains, dots escaped: the
+#               Host header (lower-cased first) of a request for the site,
+#               with or without a port
+#   routers     each with its name waf-<site>-<n> (n from 1), and the
+#               defaults of middlewares, rule (Host() of each domain, joined
+#               with ||) and priority
+waf_sites_public: >-
+  {%- set sites = [] -%}
+  {%- for site in waf_sites -%}
+  {%- set entry = {'backend': waf_host_backend if waf_mode == 'host' else '',
+                   'mode': 'detect',
+                   'paranoia': waf_paranoia,
+                   'anomaly_inbound': waf_anomaly_inbound,
+                   'anomaly_outbound': waf_anomaly_outbound,
+                   'allowed_methods': [],
+                   'allowed_content_types': [],
+                   'request_body_limit': waf_request_body_limit,
+                   'bypass_paths': [],
+                   'exclusions': [],
+                   'routers': []} | combine(site) -%}
+  {%- set domains = entry.domains if entry.domains is defined and entry.domains is sequence
+                    and entry.domains is not string and entry.domains is not mapping else [] -%}
+  {%- set exclusions = [] -%}
+  {%- if entry.exclusions is sequence and entry.exclusions is not string and entry.exclusions is not mapping -%}
+  {%- for exclusion in entry.exclusions -%}
+  {%- set _ = exclusions.append({'remove_tags': [], 'remove_ids': [], 'remove_targets': []} | combine(exclusion)
+                                if exclusion is mapping else exclusion) -%}
+  {%- endfor -%}
+  {%- endif -%}
+  {%- set routers = [] -%}
+  {%- if entry.routers is sequence and entry.routers is not string and entry.routers is not mapping -%}
+  {%- for router in entry.routers -%}
+  {%- set _ = routers.append({'middlewares': [],
+                              'rule': domains | map('string') | map('regex_replace', '^(.*)$', waf_host_rule) | join(' || '),
+                              'priority': waf_router_priority} | combine(router)
+                             | combine({'name': 'waf-' ~ entry.name | default('') ~ '-' ~ loop.index})
+                             if router is mapping else router) -%}
+  {%- endfor -%}
+  {%- endif -%}
+  {%- set _ = sites.append(entry | combine({
+        'mode': 'off' if entry.mode is sameas false else entry.mode,
+        'detection_paranoia': entry.detection_paranoia | default(entry.paranoia),
+        'exclusions': exclusions if entry.exclusions is sequence and entry.exclusions is not string
+                      and entry.exclusions is not mapping else entry.exclusions,
+        'routers': routers if entry.routers is sequence and entry.routers is not string
+                   and entry.routers is not mapping else entry.routers,
+        'index': loop.index0,
+        'host_regex': '^(?:' ~ domains | map('string') | map('replace', '.', waf_escaped_dot) | join('|') ~ ')(?::[0-9]+)?$'})) -%}
+  {%- endfor -%}
+  {{ sites }}
+
+# Replacement strings, kept out of the templates: Ansible versions differ in
+# how a template unescapes a backslash in a string literal.
+waf_host_rule: 'Host(`\1`)'
+waf_escaped_dot: '\.'
+# The port of a URL that matches waf_url_re (empty without one).
+waf_url_port: '\5'
+
+# Rule IDs of a site come from 9500000 + 100 * index (below 100 per site),
+# the role's global rules from 9599900: at most 999 sites.
+waf_sites_max: 999
+
+# Patterns of the checks. Paths are prefixes of the normalized path nginx
+# matches locations on: no . or .. segment and no // (nginx removes them
+# before it matches, so such a path never matched), no whitespace, quotes,
+# braces or semicolons (they would end the location).
+waf_hostname_re: '^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+waf_path_re: '^(?!.*//)(?!(.*/)?[.]{1,2}(/|$))/[A-Za-z0-9._~!$&()*+,=:@/-]*$'
+# An http(s) URL without a path: scheme, host (a name, an IPv4 address or an
+# [IPv6] address) and an optional port, the groups 1, 2 and 5.
+waf_url_re: '^(https?)://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?)(:([0-9]{1,5}))?$'
+waf_loopback_url_re: '^https?://(127[.]0[.]0[.]1|\[::1\])(:[0-9]{1,5})?$'
+# Letters, digits, _ and -: a method goes into a quoted ModSecurity action.
+waf_method_re: '^[A-Za-z][A-Za-z0-9_-]*$'
+waf_content_type_re: '^[a-z0-9][a-z0-9.+_-]*/[a-z0-9][a-z0-9.+_-]*$'
+waf_tag_re: '^[A-Za-z0-9_/.-]+$'
+waf_rule_id_re: '^[0-9]+$'
+# A target goes into SecRuleUpdateTargetById <id> "!<target>" inside the
+# single-quoted modsecurity_rules of an nginx location.
+waf_target_re: '^[^''"\\\r\n]+$'
+waf_line_break_re: '[\r\n]'
+waf_name_re: '^[A-Za-z0-9_-]+$'
+waf_middleware_re: '^[A-Za-z0-9_.@-]+$'
+waf_include_re: '(^|[^A-Za-z0-9_])include([^A-Za-z0-9_]|$)'
+waf_dir_re: '^(/[A-Za-z0-9._@+=,~-]+)+$'
+waf_image_re: '^([A-Za-z0-9._-]+(:[0-9]+)?/)?([a-z0-9._-]+/)*[a-z0-9._-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}@sha256:[0-9a-f]{64}$'
+waf_ipv4: '((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+waf_ipv4_re: '^{{ waf_ipv4 }}$'
+waf_ipv4_cidr_re: '^{{ waf_ipv4 }}/([0-9]|[12][0-9]|3[0-2])$'
+waf_address_re: '^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$'
+
+# waf_traefik_address against an IPv4 network waf_cidr (a.b.c.d/n), which
+# the task that asks sets: the address and the network as numbers, and
+# whether the network holds the address (both divided by the size of the
+# network give the same number). Without the ansible.utils collection.
+waf_traefik_address_number: >-
+  {%- set n = namespace(value=0) -%}
+  {%- for part in waf_traefik_address.split('.') -%}{%- set n.value = n.value * 256 + part | int -%}{%- endfor -%}
+  {{ n.value }}
+waf_cidr_number: >-
+  {%- set n = namespace(value=0) -%}
+  {%- for part in waf_cidr.split('/')[0].split('.') -%}{%- set n.value = n.value * 256 + part | int -%}{%- endfor -%}
+  {{ n.value }}
+waf_cidr_size: "{{ 2 ** (32 - waf_cidr.split('/')[1] | int) }}"
+waf_cidr_holds_address: >-
+  {{ waf_traefik_address_number | int // waf_cidr_size | int == waf_cidr_number | int // waf_cidr_size | int }}

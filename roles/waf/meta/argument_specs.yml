@@ -1,0 +1,162 @@
+---
+argument_specs:
+  main:
+    short_description: Web application firewall with the OWASP Core Rule Set in front of Traefik routers or the host's nginx sites
+    description:
+      - >-
+        One WAF proxy container per host (compose project waf, container
+        noixdev-waf) from the CRS project's ModSecurity image with nginx. It
+        knows each protected site by its domains (the Host header) and
+        forwards the site's requests to the site's backend after the Core Rule
+        Set's checks: blocking (mode block), logging only (mode detect, the
+        default for a new site) or not at all (mode off). Per site: paranoia
+        level, anomaly thresholds, extra methods and content types, paths
+        without inspection and rule exclusions scoped to a path.
+      - >-
+        traefik mode: the container joins waf_traefik_network at
+        waf_traefik_address and publishes no port; the role writes the
+        service waf and the sites' routers waf-<site>-<n> to
+        waf_traefik_dynamic_dir/waf.yml. host mode: for the nginx role's
+        sites with waf true on the same host; the container listens on
+        127.0.0.1:waf_host_port only and writes no Traefik objects. One mode
+        per host.
+      - >-
+        Every setting is checked before the role changes anything; each
+        refusal names the variable and the site.
+    options:
+      waf_image:
+        type: str
+        description: >-
+          The CRS project's image with nginx, with both a tag and an
+          @sha256: digest (refused otherwise). Default: the CRS 4.25 LTS line.
+      waf_dir:
+        type: path
+        description: Directory of the compose project (an absolute path without spaces, quotes or . and .. parts).
+      waf_mode:
+        type: str
+        choices: [traefik, host]
+        description: >-
+          traefik proxies Traefik routers (the role writes their Traefik
+          objects); host serves the nginx role's sites with waf true on the
+          same host, on 127.0.0.1:waf_host_port. One mode per host.
+      waf_traefik_network:
+        type: str
+        description: Traefik's Docker network (traefik mode). Default traefik_network, else proxy.
+      waf_traefik_dynamic_dir:
+        type: path
+        description: >-
+          Traefik's file provider directory (traefik mode); the role writes
+          waf.yml there. Default traefik_dir/dynamic, else
+          /opt/traefik/dynamic.
+      waf_traefik_address:
+        type: str
+        description: >-
+          The WAF's fixed IPv4 address on the Traefik network (traefik mode),
+          172.31.255.253 by default. Refused inside traefik_network_range or
+          outside traefik_network_subnet when those are set, and when it is
+          waf_traefik_trusted.
+      waf_traefik_trusted:
+        type: str
+        description: >-
+          The address (or CIDR) whose X-Forwarded-For the WAF believes in
+          traefik mode: Traefik's. Default traefik_address, else
+          172.31.255.254.
+      waf_host_port:
+        type: int
+        description: host mode, the WAF's port on 127.0.0.1 (8930; the nginx role's nginx_waf_port).
+      waf_host_backend:
+        type: str
+        description: >-
+          host mode, the backend of a site that names none: nginx's inner
+          listener, http://127.0.0.1:<nginx_inner_port> (8931 by default).
+      waf_paranoia:
+        type: int
+        choices: [1, 2, 3, 4]
+        description: The default blocking paranoia level of a site (1).
+      waf_anomaly_inbound:
+        type: int
+        description: The default inbound anomaly threshold of a site (5, as CRS).
+      waf_anomaly_outbound:
+        type: int
+        description: The default outbound anomaly threshold of a site (4, as CRS).
+      waf_request_body_limit:
+        type: int
+        description: >-
+          The default number of request body bytes a site's requests are
+          inspected up to (13107200). In mode block a larger body answers
+          413; in mode detect it passes and is logged.
+      waf_rules_before:
+        type: str
+        description: Raw ModSecurity rules before the Core Rule Set; an Include is refused.
+      waf_rules_after:
+        type: str
+        description: Raw ModSecurity rules after the Core Rule Set; an Include is refused.
+      waf_cpus:
+        type: str
+        description: Compose CPU limit of the container ("1.0").
+      waf_memory:
+        type: str
+        description: Compose memory limit of the container (256M).
+      waf_workers:
+        type: int
+        description: nginx worker processes in the container (2).
+      waf_health_timeout:
+        type: int
+        description: Seconds to wait for the container's health check after a start (60).
+      waf_sites:
+        type: list
+        elements: dict
+        description:
+          - The complete list of protected sites. Each entry takes exactly these keys; another key is refused.
+          - name (required), ^[a-z0-9-]+$, at most 64 characters, unique.
+          - >-
+            domains (required), a list of at least one lower-case host name. A
+            domain belongs to one site. A request matches its site by the Host
+            header, lower-cased, with or without a port.
+          - >-
+            backend, an http:// or https:// URL with a host and an optional
+            port, without a path. traefik mode: required, a name or address on
+            the Traefik network such as http://app:8080. host mode: on
+            127.0.0.1 or [::1], not on waf_host_port; waf_host_backend by
+            default.
+          - >-
+            mode, one of detect (the default; matches are logged, nothing is
+            blocked), block (a request over the anomaly threshold answers 403)
+            or off (forwarded without inspection, for emergencies).
+          - >-
+            paranoia, the blocking paranoia level 1 to 4 (waf_paranoia by
+            default); detection_paranoia, the level up to which rules run and
+            log, at least paranoia (paranoia by default).
+          - >-
+            anomaly_inbound and anomaly_outbound, the anomaly thresholds
+            (waf_anomaly_inbound and waf_anomaly_outbound by default), whole
+            numbers above 0.
+          - >-
+            allowed_methods, methods added to CRS's GET HEAD POST OPTIONS
+            (letters, digits, _ and -); allowed_content_types, lower-case
+            type/subtype values added to CRS's allowed request content types.
+          - >-
+            request_body_limit, the bytes of a request body inspected
+            (waf_request_body_limit by default).
+          - >-
+            bypass_paths, path prefixes forwarded without any inspection (not
+            /: that is mode off). A path starts with /, has no . or ..
+            segment, no // and no whitespace, quotes, braces or semicolons; it
+            is matched against the normalized path, so /v2/../admin is
+            /admin.
+          - >-
+            exclusions, a list of {path, remove_tags, remove_ids,
+            remove_targets}: for the path prefix (as bypass_paths; / for the
+            whole site) the rules with these tags ([A-Za-z0-9_/.-]) or IDs
+            (whole numbers) do not run, and remove_targets ({id, target}, the
+            target without quotes, backslashes or line breaks, such as
+            ARGS:cmd) stops a rule from looking at a target. A path is listed
+            once per site across bypass_paths and exclusions.
+          - >-
+            routers, traefik mode only (refused in host mode), a list of
+            Traefik routers waf-<site>-<n> to the WAF: entrypoints (required,
+            each one of traefik_entrypoints when that is set), middlewares
+            (default none; such as anubis@file, which then runs before the
+            WAF), rule (default Host() of each domain, joined with ||) and
+            priority (default 1000). A site without routers is reached only
+            through a router with the service waf@file.

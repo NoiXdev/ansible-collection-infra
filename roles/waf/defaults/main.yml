@@ -1,0 +1,108 @@
+---
+# The CRS project's ModSecurity image with nginx, LTS line (CRS 4.25.2,
+# security support until Q3 2027), pinned by tag and digest: a tag alone could
+# be moved to other code, a digest alone says nothing to the reader. Both are
+# required (refused otherwise). An update is a new dated tag with its digest,
+# or the 4.30 line.
+waf_image: owasp/modsecurity-crs:4.25.2-nginx-202611190211-lts@sha256:98d448750b86f5f94ca570590dd1461e3ab24efc97e7c41b271a55ac33b331fe
+# Compose project directory (compose project waf, container noixdev-waf).
+waf_dir: /opt/waf
+
+# One mode per host; the container is noixdev-waf in both.
+# traefik: the container joins waf_traefik_network at waf_traefik_address and
+# publishes no port; the role writes its Traefik objects (service waf and the
+# sites' routers waf-<site>-<n>) to waf_traefik_dynamic_dir/waf.yml. A
+# router the operator controls can use service waf@file instead.
+# host: for the nginx role on the same host (sites with waf: true). The
+# container uses the host's network, listens on 127.0.0.1:waf_host_port only
+# and writes no Traefik objects.
+waf_mode: traefik
+# The traefik role's network and file provider directory when it set them.
+waf_traefik_network: "{{ traefik_network | default('proxy') }}"
+waf_traefik_dynamic_dir: "{{ traefik_dir | default('/opt/traefik') }}/dynamic"
+# The WAF's fixed address on the Traefik network, so a backend that trusts a
+# proxy address can trust exactly it. It must lie outside the range Docker
+# hands out (traefik_network_range) and inside the subnet
+# (traefik_network_subnet); with the traefik role's defaults it sits next to
+# Traefik's own .254.
+waf_traefik_address: 172.31.255.253
+# The only address whose X-Forwarded-For the WAF believes in traefik mode, so
+# ModSecurity sees the client's address and nobody else can choose it:
+# Traefik's (the traefik role's traefik_address when set).
+waf_traefik_trusted: "{{ traefik_address | default('172.31.255.254') }}"
+# host mode: the WAF's loopback port (the nginx role's nginx_waf_port), and a
+# site's backend unless it names one: nginx's shared inner listener (the nginx
+# role's nginx_inner_port).
+waf_host_port: 8930
+waf_host_backend: "http://127.0.0.1:{{ nginx_inner_port | default(8931) }}"
+
+# The defaults of every site: the CRS blocking paranoia level (1 to 4; 1
+# hardly ever has false positives, 3 has lots) and the anomaly score at which
+# a request (inbound) or a response (outbound) is blocked, as CRS sets them.
+waf_paranoia: 1
+waf_anomaly_inbound: 5
+waf_anomaly_outbound: 4
+# How many bytes of a request body ModSecurity inspects (its recommended
+# 12.5 MiB). In mode block a larger body answers 413, so nothing passes
+# uninspected; in mode detect it passes and is logged. The WAF itself sets no
+# size limit: what a site accepts at all stays with the proxy in front and the
+# app.
+waf_request_body_limit: 13107200
+
+# Raw ModSecurity rules (SecLang) before and after the Core Rule Set, for
+# what the site settings cannot say. They cannot contain an Include: every
+# file the WAF reads comes from the role.
+waf_rules_before: ""
+waf_rules_after: ""
+
+# Compose limits, nginx worker processes in the container, and the seconds to
+# wait for the container's health check after a start.
+waf_cpus: "1.0"
+waf_memory: 256M
+waf_workers: 2
+waf_health_timeout: 60
+
+# The protected sites, each known by its domains (Host) and sent to its
+# backend after the checks:
+#   - name: registry                 # ^[a-z0-9-]+$, unique
+#     domains: [registry.example.test]   # lower-case host names, each in
+#                                        # one site only
+#     backend: http://harbor-proxy:8080  # http(s)://host[:port], no path;
+#                                        # traefik mode: required, a name or
+#                                        # address on the Traefik network;
+#                                        # host mode: on 127.0.0.1 or [::1],
+#                                        # waf_host_backend by default
+#     mode: detect                   # detect (log only, the default), block,
+#                                    # off (proxy only, for emergencies)
+#     paranoia: 1                    # blocking level 1-4 (waf_paranoia)
+#     detection_paranoia: 1          # logged up to this level, >= paranoia
+#                                    # (default: paranoia)
+#     anomaly_inbound: 5             # waf_anomaly_inbound
+#     anomaly_outbound: 4            # waf_anomaly_outbound
+#     allowed_methods: [PUT, PATCH, DELETE]   # added to CRS's
+#                                             # GET HEAD POST OPTIONS
+#     allowed_content_types: [application/octet-stream]  # type/subtype,
+#                                    # lower case, added to CRS's list
+#     request_body_limit: 13107200   # bytes (waf_request_body_limit)
+#     bypass_paths: [/v2/]           # path prefixes without any inspection
+#     exclusions:                    # per path prefix ("/" = the whole site)
+#       - path: /webhook/
+#         remove_tags: [attack-rce]  # rule tags, [A-Za-z0-9_/.-]
+#         remove_ids: [913100]       # rule IDs (integers)
+#         remove_targets:            # a rule no longer looks at a target
+#           - {id: 932160, target: "ARGS:cmd"}
+#     routers:                       # traefik mode only: Traefik routers
+#       - entrypoints: [websecure]   # required, each one of
+#                                    # traefik_entrypoints when that is set
+#         middlewares: [anubis@file] # before the WAF (default none)
+#         rule: Host(`registry.example.test`)  # default: Host() of each
+#                                    # domain, joined with ||
+#         priority: 1000             # the default; above Traefik's
+#                                    # rule-length defaults, below Anubis's
+#                                    # /.within.website/ router
+# Paths (bypass_paths, exclusions) start with /, are matched as prefixes of
+# the normalized path nginx sees, and have no . or .. segments, no //, no
+# whitespace and no quotes; a crafted /v2/../admin is matched as /admin. A
+# site without routers in traefik mode is reached only through a router with
+# service waf@file.
+waf_sites: []

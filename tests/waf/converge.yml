@@ -1,0 +1,25 @@
+---
+# The test host's playbook. The setup (the packages the tests call, and
+# Docker) runs unless run.sh passes test_setup=false; the waf role runs only
+# with test_waf=true. test_environment is the environment of every task: the
+# refusal run without Docker hides the docker CLI from PATH with it, as
+# tests/dns_invalid_peer_no_tailscale.yml does.
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  environment: "{{ test_environment | default({}) }}"
+  pre_tasks:
+    # The base role installs ca-certificates and curl on the servers; the
+    # test image has neither.
+    - name: Install the packages the tests call
+      ansible.builtin.apt:
+        name: [ca-certificates, curl]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: test_setup | default(true) | bool
+  roles:
+    - role: noixdev.infra.docker
+      when: test_setup | default(true) | bool
+    - role: noixdev.infra.waf
+      when: test_waf | default(false) | bool

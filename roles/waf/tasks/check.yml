@@ -1,0 +1,513 @@
+---
+# The refusals, before the role changes anything. Each message starts with
+# waf: and names the variable and, for a site, the entry (its name, else #n).
+# The site checks read waf_sites_public (every key with its default). Each
+# check relies on the ones before it: an assert stops at its first failing
+# condition, so a later one may use what an earlier one proved.
+- name: Check the global settings
+  ansible.builtin.assert:
+    that:
+      - waf_mode in ['traefik', 'host']
+      - waf_dir is string and waf_dir is match(waf_dir_re)
+      - waf_dir | split('/') | select('in', ['.', '..']) | list | length == 0
+      - waf_paranoia | string is match('^[1-4]$')
+      - waf_anomaly_inbound | string is match('^[1-9][0-9]*$')
+      - waf_anomaly_outbound | string is match('^[1-9][0-9]*$')
+      - waf_request_body_limit | string is match('^[1-9][0-9]*$')
+      - waf_cpus | string is match('^[0-9]+([.][0-9]+)?$') and waf_cpus | float > 0
+      - waf_memory | string is match('^[1-9][0-9]*[bkmgBKMG]?$')
+      - waf_workers | string is match('^[1-9][0-9]*$')
+      - waf_health_timeout | string is match('^[1-9][0-9]*$')
+      - waf_host_port | string is match('^[0-9]{1,5}$') and waf_host_port | int >= 1 and waf_host_port | int <= 65535
+      - waf_rules_before is string and waf_rules_after is string
+    fail_msg: >-
+      waf: waf_mode must be traefik or host, waf_dir an absolute path without spaces, quotes or .
+      and .. parts, waf_paranoia 1 to 4, waf_anomaly_inbound, waf_anomaly_outbound,
+      waf_request_body_limit, waf_workers and waf_health_timeout whole numbers above 0, waf_cpus
+      a number above 0 such as "1.0", waf_memory a size such as 256M, waf_host_port a port, and
+      waf_rules_before and waf_rules_after strings
+    quiet: true
+
+# A tag alone can be moved to other code; a digest alone tells the reader
+# nothing.
+- name: Check waf_image
+  ansible.builtin.assert:
+    that: waf_image is string and waf_image is match(waf_image_re)
+    fail_msg: >-
+      waf: waf_image {{ waf_image }} needs both a tag and a digest, such as
+      owasp/modsecurity-crs:<tag>@sha256:<64 hex digits>
+    quiet: true
+
+# Every file the WAF reads comes from the role (and is tried in the check
+# container first).
+- name: Check the raw rules
+  ansible.builtin.assert:
+    that: lookup('vars', item) is not search(waf_include_re, ignorecase=true)
+    fail_msg: >-
+      waf: {{ item }} contains an Include; the WAF reads only the role's files, so put the rules
+      themselves there
+    quiet: true
+  loop: [waf_rules_before, waf_rules_after]
+
+- name: Check the Traefik mode settings
+  when: waf_mode == 'traefik'
+  block:
+    - name: Check the Traefik settings
+      ansible.builtin.assert:
+        that:
+          - waf_traefik_network is string and waf_traefik_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+          - waf_traefik_dynamic_dir is string and waf_traefik_dynamic_dir is match('^/')
+          - "'waf.yml' not in traefik_dynamic_files | default({})"
+          - waf_traefik_address is string and waf_traefik_address is match(waf_ipv4_re)
+          - waf_traefik_trusted is string and waf_traefik_trusted is match(waf_address_re)
+          - waf_traefik_address != waf_traefik_trusted
+        fail_msg: >-
+          waf: traefik mode needs waf_traefik_network (a Docker network name),
+          waf_traefik_dynamic_dir (an absolute path), waf_traefik_address (an IPv4 address) and
+          waf_traefik_trusted (Traefik's address, not the WAF's own); traefik_dynamic_files cannot
+          contain waf.yml (the waf role writes it)
+        quiet: true
+
+    # Docker hands out the addresses of the range to other containers.
+    - name: Check that waf_traefik_address lies outside traefik_network_range
+      ansible.builtin.assert:
+        that:
+          - waf_cidr is string and waf_cidr is match(waf_ipv4_cidr_re)
+          - not (waf_cidr_holds_address | bool)
+        fail_msg: >-
+          waf: waf_traefik_address {{ waf_traefik_address }} lies inside traefik_network_range
+          {{ waf_cidr }} (or that is not an IPv4 network), where Docker hands out the addresses of
+          other containers; pick one outside it, as Traefik's own traefik_address is
+        quiet: true
+      vars:
+        waf_cidr: "{{ traefik_network_range }}"
+      when: traefik_network_range is defined
+
+    - name: Check that waf_traefik_address lies inside traefik_network_subnet
+      ansible.builtin.assert:
+        that:
+          - waf_cidr is string and waf_cidr is match(waf_ipv4_cidr_re)
+          - waf_cidr_holds_address | bool
+        fail_msg: >-
+          waf: waf_traefik_address {{ waf_traefik_address }} lies outside traefik_network_subnet
+          {{ waf_cidr }} (or that is not an IPv4 network), so Docker cannot give it to the WAF on
+          the Traefik network
+        quiet: true
+      vars:
+        waf_cidr: "{{ traefik_network_subnet }}"
+      when: traefik_network_subnet is defined
+
+- name: Check that waf_sites is a list of sites
+  ansible.builtin.assert:
+    that:
+      - waf_sites is sequence and waf_sites is not string and waf_sites is not mapping
+      - waf_sites | reject('mapping') | list | length == 0
+      - waf_sites | length <= waf_sites_max
+    fail_msg: "waf: waf_sites must be a list of at most {{ waf_sites_max }} sites, each a mapping"
+    quiet: true
+
+- name: Check the sites
+  vars:
+    waf_entry: "{{ item.name if item.name is defined and item.name is string and item.name | length > 0 else '#' ~ (item.index + 1) }}"
+  block:
+    - name: Check the site keys
+      ansible.builtin.assert:
+        that: waf_unknown | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ waf_entry }} has unknown keys ({{ waf_unknown | join(', ') }});
+          its keys are {{ waf_site_keys | join(', ') }}
+        quiet: true
+      vars:
+        waf_unknown: "{{ waf_sites[item.index].keys() | difference(waf_site_keys) | sort }}"
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ waf_entry }}"
+
+    - name: Check the site names
+      ansible.builtin.assert:
+        that:
+          - item.name is defined and item.name is string
+          - item.name is match('^[a-z0-9-]+$') and item.name | length <= 64
+        fail_msg: >-
+          waf: waf_sites entry {{ waf_entry }} has an invalid name; it must match ^[a-z0-9-]+$
+          and be at most 64 characters long
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ waf_entry }}"
+
+    - name: Check that every site name is used once
+      ansible.builtin.assert:
+        that: waf_sites_public | map(attribute='name') | select('eq', item.name) | list | length == 1
+        fail_msg: "waf: waf_sites has more than one entry named {{ item.name }}"
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Lower-case host names: the WAF matches the lower-cased Host header
+    # against them, as nginx and Traefik match names regardless of case.
+    - name: Check the domains
+      ansible.builtin.assert:
+        that:
+          - item.domains is defined and item.domains is sequence and item.domains is not string and item.domains is not mapping
+          - item.domains | length > 0
+          - waf_bad | length == 0
+          - item.domains | unique | length == item.domains | length
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has invalid domains{{ (' (' ~ waf_bad | join(', ') ~ ')') if waf_bad else '' }};
+          domains is a list of at least one lower-case host name such as shop.example.test, each
+          listed once
+        quiet: true
+      vars:
+        waf_list: "{{ item.domains if item.domains is defined and item.domains is sequence and item.domains is not string else [] }}"
+        waf_bad: "{{ (waf_list | reject('string') | map('string') | list) + (waf_list | select('string') | reject('match', waf_hostname_re) | list) }}"
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check that every domain belongs to one site
+      ansible.builtin.assert:
+        that: waf_taken | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} lists the domain {{ waf_first[0] }}, which entry
+          {{ waf_first[1] }} lists too; a domain belongs to one site
+        quiet: true
+      vars:
+        waf_first: "{{ waf_taken | first | default(['', '']) }}"
+        waf_taken: >-
+          {%- set taken = [] -%}
+          {%- for other in waf_sites_public[:item.index] -%}
+          {%- for domain in item.domains if domain in other.domains -%}
+          {%- set _ = taken.append([domain, other.name]) -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ taken }}
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check that every site has a backend
+      ansible.builtin.assert:
+        that: item.backend is string and item.backend | length > 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has no backend; in traefik mode every site needs
+          one, the http(s) URL of the app on the Traefik network, such as http://app:8080
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the backends
+      ansible.builtin.assert:
+        that:
+          - item.backend is match(waf_url_re)
+          - waf_port | int >= 1 and waf_port | int <= 65535
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has the backend {{ item.backend }}; a backend is an
+          http:// or https:// URL with a host and an optional port (1 to 65535), without a path,
+          such as http://app:8080
+        quiet: true
+      vars:
+        waf_port: >-
+          {{ item.backend | regex_replace(waf_url_re, waf_url_port) or 1 }}
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: waf_mode == 'traefik'
+
+    - name: Check the host mode backends
+      when: waf_mode == 'host'
+      block:
+        - name: Check that the backends are on the loopback
+          ansible.builtin.assert:
+            that:
+              - item.backend is match(waf_loopback_url_re)
+              - waf_port | int >= 1 and waf_port | int <= 65535
+            fail_msg: >-
+              waf: waf_sites entry {{ item.name }} has the backend {{ item.backend }}; in host mode
+              a backend is an http:// or https:// URL on 127.0.0.1 or [::1] with an optional port
+              (1 to 65535) and no path, by default nginx's inner listener (waf_host_backend)
+            quiet: true
+          vars:
+            waf_port: >-
+              {{ item.backend | regex_replace(waf_url_re, waf_url_port) or 1 }}
+          loop: "{{ waf_sites_public }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        # The WAF would send the site's requests to itself.
+        - name: Check that no backend is the WAF itself
+          ansible.builtin.assert:
+            that: waf_port | int != waf_host_port | int
+            fail_msg: >-
+              waf: waf_sites entry {{ item.name }} has the backend {{ item.backend }}, the WAF's
+              own waf_host_port; the WAF would send the site's requests to itself
+            quiet: true
+          vars:
+            waf_port: >-
+              {{ item.backend | regex_replace(waf_url_re, waf_url_port)
+                 or (443 if item.backend is match('^https:') else 80) }}
+          loop: "{{ waf_sites_public }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Check that host mode sites have no routers
+          ansible.builtin.assert:
+            that: item.routers is sequence and item.routers is not string and item.routers | length == 0
+            fail_msg: >-
+              waf: waf_sites entry {{ item.name }} has routers, which host mode does not use: the
+              host's nginx sends its sites with waf true to the WAF
+            quiet: true
+          loop: "{{ waf_sites_public }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+    - name: Check the mode
+      ansible.builtin.assert:
+        that: item.mode is string and item.mode in waf_site_modes
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has the mode {{ item.mode }}; it is detect (log
+          only), block or off (proxy only)
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the paranoia levels
+      ansible.builtin.assert:
+        that:
+          - item.paranoia | string is match('^[1-4]$')
+          - item.detection_paranoia | string is match('^[1-4]$')
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has paranoia {{ item.paranoia }} and
+          detection_paranoia {{ item.detection_paranoia }}; each is a level from 1 to 4
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # CRS checks up to the detection level and blocks up to the blocking one.
+    - name: Check that the detection level is not below the blocking level
+      ansible.builtin.assert:
+        that: item.detection_paranoia | int >= item.paranoia | int
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has detection_paranoia {{ item.detection_paranoia }}
+          below its paranoia {{ item.paranoia }}; the rules of a level are logged only when they
+          also run, so detection_paranoia is at least paranoia
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the thresholds and the body limit
+      ansible.builtin.assert:
+        that:
+          - item.anomaly_inbound | string is match('^[1-9][0-9]*$')
+          - item.anomaly_outbound | string is match('^[1-9][0-9]*$')
+          - item.request_body_limit | string is match('^[1-9][0-9]*$')
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has anomaly_inbound {{ item.anomaly_inbound }},
+          anomaly_outbound {{ item.anomaly_outbound }} and request_body_limit
+          {{ item.request_body_limit }}; each is a whole number above 0
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the lists of the sites
+      ansible.builtin.assert:
+        that:
+          - item.allowed_methods is sequence and item.allowed_methods is not string and item.allowed_methods is not mapping
+          - item.allowed_content_types is sequence and item.allowed_content_types is not string and item.allowed_content_types is not mapping
+          - item.bypass_paths is sequence and item.bypass_paths is not string and item.bypass_paths is not mapping
+          - item.exclusions is sequence and item.exclusions is not string and item.exclusions is not mapping
+          - item.exclusions | reject('mapping') | list | length == 0
+          - item.routers is sequence and item.routers is not string and item.routers is not mapping
+          - item.routers | reject('mapping') | list | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has an invalid allowed_methods,
+          allowed_content_types, bypass_paths, exclusions or routers; each is a list, and the
+          entries of exclusions and routers are mappings
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the allowed methods
+      ansible.builtin.assert:
+        that: waf_bad | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has invalid allowed_methods ({{ waf_bad | join(', ') }});
+          a method is letters, digits, _ and -, starting with a letter, such as PUT
+        quiet: true
+      vars:
+        waf_bad: >-
+          {{ (item.allowed_methods | reject('string') | map('string') | list)
+             + (item.allowed_methods | select('string') | reject('match', waf_method_re) | list) }}
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the allowed content types
+      ansible.builtin.assert:
+        that: waf_bad | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has invalid allowed_content_types
+          ({{ waf_bad | join(', ') }}); a content type is a lower-case type/subtype such as
+          application/octet-stream, without parameters
+        quiet: true
+      vars:
+        waf_bad: >-
+          {{ (item.allowed_content_types | reject('string') | map('string') | list)
+             + (item.allowed_content_types | select('string') | reject('match', waf_content_type_re) | list) }}
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # / without inspection is mode off.
+    - name: Check the bypass paths
+      ansible.builtin.assert:
+        that: waf_bad | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has invalid bypass_paths ({{ waf_bad | join(', ') }});
+          a path starts with /, has no . or .. segment, no // and no whitespace, quotes, braces or
+          semicolons, such as /v2/; for no inspection of the whole site set mode off
+        quiet: true
+      vars:
+        waf_bad: >-
+          {{ (item.bypass_paths | reject('string') | map('string') | list)
+             + (item.bypass_paths | select('string') | reject('match', waf_path_re) | list)
+             + (item.bypass_paths | select('equalto', '/') | list) }}
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the exclusions
+      ansible.builtin.assert:
+        that:
+          - waf_unknown | length == 0
+          - item.1.path is defined and item.1.path is string and item.1.path is match(waf_path_re)
+          - item.1.remove_tags is sequence and item.1.remove_tags is not string and item.1.remove_tags is not mapping
+          - item.1.remove_ids is sequence and item.1.remove_ids is not string and item.1.remove_ids is not mapping
+          - item.1.remove_targets is sequence and item.1.remove_targets is not string and item.1.remove_targets is not mapping
+        fail_msg: >-
+          waf: waf_sites entry {{ item.0.name }} has an invalid exclusion
+          ({{ item.1.path | default('without a path') }}{{ (', unknown keys ' ~ waf_unknown | join(', ')) if waf_unknown else '' }});
+          an exclusion takes a path (as bypass_paths, / for the whole site) and the lists
+          remove_tags, remove_ids and remove_targets
+        quiet: true
+      vars:
+        waf_unknown: "{{ item.1.keys() | difference(waf_exclusion_keys) | sort }}"
+      loop: "{{ waf_sites_public | subelements('exclusions') }}"
+      loop_control:
+        label: "{{ item.0.name }} {{ item.1.path | default('') }}"
+
+    - name: Check the rule tags of the exclusions
+      ansible.builtin.assert:
+        that: waf_bad | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.0.name }} has invalid remove_tags ({{ waf_bad | join(', ') }})
+          in the exclusion for {{ item.1.path }}; a tag is letters, digits and _ / . -, such as
+          attack-rce
+        quiet: true
+      vars:
+        waf_bad: >-
+          {{ (item.1.remove_tags | reject('string') | map('string') | list)
+             + (item.1.remove_tags | select('string') | reject('match', waf_tag_re) | list) }}
+      loop: "{{ waf_sites_public | subelements('exclusions') }}"
+      loop_control:
+        label: "{{ item.0.name }} {{ item.1.path }}"
+
+    - name: Check the rule IDs of the exclusions
+      ansible.builtin.assert:
+        that: waf_bad | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.0.name }} has invalid remove_ids ({{ waf_bad | join(', ') }})
+          in the exclusion for {{ item.1.path }}; a rule ID is a whole number such as 913100
+        quiet: true
+      vars:
+        waf_bad: "{{ item.1.remove_ids | map('string') | reject('match', waf_rule_id_re) | list }}"
+      loop: "{{ waf_sites_public | subelements('exclusions') }}"
+      loop_control:
+        label: "{{ item.0.name }} {{ item.1.path }}"
+
+    - name: Check the rule targets of the exclusions
+      ansible.builtin.assert:
+        that: waf_bad | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.0.name }} has invalid remove_targets
+          ({{ waf_bad | map('string') | join(', ') }}) in the exclusion for {{ item.1.path }}; each
+          is {id, target}: a rule ID and a target such as ARGS:cmd, without quotes, backslashes or
+          line breaks
+        quiet: true
+      vars:
+        waf_bad: >-
+          {%- set bad = [] -%}
+          {%- for target in item.1.remove_targets -%}
+          {%- if not (target is mapping and target.keys() | difference(['id', 'target']) | length == 0
+                      and target.id is defined and target.id | string is match(waf_rule_id_re)
+                      and target.target is defined and target.target is string
+                      and target.target is match(waf_target_re)) -%}
+          {%- set _ = bad.append(target.id | default('without an id') if target is mapping else target) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ bad }}
+      loop: "{{ waf_sites_public | subelements('exclusions') }}"
+      loop_control:
+        label: "{{ item.0.name }} {{ item.1.path }}"
+
+    # Two locations for one path would fail nginx's own test.
+    - name: Check that every path of a site is listed once
+      ansible.builtin.assert:
+        that: waf_paths | unique | length == waf_paths | length
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} lists a path more than once in bypass_paths and
+          exclusions ({{ waf_paths | join(', ') }}); one path takes one entry
+        quiet: true
+      vars:
+        waf_paths: "{{ item.bypass_paths + item.exclusions | map(attribute='path') | list }}"
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the router keys
+      ansible.builtin.assert:
+        that: waf_unknown | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has routers with unknown keys
+          ({{ waf_unknown | join(', ') }}); a router's keys are {{ waf_router_keys | join(', ') }}
+        quiet: true
+      vars:
+        waf_unknown: >-
+          {{ waf_sites[item.index].routers | default([]) | map('dict2items') | flatten
+             | map(attribute='key') | unique | difference(waf_router_keys) | sort }}
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: waf_mode == 'traefik'
+
+    - name: Check the routers
+      ansible.builtin.assert:
+        that:
+          - item.1.entrypoints is defined and item.1.entrypoints is sequence and item.1.entrypoints is not string
+          - item.1.entrypoints is not mapping and item.1.entrypoints | length > 0
+          - item.1.entrypoints | reject('string') | list | length == 0
+          - item.1.entrypoints | reject('match', waf_name_re) | list | length == 0
+          - traefik_entrypoints is not defined
+            or item.1.entrypoints | difference(traefik_entrypoints | map(attribute='name')) | length == 0
+          - item.1.middlewares is sequence and item.1.middlewares is not string and item.1.middlewares is not mapping
+          - item.1.middlewares | reject('string') | list | length == 0
+          - item.1.middlewares | reject('match', waf_middleware_re) | list | length == 0
+          - item.1.rule is string and item.1.rule | length > 0 and item.1.rule is not search(waf_line_break_re)
+          - item.1.priority | string is match('^[1-9][0-9]*$')
+        fail_msg: >-
+          waf: waf_sites entry {{ item.0.name }} has an invalid router {{ item.1.name }}; a router takes
+          entrypoints (a list of at least one name, each one of traefik_entrypoints when that is
+          set), middlewares (a list of names such as anubis@file), a rule (one line) and a priority
+          (a whole number above 0)
+        quiet: true
+      loop: "{{ waf_sites_public | subelements('routers') }}"
+      loop_control:
+        label: "{{ item.1.name }}"
+      when: waf_mode == 'traefik'

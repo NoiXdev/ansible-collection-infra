@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Web application firewall with the OWASP Core Rule Set in front of Traefik routers or the host's nginx sites
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+    - name: Debian
+      versions: [bookworm, trixie]
+dependencies: []

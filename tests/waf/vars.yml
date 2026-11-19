@@ -1,0 +1,7 @@
+---
+# Test-only values; nothing here is a secret. A valid traefik mode site, so
+# that a refusal run that overrides one setting fails on that setting alone.
+waf_sites:
+  - name: app
+    domains: [app.test]
+    backend: http://whoami:80
