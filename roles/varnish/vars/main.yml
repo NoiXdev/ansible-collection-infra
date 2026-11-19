@@ -1,0 +1,35 @@
+---
+# The releases Varnish Software has packages for.
+varnish_supported_releases: [noble, resolute]
+
+# The origin the repository's Release files name, and the Maintainer field of
+# its packages (what dpkg keeps of an installed package; Ubuntu's say "Ubuntu
+# Developers").
+varnish_apt_origin: Varnish
+varnish_vendor_maintainer: Varnish Software
+
+# The repository's component and the keyring of its signing key.
+varnish_apt_component: main
+varnish_apt_keyring: /etc/apt/keyrings/varnish.asc
+
+# Installed packages of these names that are not the repository's are refused.
+varnish_distro_packages: [varnish, varnish-modules]
+
+# What a site entry leaves out.
+varnish_site_defaults:
+  profile: generic
+  microcache: 0
+  health_path: ""
+  health_host: ""
+  debug_header: false
+  strip_cookies: []
+
+# varnish_sites with the defaults filled in; the keys of the entries as given
+# are checked in tasks/validate.yml.
+varnish_site_keys: [name, profile, purge_token, microcache, health_path, health_host, debug_header, strip_cookies]
+varnish_sites_normalized: >-
+  {%- set sites = [] -%}
+  {%- for site in varnish_sites -%}
+  {%- set _ = sites.append(varnish_site_defaults | combine(site)) -%}
+  {%- endfor -%}
+  {{ sites }}

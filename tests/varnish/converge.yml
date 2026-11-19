@@ -1,0 +1,9 @@
+---
+# The test host. The varnish role runs only when run.sh passes
+# test_varnish=true; the settings are in the file test_varnish_vars names.
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  roles:
+    - role: noixdev.infra.varnish
+      when: test_varnish | default(false) | bool

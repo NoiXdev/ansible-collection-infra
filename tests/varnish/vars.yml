@@ -1,0 +1,5 @@
+---
+# Test-only values; nothing here is a secret. The tokens are made up for the
+# tests and guard nothing.
+test_token_a: 0123456789abcdef0123456789abcdef
+test_token_b: fedcba9876543210fedcba9876543210

@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Varnish Cache from Varnish Software's repository, as a caching hop in front of nginx sites
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+dependencies: []

@@ -1,0 +1,94 @@
+---
+argument_specs:
+  main:
+    short_description: Varnish Cache from Varnish Software's repository, as a caching hop in front of nginx sites
+    description:
+      - >-
+        Installs Varnish Cache of one series from Varnish Software's repository (Ubuntu 24.04 and
+        26.04; any other release is refused before any change), pinned to that series, and
+        listens on the loopback address only. nginx sends the sites that use it to Varnish, and
+        Varnish asks nginx's inner server for what it does not have.
+      - >-
+        varnish_sites is the complete list of cached sites: a site that is not listed is not
+        cached (its requests pass) and its purge token stops working.
+      - >-
+        The site entries are checked by the role, not here, so that every message names the
+        entry; an unknown key in an entry is refused. Every setting is checked before any change.
+    options:
+      varnish_version:
+        type: str
+        description: major.minor series to install, for example "9.1".
+      varnish_apt_url:
+        type: str
+        description: The repository URL.
+      varnish_apt_suite:
+        type: str
+        description: Suite of the repository; the host's release codename by default.
+      varnish_apt_key_url:
+        type: str
+        description: Where the repository key is downloaded from.
+      varnish_apt_key_fingerprint:
+        type: str
+        description: Fingerprint the key must carry.
+      varnish_port:
+        type: int
+        description: The port Varnish listens on, on 127.0.0.1.
+      varnish_admin_port:
+        type: int
+        description: The port of Varnish's admin interface, on 127.0.0.1.
+      varnish_backend_host:
+        type: str
+        description: The backend host, nginx's inner server (127.0.0.1 by default).
+      varnish_backend_port:
+        type: int
+        description: The backend port, nginx_inner_port of the nginx role.
+      varnish_memory:
+        type: str
+        description: The size of the cache in memory, as varnishd -s malloc takes it (a number and k, m or g), for example 512M.
+      varnish_transient_memory:
+        type: str
+        description: The size of the transient storage, in the same form, for example 128M.
+      varnish_grace_healthy:
+        type: int
+        description: Seconds a stale object is served, and refreshed in the background, while the backend is healthy.
+      varnish_grace_sick:
+        type: int
+        description: >-
+          Seconds a stale object is served while the backend is sick; an object stays in the
+          cache for this long.
+      varnish_connect_timeout:
+        type: int
+        description: Seconds to connect to the backend.
+      varnish_first_byte_timeout:
+        type: int
+        description: Seconds to wait for the first byte of the backend's answer.
+      varnish_between_bytes_timeout:
+        type: int
+        description: Seconds to wait between two bytes of the backend's answer.
+      varnish_sites:
+        type: list
+        elements: dict
+        description:
+          - The complete list of cached sites. Each entry takes exactly these keys.
+          - name (required), the name of the nginx site; ^[a-z0-9_-]+$, at most 64 characters, unique.
+          - profile, generic (the default), shopware or typo3.
+          - >-
+            purge_token (required), at least 32 characters of A-Z, a-z, 0-9, ., _, ~ and -; every
+            site needs its own.
+          - >-
+            microcache, seconds from 0 to 300 (default 0) a page without cache headers is kept;
+            not with the profile shopware.
+          - >-
+            health_path, empty (the default) or a path starting with / that Varnish probes for the
+            backend's health; health_host (required with health_path), the lower-case host name
+            the probe asks for.
+          - debug_header, true to add X-Cache to the site's answers (default false).
+          - >-
+            strip_cookies, a list of cookie names (a trailing * means prefix) removed for this
+            site on top of varnish_strip_cookies (default none).
+      varnish_strip_cookies:
+        type: list
+        elements: str
+        description: >-
+          Cookie names (a trailing * means prefix) removed from requests of every site, so that
+          analytics and tracking cookies do not make a page uncacheable. No consent cookies.

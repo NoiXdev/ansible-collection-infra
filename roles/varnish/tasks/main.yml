@@ -1,0 +1,12 @@
+---
+- name: Check the release
+  ansible.builtin.fail:
+    msg: >-
+      varnish: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} is not
+      supported yet: Varnish Software has no packages for {{ ansible_facts['distribution_release'] }}
+  when: >-
+    ansible_facts['distribution'] != 'Ubuntu'
+    or ansible_facts['distribution_release'] not in varnish_supported_releases
+
+- name: Check the settings and the sites
+  ansible.builtin.include_tasks: validate.yml

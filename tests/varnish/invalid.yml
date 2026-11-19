@@ -1,0 +1,178 @@
+---
+# One play per setting the varnish role must refuse: the run fails with a
+# message that names the field (and the site), before any change. The first
+# play's tasks are the check every other play repeats (YAML anchor).
+- name: A site name used twice
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "more than one entry named a"
+    varnish_sites:
+      - {name: a, purge_token: "{{ test_token_a }}"}
+      - {name: a, purge_token: "{{ test_token_b }}"}
+  tasks: &refused
+    - name: Run the role, which must fail
+      block:
+        - name: Include the role
+          ansible.builtin.include_role:
+            name: noixdev.infra.varnish
+        - name: Fail when the role did not refuse
+          ansible.builtin.fail:
+            msg: "the role accepted the settings; it must refuse with '{{ expect }}'"
+      rescue:
+        # A looped check reports "One or more items failed"; the messages are
+        # in the results.
+        - name: Check the message
+          ansible.builtin.assert:
+            that:
+              - varnish_message is regex(expect)
+              - "varnish_message is match('^varnish: ')"
+            fail_msg: "the message '{{ varnish_message }}' does not match '{{ expect }}'"
+            quiet: true
+          vars:
+            varnish_message: >-
+              {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined')
+                  | selectattr('failed') | map(attribute='msg') | first)
+                 | default(ansible_failed_result.msg | default('')) }}
+      always:
+        - name: Read the repository file
+          ansible.builtin.stat:
+            path: /etc/apt/sources.list.d/varnish.sources
+          register: varnish_sources
+        - name: Check that nothing was changed
+          ansible.builtin.assert:
+            that: not varnish_sources.stat.exists
+            quiet: true
+
+- name: A site name with a capital
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry 'Prod' has an invalid name"
+    varnish_sites:
+      - {name: Prod, purge_token: "{{ test_token_a }}"}
+  tasks: *refused
+
+- name: An unknown profile
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a has the profile drupal"
+    varnish_sites:
+      - {name: a, profile: drupal, purge_token: "{{ test_token_a }}"}
+  tasks: *refused
+
+- name: A site without a token
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a needs a purge_token"
+    varnish_sites:
+      - {name: a}
+  tasks: *refused
+
+- name: A token of 31 characters
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a needs a purge_token"
+    varnish_sites:
+      - {name: a, purge_token: "0123456789abcdef0123456789abcde"}
+  tasks: *refused
+
+- name: A token with a slash
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a needs a purge_token"
+    varnish_sites:
+      - {name: a, purge_token: "0123456789abcdef0123456789abcde/"}
+  tasks: *refused
+
+- name: One token on two sites
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry [ab] has a purge_token that another entry has too"
+    varnish_sites:
+      - {name: a, purge_token: "{{ test_token_a }}"}
+      - {name: b, purge_token: "{{ test_token_a }}"}
+  tasks: *refused
+
+- name: A microcache above 300
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a has microcache 301"
+    varnish_sites:
+      - {name: a, purge_token: "{{ test_token_a }}", microcache: 301}
+  tasks: *refused
+
+- name: A microcache with the shopware profile
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a has microcache 30"
+    varnish_sites:
+      - {name: a, profile: shopware, purge_token: "{{ test_token_a }}", microcache: 30}
+  tasks: *refused
+
+- name: A health path without a slash
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a has an invalid health probe"
+    varnish_sites:
+      - {name: a, purge_token: "{{ test_token_a }}", health_path: health, health_host: a.test}
+  tasks: *refused
+
+- name: A health path without a health host
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a has an invalid health probe.*health_host"
+    varnish_sites:
+      - {name: a, purge_token: "{{ test_token_a }}", health_path: /health}
+  tasks: *refused
+
+- name: A health path with a quote
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a has an invalid health probe"
+    varnish_sites:
+      - {name: a, purge_token: "{{ test_token_a }}", health_path: '/he"alth', health_host: a.test}
+  tasks: *refused
+
+- name: A cache size that is not a size
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "varnish_memory is lots"
+    varnish_memory: lots
+  tasks: *refused
+
+- name: A release Varnish Software has no packages for
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "is not supported yet.*jammy"
+  pre_tasks:
+    - name: Fake the release
+      ansible.builtin.set_fact:
+        ansible_facts: "{{ ansible_facts | combine({'distribution_release': 'jammy'}) }}"
+  tasks: *refused

@@ -1,0 +1,67 @@
+---
+# major.minor series from Varnish Software's repository (9.1 as of 2026-11).
+# Updates within the series come through unattended-upgrades. A varnish of
+# another series that is installed already is refused, never replaced.
+varnish_version: "9.1"
+
+varnish_apt_url: https://packages.varnish-software.com/varnish/ubuntu
+varnish_apt_suite: "{{ ansible_facts['distribution_release'] }}"
+varnish_apt_key_url: https://packages.varnish-software.com/varnish/varnish.pub.asc
+# The key that signs the repository.
+varnish_apt_key_fingerprint: 694566269779DFAC975ED9BDD0525EAE838B3344
+
+# Where Varnish listens for nginx (loopback only), and its admin port.
+varnish_port: 6081
+varnish_admin_port: 6082
+
+# The backend: nginx's inner server (nginx_inner_port of the nginx role).
+varnish_backend_host: 127.0.0.1
+varnish_backend_port: 8931
+
+# The cache (malloc) and the transient storage, as varnishd -s takes them: a
+# number and k, m or g.
+varnish_memory: 512M
+varnish_transient_memory: 128M
+
+# Grace, in seconds: how long a stale object is served while the backend is
+# healthy (and refreshed in the background), and while it is sick. An object
+# stays in the cache for the sick grace.
+varnish_grace_healthy: 30
+varnish_grace_sick: 21600
+
+# Backend timeouts, in seconds.
+varnish_connect_timeout: 2
+varnish_first_byte_timeout: 60
+varnish_between_bytes_timeout: 60
+
+# The sites the cache serves. A site that is not listed is not cached: its
+# requests pass, and its purge token stops working.
+#   - name: prod                       # the nginx site's name; ^[a-z0-9_-]+$, unique
+#     profile: generic                 # generic (the default), shopware or typo3
+#     purge_token: "..."               # required, at least 32 of A-Za-z0-9._~-, unique
+#     microcache: 0                    # seconds, 0..300; not with shopware
+#     health_path: ""                  # e.g. /health; probed for the backend health
+#     health_host: ""                  # the Host header of the probe; required with health_path
+#     debug_header: false              # X-Cache on the answers
+#     strip_cookies: []                # cookie names this site adds to varnish_strip_cookies;
+#                                      # a trailing * means prefix
+varnish_sites: []
+
+# Cookies that are removed from requests that carry nothing else of a session
+# (analytics and tracking; a trailing * means prefix). No consent cookies.
+# The Anubis cookie names are added with the Anubis support.
+varnish_strip_cookies:
+  - _ga
+  - _ga_*
+  - _gid
+  - _gat*
+  - _gcl_*
+  - _fbp
+  - _fbc
+  - _pk_*
+  - mtm_*
+  - _hj*
+  - _uetsid
+  - _uetvid
+  - _clck
+  - _clsk
