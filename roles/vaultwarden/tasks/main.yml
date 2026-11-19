@@ -219,9 +219,54 @@
   vars:
     vaultwarden_env_null: "{{ vaultwarden_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
 
-# The point where the state of the installation, install and update plug in
-# (later tasks replace this placeholder): the settings are valid, and nothing
-# has been changed yet.
-- name: Settings are valid
-  ansible.builtin.debug:
-    msg: The settings of {{ vaultwarden_project }} are valid; the role does not install anything yet.
+# Also refuses a config.json saved on the admin page, an install that did not
+# complete and a downgrade.
+- name: Read the installation
+  ansible.builtin.include_tasks: state.yml
+
+- name: Install Vaultwarden
+  ansible.builtin.include_tasks: install.yml
+  when: vaultwarden_state == 'install'
+
+# Until the role takes a backup before an update, a newer version is refused
+# before any change.
+- name: Refuse an update
+  ansible.builtin.fail:
+    msg: >-
+      vaultwarden_version {{ vaultwarden_version }} is newer than the
+      installed version {{ vaultwarden_installed_version }} in
+      {{ vaultwarden_dir }}, but this release of the role does not update
+      Vaultwarden yet and changes nothing. Set vaultwarden_version back to
+      {{ vaultwarden_installed_version }}.
+  when: vaultwarden_state == 'update'
+
+- name: Reconfigure Vaultwarden
+  ansible.builtin.include_tasks: reconfigure.yml
+  when: vaultwarden_state == 'reconfigure'
+
+# Read-only: a run without changes starts and restarts nothing, but stays red
+# while a container is down or Vaultwarden cannot read its database.
+- name: Check that Vaultwarden runs
+  when: vaultwarden_state == 'noop'
+  block:
+    - name: Fail when a container is not running
+      ansible.builtin.fail:
+        msg: >-
+          Vaultwarden in {{ vaultwarden_dir }} is down: the services
+          {{ vaultwarden_down | join(', ') }} are not running. The role starts
+          nothing on a run without changes; start them with docker compose up
+          -d in {{ vaultwarden_dir }}.
+      when: vaultwarden_down | length > 0
+
+    - name: Check that Vaultwarden is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Vaultwarden is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Vaultwarden in {{ vaultwarden_dir }} is unhealthy
+          ({{ vaultwarden_health_lines | join('; ') }}) within
+          {{ vaultwarden_health_timeout }} seconds. The role restarts nothing on
+          a run without changes; see docker compose logs in
+          {{ vaultwarden_dir }}.
+      when: not vaultwarden_healthy

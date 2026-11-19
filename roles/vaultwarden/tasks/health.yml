@@ -1,0 +1,71 @@
+---
+# Waits up to vaultwarden_health_timeout seconds (vaultwarden_health_wait,
+# when the includer sets it) until every container of vaultwarden_services
+# reports the health status healthy, then asks Vaultwarden itself, from
+# inside its container: GET /alive, which takes a database connection, and
+# POST /identity/accounts/prelogin for an address that does not exist, which
+# reads the users table; both must answer 200. The image has no sqlite3 (nor
+# psql), so these two are the database check: they prove the connection and
+# the schema the app reads. Sets vaultwarden_healthy and
+# vaultwarden_health_lines (service, state and health of each container, then
+# the two answers). Never fails by itself.
+
+- name: Note when the health check starts
+  ansible.builtin.set_fact:
+    vaultwarden_health_start: "{{ now().timestamp() }}"
+    vaultwarden_health_expected: "{{ vaultwarden_services | map('regex_replace', '^(.*)$', '\\1 running healthy') | list }}"
+
+# retries is an upper bound (every attempt takes at least the delay); the
+# deadline ends the wait after those seconds.
+- name: Wait until the containers are healthy
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --all, --format, "{{ '{{.Service}} {{.State}} {{.Health}}' }}"]
+    chdir: "{{ vaultwarden_dir }}"
+  register: vaultwarden_health
+  until: >-
+    vaultwarden_health_expected | difference(vaultwarden_health.stdout_lines | default([])) | length == 0
+    or now().timestamp() - vaultwarden_health_start | float >= vaultwarden_health_wait | default(vaultwarden_health_timeout) | int
+  retries: "{{ (vaultwarden_health_wait | default(vaultwarden_health_timeout) | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Note whether the containers are healthy
+  ansible.builtin.set_fact:
+    vaultwarden_containers_healthy: "{{ vaultwarden_health_expected | difference(vaultwarden_health.stdout_lines | default([])) | length == 0 }}"
+
+# Prints the status code only; a few tries, as the container can be healthy
+# a moment before a request after a restart is served.
+- name: Ask Vaultwarden for /alive and a prelogin
+  ansible.builtin.command:
+    argv: >-
+      {{ ['docker', 'compose', 'exec', '-T', 'vaultwarden', 'curl', '--silent', '--max-time', '10',
+          '--output', '/dev/null', '--write-out', '%{http_code}'] + item.args + ['http://localhost:80' ~ item.path] }}
+    chdir: "{{ vaultwarden_dir }}"
+  loop:
+    - {name: GET /alive, path: /alive, args: []}
+    - name: POST /identity/accounts/prelogin
+      path: /identity/accounts/prelogin
+      args: [--header, "Content-Type: application/json", --data, '{"email": "health-check@invalid.test"}']
+  loop_control:
+    label: "{{ item.name }}"
+  register: vaultwarden_health_requests
+  until: vaultwarden_health_requests.stdout | default('') == '200'
+  retries: 3
+  delay: 2
+  changed_when: false
+  failed_when: false
+  when: vaultwarden_containers_healthy | bool
+
+- name: Note whether Vaultwarden is healthy
+  ansible.builtin.set_fact:
+    vaultwarden_health_lines: >-
+      {%- set lines = vaultwarden_health.stdout_lines | default([]) | sort -%}
+      {%- for result in vaultwarden_health_requests.results | default([]) if result.skipped is not defined -%}
+      {%-   set _ = lines.append(result.item.name ~ ' answered ' ~ (result.stdout | default('', true) or 'nothing')) -%}
+      {%- endfor -%}
+      {{ lines }}
+    vaultwarden_healthy: >-
+      {{ vaultwarden_containers_healthy | bool
+         and vaultwarden_health_requests.results | default([]) | selectattr('stdout', 'defined')
+             | selectattr('stdout', 'eq', '200') | list | length == 2 }}

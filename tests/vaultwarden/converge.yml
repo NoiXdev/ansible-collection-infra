@@ -1,20 +1,56 @@
 ---
-# The test host: Docker and Traefik, and what run.sh calls on the host. The
-# vaultwarden role runs only when run.sh passes test_vaultwarden=true.
+# The test host: Docker, Traefik and Mailpit, and what run.sh calls on the
+# host. The vaultwarden role runs only when run.sh passes
+# test_vaultwarden=true.
 - name: Converge
   hosts: all
   vars_files: [vars.yml]
+  vars:
+    converge_mailpit_image: axllent/mailpit:v1.33.1
   pre_tasks:
     # The base role installs ca-certificates and curl on the servers; the test
-    # image has neither.
+    # image has neither. client.py needs python3-cryptography.
     - name: Install the packages the tests call
       ansible.builtin.apt:
-        name: [ca-certificates, curl]
+        name: [ca-certificates, curl, python3-cryptography]
         state: present
         update_cache: true
         cache_valid_time: 3600
-  roles:
-    - noixdev.infra.docker
-    - noixdev.infra.traefik
-    - role: noixdev.infra.vaultwarden
+  tasks:
+    - name: Run the docker role
+      ansible.builtin.include_role:
+        name: noixdev.infra.docker
+
+    - name: Run the traefik role
+      ansible.builtin.include_role:
+        name: noixdev.infra.traefik
+
+    # The SMTP catcher on the Traefik network, where Vaultwarden reaches it as
+    # mailpit (any login, without TLS); its API on 127.0.0.1:8025 of the test
+    # host for run.sh.
+    - name: Look for Mailpit
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, name=^mailpit$]
+      register: converge_mailpit
+      changed_when: false
+
+    - name: Start Mailpit
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name=mailpit
+          - "--network={{ traefik_network | default('proxy') }}"
+          - --restart=unless-stopped
+          - --publish=127.0.0.1:8025:8025
+          - "{{ converge_mailpit_image }}"
+          - --smtp-auth-accept-any
+          - --smtp-auth-allow-insecure
+      changed_when: true
+      when: converge_mailpit.stdout | length == 0
+
+    - name: Run the vaultwarden role
+      ansible.builtin.include_role:
+        name: noixdev.infra.vaultwarden
       when: test_vaultwarden | default(false) | bool

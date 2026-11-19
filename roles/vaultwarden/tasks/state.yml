@@ -1,0 +1,283 @@
+---
+# Reads the host and sets vaultwarden_state:
+#   install      no compose file
+#   update       vaultwarden_version is newer than the installed version
+#   reconfigure  the compose file the role writes differs from the one on
+#                disk, or a secrets file from what the role writes
+#   noop         everything as the role writes it
+# Also sets vaultwarden_installed (a compose file exists),
+# vaultwarden_compose_before (the compose file on disk),
+# vaultwarden_compose_on_disk (it parsed), vaultwarden_installed_version,
+# vaultwarden_installed_database (from vaultwarden_target_file, empty
+# without it), vaultwarden_secrets (file name to content of the secrets the
+# role writes), vaultwarden_secrets_changed and vaultwarden_down (the
+# services that are not running). Refuses, before any change and in this
+# order: a vaultwarden_data_dir that is not a mountpoint (with
+# vaultwarden_data_dir_mountpoint), an installation without its data
+# subdirectories (an unmounted volume), a config.json saved on the admin
+# page, a compose file that is not YAML, an install that did not complete
+# (its marker), a compose file without a Vaultwarden version and a
+# downgrade. Changes nothing.
+
+# A block volume that is not mounted leaves its mountpoint as an empty
+# directory on the root filesystem; an install there would put the data
+# beside the volume.
+- name: Check that the data directory is a mountpoint
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ vaultwarden_data_dir }}"]
+  register: vaultwarden_data_dir_mounted
+  changed_when: false
+  failed_when: false
+  when: vaultwarden_data_dir_mountpoint | bool
+
+- name: Refuse a data directory that is not a mountpoint
+  ansible.builtin.fail:
+    msg: >-
+      vaultwarden_data_dir_mountpoint is on, but {{ vaultwarden_data_dir }}
+      is not a mountpoint: is the volume mounted? The role changes nothing.
+      Mount the volume at {{ vaultwarden_data_dir }}, then run the role
+      again.
+  when:
+    - vaultwarden_data_dir_mountpoint | bool
+    - vaultwarden_data_dir_mounted.rc != 0
+
+# The role writes no secret into it, but one changed by hand could hold one,
+# so it is read, noted and parsed in no_log tasks.
+- name: Read the compose file
+  ansible.builtin.slurp:
+    src: "{{ vaultwarden_compose_file }}"
+  register: vaultwarden_compose_read
+  failed_when: false
+  no_log: true
+
+- name: Look for the data subdirectories
+  ansible.builtin.stat:
+    path: "{{ vaultwarden_data_dir }}/{{ item }}"
+    get_checksum: false
+  loop: "{{ vaultwarden_data_subdirs }}"
+  register: vaultwarden_subdirs_stat
+
+- name: Note what is on the host
+  ansible.builtin.set_fact:
+    vaultwarden_compose_before: "{{ vaultwarden_compose_read.content | default('') | b64decode }}"
+    vaultwarden_installed: "{{ vaultwarden_compose_read.content is defined }}"
+    vaultwarden_data_present: >-
+      {{ vaultwarden_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
+  no_log: true
+
+# Only install creates the subdirectories, and compose does not create a
+# missing one (create_host_path: false), so their absence beside a compose
+# file is data that is not there (an unmounted volume), never a state to
+# repair: Vaultwarden would start on an empty vault.
+- name: Refuse an installation without its data
+  ansible.builtin.fail:
+    msg: >-
+      Vaultwarden is installed in {{ vaultwarden_dir }}
+      ({{ vaultwarden_compose_file }}), but {{ vaultwarden_data_dir }} lacks
+      {{ vaultwarden_data_missing | join(', ') }}: is the volume mounted? The
+      role changes nothing and creates none of them. Mount the volume (or put
+      the data back) at {{ vaultwarden_data_dir }}, then run the role again.
+  vars:
+    # In the order of vaultwarden_data_subdirs, which difference does not keep.
+    vaultwarden_data_missing: "{{ vaultwarden_data_subdirs | reject('in', vaultwarden_data_present) | list }}"
+  when:
+    - vaultwarden_installed
+    - vaultwarden_data_missing | length > 0
+
+# The first save on the admin page writes config.json, and Vaultwarden takes
+# its values over every setting the role writes (the admin token, SMTP and
+# its password among them), so the role would no longer own the settings it
+# writes. Its values can be secrets: it is read and parsed in no_log tasks,
+# and only the key names are shown. User management on the admin page writes
+# no config.json.
+- name: Look for a config.json of the admin page
+  ansible.builtin.stat:
+    path: "{{ vaultwarden_config_json }}"
+    get_checksum: false
+  register: vaultwarden_config_json_stat
+
+- name: Read the keys of config.json
+  when: vaultwarden_config_json_stat.stat.exists
+  block:
+    - name: Read config.json
+      ansible.builtin.slurp:
+        src: "{{ vaultwarden_config_json }}"
+      register: vaultwarden_config_json_read
+      no_log: true
+
+    - name: Note the keys of config.json
+      ansible.builtin.set_fact:
+        vaultwarden_config_json_keys: "{{ (vaultwarden_config_json_parsed | list | sort) if vaultwarden_config_json_parsed is mapping else none }}"
+      vars:
+        vaultwarden_config_json_parsed: "{{ vaultwarden_config_json_read.content | b64decode | from_json }}"
+      no_log: true
+  rescue:
+    - name: Note a config.json that cannot be read or is not JSON
+      ansible.builtin.set_fact:
+        vaultwarden_config_json_keys: null
+
+- name: Refuse a config.json that is not a JSON object
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_config_json }} exists, but it cannot be read or is not a
+      JSON object (the error is not shown: it can quote the file, whose
+      values can be secrets). Vaultwarden takes the settings of that file
+      over the ones the role writes, so the role changes nothing while it
+      exists. Move the settings you want to keep into the role's variables
+      or vaultwarden_env, then remove the file (rm
+      {{ vaultwarden_config_json }}) and run the role again.
+  when:
+    - vaultwarden_config_json_stat.stat.exists
+    - vaultwarden_config_json_keys is none
+
+- name: Refuse the settings saved on the admin page
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_config_json }} exists: a save on the admin page wrote it,
+      and Vaultwarden takes its settings over the ones the role writes. It
+      holds {{ vaultwarden_config_json_keys | join(', ') if vaultwarden_config_json_keys | length > 0 else 'no settings' }}
+      (the values are not shown). The role changes nothing while it exists.
+      Move the settings you want to keep into the role's variables (SMTP,
+      the admin token, push, signups) or vaultwarden_env (the other ones,
+      upper-case: log_level is LOG_LEVEL), then remove the file (rm
+      {{ vaultwarden_config_json }}) and run the role again. Saving settings
+      on the admin page writes it again; managing users there does not.
+  when:
+    - vaultwarden_config_json_stat.stat.exists
+    - vaultwarden_config_json_keys is not none
+
+# A file that is not YAML gets a message of its own, without the parser's
+# error (it can quote a line). One that is YAML but not a mapping parses as
+# empty and names no version, which is refused below.
+- name: Check that the compose file is YAML
+  block:
+    - name: Parse the compose file
+      ansible.builtin.set_fact:
+        vaultwarden_compose_on_disk: "{{ vaultwarden_compose_parsed if vaultwarden_compose_parsed is mapping else {} }}"
+      vars:
+        vaultwarden_compose_parsed: "{{ (vaultwarden_compose_before or '{}') | from_yaml }}"
+      no_log: true
+  rescue:
+    - name: Fail on a compose file that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ vaultwarden_compose_file }} is not YAML, so the role cannot tell
+          what is installed and changes nothing. Put back the compose file the
+          role wrote (docker compose config --quiet in {{ vaultwarden_dir }}
+          shows the error).
+
+- name: Look for the marker of an install in progress
+  ansible.builtin.stat:
+    path: "{{ vaultwarden_install_marker }}"
+    get_checksum: false
+  register: vaultwarden_install_marker_stat
+
+- name: Refuse an install that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_install_marker }} exists: an install of Vaultwarden in
+      {{ vaultwarden_dir }} did not complete. The role changes nothing.
+      {{ vaultwarden_install_hint }}
+  when: vaultwarden_install_marker_stat.stat.exists
+
+- name: Note the installed version
+  ansible.builtin.set_fact:
+    vaultwarden_installed_version: >-
+      {{ ((((vaultwarden_compose_on_disk.services | default({})).vaultwarden | default({})).image | default(''))
+          | string).rpartition(':')[2] }}
+
+- name: Check the installed version
+  when: vaultwarden_installed
+  block:
+    - name: Check that the compose file names the Vaultwarden version
+      ansible.builtin.assert:
+        that: vaultwarden_installed_version is match('^\d+\.\d+\.\d+$')
+        fail_msg: >-
+          The Vaultwarden image in {{ vaultwarden_compose_file }} has no tag
+          X.Y.Z, so the role cannot tell which version is installed and
+          changes nothing. Put back the compose file the role wrote.
+        quiet: true
+
+    # Vaultwarden migrates its database on start and cannot migrate it down.
+    - name: Refuse a downgrade
+      ansible.builtin.fail:
+        msg: >-
+          vaultwarden_version {{ vaultwarden_version }} is lower than the
+          installed version {{ vaultwarden_installed_version }} in
+          {{ vaultwarden_dir }}; the role refuses to downgrade, as Vaultwarden
+          cannot migrate its database down, and changes nothing. Set
+          vaultwarden_version to {{ vaultwarden_installed_version }} or newer.
+      when: vaultwarden_version is version(vaultwarden_installed_version, '<')
+
+# Not secret: the database mode (and for an external server where it is).
+- name: Read the database target
+  ansible.builtin.slurp:
+    src: "{{ vaultwarden_target_file }}"
+  register: vaultwarden_target_read
+  failed_when: false
+  when: vaultwarden_installed
+
+- name: Note the installed database
+  ansible.builtin.set_fact:
+    vaultwarden_installed_database: "{{ (vaultwarden_target_parsed if vaultwarden_target_parsed is mapping else {}).database | default('') }}"
+  vars:
+    vaultwarden_target_parsed: "{{ (vaultwarden_target_read.content | default('') | b64decode or '{}') | from_yaml }}"
+
+# What the secrets files hold (only those in use): the Argon2id hash of the
+# admin token, the SMTP password (with a login) and the push installation
+# key.
+- name: Note the secrets the role writes
+  ansible.builtin.set_fact:
+    vaultwarden_secrets: >-
+      {{ ({'admin_token': vaultwarden_admin_token_hash | string}
+          if vaultwarden_admin_token_hash | string | length > 0 else {})
+         | combine({'smtp_password': vaultwarden_smtp_settings.password | string}
+                   if vaultwarden_smtp_settings.host | string | length > 0
+                      and vaultwarden_smtp_settings.username | string | length > 0 else {})
+         | combine({'push_installation_key': vaultwarden_push_installation_key | string}
+                   if vaultwarden_push_installation_id | string | length > 0 else {}) }}
+  no_log: true
+
+- name: Find the secrets files
+  ansible.builtin.find:
+    paths: "{{ vaultwarden_secrets_dir }}"
+    file_type: any
+    hidden: true
+  register: vaultwarden_secrets_on_disk
+  when: vaultwarden_installed
+
+- name: Read the secrets files
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ vaultwarden_secrets_on_disk.files | default([]) | map(attribute='path') | sort }}"
+  register: vaultwarden_secrets_read
+  failed_when: false
+  no_log: true
+
+# A file that cannot be read compares as changed, so a reconfigure writes it.
+- name: Compare the secrets files with what the role writes
+  ansible.builtin.set_fact:
+    vaultwarden_secrets_changed: >-
+      {%- set found = {} -%}
+      {%- for read in vaultwarden_secrets_read.results | default([]) -%}
+      {%-   set _ = found.update({read.item | basename: (read.content | b64decode) if read.content is defined else none}) -%}
+      {%- endfor -%}
+      {{ found != vaultwarden_secrets }}
+  no_log: true
+
+- name: Read the services that run
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
+    chdir: "{{ vaultwarden_dir }}"
+  register: vaultwarden_ps
+  changed_when: false
+  when: vaultwarden_installed
+
+- name: Decide what to do
+  ansible.builtin.set_fact:
+    vaultwarden_down: "{{ vaultwarden_services | difference(vaultwarden_ps.stdout_lines | default([])) }}"
+    vaultwarden_state: >-
+      {{ 'install' if not vaultwarden_installed
+         else 'update' if vaultwarden_version is version(vaultwarden_installed_version, '>')
+         else 'reconfigure' if vaultwarden_compose_before != vaultwarden_compose or vaultwarden_secrets_changed | bool
+         else 'noop' }}

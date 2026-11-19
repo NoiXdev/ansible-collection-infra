@@ -1,0 +1,121 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. No secret is in this file: they
+    reach Vaultwarden as files of vaultwarden_secrets_dir, which it reads
+    through <KEY>_FILE. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+{#- A bind mount that compose must not create: a missing data directory (an
+    unmounted volume) stops the container instead of starting it empty. -#}
+{%- macro bind(source, target, read_only=false) %}
+      - type: bind
+        source: {{ q(source) }}
+        target: {{ q(target) }}
+        read_only: {{ 'true' if read_only else 'false' }}
+        bind:
+          create_host_path: false
+{%- endmacro %}
+{%- set url = vaultwarden_url | regex_replace('/+$', '') -%}
+{%- set secrets = vaultwarden_container_secrets_dir -%}
+{#- vaultwarden_env first, the settings the role owns over it (main.yml
+    refuses them in vaultwarden_env). -#}
+{%- set env = {} -%}
+{%- for key, value in vaultwarden_env | dictsort -%}
+{%-   set _ = env.update({key: (('true' if value else 'false') if value is boolean else value)}) -%}
+{%- endfor -%}
+{%- set _ = env.update({
+  'DOMAIN': url,
+  'SIGNUPS_ALLOWED': 'true' if vaultwarden_signups_allowed else 'false',
+  'INVITATIONS_ALLOWED': 'true',
+  'INVITATION_ORG_NAME': vaultwarden_invitation_org_name,
+  'PASSWORD_HINTS_ALLOWED': 'false',
+}) -%}
+{#- No ADMIN_TOKEN at all without a hash: the admin page is off. -#}
+{%- if 'admin_token' in vaultwarden_secrets -%}
+{%-   set _ = env.update({'ADMIN_TOKEN_FILE': secrets ~ '/admin_token'}) -%}
+{%- endif -%}
+{#- Vaultwarden refuses a username without a password and the other way
+    round; main.yml requires the password with a username. -#}
+{%- if vaultwarden_smtp_settings.host | string | length > 0 -%}
+{%-   set _ = env.update({
+        'SMTP_HOST': vaultwarden_smtp_settings.host,
+        'SMTP_PORT': vaultwarden_smtp_settings.port,
+        'SMTP_SECURITY': vaultwarden_smtp_settings.security,
+        'SMTP_FROM': vaultwarden_smtp_settings['from'],
+        'SMTP_FROM_NAME': vaultwarden_smtp_settings.from_name,
+      }) -%}
+{%-   if 'smtp_password' in vaultwarden_secrets -%}
+{%-     set _ = env.update({
+          'SMTP_USERNAME': vaultwarden_smtp_settings.username,
+          'SMTP_PASSWORD_FILE': secrets ~ '/smtp_password',
+        }) -%}
+{%-   endif -%}
+{%- endif -%}
+{%- if 'push_installation_key' in vaultwarden_secrets -%}
+{%-   set _ = env.update({
+        'PUSH_ENABLED': 'true',
+        'PUSH_INSTALLATION_ID': vaultwarden_push_installation_id,
+        'PUSH_INSTALLATION_KEY_FILE': secrets ~ '/push_installation_key',
+        'PUSH_RELAY_URI': vaultwarden_push_uris[vaultwarden_push_region].relay,
+        'PUSH_IDENTITY_URI': vaultwarden_push_uris[vaultwarden_push_region].identity,
+      }) -%}
+{%- endif -%}
+{%- set router = vaultwarden_project -%}
+{%- set admin_router = vaultwarden_project ~ '-admin' -%}
+{%- set host_rule = 'Host(`' ~ vaultwarden_hostname ~ '`)' -%}
+# Managed by the noixdev.infra.vaultwarden role; changes are overwritten.
+
+services:
+  vaultwarden:
+    image: {{ q(vaultwarden_image ~ ':' ~ vaultwarden_version) }}
+    environment:
+{% for key, value in env | dictsort %}
+      {{ key }}: {{ q(value) }}
+{% endfor %}
+    volumes:
+{{ bind(vaultwarden_data_dir ~ '/vaultwarden', '/data') }}
+{{ bind(vaultwarden_secrets_dir, secrets, read_only=true) }}
+    # The image's own check (/healthcheck.sh asks /alive, which takes a
+    # database connection), every 5 seconds while it starts instead of
+    # after the first minute.
+    healthcheck:
+      test: [CMD, /healthcheck.sh]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+      start_interval: 5s
+    networks: [default, traefik]
+    # No published port: Traefik reaches Vaultwarden over its network.
+    labels:
+      - traefik.enable=true
+      - {{ q('traefik.docker.network=' ~ vaultwarden_traefik_network) }}
+      # The web vault, the API of the apps and extensions, and their
+      # notifications (websockets on the same port).
+      - {{ q('traefik.http.routers.' ~ router ~ '.rule=' ~ host_rule) }}
+{% if vaultwarden_traefik_entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.entrypoints=' ~ vaultwarden_traefik_entrypoints | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.priority=' ~ vaultwarden_traefik_priority) }}
+{% if vaultwarden_traefik_middlewares | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.middlewares=' ~ vaultwarden_traefik_middlewares | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.service=' ~ vaultwarden_project) }}
+{% if 'admin_token' in vaultwarden_secrets %}
+      # The admin page, only while it is on, with middlewares of its own.
+      - {{ q('traefik.http.routers.' ~ admin_router ~ '.rule=' ~ host_rule ~ ' && PathPrefix(`/admin`)') }}
+{%   if vaultwarden_traefik_admin_entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ admin_router ~ '.entrypoints=' ~ vaultwarden_traefik_admin_entrypoints | join(',')) }}
+{%   endif %}
+      - {{ q('traefik.http.routers.' ~ admin_router ~ '.priority=' ~ (vaultwarden_traefik_priority | int + 1)) }}
+{%   if vaultwarden_traefik_admin_middlewares | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ admin_router ~ '.middlewares=' ~ vaultwarden_traefik_admin_middlewares | join(',')) }}
+{%   endif %}
+      - {{ q('traefik.http.routers.' ~ admin_router ~ '.service=' ~ vaultwarden_project) }}
+{% endif %}
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - {{ q('traefik.http.services.' ~ vaultwarden_project ~ '.loadbalancer.server.port=80') }}
+    restart: unless-stopped
+
+networks:
+  traefik:
+    name: {{ q(vaultwarden_traefik_network) }}
+    external: true

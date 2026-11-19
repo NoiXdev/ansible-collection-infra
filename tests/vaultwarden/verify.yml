@@ -1,0 +1,155 @@
+---
+# Checks an installation on the test host as run.sh's settings make it
+# (install-vars.json): the containers of the compose project (only
+# vaultwarden, running and healthy, with the pinned image and no published
+# port), its environment (the settings the role fixes, SMTP with a login, push
+# of the eu region, vaultwarden_env; the secrets only as *_FILE, never as
+# values), its mounts (the data subdirectory, the secrets directory
+# read-only) and the files: the compose file 0644, the secrets directory 0700
+# with only the files in use, each 0600, and the database target sqlite.
+# Extra variables: verify_admin (the admin page is on), verify_org_name,
+# verify_push_id.
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars:
+    verify_dir: /opt/vaultwarden
+    verify_defaults: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../roles/vaultwarden/defaults/main.yml') | from_yaml }}"
+    verify_image: "{{ verify_defaults.vaultwarden_image }}:{{ verify_defaults.vaultwarden_version }}"
+    verify_container: "{{ (verify_inspect.stdout | from_json)[0] }}"
+    verify_env: "{{ verify_container.Config.Env }}"
+    verify_secret_files: "{{ (['admin_token'] if verify_admin | bool else []) + ['push_installation_key', 'smtp_password'] }}"
+    verify_expected_env:
+      - DOMAIN=https://vaultwarden.test
+      - SIGNUPS_ALLOWED=false
+      - INVITATIONS_ALLOWED=true
+      - INVITATION_ORG_NAME={{ verify_org_name }}
+      - PASSWORD_HINTS_ALLOWED=false
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
+      - SMTP_SECURITY=off
+      - SMTP_USERNAME=noix
+      - SMTP_PASSWORD_FILE=/run/secrets-vw/smtp_password
+      - SMTP_FROM=vault@example.test
+      - SMTP_FROM_NAME=Noix Vault
+      - PUSH_ENABLED=true
+      - PUSH_INSTALLATION_ID={{ verify_push_id }}
+      - PUSH_INSTALLATION_KEY_FILE=/run/secrets-vw/push_installation_key
+      - PUSH_RELAY_URI=https://api.bitwarden.eu
+      - PUSH_IDENTITY_URI=https://identity.bitwarden.eu
+      - TZ=Etc/UTC
+      # The $ verbatim: compose did not interpolate it.
+      - NOIX_TEST=a$b
+      - SENDS_ALLOWED=true
+  tasks:
+    - name: Find the containers of the compose project
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, label=com.docker.compose.project=vaultwarden]
+      register: verify_ids
+      changed_when: false
+
+    - name: Check that the project has one container
+      ansible.builtin.assert:
+        that: verify_ids.stdout_lines | length == 1
+        fail_msg: "The project has {{ verify_ids.stdout_lines | length }} containers, not one (vaultwarden)."
+
+    - name: Inspect the container
+      ansible.builtin.command:
+        argv: [docker, inspect, "{{ verify_ids.stdout_lines[0] }}"]
+      register: verify_inspect
+      changed_when: false
+
+    - name: Check the container
+      ansible.builtin.assert:
+        that:
+          - verify_container.Config.Labels['com.docker.compose.service'] == 'vaultwarden'
+          - verify_container.Config.Image == verify_image
+          - verify_container.State.Running
+          - verify_container.State.Health.Status == 'healthy'
+          - verify_container.HostConfig.RestartPolicy.Name == 'unless-stopped'
+        fail_msg: >-
+          The container is not the vaultwarden service of {{ verify_image }},
+          running, healthy and restarted unless stopped:
+          {{ verify_container.Config.Image }}, {{ verify_container.State.Status }},
+          {{ verify_container.State.Health.Status | default('no health') }}.
+
+    - name: Check that no port is published
+      ansible.builtin.assert:
+        that:
+          - verify_container.HostConfig.PortBindings | default({}, true) | length == 0
+          - verify_container.NetworkSettings.Ports | default({}, true) | dict2items | selectattr('value') | list | length == 0
+        fail_msg: "The container publishes a port: {{ verify_container.NetworkSettings.Ports }}"
+
+    - name: Check the environment
+      ansible.builtin.assert:
+        that:
+          - verify_expected_env | difference(verify_env) | length == 0
+          - ('ADMIN_TOKEN_FILE=/run/secrets-vw/admin_token' in verify_env) == (verify_admin | bool)
+          # No secret as a value, and the client address left to Vaultwarden's
+          # default header (X-Real-IP, which Traefik sets).
+          - verify_env | select('match', '^(ADMIN_TOKEN|SMTP_PASSWORD|PUSH_INSTALLATION_KEY|DATABASE_URL|IP_HEADER)=') | list | length == 0
+        fail_msg: >-
+          The environment lacks {{ verify_expected_env | difference(verify_env) }},
+          or ADMIN_TOKEN_FILE does not follow the admin page
+          (verify_admin {{ verify_admin }}), or it holds a secret or IP_HEADER
+          (the names: {{ verify_env | map('regex_replace', '=.*$', '') | sort }}).
+
+    - name: Check the mounts
+      ansible.builtin.assert:
+        that:
+          - verify_data.Type == 'bind'
+          - verify_data.Source == verify_dir ~ '/data/vaultwarden'
+          - verify_data.RW
+          - verify_secrets.Type == 'bind'
+          - verify_secrets.Source == verify_dir ~ '/secrets'
+          - not verify_secrets.RW
+        fail_msg: "The mounts are not the data subdirectory at /data and the secrets read-only: {{ verify_container.Mounts }}"
+      vars:
+        verify_data: "{{ verify_container.Mounts | selectattr('Destination', 'eq', '/data') | first | default({}) }}"
+        verify_secrets: "{{ verify_container.Mounts | selectattr('Destination', 'eq', '/run/secrets-vw') | first | default({}) }}"
+
+    - name: Stat the compose file and the secrets directory
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: ["{{ verify_dir }}/compose.yaml", "{{ verify_dir }}/secrets"]
+      register: verify_stat
+
+    - name: Check the modes of the compose file and the secrets directory
+      ansible.builtin.assert:
+        that:
+          - verify_stat.results[0].stat.mode == '0644'
+          - verify_stat.results[1].stat.isdir
+          - verify_stat.results[1].stat.mode == '0700'
+          - verify_stat.results[1].stat.pw_name == 'root'
+        fail_msg: >-
+          The compose file is not 0644 ({{ verify_stat.results[0].stat.mode }}) or
+          the secrets directory not root's 0700 ({{ verify_stat.results[1].stat.mode | default('missing') }}).
+
+    - name: Find the secrets files
+      ansible.builtin.find:
+        paths: "{{ verify_dir }}/secrets"
+        file_type: any
+        hidden: true
+      register: verify_secrets_found
+
+    - name: Check the secrets files
+      ansible.builtin.assert:
+        that:
+          - verify_secrets_found.files | map(attribute='path') | map('basename') | sort == verify_secret_files | sort
+          - verify_secrets_found.files | rejectattr('mode', 'eq', '0600') | list | length == 0
+          - verify_secrets_found.files | rejectattr('pw_name', 'eq', 'root') | list | length == 0
+        fail_msg: >-
+          The secrets files are not {{ verify_secret_files | sort }}, each root's
+          0600: {{ verify_secrets_found.files | map(attribute='path') | map('basename') | sort }}
+          ({{ verify_secrets_found.files | map(attribute='mode') | list }}).
+
+    - name: Read the database target
+      ansible.builtin.slurp:
+        src: "{{ verify_dir }}/database-target"
+      register: verify_target
+
+    - name: Check the database target
+      ansible.builtin.assert:
+        that: "(verify_target.content | b64decode | from_yaml) == {'database': 'sqlite'}"
+        fail_msg: "The database target is not sqlite: {{ verify_target.content | b64decode }}"

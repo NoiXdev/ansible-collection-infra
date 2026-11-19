@@ -60,3 +60,46 @@ vaultwarden_admin_hash_pattern: '^\$argon2id\$v=19\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-
 vaultwarden_smtp_settings: >-
   {{ {'host': '', 'port': 587, 'security': 'starttls', 'username': '', 'password': '', 'from': '', 'from_name': 'Vaultwarden'}
      | combine(vaultwarden_smtp if vaultwarden_smtp is mapping else {}) }}
+
+# The services of the compose project.
+vaultwarden_services: [vaultwarden]
+# Where the container reads the secrets files (vaultwarden_secrets_dir, bound
+# read-only).
+vaultwarden_container_secrets_dir: /run/secrets-vw
+# Written by the first save on the admin page; it overrides every setting the
+# role writes, so state.yml refuses it.
+vaultwarden_config_json: "{{ vaultwarden_data_dir }}/vaultwarden/config.json"
+# Bitwarden's relay and identity server of each vaultwarden_push_region.
+vaultwarden_push_uris:
+  us: {relay: "https://push.bitwarden.com", identity: "https://identity.bitwarden.com"}
+  eu: {relay: "https://api.bitwarden.eu", identity: "https://identity.bitwarden.eu"}
+# What install records in vaultwarden_target_file; no credentials.
+vaultwarden_database_target:
+  database: "{{ vaultwarden_database }}"
+
+# The compose file as the role writes it; compared with the one on disk. It
+# needs vaultwarden_secrets, which state.yml sets.
+vaultwarden_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
+
+# The task that failed and its error: for a command the last line of stderr
+# that names an error (else its last line), for anything else the first line
+# of the message.
+vaultwarden_failure: >-
+  {%- set stderr = (ansible_failed_result.stderr | default('') | trim).splitlines() -%}
+  {%- set errors = stderr | select('search', 'Error:') | list -%}
+  {{ ansible_failed_task.name }}:
+  {{ (errors or stderr or ['']) | last | trim
+     if ansible_failed_result.msg | default('') is search('non-zero return code')
+     else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
+
+# After a failed install: nothing in it should be worth keeping yet, so what
+# it made is removed and the next run installs afresh.
+vaultwarden_install_hint: >-
+  It left a partial installation, which the role does not take for a
+  finished one. To install again, first check that nothing in it is worth
+  keeping (accounts and items in Vaultwarden), then run docker compose down
+  in {{ vaultwarden_dir }} (if {{ vaultwarden_compose_file }} exists), remove
+  {{ vaultwarden_compose_file }}, {{ vaultwarden_secrets_dir }},
+  {{ vaultwarden_target_file }}, {{ vaultwarden_install_marker }} and the
+  subdirectories {{ vaultwarden_data_subdirs | join(' and ') }} of
+  {{ vaultwarden_data_dir }}, then run the role again.

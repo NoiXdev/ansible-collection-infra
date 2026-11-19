@@ -1,0 +1,36 @@
+---
+# Same installation, other settings: the secrets and the compose file are
+# written, Vaultwarden brought to them, and checked. Vaultwarden reads its
+# settings (the secrets files among them) only on start, so a changed secret
+# alone, which leaves the compose file as it is, restarts it too.
+
+- name: Write the secrets
+  ansible.builtin.include_tasks: secrets.yml
+
+- name: Write the compose file
+  ansible.builtin.copy:
+    dest: "{{ vaultwarden_compose_file }}"
+    content: "{{ vaultwarden_compose }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start Vaultwarden with the new configuration
+  community.docker.docker_compose_v2:
+    project_src: "{{ vaultwarden_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+    recreate: "{{ 'always' if vaultwarden_secrets_changed | bool else 'auto' }}"
+
+- name: Check that Vaultwarden is healthy
+  ansible.builtin.include_tasks: health.yml
+
+- name: Fail when Vaultwarden is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      Vaultwarden in {{ vaultwarden_dir }} is not healthy within
+      {{ vaultwarden_health_timeout }} seconds after the reconfigure
+      ({{ vaultwarden_health_lines | join('; ') }}); see docker compose logs
+      in {{ vaultwarden_dir }}.
+  when: not vaultwarden_healthy

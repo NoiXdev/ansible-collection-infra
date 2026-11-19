@@ -1,0 +1,115 @@
+---
+# A fresh install: the directories (the data subdirectory only here), the
+# secrets, the compose file and the database target, then Vaultwarden until
+# it is healthy; it creates its database and keys on its first start. The
+# marker vaultwarden_install_marker lives from before the first data
+# directory until Vaultwarden is healthy, so a run after a failed install
+# refuses (state.yml) instead of taking the half-made installation for a
+# finished one. A failed install stops Vaultwarden and deletes nothing.
+
+- name: Create the Vaultwarden directory
+  ansible.builtin.file:
+    path: "{{ vaultwarden_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the marker of an install in progress
+  ansible.builtin.copy:
+    dest: "{{ vaultwarden_install_marker }}"
+    content: |
+      version: {{ vaultwarden_version }}
+      time: {{ now(utc=true).isoformat() }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install Vaultwarden
+  block:
+    - name: Create the data directory
+      ansible.builtin.file:
+        path: "{{ vaultwarden_data_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # The container runs as root; the subdirectory holds the database, the
+    # attachments and the key that signs the logins.
+    - name: Create the data subdirectory
+      ansible.builtin.file:
+        path: "{{ vaultwarden_data_dir }}/vaultwarden"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Write the secrets
+      ansible.builtin.include_tasks: secrets.yml
+
+    - name: Write the compose file
+      ansible.builtin.copy:
+        dest: "{{ vaultwarden_compose_file }}"
+        content: "{{ vaultwarden_compose }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # A later run with settings that name another database refuses: there
+    # Vaultwarden would make an empty vault.
+    - name: Write the database target
+      ansible.builtin.copy:
+        dest: "{{ vaultwarden_target_file }}"
+        content: |
+          # Written by the noixdev.infra.vaultwarden role on install: the
+          # database this installation keeps its vault in. Remove it only when
+          # the database really moved (a dump restored elsewhere).
+          {{ vaultwarden_database_target | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Start Vaultwarden
+      community.docker.docker_compose_v2:
+        project_src: "{{ vaultwarden_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that Vaultwarden is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Vaultwarden is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Vaultwarden is not healthy within {{ vaultwarden_health_timeout }}
+          seconds ({{ vaultwarden_health_lines | join('; ') }}); see docker
+          compose logs in {{ vaultwarden_dir }}
+      when: not vaultwarden_healthy
+
+    - name: Remove the marker of an install in progress
+      ansible.builtin.file:
+        path: "{{ vaultwarden_install_marker }}"
+        state: absent
+
+  rescue:
+    - name: Note why the install failed
+      ansible.builtin.set_fact:
+        vaultwarden_install_failure: "{{ vaultwarden_failure | trim }}"
+
+    # Stopped, not removed: what is left is for the hint's removal, and a
+    # running Vaultwarden would take accounts into the installation it says
+    # to remove.
+    - name: Stop Vaultwarden after the failed install
+      community.docker.docker_compose_v2:
+        project_src: "{{ vaultwarden_dir }}"
+        state: stopped
+      failed_when: false
+
+    - name: Fail with what to remove
+      ansible.builtin.fail:
+        msg: >-
+          The install of Vaultwarden {{ vaultwarden_version }} in
+          {{ vaultwarden_dir }} failed ({{ vaultwarden_install_failure }}).
+          {{ vaultwarden_install_hint }}

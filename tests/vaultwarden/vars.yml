@@ -1,13 +1,24 @@
 ---
 # Test-only values; nothing here is a secret. run.sh generates the passwords
-# and keys of each run (role-vars.json).
+# and keys of each run (role-vars.json, install-vars.json).
 traefik_dir: /opt/traefik
-# One plain-HTTP entrypoint: no TLS, so no ACME e-mail.
+# Plain HTTP and HTTPS on the test host's loopback, HTTPS the routers'
+# default, as on a server: the official Bitwarden clients refuse a server that
+# is not HTTPS. The ACME server does not exist, so Traefik serves its own
+# self-signed certificate, which the tests accept (curl -k, the CLI with
+# NODE_TLS_REJECT_UNAUTHORIZED=0).
 traefik_entrypoints:
   - name: web
     port: 80
     bind: [127.0.0.1]
+  - name: websecure
+    port: 443
+    bind: [127.0.0.1]
+    tls: true
     as_default: true
+traefik_acme_email: acme@example.test
+traefik_acme_challenge: http
+traefik_acme_ca_server: https://127.0.0.1:9/directory
 # A middleware that denies every client (192.0.2.1 is a documentation
 # address), for the admin router scenarios.
 traefik_dynamic_files:
@@ -19,4 +30,3 @@ traefik_dynamic_files:
             sourceRange: [192.0.2.1/32]
 
 vaultwarden_hostname: vaultwarden.test
-vaultwarden_url: http://vaultwarden.test
