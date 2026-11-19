@@ -24,10 +24,10 @@
   ansible.builtin.set_fact:
     backrest_age_failed: >-
       {{ (what ~ ' is older than ' ~ backrest_max_age_hours ~ ' hours (' ~ (age_hours | round(1)) ~ ' hours); check the backups, see journalctl -u backrest.')
-         if mark is defined and age_hours | float > backrest_max_age_hours | float else '' }}
+         if mark is not none and age_hours | float > backrest_max_age_hours | float else '' }}
   vars:
     last: "{{ backrest_age_stats.results[0].stat }}"
     first: "{{ backrest_age_stats.results[1].stat }}"
-    mark: "{{ last.mtime if last.exists else (first.mtime if first.exists) }}"
+    mark: "{{ last.mtime if last.exists else (first.mtime if first.exists else none) }}"
     what: "{{ 'The last good backup' if last.exists else 'The first run of the role (there is no good backup yet)' }}"
     age_hours: "{{ ((backrest_clock.stdout | int) - (mark | int)) / 3600 }}"

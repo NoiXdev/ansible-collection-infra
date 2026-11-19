@@ -35,15 +35,52 @@
       other report types such as webhook.
     quiet: true
 
+# The URL goes into a curl configuration between quotes: any whitespace is
+# refused, also a trailing line break (a vault block scalar ends in one),
+# because a line break could add options to the file, and so are quotes and
+# backslashes. (No Jinja escapes in this block scalar: the regex is as written.)
 - name: Check the notify URL
   ansible.builtin.set_fact:
-    backrest_notify_url_valid: "{{ backrest_notify_url == '' or backrest_notify_url is match('^https?://[^\\s]+$') }}"
+    backrest_notify_url_valid: >-
+      {{ backrest_notify_url == ''
+         or (backrest_notify_url is match('https?://') and not (backrest_notify_url is search('[\s"\\]'))) }}
   no_log: true
 
 - name: Require a valid notify URL
   ansible.builtin.fail:
-    msg: backrest_notify_url must be empty or an http(s) URL without spaces or line breaks.
+    msg: backrest_notify_url must be empty or an http(s) URL without whitespace, quotes or backslashes.
   when: not backrest_notify_url_valid | bool
+
+- name: Check the schedules
+  ansible.builtin.assert:
+    that: item.value.split() | length == 5
+    fail_msg: "{{ item.key }} must be a cron expression with five fields, for example \"0 2 * * *\"."
+    quiet: true
+  loop:
+    - {key: backrest_schedule, value: "{{ backrest_schedule }}"}
+    - {key: backrest_prune_schedule, value: "{{ backrest_prune_schedule }}"}
+    - {key: backrest_check_schedule, value: "{{ backrest_check_schedule }}"}
+  loop_control:
+    label: "{{ item.key }}"
+
+# Backrest replaces ${NAME} in the repository's URI and environment with its own
+# environment variable before restic sees the value (the repository password
+# reaches restic as written), so such a value would be changed silently.
+- name: Check the repository URI and environment
+  ansible.builtin.set_fact:
+    backrest_repo_values_valid: >-
+      {{ not (backrest_repo_uri is search(pattern))
+         and backrest_repo_env.values() | map('string') | select('search', pattern) | list | length == 0 }}
+  vars:
+    pattern: '\$\{[^}]*\}'
+  no_log: true
+
+- name: Require a repository URI and environment that reach restic as written
+  ansible.builtin.fail:
+    msg: >-
+      backrest_repo_uri or a value of backrest_repo_env holds ${...}, which Backrest replaces with
+      one of its own environment variables before restic sees the value. Use a value without ${...}.
+  when: not backrest_repo_values_valid | bool
 
 - name: Require logins
   ansible.builtin.fail:

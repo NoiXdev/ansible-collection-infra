@@ -16,6 +16,11 @@
     checksum: "sha256:{{ backrest_checksum }}"
     mode: "0600"
     timeout: 60
+  register: backrest_download
+  # One transient failure of GitHub must not turn the nightly run red.
+  until: backrest_download is succeeded
+  retries: 3
+  delay: 10
   changed_when: false
 
 - name: Unpack the release
