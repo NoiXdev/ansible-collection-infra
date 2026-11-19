@@ -1,10 +1,20 @@
 ---
 # Every change to the host and the running service happens here, from what
-# install.yml and config.yml prepared. A restart kills a running restic, so
+# install.yml and config.yml prepared. A restart kills a running backup (restic,
+# or the hooks around it: backrest-prepare while it dumps, backrest-finish), so
 # the wait for a running backup comes before the first write; when it gives up
-# the host is unchanged.
+# the host is unchanged. The brackets keep the pattern from matching the shell
+# that runs pgrep, whose command line holds it.
 - name: Wait for a running backup
-  ansible.builtin.command: pgrep -x restic
+  ansible.builtin.shell: >-
+    pgrep -x restic >/dev/null; restic=$?;
+    pgrep -f -- {{ backrest_hook_pattern | quote }} >/dev/null; hooks=$?;
+    if [ "$restic" = 0 ] || [ "$hooks" = 0 ]; then exit 0; fi;
+    if [ "$restic" = 1 ] && [ "$hooks" = 1 ]; then exit 1; fi;
+    exit 2
+  vars:
+    backrest_hook_pattern: >-
+      {{ [backrest_prepare_script, backrest_finish_script] | map('regex_replace', '^/', '[/]') | join('|') }}
   register: backrest_restic
   changed_when: false
   failed_when: backrest_restic.rc not in [0, 1]
@@ -17,7 +27,7 @@
 - name: Stop while a backup is running
   ansible.builtin.fail:
     msg: >-
-      A backup is running (a restic process) and the role has to change the host. Nothing was changed.
+      A backup is running (restic, backrest-prepare or backrest-finish) and the role has to change the host. Nothing was changed.
       Run it again when the backup is done, or raise backrest_restart_wait (now {{ backrest_restart_wait }} seconds).
   when: backrest_writes_pending | bool and backrest_restic.rc | default(1) != 1
 
@@ -39,6 +49,19 @@
     - "{{ backrest_data_dir }}"
     - "{{ backrest_cache_dir }}"
     - "{{ backrest_dump_dir }}"
+
+# From here until Backrest has restarted, a run that dies would leave Backrest
+# on what it read at its last start, while the files already match; the marker
+# makes the next run restart it.
+- name: Mark the restart as pending
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ backrest_restart_marker }}"
+    owner: root
+    group: root
+    mode: "0600"
+    force: false
+  when: backrest_restart_needed | bool
 
 # copy replaces the file atomically, so a running Backrest keeps its binary.
 - name: Install the binary
@@ -153,13 +176,13 @@
 - name: Reload systemd
   ansible.builtin.systemd_service:
     daemon_reload: true
-  when: backrest_unit_changed | bool
+  when: backrest_unit_changed | bool or backrest_exists.restart_marker | bool
 
 - name: Enable the service and start it, or restart it after a change
   ansible.builtin.systemd_service:
     name: backrest
     enabled: true
-    state: "{{ 'restarted' if (backrest_binary_changed | bool or backrest_unit_changed | bool or backrest_config_changed | bool) else 'started' }}"
+    state: "{{ 'restarted' if backrest_restart_needed | bool else 'started' }}"
 
 # Backrest sets the repository id after the first init; the next run must find it.
 - name: Wait until Backrest has written the repository id
@@ -171,9 +194,14 @@
   delay: 1
   no_log: true
   ignore_errors: true
-  when: backrest_config_changed | bool and 'guid' not in backrest_desired.repos[0]
+  when: (backrest_config_changed | bool or backrest_exists.restart_marker | bool) and 'guid' not in backrest_desired.repos[0]
 
 - name: Stop when the repository was not initialised
   ansible.builtin.fail:
     msg: Backrest did not initialise the repository; see journalctl -u backrest.
   when: backrest_written is failed
+
+- name: Clear the pending restart
+  ansible.builtin.file:
+    path: "{{ backrest_restart_marker }}"
+    state: absent

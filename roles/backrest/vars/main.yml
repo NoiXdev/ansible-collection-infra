@@ -58,3 +58,8 @@ backrest_notify_file: /etc/backrest/notify.curl
 # Written by the role on its first run; the age check counts from it on a host
 # that has no good backup yet.
 backrest_first_run_file: /var/lib/backrest/first-run
+# Written before the first change that Backrest reads only at its start (the
+# binary, the unit, the environment file, config.json) and removed once
+# Backrest runs with it. A run that dies in between leaves it, and the next run
+# restarts Backrest although the files on disk already match.
+backrest_restart_marker: /var/lib/backrest/restart-pending

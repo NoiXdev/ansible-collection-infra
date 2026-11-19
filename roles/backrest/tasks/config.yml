@@ -32,6 +32,7 @@
     - {key: data_dir, path: "{{ backrest_data_dir }}"}
     - {key: cache_dir, path: "{{ backrest_cache_dir }}"}
     - {key: dump_dir, path: "{{ backrest_dump_dir }}"}
+    - {key: restart_marker, path: "{{ backrest_restart_marker }}"}
   loop_control:
     label: "{{ item.key }}"
   register: backrest_file_stats
@@ -150,11 +151,17 @@
     current_core: "{{ backrest_current | dict2items | rejectattr('key', 'equalto', 'modno') | list | items2dict }}"
   no_log: true
 
-- name: Work out whether a write is pending
+# A marker left by a run that died before its restart counts as a change: the
+# files on disk match, but Backrest still runs with what it read at its last start.
+- name: Work out whether a restart and a write are pending
   ansible.builtin.set_fact:
+    backrest_restart_needed: >-
+      {{ backrest_binary_changed | bool or backrest_unit_changed | bool or backrest_config_changed | bool
+         or backrest_exists.restart_marker | bool }}
     backrest_writes_pending: >-
       {{ backrest_binary_changed | bool or backrest_unit_changed | bool or backrest_config_changed | bool
+         or backrest_exists.restart_marker | bool
          or backrest_scripts_changed | bool or backrest_notify_changed | bool
          or backrest_active_apps_content | hash('sha1') != backrest_active_apps_old_sha1
-         or not (backrest_exists.excludes and backrest_exists.config_dir and backrest_exists.data_dir
+         or not (backrest_exists.excludes and backrest_exists.targets and backrest_exists.config_dir and backrest_exists.data_dir
                  and backrest_exists.cache_dir and backrest_exists.dump_dir) }}
