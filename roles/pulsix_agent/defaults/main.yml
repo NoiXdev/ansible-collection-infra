@@ -18,8 +18,11 @@ pulsix_agent_server_name: ""
 pulsix_agent_name: ""
 
 # Enrollment tokens (pxa1.…) for hosts without identity. Pass them at run
-# time, never store them:
-#   -e '{"pulsix_agent_enroll_tokens": {"web-1.example.test": "pxa1.…"}}'
+# time from a file kept out of version control, never on the command line:
+#   ansible-playbook agents.yml -e @tokens.yml
+# with tokens.yml holding
+#   pulsix_agent_enroll_tokens:
+#     web-1.example.test: pxa1.…
 # The per-host token wins over the shared one.
 pulsix_agent_enroll_token: ""
 pulsix_agent_enroll_tokens: {}

@@ -35,7 +35,9 @@ per run (`<label> <pass|fail|skipped> <seconds>[ <note>...]`). The `harbor` suit
 runs natively, and on another architecture (an arm64 Mac) the Harbor images inside it
 run as `linux/amd64` under emulation, which is slow. Docker Desktop on Apple silicon needs
 Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tests/attest.sh`
-check this first. The `mailcow` suite needs network
+check this first. The `pulsix_agent` suite runs a stub agent and manager, but its
+`release_match` scenario downloads the pinned Pulsix release and needs network access. The
+`mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
 (`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `tandoor` about 2 GB and `n8n` about 3 GB of images, `cloudpanel` runs CloudPanel's real installer.
 `tests/services/run.sh` (nodejs, redis, mariadb, mysql, php, composer, nginx) is part of `tests/all.sh` as the
