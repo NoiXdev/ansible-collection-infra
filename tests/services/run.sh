@@ -804,7 +804,7 @@ php_failed_run_reloads() {
 }
 
 suite_php() {
-  local dir="$here/php" codename version policy prod staging tries rotate name conf stanza key fpr
+  local dir="$here/php" codename version policy prod staging tries rotate name conf stanza key fpr mirror
   local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
   # staging after its upgrade.
   local upgraded=(-e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3)
@@ -942,6 +942,25 @@ print(hashlib.sha256(urllib.request.urlopen(sys.argv[1]).read()).hexdigest())' h
   refused php foreign-sources "/etc/apt/sources.list.d/php.sources already enable" "$dir/converge.yml"
   php_running foreign-sources
   hx php rm /etc/apt/sources.list.d/php.sources
+  # A mirror in php_apt_url that the PPA's old source names already (a v0.6.0
+  # inventory with a mirror of the PPA): the role's source next to it would
+  # stop apt.
+  mirror=https://mirror.example.test/ondrej-php/ubuntu
+  hx php sh -c 'printf "Types: deb\nURIs: %s/\nSuites: %s\nComponents: main\nSigned-By: /etc/apt/keyrings/ondrej-php.asc\n" "$1" "$2" \
+    > /etc/apt/sources.list.d/ondrej-php.sources' sh "$mirror" "$codename"
+  refused php foreign-ppa-mirror "php: /etc/apt/sources.list.d/ondrej-php.sources already enable $mirror; remove them, the role adds its own source (two entries with different keys stop apt for every source); /etc/apt/sources.list.d/ondrej-php.sources is the ondrej/php PPA's source from before the switch, so php_apt_url names the PPA: it must point at packages.sury.org or a mirror of it" \
+    "$dir/converge.yml" -e "php_apt_url=$mirror"
+  php_running foreign-ppa-mirror
+  hx php rm /etc/apt/sources.list.d/ondrej-php.sources
+  # A source of the host's own for a mirror in php_apt_url, in other case
+  # and with a trailing slash.
+  mirror=https://mirror.example.test/sury/php
+  hx php sh -c 'echo "deb [signed-by=/usr/share/keyrings/mirror.gpg] HTTPS://Mirror.Example.TEST/sury/php/ $1 main" > /etc/apt/sources.list.d/mirror.list' sh "$codename"
+  refused php foreign-mirror "php: /etc/apt/sources.list.d/mirror.list already enable $mirror; remove them, the role adds its own source (two entries with different keys stop apt for every source)" \
+    "$dir/converge.yml" -e "php_apt_url=$mirror"
+  ! grep -qF "PPA's source from before the switch" "$out/php-foreign-mirror.log" || fail "php: the refusal of mirror.list calls it the PPA's source"
+  php_running foreign-mirror
+  hx php rm /etc/apt/sources.list.d/mirror.list
   # A commented entry and a disabled stanza do not count.
   hx php sh -c 'echo "# deb https://packages.sury.org/php/ $2 main" > /etc/apt/sources.list.d/php-commented.list \
     && printf "${1}Enabled: no\n" "$2" > /etc/apt/sources.list.d/php-disabled.sources' sh "$stanza" "$codename"

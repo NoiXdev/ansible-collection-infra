@@ -1,49 +1,84 @@
 ---
 # Checks of the host before any change.
 
-# Active entries for packages.sury.org/php other than the role's own: a
-# one-line entry (deb or deb-src, not a comment) or a deb822 paragraph whose
-# URIs name it and that is not disabled (apt reads Enabled as a boolean).
-# First, and without apt: next to the role's source, such an entry with
-# another key stops apt, python3-apt's cache and the apt module included.
-- name: Find other sources of packages.sury.org/php
+# Active entries for packages.sury.org/php, or for php_apt_url (a mirror),
+# other than the role's own: a one-line entry (deb or deb-src, not a comment)
+# or a deb822 paragraph whose URIs name it and that is not disabled (apt reads
+# Enabled as a boolean). A URI is compared without its scheme and trailing
+# slashes, in lower case. First, and without apt: next to the role's source,
+# such an entry with another key stops apt, python3-apt's cache and the apt
+# module included. That holds for the PPA's own ondrej-php.sources too, when
+# php_apt_url names the PPA's mirror. Each file is printed once, after S (it
+# names packages.sury.org/php) or U (php_apt_url only).
+- name: Find other sources of packages.sury.org/php and php_apt_url
   ansible.builtin.shell:
     cmd: |
+      uris='
+        function scan(t,   n, i, w, a) {
+          n = split(tolower(t), a, /[ \t\r]+/)
+          for (i = 1; i <= n; i++) {
+            w = a[i]
+            if (!sub(/^[a-z][a-z0-9+.-]*:\/\//, "", w)) continue
+            sub(/\/+$/, "", w)
+            if (w == ENVIRON["PHP_SURY"]) ps = 1
+            else if (ENVIRON["PHP_URL"] != "" && w == ENVIRON["PHP_URL"]) pu = 1
+          }
+        }
+        function keep() { if (!off) { s = s || ps; u = u || pu }; ps = pu = off = field = 0 }
+        function report() { keep(); if (s) print "S"; else if (u) print "U" }'
       for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
         [ -f "$f" ] || continue
-        if awk '{ sub(/#.*/, ""); l = tolower($0) " " }
-            $1 ~ /^deb(-src)?$/ && l ~ /:\/\/packages\.sury\.org\/php\/?[ \t\r]/ { found = 1; exit }
-            END { exit !found }' "$f"; then
-          echo "$f"
-        fi
+        kind="$(awk "$uris"'
+            { sub(/#.*/, "") }
+            $1 ~ /^deb(-src)?$/ { scan($0) }
+            END { report() }' "$f")"
+        [ -z "$kind" ] || echo "$kind $f"
       done
       for f in /etc/apt/sources.list.d/*.sources; do
         [ -f "$f" ] && [ "$f" != /etc/apt/sources.list.d/sury-php.sources ] || continue
-        if awk '
-            function paragraph() { if (named && !off) found = 1; named = off = field = 0 }
+        kind="$(awk "$uris"'
             /^#/ { next }
-            /^[ \t\r]*$/ { paragraph(); next }
-            { l = tolower($0) " " }
-            l ~ /^[ \t]/ { if (field && l ~ /:\/\/packages\.sury\.org\/php\/?[ \t\r]/) named = 1; next }
-            { field = (l ~ /^uris:/); if (field && l ~ /:\/\/packages\.sury\.org\/php\/?[ \t\r]/) named = 1 }
+            /^[ \t\r]*$/ { keep(); next }
+            /^[ \t]/ { if (field) scan($0); next }
+            { l = tolower($0); field = (l ~ /^uris:/); if (field) { sub(/^uris:/, "", l); scan(l) } }
             l ~ /^enabled:/ { v = l; sub(/^enabled:[ \t]*/, "", v); sub(/[ \t\r]*$/, "", v)
               if (v != "" && index(" no false off without disable 0 ", " " v " ")) off = 1 }
-            END { paragraph(); exit !found }' "$f"; then
-          echo "$f"
-        fi
+            END { report() }' "$f")"
+        [ -z "$kind" ] || echo "$kind $f"
       done
+  environment:
+    PHP_SURY: packages.sury.org/php
+    PHP_URL: "{{ php_apt_url | string | lower | regex_replace('^[a-z][a-z0-9+.-]*://', '') | regex_replace('/+$', '') }}"
   register: php_foreign_sources
   changed_when: false
   check_mode: false
 
 - name: Check that no other source enables packages.sury.org/php
   ansible.builtin.assert:
-    that: php_foreign_sources.stdout_lines | length == 0
+    that: php_foreign_sury | length == 0
     fail_msg: >-
-      php: {{ php_foreign_sources.stdout_lines | join(', ') }} already enable packages.sury.org/php;
+      php: {{ php_foreign_sury | join(', ') }} already enable packages.sury.org/php;
       remove them, the role adds its own source (two entries with different keys stop apt for every
       source)
     quiet: true
+  vars:
+    php_foreign_sury: "{{ php_foreign_sources.stdout_lines | select('match', '^S ') | map('regex_replace', '^S ', '') | list }}"
+
+# Only a php_apt_url other than packages.sury.org/php gets here with a file.
+- name: Check that no other source enables php_apt_url
+  ansible.builtin.assert:
+    that: php_foreign_url | length == 0
+    fail_msg: >-
+      php: {{ php_foreign_url | join(', ') }} already enable {{ php_apt_url }}; remove them, the role
+      adds its own source (two entries with different keys stop apt for every source){{ php_ppa_note }}
+    quiet: true
+  vars:
+    php_foreign_url: "{{ php_foreign_sources.stdout_lines | select('match', '^U ') | map('regex_replace', '^U ', '') | list }}"
+    php_ppa_source: /etc/apt/sources.list.d/ondrej-php.sources
+    php_ppa_note: >-
+      {{ ('; ' ~ php_ppa_source ~ " is the ondrej/php PPA's source from before the switch, so php_apt_url"
+          ~ ' names the PPA: it must point at packages.sury.org or a mirror of it')
+         if php_ppa_source in php_foreign_url else '' }}
 
 # python3-apt reads the origins; the apt module needs it anyway, so on a
 # host the collection manages it is there.
