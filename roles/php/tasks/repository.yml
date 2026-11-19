@@ -73,9 +73,13 @@
       changed_when: false
       check_mode: false
 
+    # Exactly one key, whose primary fingerprint (the fpr record right after
+    # its pub record) is the pinned one: apt would trust every key in the file.
     - name: Check the key's fingerprint
       ansible.builtin.assert:
-        that: php_apt_key.stdout is search('^fpr:+' ~ php_apt_key_fingerprint | upper ~ ':', multiline=True)
+        that:
+          - php_apt_key.stdout_lines | select('match', '^pub:') | list | length == 1
+          - php_apt_key.stdout is search('^pub:[^\n]*\nfpr:+' ~ php_apt_key_fingerprint | upper ~ ':', multiline=True)
         fail_msg: >-
           php: {{ php_apt_key_url }} does not carry the key {{ php_apt_key_fingerprint }}; the key in
           place stays

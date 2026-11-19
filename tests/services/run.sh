@@ -927,6 +927,19 @@ print(hashlib.sha256(urllib.request.urlopen(sys.argv[1]).read()).hexdigest())' h
     "$dir/converge.yml" -e php_apt_key_url=file:///root/expired.gpg -e "php_apt_key_fingerprint=$fpr"
   [ "$(hx php sha256sum /etc/apt/keyrings/sury-php.gpg | cut -d ' ' -f 1)" = "$key" ] || fail "php: the expired key replaced the one in place"
   hx php rm -rf /root/expired /root/expired.gpg
+  # The pinned key (the one in place is packages.sury.org's, checked above)
+  # and a second one in the same file: apt would trust both.
+  hx php sh -c 'rm -rf /root/other && mkdir -m 700 /root/other \
+    && gpg --batch --homedir /root/other --passphrase "" --quick-gen-key "Other <other@example.test>" rsa2048 sign 1y \
+    && gpg --batch --homedir /root/other --export > /root/other.gpg \
+    && cat /etc/apt/keyrings/sury-php.gpg /root/other.gpg > /root/two-keys.gpg' >/dev/null 2>&1 \
+    || fail "php: the two-key file could not be made"
+  [ "$(hx php gpg --batch --show-keys --with-colons /root/two-keys.gpg | grep -c '^pub:')" = 2 ] \
+    || fail "php: the two-key file does not hold two keys"
+  refused php two-keys "php: file:///root/two-keys.gpg does not carry the key 15058500A0235D97F5D10063B188E2B695BD4743; the key in place stays" \
+    "$dir/converge.yml" -e php_apt_key_url=file:///root/two-keys.gpg
+  [ "$(hx php sha256sum /etc/apt/keyrings/sury-php.gpg | cut -d ' ' -f 1)" = "$key" ] || fail "php: the two-key file replaced the key in place"
+  hx php rm -rf /root/other /root/other.gpg /root/two-keys.gpg
   php_running key-refusals
 
   echo "== php: another source of packages.sury.org/php is refused before any change"
