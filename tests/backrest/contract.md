@@ -12,6 +12,7 @@ bcrypt_command: printf %s "$BACKREST_PASSWORD" | htpasswd -inBC 10 "" | tr -d ":
 guid_written_back: yes
 restart_rewrites_config: no
 exclude_file_flag: yes
+files_from_flag: yes
 start_hook_fatal: yes
 finish_marks_failed: no
 report_count: start_hook=1 finish_hook=0 restic_error=1
@@ -28,6 +29,9 @@ backup_rpc_blocks: yes (a 4 second start hook; answers 200 when the backup succe
 start_hook: status STATUS_ERROR, new snapshots 0, RPC 500
 finish_hook: status STATUS_ERROR, new snapshots 1, RPC 500, CONDITION_ANY_ERROR reports 0
 restic_error: status STATUS_ERROR, RPC 500
+restic_warning: status STATUS_WARNING, new snapshots 1, RPC 200, CONDITION_SNAPSHOT_SUCCESS hook ran no, reports 1
+missing_path: status STATUS_ERROR, new snapshots 0, RPC 500, CONDITION_SNAPSHOT_SUCCESS hook ran no, reports 1
+env_expansion: ${NAME} in a repository env value replaced by Backrest yes
 report_healthchecks: 1 to /report/fail
 report_webhook: 0 (backup status STATUS_ERROR)
 ```

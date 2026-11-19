@@ -58,7 +58,9 @@ ui_user='admin'
 ui_password="$(openssl rand -hex 16)"
 repo_password="$(openssl rand -hex 16)"
 s3_access_key="$(openssl rand -hex 10)"
-s3_secret_key="$(openssl rand -hex 20)"
+# The S3 secret holds $, a quote, a backslash and spaces (at most 40 characters
+# for MinIO), so that the tests prove it reaches restic as written.
+s3_secret_key="$(openssl rand -hex 10)"' $HOME $x "q\ z'
 db_password="$(openssl rand -hex 16)"
 
 # The command the owner runs for backrest_users: it reads the password from the
@@ -138,6 +140,32 @@ restic_stand_in() {
   printf 'python3 -c %s' "'open(\"/proc/self/comm\", \"w\").write(\"restic\"); import time; time.sleep($1)'"
 }
 
+# hook_stand_in <script> <seconds>: a command line for h_bg that runs a process
+# whose command line holds the path of the script, as Backrest's hook shell does.
+hook_stand_in() {
+  printf 'python3 -c %s %s' "'import time; time.sleep($2)'" "$1"
+}
+
+# plain_restic_snapshots <uri> <vars file>: how many snapshots restic lists in
+# the test host with the password of the vars file and the S3 keys given
+# directly, not through Backrest. The values pass on standard input.
+plain_restic_snapshots() {
+  env "URI=$1" "S3_ACCESS_KEY=$s3_access_key" "S3_SECRET_KEY=$s3_secret_key" python3 -c '
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    password = json.load(f)["backrest_repo_password"]
+e = os.environ
+print(json.dumps({"uri": e["URI"], "password": password, "access": e["S3_ACCESS_KEY"], "secret": e["S3_SECRET_KEY"]}))' "$2" \
+    | hi env "RESTIC=$data_dir/restic" python3 -c '
+import json, os, subprocess, sys
+e = json.load(sys.stdin)
+env = {"PATH": os.environ["PATH"], "RESTIC_PASSWORD": e["password"],
+       "AWS_ACCESS_KEY_ID": e["access"], "AWS_SECRET_ACCESS_KEY": e["secret"]}
+out = subprocess.run([os.environ["RESTIC"], "--no-cache", "--no-lock", "-r", e["uri"], "snapshots", "--json"],
+                     env=env, check=True, stdout=subprocess.PIPE).stdout
+print(len(json.loads(out)))'
+}
+
 # cfg <jq filter>: a value of config.json (null prints as "null").
 cfg() { h cat "$config" | jq -r "$1"; }
 # cfg_with <jq filter>: config.json with the filter applied, as JSON.
@@ -163,16 +191,31 @@ api() {
   case "$status" in 2??) return 0 ;; *) return 1 ;; esac
 }
 api_status() { cat "$out/api.status"; }
+# api_read <Rpc> [json]: api for a call that only reads, tried again for up to
+# 10 seconds: right after a backup Backrest's retention run can hold the
+# repository lock, and a listing then fails for a moment.
+api_read() {
+  local _
+  for _ in $(seq 1 10); do
+    if api "$@" >"$out/api-read.answer"; then
+      cat "$out/api-read.answer"
+      return 0
+    fi
+    sleep 1
+  done
+  cat "$out/api-read.answer"
+  return 1
+}
 
 # The status of the newest backup operation.
 last_status() {
-  api GetOperations '{"selector":{},"lastN":"200"}' | python3 -c '
+  api_read GetOperations '{"selector":{},"lastN":"200"}' | python3 -c '
 import json, sys
 ops = [o for o in json.load(sys.stdin).get("operations", []) if "operationBackup" in o]
 print(ops[-1].get("status", "") if ops else "none")'
 }
 snapshot_ids() {
-  api ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
+  api_read ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
 import json, sys
 for s in json.load(sys.stdin).get("snapshots", []):
     print(s["id"])'
@@ -181,7 +224,7 @@ snapshot_count() { snapshot_ids | wc -l | tr -d ' '; }
 # The id of the newest snapshot. Retention keeps one snapshot per day, so the
 # number of snapshots is no sign of a new one.
 newest_snapshot() {
-  api ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
+  api_read ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
 import json, sys
 print(max(json.load(sys.stdin)["snapshots"], key=lambda s: int(s.get("unixTimeMs", 0)))["id"])'
 }
@@ -192,7 +235,7 @@ snapshot_entries() {
   body="$(python3 -c '
 import json, sys
 print(json.dumps({"repoId": sys.argv[1], "snapshotId": sys.argv[2], "path": sys.argv[3]}))' "$repo_id" "$(newest_snapshot)" "$1")"
-  api ListSnapshotFiles "$body" | python3 -c '
+  api_read ListSnapshotFiles "$body" | python3 -c '
 import json, sys
 for entry in json.load(sys.stdin).get("entries", []):
     print(entry["path"])'
@@ -294,7 +337,8 @@ start_host() {
 
   h mkdir -p /opt/fixtures /srv/capture
   docker cp -q "$here/fixtures/compose.yaml" "$host:/opt/fixtures/compose.yaml"
-  printf 'S3_ACCESS_KEY=%s\nS3_SECRET_KEY=%s\nS3_BUCKET=%s\nDB_PASSWORD=%s\n' \
+  # Single quotes: Compose reads the value literally.
+  printf "S3_ACCESS_KEY=%s\nS3_SECRET_KEY='%s'\nS3_BUCKET=%s\nDB_PASSWORD=%s\n" \
     "$s3_access_key" "$s3_secret_key" "$s3_bucket" "$db_password" | hi sh -c 'umask 077; cat >/opt/fixtures/.env'
   h sh -c 'cd /opt/fixtures && docker compose up -d --quiet-pull --wait' >"$out/fixtures.log" 2>&1 \
     || { cat "$out/fixtures.log" >&2; fail "the fixtures did not start"; }
@@ -324,7 +368,8 @@ install_release() {
   if [ "${#sha256_x86_64}" != 64 ] || [ "${#sha256_arm64}" != 64 ]; then fail "$checksums lacks a Linux archive"; fi
   binary_in_archive=
   for asset in backrest_Linux_x86_64.tar.gz backrest_Linux_arm64.tar.gz; do
-    paths="$(h tar -tzf "/opt/release/$asset" | sed 's#^\./##' | grep -E '(^|/)backrest$')"
+    # The raw member name, as the role's unarchive include names it.
+    paths="$(h tar -tzf "/opt/release/$asset" | grep -E '(^|/)backrest$')"
     [ -z "$binary_in_archive" ] || [ "$binary_in_archive" = "$paths" ] || fail "the archives disagree on the binary: $paths"
     binary_in_archive="$paths"
   done
@@ -406,10 +451,11 @@ login_status() {
 
 test_contract() {
   local ubuntu="$1" linux_hash local_hash before after entries _
-  local sleep_hook fail_start fail_finish report status count start elapsed
+  local sleep_hook fail_start fail_finish success_hook report status count start elapsed
   sleep_hook='{"conditions":["CONDITION_SNAPSHOT_START"],"onError":"ON_ERROR_FATAL","actionCommand":{"command":"sleep 4"}}'
   fail_start='{"conditions":["CONDITION_SNAPSHOT_START"],"onError":"ON_ERROR_FATAL","actionCommand":{"command":"exit 1"}}'
   fail_finish='{"conditions":["CONDITION_SNAPSHOT_SUCCESS"],"onError":"ON_ERROR_FATAL","actionCommand":{"command":"exit 1"}}'
+  success_hook='{"conditions":["CONDITION_SNAPSHOT_SUCCESS"],"onError":"ON_ERROR_FATAL","actionCommand":{"command":"touch /tmp/success-hook-ran"}}'
   report='{"conditions":["CONDITION_ANY_ERROR","CONDITION_SNAPSHOT_WARNING"],"actionDiscord":{"webhookUrl":"'"$capture_url"'","template":"contract report"}}'
 
   echo "== contract: the release archives (ubuntu $ubuntu)"
@@ -471,6 +517,18 @@ test_contract() {
     exclude_file_flag=yes
   fi
 
+  echo "== contract: a files-from file"
+  # The role hands restic the paths besides the dump directory in such a file.
+  h sh -c "mkdir -p /srv/data/listed && echo listed >/srv/data/listed/file && printf '/srv/data/listed\n' >$data_dir/targets"
+  reconfigure "{\"plan\":{\"paths\":[\"/srv/data/kept\"],\"backup_flags\":[\"--exclude-file=$data_dir/excludes\",\"--files-from-verbatim=$data_dir/targets\"]}}"
+  backup || fail "the backup with the files-from file failed: $(api_status)"
+  entries="$(snapshot_entries /srv/data)"
+  files_from_flag=no
+  if grep -qx /srv/data/kept <<<"$entries" && grep -qx /srv/data/listed <<<"$entries"; then
+    files_from_flag=yes
+  fi
+  reconfigure "{\"plan\":{\"paths\":[\"/srv/data\"],\"backup_flags\":[\"--exclude-file=$data_dir/excludes\"]}}"
+
   echo "== contract: a failing start hook"
   hooks "$fail_start" "$report"
   reports_clear
@@ -500,6 +558,69 @@ test_contract() {
   restic_error_status="$(last_status)"
   report_restic_error="$(reports_settled)"
   reconfigure '{"plan":{"paths":["/srv/data"]}}'
+
+  echo "== contract: a missing path next to a good one"
+  h rm -f /tmp/success-hook-ran
+  reconfigure "{\"plan\":{\"hooks\":[$success_hook],\"paths\":[\"/srv/data\",\"/srv/does-not-exist\"]},\"repo\":{\"hooks\":[$report]}}"
+  reports_clear
+  count="$(snapshot_count)"
+  if backup; then missing_path_rpc=answered; else missing_path_rpc="$(api_status)"; fi
+  missing_path_status="$(last_status)"
+  missing_path_new_snapshots=$(($(snapshot_count) - count))
+  report_missing_path="$(reports_settled)"
+  if h test -e /tmp/success-hook-ran; then missing_path_success_hook=yes; else missing_path_success_hook=no; fi
+  reconfigure '{"plan":{"hooks":[],"paths":["/srv/data"]},"repo":{"hooks":[]}}'
+
+  echo "== contract: a restic warning"
+  # restic exits 3 for a partial backup (a file it could not read). A wrapper
+  # that Backrest runs as its restic ends a good backup that way, which no file
+  # a root process cannot read would do reliably.
+  hi sh -c 'cat >/usr/local/bin/restic-warning && chmod 0755 /usr/local/bin/restic-warning' <<WRAPPER
+#!/bin/sh
+$restic_binary "\$@"
+rc=\$?
+case " \$* " in *" backup "*) [ "\$rc" != 0 ] || exit 3 ;; esac
+exit \$rc
+WRAPPER
+  h mkdir -p /etc/systemd/system/backrest.service.d
+  h sh -c 'printf "[Service]\nEnvironment=BACKREST_RESTIC_COMMAND=/usr/local/bin/restic-warning\n" >/etc/systemd/system/backrest.service.d/warning.conf'
+  h systemctl daemon-reload
+  h rm -f /tmp/success-hook-ran
+  hooks "$success_hook" "$report"
+  reports_clear
+  count="$(snapshot_count)"
+  if backup; then restic_warning_rpc="$(api_status)"; else restic_warning_rpc="$(api_status)"; fi
+  restic_warning_status="$(last_status)"
+  restic_warning_new_snapshots=$(($(snapshot_count) - count))
+  report_restic_warning="$(reports_settled)"
+  if h test -e /tmp/success-hook-ran; then restic_warning_success_hook=yes; else restic_warning_success_hook=no; fi
+  h rm -rf /etc/systemd/system/backrest.service.d /usr/local/bin/restic-warning
+  h systemctl daemon-reload
+  hooks "" ""
+
+  echo "== contract: \${NAME} in a repository env value"
+  # restic creates RESTIC_CACHE_DIR; the directory it made shows whether
+  # Backrest replaced ${BACKREST_DATA} (set in the unit) before restic ran.
+  save_config
+  h systemctl stop backrest
+  h env "CONFIG=$config" python3 -c '
+import json, os
+with open(os.environ["CONFIG"], encoding="utf-8") as f:
+    c = json.load(f)
+c["repos"][0]["env"].append("RESTIC_CACHE_DIR=/var/cache/probe${BACKREST_DATA}")
+with open(os.environ["CONFIG"], "w", encoding="utf-8") as f:
+    json.dump(c, f, indent=2)'
+  h systemctl start backrest
+  wait_ui
+  backup || fail "the backup with the probe env failed: $(api_status)"
+  env_expanded=unknown
+  if h test -d "/var/cache/probe$data_dir"; then env_expanded=yes; fi
+  if h test -d '/var/cache/probe${BACKREST_DATA}'; then env_expanded=no; fi
+  h systemctl stop backrest
+  restore_config
+  h rm -rf /var/cache/probe*
+  h systemctl start backrest
+  wait_ui
 
   echo "== contract: the other report types"
   hooks "$fail_start" '{"conditions":["CONDITION_ANY_ERROR"],"actionHealthchecks":{"webhookUrl":"'"$capture_url"'","template":"contract report"}}'
@@ -551,6 +672,12 @@ test_refusals() {
   refused 'dump.output' -e '{"backrest_apps": [{"name": "a", "dump": {"type": "command", "command": "/bin/true"}}]}'
   refused 'backrest_notify_type' -e backrest_notify_type=mail -e backrest_notify_url=https://x.invalid
   refused 'backrest_notify_type' -e backrest_notify_type=webhook -e backrest_notify_url=https://x.invalid
+  # A vault block scalar ends in a line break.
+  refused 'backrest_notify_url must' -e '{"backrest_notify_url": "https://x.invalid/a\n"}'
+  refused 'backrest_notify_url must' -e '{"backrest_notify_url": "https://x.invalid/a\"b"}'
+  refused 'five fields' -e '{"backrest_schedule": "0 2 * *"}'
+  refused 'holds ${...}' -e '{"backrest_repo_env": {"AWS_SECRET_ACCESS_KEY": "a${HOME}b"}}'
+  refused 'below it' -e '{"backrest_apps": [{"name": "a", "paths": ["/var/lib/backrest-dumps/a"]}]}'
 }
 
 test_install() {
@@ -564,6 +691,9 @@ test_install() {
   user="$(h systemctl show backrest -p User --value)"
   if [ -n "$user" ] && [ "$user" != root ]; then fail "Backrest runs as $user, not root"; fi
   [ "$(h stat -c %a /etc/backrest/backrest.env)" = 600 ] || fail "backrest.env is not mode 0600"
+  # The member the role unpacks is the one the contract found in both archives.
+  [ "$(value_of "$root/roles/backrest/vars/main.yml" backrest_binary_in_archive)" = "$(value_of "$here/contract.md" binary_in_archive)" ] \
+    || fail "the role unpacks another member than the contract measured"
   role_converge_unchanged
   # An app name with an underscore passes validation; the app joins the list of active apps.
   role_converge -e '{"backrest_apps": [{"name": "my_app"}]}'
@@ -578,7 +708,7 @@ test_install() {
 }
 
 test_config() {
-  local guid sync other_uri third_uri status
+  local guid sync other_uri third_uri status pid script
   echo "== config (ubuntu $1)"
   command -v jq >/dev/null || fail "jq is missing on this machine"
   other_uri="s3:$s3_endpoint/$s3_bucket/config-other"
@@ -588,7 +718,7 @@ test_config() {
     umask 077
     python3 -c '
 import json
-print(json.dumps({"backrest_repo_password": "p\"a\x27ss $HOME \\n {x} #é"}))' >"$out/hard-password.json"
+print(json.dumps({"backrest_repo_password": "p\"a\x27ss $HOME ${HOME} \\n {x} #é $"}))' >"$out/hard-password.json"
   )
   role_converge
   guid="$(cfg '.repos[0].guid')"
@@ -613,7 +743,9 @@ print(json.dumps({"backrest_repo_password": "p\"a\x27ss $HOME \\n {x} #é"}))' >
   [ "$(cfg '.repos[0].checkPolicy.readDataSubsetPercent')" = 5 ] || fail "check read percent"
   [ "$(cfg '.plans[0].retention.policyTimeBucketed.monthly')" = 6 ] || fail "retention"
   role_converge -e '{"backrest_extra_paths": ["/srv/extra"], "backrest_excludes": ["*.tmp"]}'
-  cfg '.plans[0].paths' | grep -q /srv/extra || fail "extra path missing"
+  h grep -qxF 'target /srv/extra' /usr/local/sbin/backrest-prepare || fail "extra path missing"
+  [ "$(cfg '.plans[0].paths | join(" ")')" = /var/lib/backrest-dumps ] || fail "the plan has other paths than the dump directory"
+  cfg '.plans[0].backup_flags' | grep -qF -- "--files-from-verbatim=$data_dir/targets" || fail "the plan does not read the targets file"
   cfg '.plans[0].excludes' | grep -qF '*.tmp' || fail "exclude pattern missing"
   # A plan changed in the UI is put back.
   api SetConfig "$(cfg_with '.plans[0].schedule.cron="0 9 * * *"')" >/dev/null || fail "SetConfig answered $(api_status)"
@@ -624,11 +756,28 @@ print(json.dumps({"backrest_repo_password": "p\"a\x27ss $HOME \\n {x} #é"}))' >
   # A new URI drops the guid and initialises the new repository.
   role_converge -e backrest_repo_uri="$other_uri"
   [ "$(cfg '.repos[0].guid')" != "$guid" ] || fail "the old repository id was kept"
-  # A hard password reaches restic.
+  # A hard password reaches restic, and with the S3 secret (also hard) it opens
+  # the repository with plain restic, as it must in a disaster recovery.
   role_converge -e backrest_repo_uri="$third_uri" -e "@$out/hard-password.json"
   backup || fail "the backup answered $(api_status)"
   [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup did not succeed"
   h python3 -m json.tool "$config" >/dev/null
+  [ "$(plain_restic_snapshots "$third_uri" "$out/hard-password.json")" -ge 1 ] \
+    || fail "plain restic does not list the snapshots with the stored password and S3 keys"
+  # A run that dies after writing the configuration leaves the restart to the next run.
+  pid="$(h systemctl show backrest -p MainPID --value)"
+  h sh -c "rm -f $data_dir/active-apps && mkdir $data_dir/active-apps"
+  role_converge_fails -e backrest_repo_uri="$third_uri" -e "@$out/hard-password.json" -e '{"backrest_schedule": "0 7 * * *"}'
+  [ "$(cfg '.plans[0].schedule.cron')" = '0 7 * * *' ] || fail "the failed run did not write the configuration first"
+  [ "$(h systemctl show backrest -p MainPID --value)" = "$pid" ] || fail "the failed run restarted Backrest"
+  h test -e "$data_dir/restart-pending" || fail "the failed run left no restart marker"
+  [ "$(api GetConfig | jq -r '.plans[0].schedule.cron')" != '0 7 * * *' ] || fail "Backrest runs the new plan without a restart"
+  h rmdir "$data_dir/active-apps"
+  role_converge -e backrest_repo_uri="$third_uri" -e "@$out/hard-password.json" -e '{"backrest_schedule": "0 7 * * *"}'
+  [ "$(h systemctl show backrest -p MainPID --value)" != "$pid" ] || fail "the next run did not restart Backrest"
+  [ "$(api GetConfig | jq -r '.plans[0].schedule.cron')" = '0 7 * * *' ] || fail "Backrest does not run the new plan after the next run"
+  h test ! -e "$data_dir/restart-pending" || fail "the restart marker was not removed"
+  role_converge_unchanged -e backrest_repo_uri="$third_uri" -e "@$out/hard-password.json" -e '{"backrest_schedule": "0 7 * * *"}'
   # A broken file stops the run, unchanged and unprinted.
   save_config
   h sh -c 'echo "secret-line {" > /etc/backrest/config.json'
@@ -650,6 +799,15 @@ print(json.dumps({"backrest_repo_password": "p\"a\x27ss $HOME \\n {x} #é"}))' >
   grep -q 'backup is running' "$out/converge.log" || fail "no message about the running backup"
   [ "$(cfg '.plans[0].schedule.cron')" = '0 3 * * *' ] || fail "a failed wait changed the configuration"
   h pkill -x restic || true
+  # The hooks around restic count as a running backup too: backrest-prepare
+  # while it dumps, and backrest-finish.
+  for script in /usr/local/sbin/backrest-prepare /usr/local/sbin/backrest-finish; do
+    h_bg "$(hook_stand_in "$script" 600)"
+    role_converge_fails -e backrest_repo_uri="$third_uri" -e "@$out/hard-password.json" -e '{"backrest_schedule": "0 4 * * *"}' -e backrest_restart_wait=5
+    grep -q 'backup is running' "$out/converge.log" || fail "no message about the running $script"
+    [ "$(cfg '.plans[0].schedule.cron')" = '0 3 * * *' ] || fail "a running $script did not hold back the change"
+    h pkill -f "^python3 -c .* $script\$" || true
+  done
 }
 
 # compose <args>: docker compose in the fixtures' project.
@@ -703,6 +861,7 @@ test_apps() {
 #!/bin/sh
 case "$(cat /srv/notes-mode 2>/dev/null)" in
   file) rm -rf /srv/notes-dump; echo x >/srv/notes-dump ;;
+  empty) rm -rf /srv/notes-dump; mkdir /srv/notes-dump ;;
   fail) exit 1 ;;
   *) [ -d /srv/notes-dump ] || rm -f /srv/notes-dump; mkdir -p /srv/notes-dump && echo notes >/srv/notes-dump/out ;;
 esac
@@ -763,17 +922,50 @@ NOTES
   [ "$(last_status)" = "$failed_status" ] || fail "an empty path did not fail the backup"
 
   # An app that is not installed is skipped; once installed it fails until the next run.
+  # A file in the dump directory that this backup did not write stays out of
+  # it: the dump of an app that is skipped, not in the plan yet or no longer in
+  # the role, and any other file.
+  h sh -c "echo stale >$dump_dir/late.dump; echo stale >$dump_dir/removed.dump; echo stray >$dump_dir/stray"
   role_converge -e "@$out/with-late-app.json"
   run_backup
   [ "$(last_status)" = STATUS_SUCCESS ] || fail "a missing app failed the backup"
+  in_snapshot "$dump_dir/shop.dump"
+  not_in_snapshot "$dump_dir/late.dump" "$dump_dir/removed.dump" "$dump_dir/stray"
   h touch /srv/late/installed
   run_backup
   h grep -q '^late: .*run the playbook' "$data_dir/prepare-failures" || fail "the app that joined late is not recorded"
   [ "$(last_status)" = "$failed_status" ] || fail "the app that joined late did not fail the backup"
+  in_snapshot "$dump_dir/shop.dump"
+  not_in_snapshot "$dump_dir/late.dump"
   role_converge -e "@$out/with-late-app.json"
   run_backup
   [ "$(last_status)" = STATUS_SUCCESS ] || fail "the app did not join after the playbook"
-  in_snapshot /srv/late/data/b.txt
+  in_snapshot /srv/late/data/b.txt "$dump_dir/shop.dump"
+  not_in_snapshot "$dump_dir/late.dump" "$dump_dir/removed.dump" "$dump_dir/stray"
+  # An app whose requires_path is gone after the role made it active fails, and
+  # what is left of it stays out, until the next run of the role drops it.
+  before="$(h stat -c %Y "$data_dir/last-success")"
+  h rm /srv/late/installed
+  run_backup
+  [ "$(last_status)" = "$failed_status" ] || fail "an app whose requires_path is gone did not fail the backup"
+  h grep -qF 'late: requires_path /srv/late/installed is gone, but the app was installed at the last role run' \
+    "$data_dir/prepare-failures" || fail "the gone requires_path is not recorded"
+  [ -z "$(snapshot_children /srv/late/data)" ] || fail "the paths of the app whose requires_path is gone are in the snapshot"
+  [ "$(h stat -c %Y "$data_dir/last-success")" = "$before" ] || fail "last-success moved although requires_path is gone"
+  role_converge -e "@$out/with-late-app.json"
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the app that the role dropped still fails the backup"
+  h rm -f "$dump_dir/late.dump" "$dump_dir/removed.dump" "$dump_dir/stray"
+  # A missing extra path is recorded too, and the snapshot of the rest is taken.
+  n="$(newest_snapshot)"
+  role_converge -e "@$out/with-late-app.json" -e '{"backrest_extra_paths": ["/srv/extra-missing"]}'
+  run_backup
+  [ "$(last_status)" = "$failed_status" ] || fail "a missing extra path did not fail the backup"
+  h grep -qxF 'backrest_extra_paths: /srv/extra-missing is missing' "$data_dir/prepare-failures" \
+    || fail "the missing extra path is not recorded"
+  [ "$(newest_snapshot)" != "$n" ] || fail "a missing extra path stopped the snapshot"
+  in_snapshot /srv/shop/a.txt "$dump_dir/shop.dump"
+  role_converge -e "@$out/with-late-app.json"
 
   # The script's own failure: no snapshot, a failed backup.
   n="$(newest_snapshot)"
@@ -788,6 +980,11 @@ NOTES
   run_backup
   h grep -q '^notes: .*must be a directory' "$data_dir/prepare-failures" || fail "a file as command output is not recorded"
   [ "$(last_status)" = STATUS_ERROR ] || fail "a file as command output did not fail the backup"
+  # A command that exits 0 but leaves an empty directory fails the app too.
+  h sh -c 'echo empty >/srv/notes-mode'
+  run_backup
+  h grep -q '^notes: .*left an empty directory' "$data_dir/prepare-failures" || fail "an empty command output is not recorded"
+  [ "$(last_status)" = STATUS_ERROR ] || fail "an empty command output did not fail the backup"
   h sh -c 'rm -f /srv/notes-mode'
   run_backup
   [ "$(last_status)" = STATUS_SUCCESS ] || fail "the command dump did not recover"
@@ -878,7 +1075,8 @@ finish_fails() {
 }
 
 test_reports() {
-  local type notify=/etc/backrest/notify.curl finish=/usr/local/sbin/backrest-finish body
+  local type notify=/etc/backrest/notify.curl notify_success=/etc/backrest/notify-success.curl
+  local finish=/usr/local/sbin/backrest-finish body before status n
   echo "== reports (ubuntu $1)"
   command -v jq >/dev/null || fail "jq is missing on this machine"
   command -v shellcheck >/dev/null || fail "shellcheck is missing on this machine"
@@ -922,10 +1120,31 @@ with open(sys.argv[1] + "/reports-apps.json", "w", encoding="utf-8") as f:
   reports_to partial | grep -q shop || fail "the report does not name the failed app"
   compose up -d --wait db
 
+  # A missing app path (not only an empty one) fails the backup, keeps
+  # last-success and sends exactly one report.
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup before the missing path did not succeed"
+  before="$(h stat -c %Y "$data_dir/last-success")"
+  n="$(newest_snapshot)"
+  reports_clear
+  h mv /srv/shop /srv/shop.away
+  run_backup
+  status="$(last_status)"
+  h mv /srv/shop.away /srv/shop
+  [ "$status" != STATUS_SUCCESS ] || fail "a missing path did not fail the backup"
+  # restic fails a whole backup for a missing path it is given; the role gives
+  # it only the paths that exist, so the rest of the host is still saved.
+  [ "$(newest_snapshot)" != "$n" ] || fail "a missing path stopped the snapshot of the rest"
+  in_snapshot "$dump_dir/shop.dump"
+  [ "$(h stat -c %Y "$data_dir/last-success")" = "$before" ] || fail "last-success moved although a path is missing"
+  h grep -qF 'shop: /srv/shop is missing or empty' "$data_dir/prepare-failures" || fail "the missing path is not recorded"
+  [ "$(reports_settled_to partial)" = 1 ] || fail "a missing path did not send exactly one report (status $status)"
+
   # The URL is a secret.
   ! h grep -qF "$capture_url" "$finish" || fail "the notify URL is in the finish script"
   ! h grep -qF "$capture_url" /usr/local/sbin/backrest-prepare || fail "the notify URL is in the prepare script"
   [ "$(h stat -c '%U %a' "$notify")" = 'root 600' ] || fail "the notify file is not root 0600"
+  h test ! -e "$notify_success" || fail "the success file exists for discord"
   ! grep -qF "$capture_url" "$out/converge.log" || fail "the notify URL is in the output of the role"
   role_converge_unchanged -e "@$out/reports-apps.json" -e backrest_notify_type=discord -e backrest_notify_url="$capture_url/partial"
 
@@ -976,11 +1195,21 @@ assert "truncated" in content' || fail "a long report is not truncated below 200
   h rm -f "$data_dir/prepare-failures"
   finish_fails
   reports_to hc | grep -q 'prepare-failures is missing' || fail "a missing failures file was not reported"
+  # A good backup after a failure sends one success ping to the check's base
+  # address, so the check is up again and the next failure alerts.
+  [ "$(h stat -c '%U %a' "$notify_success")" = 'root 600' ] || fail "the success file is not root 0600"
+  ! h grep -qF "$capture_url" "$finish" || fail "the notify URL is in the healthchecks finish script"
+  reports_clear
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup after the failure did not succeed"
+  [ "$(reports_settled_to hc)" = 1 ] || fail "a good backup did not send exactly one success ping: $(reports)"
+  reports_to hc | grep -q "^POST $capture_path/hc " || fail "the success ping did not go to the base address: $(reports)"
 
   # No URL, no hooks, no file.
   role_converge -e "@$out/reports-apps.json" -e backrest_notify_url=
   [ "$(cfg '.repos[0].hooks | length')" = 0 ] || fail "the report hook was not removed"
   h test ! -e "$notify" || fail "the notify file was not removed"
+  h test ! -e "$notify_success" || fail "the success file was not removed"
   role_converge_unchanged -e "@$out/reports-apps.json" -e backrest_notify_url=
   # A URL with a line break could add options to the curl file.
   role_converge_fails -e "@$out/reports-apps.json" -e '{"backrest_notify_url": "http://127.0.0.1:9/a\nb"}'
@@ -1038,7 +1267,7 @@ with open(sys.argv[1] + "/shop-apps.json", "w", encoding="utf-8") as f:
 wait_restore() {
   local _ status=none
   for _ in $(seq 1 120); do
-    status="$(api GetOperations '{"selector":{},"lastN":"200"}' | python3 -c '
+    status="$(api_read GetOperations '{"selector":{},"lastN":"200"}' | python3 -c '
 import json, sys
 ops = [o for o in json.load(sys.stdin).get("operations", []) if "operationRestore" in o]
 print(ops[-1].get("status", "STATUS_INPROGRESS") if ops else "none")')"
@@ -1180,6 +1409,7 @@ bcrypt_command: $bcrypt_command
 guid_written_back: $guid_written_back
 restart_rewrites_config: $restart_rewrites_config
 exclude_file_flag: $exclude_file_flag
+files_from_flag: $files_from_flag
 start_hook_fatal: $start_hook_fatal
 finish_marks_failed: $finish_marks_failed
 report_count: start_hook=$report_start_hook finish_hook=$report_finish_hook restic_error=$report_restic_error
@@ -1196,6 +1426,9 @@ backup_rpc_blocks: $backup_rpc_blocks (a 4 second start hook; answers $backup_rp
 start_hook: status $start_hook_status, new snapshots $start_hook_new_snapshots, RPC $start_hook_rpc
 finish_hook: status $finish_hook_status, new snapshots $finish_hook_new_snapshots, RPC $finish_hook_rpc, CONDITION_ANY_ERROR reports $report_finish_hook
 restic_error: status $restic_error_status, RPC $restic_error_rpc
+restic_warning: status $restic_warning_status, new snapshots $restic_warning_new_snapshots, RPC $restic_warning_rpc, CONDITION_SNAPSHOT_SUCCESS hook ran $restic_warning_success_hook, reports $report_restic_warning
+missing_path: status $missing_path_status, new snapshots $missing_path_new_snapshots, RPC $missing_path_rpc, CONDITION_SNAPSHOT_SUCCESS hook ran $missing_path_success_hook, reports $report_missing_path
+env_expansion: \${NAME} in a repository env value replaced by Backrest $env_expanded
 report_healthchecks: $report_healthchecks to $report_healthchecks_path
 report_webhook: $report_webhook (backup status $webhook_status)
 \`\`\`
