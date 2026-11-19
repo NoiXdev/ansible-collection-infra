@@ -1481,6 +1481,15 @@ suite_php_updates() {
   hx php cp /root/production-pool.conf "$conf"
   hx php sh -c 'systemctl reset-failed php-fpm@production; systemctl restart php-fpm@production'
   play php "$dir/verify.yml" "${knobs[@]}" -e php_test_extra_version=8.3
+
+  # Last: the run stops every pool.
+  echo "== php: updates: the PPA's pattern stays while the PPA's source does (php_versions empty)"
+  hx php sh -c 'echo "# stand-in" > /etc/apt/sources.list.d/ondrej-php.sources \
+    && echo "// stand-in" > /etc/apt/apt.conf.d/52noixdev-php-ppa'
+  play php "$dir/converge.yml" -e '{"php_versions": [], "php_pools": []}' >"$out/php-ppa-pattern.log" 2>&1 \
+    || { cat "$out/php-ppa-pattern.log" >&2; fail "php: the run with php_versions empty failed"; }
+  hx php test -e /etc/apt/apt.conf.d/52noixdev-php-ppa || fail "php: the PPA's pattern went while its source is there"
+  hx php rm /etc/apt/sources.list.d/ondrej-php.sources /etc/apt/apt.conf.d/52noixdev-php-ppa
 }
 
 # ncurl URL [curl args]: the headers and body of URL, asked in the nginx

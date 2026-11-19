@@ -68,8 +68,16 @@
     group: root
     mode: "0644"
 
-# The PPA's pattern, from before the switch to packages.sury.org.
+# The PPA's pattern, from before the switch to packages.sury.org. It stays
+# while the PPA's source does (a run that did not reach tasks/repository.yml's
+# switch, e.g. with php_versions empty): the PPA's packages keep their updates.
+- name: Look for the PPA's source
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/ondrej-php.sources
+  register: php_ppa_source
+
 - name: Remove the PPA's pattern from unattended-upgrades
   ansible.builtin.file:
     path: /etc/apt/apt.conf.d/52noixdev-php-ppa
     state: absent
+  when: not php_ppa_source.stat.exists

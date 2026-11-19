@@ -188,8 +188,8 @@
     - name: Read where the installed packages come from, with packages.sury.org's lists
       ansible.builtin.include_tasks: origins.yml
 
-    # On such a host these files come from this run only: a refused run
-    # removes them again.
+    # From this run, or from an earlier one whose refresh failed: removing
+    # them returns the host to the PPA as it was.
     - name: Remove packages.sury.org's source, key and pin again
       ansible.builtin.file:
         path: "{{ item }}"
