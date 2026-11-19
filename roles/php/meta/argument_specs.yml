@@ -141,5 +141,6 @@ argument_specs:
       php_apt_key_fingerprint:
         type: str
         description: >-
-          Fingerprint the packages.sury.org key must carry (Ubuntu 24.04 and 26.04); any other key
-          is removed and the run fails. The ondrej/php PPA's fingerprint is refused.
+          Fingerprint the packages.sury.org key must carry (Ubuntu 24.04 and 26.04); a key without
+          it, or one that has expired, fails the run and the key in place stays. The ondrej/php
+          PPA's fingerprint is refused.

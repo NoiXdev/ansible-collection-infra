@@ -803,7 +803,7 @@ php_failed_run_reloads() {
 }
 
 suite_php() {
-  local dir="$here/php" codename version policy prod staging tries rotate name conf stanza
+  local dir="$here/php" codename version policy prod staging tries rotate name conf stanza key fpr
   local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
   # staging after its upgrade.
   local upgraded=(-e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3)
@@ -840,39 +840,93 @@ suite_php() {
   hx php sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}\n" "php$1-*" 2>/dev/null | grep -q "^.i"' sh "$version" \
     || fail "php: Ubuntu's php$version is still installed"
 
-  echo "== php: a run whose PPA refresh failed is not followed by Ubuntu's php"
-  # The first run adds the source and the pin, then its refresh fails: the
-  # package lists stay without the PPA's packages. The key comes from
-  # keyserver.ubuntu.com, so only apt's way to the PPA is cut off.
-  hx php sh -c 'echo "Acquire::https::Proxy::ppa.launchpadcontent.net \"http://127.0.0.1:9\";" > /etc/apt/apt.conf.d/99-block-ppa'
+  echo "== php: a run whose packages.sury.org refresh failed is not followed by Ubuntu's php"
+  # The first run adds the key, the source and the pin, then its refresh
+  # fails: the package lists stay without packages.sury.org's packages. The
+  # key comes through get_url, not apt, so only apt is cut off.
+  hx php sh -c 'echo "Acquire::https::Proxy::packages.sury.org \"http://127.0.0.1:9\";" > /etc/apt/apt.conf.d/99-block-sury'
   if play php "$dir/converge.yml" >"$out/php-blocked.log" 2>&1; then
-    fail "php: the run with ppa.launchpadcontent.net unreachable did not fail"
+    fail "php: the run with packages.sury.org unreachable did not fail"
   fi
-  hx php test -e /etc/apt/sources.list.d/ondrej-php.sources || fail "php: the blocked run did not add the source"
+  hx php test -e /etc/apt/sources.list.d/sury-php.sources || fail "php: the blocked run did not add the source"
   hx php sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}\n" php8.3-cli php8.3-fpm 2>/dev/null | grep -q "^.i"' \
     || fail "php: the blocked run installed php"
-  # Ubuntu 24.04 ships php8.3 too; the pin leaves it no candidate.
-  policy="$(hx php apt-cache policy php8.3-cli)"
-  grep -qF 'Candidate: (none)' <<<"$policy" || fail "php: without the PPA's lists Ubuntu's php8.3-cli is a candidate: $policy"
-  hx php rm -f /etc/apt/apt.conf.d/99-block-ppa
+  # Ubuntu's own php (8.3 on 24.04) has no candidate: the pin leaves it none.
+  # 26.04 ships 8.5, which the suite does not list; the pin check below
+  # covers php8.3-* and php8.4-* there.
+  case "$version" in
+    8.3 | 8.4)
+      policy="$(hx php apt-cache policy "php$version-cli")"
+      grep -qF 'Candidate: (none)' <<<"$policy" \
+        || fail "php: without packages.sury.org's lists Ubuntu's php$version-cli is a candidate: $policy" ;;
+    *) echo "   Ubuntu's php is $version, which the suite does not list: no candidate check" ;;
+  esac
+  hx php rm -f /etc/apt/apt.conf.d/99-block-sury
 
   echo "== php: converge (the first run with --diff -v, on the stale lists) and idempotence"
   converge php install "$dir/converge.yml" --diff -v
-  version="$(hx php dpkg-query -W -f='${Version}' php8.3-fpm)"
-  case "$version" in
-    *deb.sury.org*) echo "   installed the PPA's php8.3-fpm $version" ;;
-    *) fail "php: after a failed refresh the role installed php8.3-fpm $version, not the PPA's" ;;
+  # By the origin of the installed version, not its string: packages.sury.org
+  # uses several version schemes (on arm64 a gbp snapshot, for instance).
+  version="$(hx php python3 -c 'import apt, sys
+v = apt.Cache()[sys.argv[1]].installed
+print(v.version, " ".join(sorted({o.origin for o in v.origins})))' php8.3-fpm)"
+  case " $version " in
+    *" deb.sury.org "*) echo "   installed packages.sury.org's php8.3-fpm ${version%% *}" ;;
+    *) fail "php: after a failed refresh the role installed php8.3-fpm $version, not packages.sury.org's" ;;
   esac
-  # The PPA's versions win by origin; Ubuntu's php8.3 is never installed.
+  # packages.sury.org's versions win by origin; Ubuntu's php8.3 is never
+  # installed. Each version line is judged by the first source under it.
   policy="$(hx php apt-cache policy php8.3-cli php8.3-fpm php8.3-common php8.3-intl php8.3-mbstring php8.4-cli php8.4-fpm php8.4-intl php8.4-mbstring)"
-  awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
-         if ((v ~ /deb\.sury\.org/ && p != 990) || (v !~ /deb\.sury\.org/ && p != -1)) { print v, p; bad = 1 } }
+  awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF; next }
+       v != "" && $2 ~ /^[a-z]+:\/\// { sury = ($2 ~ /:\/\/packages\.sury\.org\//)
+         if ((sury && p != 990) || (!sury && p != -1)) { print v, p, $2; bad = 1 }
+         v = "" }
        END { exit bad }' <<<"$policy" || fail "php: the pin gives the wrong priorities: $policy"
   play php "$dir/verify.yml"
   rotate="$(hx php logrotate -d /etc/logrotate.d/php-pools 2>&1)"
   for name in production staging; do
     grep -qF "/var/log/php/$name.log" <<<"$rotate" || fail "php: logrotate does not consider $name's log: $rotate"
   done
+
+  echo "== php: a damaged key in place is replaced, the lists refreshed"
+  prod="$(pid php php-fpm@production)"
+  staging="$(pid php php-fpm@staging)"
+  # The key packages.sury.org serves now, fetched afresh (the image has no curl).
+  key="$(hx php python3 -c 'import hashlib, sys, urllib.request
+print(hashlib.sha256(urllib.request.urlopen(sys.argv[1]).read()).hexdigest())' https://packages.sury.org/php/apt.gpg)"
+  [ "$(hx php sha256sum /etc/apt/keyrings/sury-php.gpg | cut -d ' ' -f 1)" = "$key" ] \
+    || fail "php: the key in place is not the one packages.sury.org serves"
+  # Lists older than the role's cache_valid_time, as on a host between runs:
+  # a refresh before the key is replaced would fail on the damaged key.
+  hx php sh -c 'truncate -s 5 /etc/apt/keyrings/sury-php.gpg && touch -d "3 hours ago" /var/lib/apt/lists \
+    && if [ -e /var/lib/apt/periodic/update-success-stamp ]; then touch -d "3 hours ago" /var/lib/apt/periodic/update-success-stamp; fi'
+  converge php key-restored "$dir/converge.yml"
+  [ "$(hx php sha256sum /etc/apt/keyrings/sury-php.gpg | cut -d ' ' -f 1)" = "$key" ] || fail "php: the damaged key was not replaced"
+  # The first line after the refresh's task header is its result: it ran.
+  # (The apt module reports a refresh that brought no new lists as ok.)
+  awk '/^TASK \[.*Refresh the package lists for packages\.sury\.org\]/ { t = 1; next }
+       t && /^(ok|changed|skipping|fatal):/ { r = $1; t = 0 }
+       END { exit !(r == "ok:" || r == "changed:") }' "$out/php-key-restored.log" \
+    || fail "php: the run that replaced the key did not refresh the lists"
+  php_running key-restored
+
+  echo "== php: a key with another fingerprint or an expired key is refused, the key in place stays"
+  refused php wrong-key "does not carry the key 0123456789ABCDEF0123456789ABCDEF01234567; the key in place stays" \
+    "$dir/converge.yml" -e php_apt_key_fingerprint=0123456789ABCDEF0123456789ABCDEF01234567
+  [ "$(hx php sha256sum /etc/apt/keyrings/sury-php.gpg | cut -d ' ' -f 1)" = "$key" ] || fail "php: the refused key replaced the one in place"
+  # A key that expired on 2020-01-02, made with a faked clock.
+  hx php sh -c 'rm -rf /root/expired && mkdir -m 700 /root/expired \
+    && gpg --batch --homedir /root/expired --faked-system-time "20200101T000000!" --passphrase "" \
+      --quick-gen-key "Expired <expired@example.test>" rsa2048 sign 1d \
+    && gpg --batch --homedir /root/expired --export > /root/expired.gpg' >/dev/null 2>&1 \
+    || fail "php: the expired key could not be made"
+  fpr="$(hx php gpg --batch --show-keys --with-colons /root/expired.gpg | awk -F: '$1 == "fpr" { print $10; exit }')"
+  [ -n "$fpr" ] || fail "php: the expired key has no fingerprint"
+  refused php expired-key "php: the key $fpr from file:///root/expired.gpg expired on 2020-01-02" \
+    "$dir/converge.yml" -e php_apt_key_url=file:///root/expired.gpg -e "php_apt_key_fingerprint=$fpr"
+  [ "$(hx php sha256sum /etc/apt/keyrings/sury-php.gpg | cut -d ' ' -f 1)" = "$key" ] || fail "php: the expired key replaced the one in place"
+  hx php rm -rf /root/expired /root/expired.gpg
+  php_running key-refusals
 
   echo "== php: another source of packages.sury.org/php is refused before any change"
   prod="$(pid php php-fpm@production)"
@@ -1235,10 +1289,10 @@ rr_since() {
 }
 
 # reinstall NAME [PACKAGE]: apt reinstalls PACKAGE (php8.3-fpm by default;
-# the same version, from the PPA). dpkg logs it as an upgrade, and apt runs it
-# with the apt hooks, as unattended-upgrades does (a bare dpkg -i runs none).
-# The package's own scripts run unchecked: no policy-rc.d. The log is
-# $out/php-NAME.log.
+# the same version, from packages.sury.org). dpkg logs it as an upgrade, and
+# apt runs it with the apt hooks, as unattended-upgrades does (a bare dpkg -i
+# runs none). The package's own scripts run unchecked: no policy-rc.d. The log
+# is $out/php-NAME.log.
 reinstall() {
   hx php sh -c 'mv /usr/sbin/policy-rc.d /usr/sbin/policy-rc.d.off \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall "$1"; rc=$?; \
@@ -1271,7 +1325,7 @@ needrestart_deferred() {
 # classic suite: production and staging on 8.3, extra on 8.4. needrestart is
 # installed, as on a stock Ubuntu server: its apt hook runs before the role's.
 suite_php_updates() {
-  local dir="$here/php" prod staging extra count expected log rc started took
+  local dir="$here/php" prod staging extra count expected log rc started took codename
   local knobs=(-e php_test_staging_version=8.3 -e php_test_extra=true -e php_fpm_restart_timeout=5)
   local script=/usr/local/sbin/php-fpm-rolling-restart conf=/etc/php-fpm/production/pool.conf
 
@@ -1283,9 +1337,10 @@ suite_php_updates() {
   play php "$dir/verify.yml" "${knobs[@]}"
   hx php cat "$script" >"$out/php-fpm-rolling-restart"
   shellcheck "$out/php-fpm-rolling-restart" || fail "php: shellcheck finds problems in the rendered $script"
-  # The pattern names the PPA's own origin and codename.
-  hx php apt-cache policy | grep -E 'o=LP-PPA-ondrej-php,.*n=noble,' >/dev/null \
-    || fail "php: apt-cache policy shows no release o=LP-PPA-ondrej-php, n=noble"
+  # The pattern names packages.sury.org's own origin and codename.
+  codename="$(hx php sh -c '. /etc/os-release && echo "$VERSION_CODENAME"')"
+  hx php apt-cache policy | grep -E "o=deb\.sury\.org,(.*,)?n=$codename(,|$)" >/dev/null \
+    || fail "php: apt-cache policy shows no release o=deb.sury.org, n=$codename"
 
   echo "== php: updates: php-fpm-rolling-restart 8.3 restarts production, then staging"
   prod="$(pid php php-fpm@production)"

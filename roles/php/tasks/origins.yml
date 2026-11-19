@@ -13,6 +13,8 @@
   changed_when: false
   check_mode: false
 
+# Over ssh, script runs with a tty, which merges the script's stderr (such as
+# a warning from python3-apt) into stdout: the JSON is the last line.
 - name: Keep where the installed packages come from
   ansible.builtin.set_fact:
-    php_apt_origins: "{{ php_apt_origins_script.stdout | from_json }}"
+    php_apt_origins: "{{ php_apt_origins_script.stdout_lines | last | from_json }}"

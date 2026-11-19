@@ -1,10 +1,25 @@
 ---
+# packages.sury.org: the key, the source and the pin, then the switch from the
+# ondrej/php PPA on a host the role set up from it. Runs after tasks/checks.yml.
+
+# Installed (and the lists refreshed) only when one of these is missing: with
+# a key in place that is damaged or has expired, a refresh fails, and the key
+# is replaced only below. The apt module refreshes on cache_valid_time alone.
+- name: Look for what the repository needs
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, -f, '${db:Status-Abbrev}\n', ca-certificates, gnupg, python3-debian]
+  register: php_apt_tools
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
 - name: Install what the repository needs
   ansible.builtin.apt:
     name: [ca-certificates, gnupg, python3-debian]
     state: present
     update_cache: true
     cache_valid_time: 3600
+  when: php_apt_tools.stdout_lines | select('match', '^ii') | list | length < 3
 
 - name: Create the apt keyring directory
   ansible.builtin.file:
@@ -14,60 +29,110 @@
     group: root
     mode: "0755"
 
-- name: Look for the PPA's apt key
-  ansible.builtin.stat:
-    path: /etc/apt/keyrings/ondrej-php.asc
-  register: php_apt_key_file
-
-# The keyserver serves the key with its armor headers in a different order on
-# every request, so a key in place is kept (and checked below on every run).
-- name: Install the PPA's apt key
-  when: not php_apt_key_file.stat.exists
-  ansible.builtin.get_url:
-    url: "{{ php_apt_key_url }}"
-    dest: /etc/apt/keyrings/ondrej-php.asc
-    owner: root
-    group: root
-    mode: "0644"
-
-- name: Read the key fingerprints
-  ansible.builtin.command:
-    cmd: gpg --batch --show-keys --with-colons /etc/apt/keyrings/ondrej-php.asc
-  register: php_apt_key
-  changed_when: false
-
-- name: Reject an unexpected key
-  when: php_apt_key.stdout is not search('^fpr:+' ~ php_apt_key_fingerprint | upper ~ ':', multiline=True)
+# The key is fetched on every run, since upstream extends its expiry. It is
+# checked in a temporary file and only then copied into place, so a fetch
+# that fails or a key that is refused leaves the key in place and changes
+# nothing.
+- name: Fetch and check the packages.sury.org key
+  vars:
+    # The expiry (field 7, seconds since the epoch) of the pub or sub record
+    # whose fpr record carries the fingerprint; empty when the key has none.
+    php_apt_key_expires: >-
+      {%- set key = namespace(last='', expires='', found=false) -%}
+      {%- for record in php_apt_key.stdout_lines | map('split', ':') -%}
+        {%- if record[0] in ['pub', 'sub'] -%}
+          {%- set key.last = record[6] -%}
+        {%- elif not key.found and record[0] == 'fpr' and record[9] == php_apt_key_fingerprint | upper -%}
+          {%- set key.found = true -%}
+          {%- set key.expires = key.last -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ key.expires }}
   block:
-    - name: Remove the key
+    - name: Create a temporary file for the key
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .gpg
+      register: php_apt_key_temp
+      changed_when: false
+      check_mode: false
+
+    - name: Download the key
+      ansible.builtin.get_url:
+        url: "{{ php_apt_key_url }}"
+        dest: "{{ php_apt_key_temp.path }}"
+        force: true
+        mode: "0600"
+      changed_when: false
+      check_mode: false
+
+    - name: Read the key
+      ansible.builtin.command:
+        argv: [gpg, --batch, --show-keys, --with-colons, "{{ php_apt_key_temp.path }}"]
+      register: php_apt_key
+      changed_when: false
+      check_mode: false
+
+    - name: Check the key's fingerprint
+      ansible.builtin.assert:
+        that: php_apt_key.stdout is search('^fpr:+' ~ php_apt_key_fingerprint | upper ~ ':', multiline=True)
+        fail_msg: >-
+          php: {{ php_apt_key_url }} does not carry the key {{ php_apt_key_fingerprint }}; the key in
+          place stays
+        quiet: true
+
+    # apt would fail later on an expired key, with a less clear message.
+    # Compared as UTC date strings of the same width.
+    - name: Check that the key has not expired
+      ansible.builtin.assert:
+        that: >-
+          php_apt_key_expires | string == ''
+          or ('%Y%m%d%H%M%S' | strftime(php_apt_key_expires | int, utc=true))
+             > ('%Y%m%d%H%M%S' | strftime(utc=true))
+        fail_msg: >-
+          php: the key {{ php_apt_key_fingerprint }} from {{ php_apt_key_url }} expired on
+          {{ '%Y-%m-%d' | strftime(php_apt_key_expires | int, utc=true) }}
+        quiet: true
+
+    - name: Install the key
+      ansible.builtin.copy:
+        src: "{{ php_apt_key_temp.path }}"
+        remote_src: true
+        dest: /etc/apt/keyrings/sury-php.gpg
+        owner: root
+        group: root
+        mode: "0644"
+      register: php_apt_key_file
+  always:
+    - name: Remove the temporary key
       ansible.builtin.file:
-        path: /etc/apt/keyrings/ondrej-php.asc
+        path: "{{ php_apt_key_temp.path }}"
         state: absent
+      when: php_apt_key_temp.path is defined
+      changed_when: false
+      check_mode: false
 
-    - name: Stop
-      ansible.builtin.fail:
-        msg: >-
-          {{ php_apt_key_url }} does not carry the key
-          {{ php_apt_key_fingerprint }}; the key file was removed.
-
-- name: Add the PPA
+- name: Add packages.sury.org
   ansible.builtin.deb822_repository:
-    name: ondrej-php
+    name: sury-php
     types: [deb]
     uris: "{{ php_apt_url }}"
     suites: ["{{ php_apt_suite }}"]
     components: [main]
-    signed_by: /etc/apt/keyrings/ondrej-php.asc
+    signed_by: /etc/apt/keyrings/sury-php.gpg
   register: php_apt_repository
 
-# Ubuntu 24.04 ships php8.3 too. apt takes the first stanza that matches:
+# Ubuntu ships its own PHP (8.3 on 24.04). apt takes the first stanza that
+# matches:
 # - Ubuntu's packages of the listed versions are never installed;
-# - the PPA's win.
-# Without the PPA's package lists there is no candidate, and the install fails
-# instead of falling back to Ubuntu's php8.3.
-- name: Pin the PHP packages to the PPA
+# - packages.sury.org's win. 990 is below 1000, so an installed version that
+#   is newer (from the PPA) is kept until packages.sury.org catches up, never
+#   downgraded.
+# Without packages.sury.org's package lists there is no candidate, and the
+# install fails instead of falling back to Ubuntu's PHP.
+- name: Pin the PHP packages to packages.sury.org
   ansible.builtin.copy:
-    dest: /etc/apt/preferences.d/ondrej-php
+    dest: /etc/apt/preferences.d/sury-php
     content: |
       Explanation: Managed by noixdev.infra (php role). Changes here are overwritten.
       Package: {{ php_apt_packages }}
@@ -84,7 +149,9 @@
     php_apt_packages: "{{ php_version_names | map('regex_replace', '^', 'php') | map('regex_replace', '$', '-*') | join(' ') }}"
 
 # A refresh that failed in an earlier run leaves the source in place but its
-# packages out of the lists; the next run refreshes then too.
+# packages out of the lists; the next run refreshes then too. On a host with
+# the PPA, the PPA stays and serves as before until a refresh works. A new
+# key (damaged in place, or renewed upstream) refreshes as well.
 - name: Read where the PHP packages can come from
   ansible.builtin.command:
     argv: "{{ ['apt-cache', 'policy'] + php_version_names | map('regex_replace', '^', 'php') | map('regex_replace', '$', '-fpm') | list }}"
@@ -92,9 +159,73 @@
   changed_when: false
   check_mode: false
 
-- name: Refresh the package lists for the PPA
+- name: Refresh the package lists for packages.sury.org
   ansible.builtin.apt:
     update_cache: true
   when: >-
     php_apt_repository is changed
+    or php_apt_key_file is changed
     or (php_apt_url | regex_replace('/+$', '')) not in php_apt_policy.stdout
+
+# The switch from the PPA: a host the role set up from it (its source or pin
+# is still there) moves only when packages.sury.org has every package the
+# host has from the PPA. Otherwise this run takes back what it added above,
+# and the host stays on the PPA as it was. Not in check mode: the check needs
+# the refreshed lists.
+- name: Look for the PPA's source and pin
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/apt/sources.list.d/ondrej-php.sources
+    - /etc/apt/preferences.d/ondrej-php
+  register: php_ppa_files
+
+- name: Check that packages.sury.org has what this host has from the PPA
+  when:
+    - not ansible_check_mode
+    - php_ppa_files.results | selectattr('stat.exists') | list | length > 0
+  block:
+    - name: Read where the installed packages come from, with packages.sury.org's lists
+      ansible.builtin.include_tasks: origins.yml
+
+    # On such a host these files come from this run only: a refused run
+    # removes them again.
+    - name: Remove packages.sury.org's source, key and pin again
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/sury-php.sources
+        - /etc/apt/keyrings/sury-php.gpg
+        - /etc/apt/preferences.d/sury-php
+      when: php_apt_origins.ppa_only | length > 0
+
+    - name: Refresh the package lists without packages.sury.org
+      ansible.builtin.apt:
+        update_cache: true
+      when: php_apt_origins.ppa_only | length > 0
+
+    - name: Stay on the PPA
+      ansible.builtin.fail:
+        msg: >-
+          php: packages.sury.org has no {{ php_apt_origins.ppa_only | join(', ') }}, which this host has
+          from the ondrej/php PPA; the host stays on the PPA
+      when: php_apt_origins.ppa_only | length > 0
+
+# The installed packages stay as they are (tasks/versions.yml does not
+# upgrade): they move to packages.sury.org's versions with the next upgrade.
+- name: Remove the PPA's source, key and pin
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/ondrej-php.sources
+    - /etc/apt/keyrings/ondrej-php.asc
+    - /etc/apt/preferences.d/ondrej-php
+  register: php_ppa_removed
+
+# Now, not in a handler: the versions are installed next, without the PPA.
+- name: Refresh the package lists without the PPA
+  ansible.builtin.apt:
+    update_cache: true
+  when: php_ppa_removed.results | selectattr('changed') | list | length > 0
