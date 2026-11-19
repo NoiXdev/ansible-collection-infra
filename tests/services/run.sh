@@ -803,7 +803,7 @@ php_failed_run_reloads() {
 }
 
 suite_php() {
-  local dir="$here/php" codename version policy prod staging tries rotate name conf
+  local dir="$here/php" codename version policy prod staging tries rotate name conf stanza
   local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
   # staging after its upgrade.
   local upgraded=(-e php_test_staging_memory_limit=160M -e php_test_staging_version=8.3)
@@ -826,6 +826,19 @@ suite_php() {
     "$dir/converge.yml" -e php_test_prepare=false -e php_apt_key_fingerprint=B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6
   refused php ppa-key-url "php: php_apt_key_url points at the ondrej/php PPA (https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6)" \
     "$dir/converge.yml" -e php_test_prepare=false -e 'php_apt_key_url=https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6'
+
+  echo "== php: Ubuntu's own php of a listed version is refused before any change"
+  hx php apt-get update -q >/dev/null
+  # The version Ubuntu's php-cli stands for (8.3 on 24.04).
+  version="$(hx php apt-cache depends php-cli | sed -n 's/^ *Depends: php\([0-9][0-9]*\.[0-9][0-9]*\)-cli$/\1/p' | head -n 1)"
+  [ -n "$version" ] || fail "php: found no version behind Ubuntu's php-cli"
+  hx php env DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-apt "php$version-cli" >/dev/null
+  refused php ubuntu-php "are Ubuntu's own packages of a version php_versions lists" \
+    "$dir/converge.yml" -e php_test_prepare=false -e "{\"php_versions\": [{\"version\": \"$version\"}], \"php_pools\": []}"
+  grep -qF "php$version-cli" "$out/php-ubuntu-php.log" || fail "php: the refusal does not name php$version-cli"
+  hx php env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q --autoremove "php$version-*" php-common >/dev/null
+  hx php sh -c '! dpkg-query -W -f "\${db:Status-Abbrev}\n" "php$1-*" 2>/dev/null | grep -q "^.i"' sh "$version" \
+    || fail "php: Ubuntu's php$version is still installed"
 
   echo "== php: a run whose PPA refresh failed is not followed by Ubuntu's php"
   # The first run adds the source and the pin, then its refresh fails: the
@@ -860,6 +873,26 @@ suite_php() {
   for name in production staging; do
     grep -qF "/var/log/php/$name.log" <<<"$rotate" || fail "php: logrotate does not consider $name's log: $rotate"
   done
+
+  echo "== php: another source of packages.sury.org/php is refused before any change"
+  prod="$(pid php php-fpm@production)"
+  staging="$(pid php php-fpm@staging)"
+  stanza='Types: deb\nURIs: https://packages.sury.org/php/\nSuites: %s\nComponents: main\nSigned-By: /usr/share/keyrings/debsuryorg-archive-keyring.gpg\n'
+  hx php sh -c 'echo "deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.gpg] https://packages.sury.org/php/ $1 main" > /etc/apt/sources.list.d/php.list' sh "$codename"
+  refused php foreign-list "/etc/apt/sources.list.d/php.list already enable packages.sury.org/php" "$dir/converge.yml"
+  php_running foreign-list
+  hx php rm /etc/apt/sources.list.d/php.list
+  # The same source as a deb822 stanza.
+  hx php sh -c 'printf "$1" "$2" > /etc/apt/sources.list.d/php.sources' sh "$stanza" "$codename"
+  refused php foreign-sources "/etc/apt/sources.list.d/php.sources already enable" "$dir/converge.yml"
+  php_running foreign-sources
+  hx php rm /etc/apt/sources.list.d/php.sources
+  # A commented entry and a disabled stanza do not count.
+  hx php sh -c 'echo "# deb https://packages.sury.org/php/ $2 main" > /etc/apt/sources.list.d/php-commented.list \
+    && printf "${1}Enabled: no\n" "$2" > /etc/apt/sources.list.d/php-disabled.sources' sh "$stanza" "$codename"
+  converge php foreign-inactive "$dir/converge.yml"
+  php_running foreign-inactive
+  hx php rm /etc/apt/sources.list.d/php-commented.list /etc/apt/sources.list.d/php-disabled.sources
 
   echo "== php: kill -9 of staging's master leaves production serving, systemd restarts staging"
   prod="$(pid php php-fpm@production)"

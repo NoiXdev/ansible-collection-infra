@@ -11,6 +11,10 @@
 - name: Check the versions, php_ini and the pools
   ansible.builtin.include_tasks: validate.yml
 
+- name: Check the host
+  ansible.builtin.include_tasks: checks.yml
+  when: php_versions | length > 0
+
 - name: Add packages.sury.org
   ansible.builtin.include_tasks: repository.yml
   when: php_versions | length > 0

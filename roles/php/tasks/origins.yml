@@ -1,0 +1,18 @@
+---
+# Where the installed packages come from, by the origin of the Release file
+# apt has their version from (files/php_apt_origins.py). Included by
+# tasks/checks.yml and again by tasks/repository.yml after its refresh, so it
+# reads the lists of that moment.
+- name: Read where the installed packages come from
+  ansible.builtin.script:
+    cmd: >-
+      php_apt_origins.py --ppa-origin {{ php_ppa_origin | quote }} --sury-origin {{ php_apt_origin | quote }}
+      {{ php_version_names | map('quote') | join(' ') }}
+    executable: /usr/bin/python3
+  register: php_apt_origins_script
+  changed_when: false
+  check_mode: false
+
+- name: Keep where the installed packages come from
+  ansible.builtin.set_fact:
+    php_apt_origins: "{{ php_apt_origins_script.stdout | from_json }}"

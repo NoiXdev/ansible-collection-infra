@@ -1,0 +1,67 @@
+---
+# Checks of the host before any change.
+
+# Active entries for packages.sury.org/php other than the role's own: a
+# one-line entry (deb or deb-src, not a comment) or a deb822 paragraph whose
+# URIs name it and that is not disabled (apt reads Enabled as a boolean).
+# First, and without apt: next to the role's source, such an entry with
+# another key stops apt, python3-apt's cache and the apt module included.
+- name: Find other sources of packages.sury.org/php
+  ansible.builtin.shell:
+    cmd: |
+      for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+        [ -f "$f" ] || continue
+        if awk '{ sub(/#.*/, ""); l = tolower($0) " " }
+            $1 ~ /^deb(-src)?$/ && l ~ /:\/\/packages\.sury\.org\/php\/?[ \t\r]/ { found = 1; exit }
+            END { exit !found }' "$f"; then
+          echo "$f"
+        fi
+      done
+      for f in /etc/apt/sources.list.d/*.sources; do
+        [ -f "$f" ] && [ "$f" != /etc/apt/sources.list.d/sury-php.sources ] || continue
+        if awk '
+            function paragraph() { if (named && !off) found = 1; named = off = field = 0 }
+            /^#/ { next }
+            /^[ \t\r]*$/ { paragraph(); next }
+            { l = tolower($0) " " }
+            l ~ /^[ \t]/ { if (field && l ~ /:\/\/packages\.sury\.org\/php\/?[ \t\r]/) named = 1; next }
+            { field = (l ~ /^uris:/); if (field && l ~ /:\/\/packages\.sury\.org\/php\/?[ \t\r]/) named = 1 }
+            l ~ /^enabled:/ { v = l; sub(/^enabled:[ \t]*/, "", v); sub(/[ \t\r]*$/, "", v)
+              if (v != "" && index(" no false off without disable 0 ", " " v " ")) off = 1 }
+            END { paragraph(); exit !found }' "$f"; then
+          echo "$f"
+        fi
+      done
+  register: php_foreign_sources
+  changed_when: false
+  check_mode: false
+
+- name: Check that no other source enables packages.sury.org/php
+  ansible.builtin.assert:
+    that: php_foreign_sources.stdout_lines | length == 0
+    fail_msg: >-
+      php: {{ php_foreign_sources.stdout_lines | join(', ') }} already enable packages.sury.org/php;
+      remove them, the role adds its own source (two entries with different keys stop apt for every
+      source)
+    quiet: true
+
+# python3-apt reads the origins; the apt module needs it anyway, so on a
+# host the collection manages it is there.
+- name: Install python3-apt
+  ansible.builtin.apt:
+    name: python3-apt
+    state: present
+
+- name: Read the origins
+  ansible.builtin.include_tasks: origins.yml
+
+# The pin keeps Ubuntu's packages from being installed but does not replace
+# them, and an extension from packages.sury.org would then need its common
+# from another origin. Taking such a host over is not the role's job.
+- name: Check that no PHP of a listed version is Ubuntu's own
+  ansible.builtin.assert:
+    that: php_apt_origins.ubuntu | length == 0
+    fail_msg: >-
+      php: {{ php_apt_origins.ubuntu | join(', ') }} are Ubuntu's own packages of a version php_versions
+      lists; remove them or drop the version from php_versions
+    quiet: true

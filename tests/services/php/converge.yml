@@ -5,7 +5,8 @@
 - name: Converge the php role
   hosts: testhost
   vars:
-    # false skips the pre_tasks (the release refusal on 26.04 changes nothing).
+    # false skips the pre_tasks, for the refusals that run before any pool
+    # user exists.
     php_test_prepare: true
     php_test_staging: true
     php_test_staging_version: "8.4"
