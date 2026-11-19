@@ -47,39 +47,100 @@
   no_log: true
   diff: false
 
-- name: Write the agent's settings
-  ansible.builtin.template:
-    src: agent.env.j2
-    dest: /etc/pulsix/agent.env
-    owner: root
-    group: root
-    mode: "0600"
-  register: pulsix_agent_settings
-  no_log: true
-  diff: false
+# Everything from writing the token to removing it again is one block: when any
+# step fails on a host without identity (the unit does not start, the agent does
+# not enroll), the rescue takes the token off the host and stops the agent.
+- name: Configure, start and enroll the agent
+  block:
+    - name: Write the agent's settings
+      ansible.builtin.template:
+        src: agent.env.j2
+        dest: /etc/pulsix/agent.env
+        owner: root
+        group: root
+        mode: "0600"
+      register: pulsix_agent_settings
+      no_log: true
+      diff: false
 
-- name: Look for the service unit
-  ansible.builtin.stat:
-    path: /etc/systemd/system/pulsix-agent.service
-  register: pulsix_agent_unit_before
+    - name: Look for the service unit
+      ansible.builtin.stat:
+        path: /etc/systemd/system/pulsix-agent.service
+      register: pulsix_agent_unit_before
 
-- name: Install the service unit
-  ansible.builtin.copy:
-    src: pulsix-agent.service
-    dest: /etc/systemd/system/pulsix-agent.service
-    owner: root
-    group: root
-    mode: "0644"
-  register: pulsix_agent_unit
+    - name: Install the service unit
+      ansible.builtin.copy:
+        src: pulsix-agent.service
+        dest: /etc/systemd/system/pulsix-agent.service
+        owner: root
+        group: root
+        mode: "0644"
+      register: pulsix_agent_unit
 
-- name: Enable and start the agent
-  ansible.builtin.systemd_service:
-    name: pulsix-agent
-    enabled: true
-    state: "{{ 'restarted' if pulsix_agent_restart else 'started' }}"
-    daemon_reload: "{{ pulsix_agent_restart }}"
-  vars:
-    pulsix_agent_restart: >-
-      {{ pulsix_agent_binary is changed or pulsix_agent_stale_token is changed
-         or pulsix_agent_settings is changed or pulsix_agent_unit is changed }}
-  when: not ansible_check_mode or pulsix_agent_unit_before.stat.exists
+    - name: Enable and start the agent
+      ansible.builtin.systemd_service:
+        name: pulsix-agent
+        enabled: true
+        state: "{{ 'restarted' if pulsix_agent_restart else 'started' }}"
+        daemon_reload: "{{ pulsix_agent_restart }}"
+      vars:
+        pulsix_agent_restart: >-
+          {{ pulsix_agent_binary is changed or pulsix_agent_stale_token is changed
+             or pulsix_agent_settings is changed or pulsix_agent_unit is changed }}
+      when: not ansible_check_mode or pulsix_agent_unit_before.stat.exists
+
+    # The agent writes agent.key, agent.ca.pem, agent.crt and then agent.json;
+    # it has enrolled when the last one is there.
+    - name: Wait for the agent's identity
+      ansible.builtin.wait_for:
+        path: "/etc/pulsix/{{ item }}"
+        timeout: "{{ pulsix_agent_enroll_timeout }}"
+      loop: [agent.crt, agent.json]
+      when: not pulsix_agent_identity.stat.exists and not ansible_check_mode
+
+    - name: Remove the token from the settings
+      ansible.builtin.lineinfile:
+        path: /etc/pulsix/agent.env
+        regexp: ^PULSIX_ENROLL_TOKEN=
+        state: absent
+      when: not pulsix_agent_identity.stat.exists and not ansible_check_mode
+      no_log: true
+      diff: false
+
+    - name: Restart the agent so that it no longer holds the token
+      ansible.builtin.systemd_service:
+        name: pulsix-agent
+        state: restarted
+      when: not pulsix_agent_identity.stat.exists and not ansible_check_mode
+  rescue:
+    - name: Remove the token from the settings after a failed enrollment
+      ansible.builtin.lineinfile:
+        path: /etc/pulsix/agent.env
+        regexp: ^PULSIX_ENROLL_TOKEN=
+        state: absent
+      when: not pulsix_agent_identity.stat.exists
+      no_log: true
+      diff: false
+
+    # A stop that fails (no unit yet) must not hide the message below.
+    - name: Stop the agent after a failed enrollment
+      ansible.builtin.systemd_service:
+        name: pulsix-agent
+        state: stopped
+      when: not pulsix_agent_identity.stat.exists
+      failed_when: false
+
+    - name: Fail the run
+      ansible.builtin.fail:
+        msg: >-
+          {% if pulsix_agent_identity.stat.exists %}
+          The pulsix-agent service could not be configured or started on {{ inventory_hostname }};
+          the failed task is shown above. See journalctl -u pulsix-agent on the host. Nothing was
+          removed.
+          {% else %}
+          {{ inventory_hostname }} did not start or did not enroll within
+          {{ pulsix_agent_enroll_timeout }} seconds. The token was removed from
+          /etc/pulsix/agent.env and the agent is stopped. See journalctl -u pulsix-agent on the
+          host. A token that was used or has expired needs a new one; create it in Pulsix and run
+          the role again. Nothing was removed.
+          {% endif %}

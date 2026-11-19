@@ -6,7 +6,7 @@
 - name: Install the agent
   ansible.builtin.import_tasks: install.yml
 
-- name: Enroll the agent and prove that it runs
+- name: Prove that the agent runs
   ansible.builtin.import_tasks: enroll.yml
   when: not ansible_check_mode
 

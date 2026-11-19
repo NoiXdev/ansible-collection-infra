@@ -1,0 +1,27 @@
+---
+# Takes pulsix_agent_purge, the packages about to be purged. apt-get purge also
+# removes every package that depends on one of them; that is refused before the
+# purge, with the list. The simulation changes nothing.
+- name: Ask apt what the purge would remove
+  ansible.builtin.command:  # noqa: command-instead-of-module (a simulation has no module)
+    argv: "{{ ['apt-get', '-s', 'purge'] + pulsix_agent_purge }}"
+  environment:
+    LC_ALL: C
+  register: pulsix_agent_purge_simulation
+  changed_when: false
+
+- name: Refuse to remove packages that depend on the tool
+  ansible.builtin.assert:
+    that: pulsix_agent_purge_others | length == 0
+    fail_msg: >-
+      Purging {{ pulsix_agent_purge | join(', ') }} on {{ inventory_hostname }} would also remove
+      {{ pulsix_agent_purge_others | join(', ') }}, which depend on them. Nothing was purged.
+      Decide about those packages first, then run the role again.
+    quiet: true
+  vars:
+    pulsix_agent_purge_others: >-
+      {{ pulsix_agent_purge_simulation.stdout_lines
+         | select('match', '^(Remv|Purg) ')
+         | map('regex_replace', '^\S+ (\S+).*$', '\1')
+         | reject('in', pulsix_agent_purge)
+         | unique | list }}

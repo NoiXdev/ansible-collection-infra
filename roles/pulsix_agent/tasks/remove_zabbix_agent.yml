@@ -33,6 +33,12 @@
          | reject('eq', 'zabbix-release')
          | list }}
 
+- name: Check that purging the helpers takes nothing else
+  ansible.builtin.include_tasks: check_purge.yml
+  vars:
+    pulsix_agent_purge: "{{ pulsix_agent_zabbix_helpers }}"
+  when: pulsix_agent_zabbix_helpers | length > 0
+
 - name: Purge the helpers of the agent
   ansible.builtin.apt:
     name: "{{ pulsix_agent_zabbix_helpers }}"
@@ -46,13 +52,16 @@
   register: pulsix_agent_zabbix_dpkg
   changed_when: false
 
+# Any state but not-installed counts: a server that was removed but not purged
+# (config-files) still has its configuration in /etc/zabbix. The agent's own
+# packages are purged by now, and zabbix-release is not another package.
 - name: Look for other Zabbix packages
   ansible.builtin.set_fact:
     pulsix_agent_zabbix_others: >-
       {{ pulsix_agent_zabbix_dpkg.stdout_lines
          | select('match', '^zabbix-\S+ ')
          | reject('match', '^zabbix-release ')
-         | reject('search', ' (not-installed|config-files)$')
+         | reject('search', ' not-installed$')
          | list }}
 
 - name: Remove what only the Zabbix agent used

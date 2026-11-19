@@ -41,8 +41,13 @@ play() {
   ansible-playbook -i "$tests/inventory.yml" -e "test_host=$host" "$here/converge.yml" "$@" >>"$log" 2>&1
 }
 
+# since LINES: the log after its first LINES lines. Output is matched with
+# here-strings, never through a pipe: under pipefail a "grep -q" that matches
+# early makes the writer die of SIGPIPE, and the match would read as a miss.
+since() { tail -n +$(($1 + 1)) "$log"; }
+
 # expect_fail ARGS: the run must fail in a task of the role (not before it, for
-# example because the role is missing).
+# example because the role is missing); $out holds its output.
 expect_fail() {
   local before
   before="$(wc -l <"$log")"
@@ -50,8 +55,9 @@ expect_fail() {
     echo "expected the run to fail: $*" >&2
     exit 1
   fi
-  tail -n +$((before + 1)) "$log" | grep -q 'TASK \[noixdev.infra.pulsix_agent : ' || {
-    tail -n +$((before + 1)) "$log" >&2
+  out="$(since "$before")"
+  grep -q 'TASK \[noixdev.infra.pulsix_agent : ' <<<"$out" || {
+    printf '%s\n' "$out" >&2
     echo "the run failed before it reached the role: $*" >&2
     exit 1
   }
@@ -111,11 +117,15 @@ converge() {
   local before
   before="$(wc -l <"$log")"
   play "${common[@]}" "$@" || { tail -n +$((before + 1)) "$log" >&2; fail "the run failed: $*"; }
-  out="$(tail -n +$((before + 1)) "$log")"
+  out="$(since "$before")"
 }
 
 # changed_zero: the last run changed nothing.
-changed_zero() { printf '%s\n' "$out" | grep -E '^testhost +:' | grep -q 'changed=0 ' || fail "the run was not idempotent"; }
+changed_zero() {
+  local recap
+  recap="$(grep -E '^testhost +:' <<<"$out" || true)"
+  [[ $recap == *'changed=0 '* ]] || fail "the run was not idempotent"
+}
 
 main_pid() { host_sh 'systemctl show -p MainPID --value pulsix-agent'; }
 agent_sha() { host_sh "sha256sum $bin" | cut -d' ' -f1; }
@@ -123,6 +133,8 @@ sha_file() { echo "/srv/pulsix-stub-web/$1/pulsix-agent-linux-$(host_sh 'dpkg --
 
 # no_token_left PID: the token is neither in agent.env nor in the environment of PID.
 no_token_left() {
+  case "$1" in '' | 0) fail "the agent has no main process (PID '$1')" ;; esac
+  host_sh "test -r /proc/$1/environ && cat /proc/$1/environ >/dev/null" || fail "cannot read the environment of PID $1"
   if host_sh 'grep -q PULSIX_ENROLL_TOKEN /etc/pulsix/agent.env'; then fail "agent.env still has the token"; fi
   if host_sh "grep -aq NOIXTESTVALID /proc/$1/environ"; then fail "the agent still holds the token"; fi
 }
@@ -169,12 +181,13 @@ checkmk_units() { printf '%s\n' check-mk-agent.socket check-mk-agent-async cmk-a
 # clean_tools: no trace of any of the three tools.
 clean_tools() { host_sh 'sh /opt/fixtures/clean.sh'; }
 
-# deb NAME VERSION PATH...: build and install a fixture package.
+# deb NAME VERSION PATH...: build and install a fixture package; DEPENDS=PKG
+# before the call makes it depend on PKG.
 deb() {
   local name="$1" version="$2"
   shift 2
   printf '%s\n' "$@" | docker exec -i "$host" sh -c "cat >/tmp/$name.list"
-  host_sh "sh /opt/fixtures/make-deb.sh $name $version /tmp/$name.list && dpkg -i /tmp/${name}_${version}_all.deb >/dev/null 2>&1" \
+  host_sh "DEPENDS='${DEPENDS:-}' sh /opt/fixtures/make-deb.sh $name $version /tmp/$name.list && dpkg -i /tmp/${name}_${version}_all.deb >/dev/null 2>&1" \
     || fail "could not install the fixture package $name"
 }
 
@@ -321,7 +334,11 @@ start_host() {
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --sysctl net.ipv6.conf.all.disable_ipv6=0 \
     --tmpfs /run --tmpfs /run/lock --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
-  until (docker exec "$host" systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
+  local state=""
+  until [[ $state == *running* || $state == *degraded* ]]; do
+    sleep 1
+    state="$(docker exec "$host" systemctl is-system-running 2>/dev/null || true)"
+  done
 
   host_sh 'mkdir -p /opt/stub /opt/fixtures /srv/pulsix-stub-web /var/lib/pulsix-stub'
   docker cp "$here/stub/." "$host:/opt/stub/"
@@ -367,10 +384,11 @@ run_release() {
     local before
     before="$(wc -l <"$log")"
     play --tags pulsix_agent_check -e '{"pulsix_agent_manager_addr": "[2001:db8::1]:8444"}' -e "pulsix_agent_enroll_token=$token" \
-      || { tail -n +$((before + 1)) "$log" >&2; fail "an IPv6 manager address was refused"; }
-    tail -n +$((before + 1)) "$log" | grep -q 'TASK \[noixdev.infra.pulsix_agent : Check the settings\]' \
+      || { since "$before" >&2; fail "an IPv6 manager address was refused"; }
+    out="$(since "$before")"
+    grep -q 'TASK \[noixdev.infra.pulsix_agent : Check the settings\]' <<<"$out" \
       || fail "the settings check did not run for an IPv6 manager address"
-    ! tail -n +$((before + 1)) "$log" | grep -q 'fatal:' || fail "an IPv6 manager address failed a check"
+    if grep -q 'fatal:' <<<"$out"; then fail "an IPv6 manager address failed a check"; fi
   fi
 
   # Settings every run shares: the manager stub and the stub's web server.
@@ -388,9 +406,12 @@ run_release() {
     [ "$(host_sh "stat -c %a $bin")" = 755 ] || fail "the binary is not 755"
     host_sh 'systemctl is-active --quiet pulsix-agent && systemctl is-enabled --quiet pulsix-agent' || fail "the service is not active and enabled"
     host_sh 'test -e /etc/pulsix/agent.crt' || fail "agent.crt is missing"
+    # The stub writes agent.json two seconds after agent.crt; a restart in
+    # between would leave it missing.
+    host_sh 'test -e /etc/pulsix/agent.json' || fail "agent.json is missing: the agent was restarted before it finished enrolling"
     pid="$(main_pid)"
     no_token_left "$pid"
-    if printf '%s\n' "$out" | grep -q NOIXTESTVALID; then fail "the Ansible log shows the token"; fi
+    if [[ $out == *NOIXTESTVALID* ]]; then fail "the Ansible log shows the token"; fi
     converge "${tok[@]}"
     changed_zero
     [ "$(main_pid)" = "$pid" ] || fail "a second run restarted the agent"
@@ -467,30 +488,53 @@ run_release() {
     echo "-- failed_enrollment"
     fresh_host
     publish_stub "$v"
-    before="$(wc -l <"$log")"
     expect_fail -e "pulsix_agent_enroll_token=$token_refused" -e pulsix_agent_enroll_timeout=10
-    tail -n +$((before + 1)) "$log" | grep -q 'journalctl -u pulsix-agent' || fail "the failure does not name journalctl"
-    if tail -n +$((before + 1)) "$log" | grep -q NOIXTESTREFUSED; then fail "the Ansible log shows the token"; fi
+    [[ $out == *'journalctl -u pulsix-agent'* ]] || fail "the failure does not name journalctl"
+    if [[ $out == *NOIXTESTREFUSED* ]]; then fail "the Ansible log shows the token"; fi
     if host_sh 'grep -q NOIXTESTREFUSED /etc/pulsix/agent.env'; then fail "the refused token stayed in agent.env"; fi
     [ "$(host_sh 'systemctl is-active pulsix-agent || true')" = inactive ] || fail "the service is not inactive"
     converge "${tok[@]}"
     host_sh 'test -e /etc/pulsix/agent.crt' || fail "enrolling again with a valid token failed"
   fi
 
+  # The unit cannot start (a drop-in whose ExecStartPre fails): the token that
+  # was just written must not stay behind.
+  if scenario start_fails; then
+    echo "-- start_fails"
+    fresh_host
+    publish_stub "$v"
+    host_sh "mkdir -p /etc/systemd/system/pulsix-agent.service.d
+      printf '[Service]\nExecStartPre=/bin/false\n' >/etc/systemd/system/pulsix-agent.service.d/fail.conf
+      systemctl daemon-reload"
+    expect_fail "${tok[@]}"
+    [[ $out == *'journalctl -u pulsix-agent'* ]] || fail "the failure does not name journalctl"
+    if [[ $out == *NOIXTESTVALID* ]]; then fail "the Ansible log shows the token"; fi
+    host_sh 'test -e /etc/pulsix/agent.env' || fail "the run did not get as far as the settings"
+    if host_sh 'grep -q PULSIX_ENROLL_TOKEN /etc/pulsix/agent.env'; then fail "the token stayed in agent.env"; fi
+    [ "$(host_sh 'systemctl is-active pulsix-agent || true')" = inactive ] || fail "the service is not inactive"
+    host_sh 'rm -rf /etc/systemd/system/pulsix-agent.service.d && systemctl daemon-reload'
+    converge "${tok[@]}"
+    host_sh 'test -e /etc/pulsix/agent.crt' || fail "enrolling after the start was fixed failed"
+    no_token_left "$(main_pid)"
+  fi
+
+  # A requested removal needs an agent that runs and a proven connection. The
+  # marker stands in for the tool's files; every failure keeps it.
+  local rm=(-e '{"pulsix_agent_remove": ["netdata"]}') mode
+
   if scenario crash; then
     echo "-- crash"
     fresh_host
     publish_stub "$v"
     converge "${tok[@]}"
+    host_sh 'mkdir -p /etc/netdata && touch /etc/netdata/marker'
     set_mode crash
-    expect_fail
+    expect_fail "${rm[@]}"
     set_mode ok
+    [[ $out == *'did not stay active'* ]] || fail "the crash did not fail the check that the agent stays up"
+    host_sh 'test -e /etc/netdata/marker' || fail "the marker is gone after a crash"
   fi
 
-  # A requested removal needs a proven connection. The marker stands in for the
-  # tool's files; every failure keeps it.
-  local rm=(-e '{"pulsix_agent_remove": ["netdata"]}')
-  local before mode
   # Each mode fails in its own check; the drop closes after 30 s, inside the
   # 30-second window that follows the first sighting of the connection.
   for mode in no_connection stream_failed refused drop; do
@@ -500,10 +544,9 @@ run_release() {
       publish_stub "$v"
       host_sh 'mkdir -p /etc/netdata && touch /etc/netdata/marker'
       set_mode "${mode//_/-}"
-      before="$(wc -l <"$log")"
       expect_fail "${tok[@]}" "${rm[@]}"
-      tail -n +$((before + 1)) "$log" | grep -q 'journalctl -u pulsix-agent' || fail "the failure does not name journalctl ($mode)"
-      tail -n +$((before + 1)) "$log" | grep -q "$(failure_text "$mode")" || fail "$mode did not fail with: $(failure_text "$mode")"
+      [[ $out == *'journalctl -u pulsix-agent'* ]] || fail "the failure does not name journalctl ($mode)"
+      [[ $out == *"$(failure_text "$mode")"* ]] || fail "$mode did not fail with: $(failure_text "$mode")"
       host_sh 'test -e /etc/netdata/marker' || fail "the marker is gone after $mode"
     fi
   done
@@ -809,6 +852,94 @@ run_release() {
     changed_zero
   fi
 
+  # A unit whose file was deleted and systemd reloaded still runs (LoadState
+  # not-found, ActiveState active), here as the tool's user.
+  if scenario unit_gone_running; then
+    echo "-- unit_gone_running"
+    removal_host
+    # Without the packaged unit file, which systemd would load instead.
+    netdata_spec | grep -v '/netdata.service$' | seed_missing
+    add_user netdata
+    host_sh "printf '[Unit]\nDescription=fixture\n[Service]\nUser=netdata\nExecStart=/bin/sleep 7781\n' >/etc/systemd/system/netdata.service
+      systemctl daemon-reload && systemctl start netdata.service
+      rm /etc/systemd/system/netdata.service
+      systemctl daemon-reload"
+    host_sh 'pgrep -f "[s]leep 7781" >/dev/null' || fail "the unit does not run"
+    [ "$(host_sh 'systemctl show -p LoadState -p ActiveState --value netdata | tr "\n" " "')" = "not-found active " ] \
+      || fail "the unit is not a running unit without a file"
+    remove_args netdata
+    converge "${tok[@]}" "${rm_args[@]}"
+    if host_sh 'pgrep -f "[s]leep 7781" >/dev/null'; then fail "the unit without a file is still running"; fi
+    netdata_spec | assert_paths_gone
+    assert_user_gone netdata
+    converge "${tok[@]}" "${rm_args[@]}"
+    changed_zero
+  fi
+
+  # A failed unit whose file stays (not owned by a removed package) is not
+  # stopped again on every run.
+  if scenario unit_failed; then
+    echo "-- unit_failed"
+    removal_host
+    host_sh "printf '[Unit]\nDescription=fixture\n[Service]\nExecStart=/bin/false\n' >/etc/systemd/system/zabbix-agent.service
+      systemctl daemon-reload; systemctl start zabbix-agent.service; true"
+    [ "$(host_sh 'systemctl show -p ActiveState --value zabbix-agent')" = failed ] || fail "the unit is not failed"
+    remove_args zabbix_agent
+    converge "${tok[@]}" "${rm_args[@]}"
+    converge "${tok[@]}" "${rm_args[@]}"
+    changed_zero
+    host_sh 'rm -f /etc/systemd/system/zabbix-agent.service && systemctl daemon-reload && systemctl reset-failed; true'
+  fi
+
+  # A package that depends on a tool's package would go with an apt purge: the
+  # run refuses, names it, and removes nothing.
+  if scenario purge_dependents; then
+    echo "-- purge_dependents"
+    removal_host
+    deb netdata 1.0 /usr/sbin/netdata
+    DEPENDS=netdata deb noixdev-site-monitoring 1.0 /usr/share/noixdev-site-monitoring/data
+    remove_args netdata
+    expect_fail "${tok[@]}" "${rm_args[@]}"
+    [[ $out == *noixdev-site-monitoring* ]] || fail "the refusal does not name the dependent package"
+    assert_pkgs_installed netdata noixdev-site-monitoring
+    host_sh 'test -e /usr/sbin/netdata' || fail "a file of the tool was removed"
+    host_sh 'dpkg --purge noixdev-site-monitoring >/dev/null'
+    # The same for an auto-installed helper of the Zabbix agent: an orphaned
+    # server that needs zabbix-sender is not purged with it.
+    removal_host
+    install_zabbix_agent fixture
+    deb zabbix-sender 1.0 /usr/bin/zabbix_sender
+    DEPENDS=zabbix-sender deb zabbix-server-pgsql 1.0 /usr/sbin/zabbix_server
+    host_sh 'apt-mark auto zabbix-sender zabbix-server-pgsql >/dev/null'
+    remove_args zabbix_agent
+    expect_fail "${tok[@]}" "${rm_args[@]}"
+    [[ $out == *zabbix-server-pgsql* ]] || fail "the refusal does not name the server package"
+    assert_pkgs_installed zabbix-sender zabbix-server-pgsql zabbix-release
+    zabbix_shared_spec | assert_paths_there
+    host_sh 'dpkg --purge zabbix-server-pgsql >/dev/null'
+  fi
+
+  # A Zabbix server that was removed but not purged keeps its configuration in
+  # /etc/zabbix: the shared parts stay.
+  if scenario zabbix_config_files; then
+    echo "-- zabbix_config_files"
+    removal_host
+    install_zabbix_agent fixture
+    deb zabbix-server-pgsql 1.0 /etc/zabbix/zabbix_server.conf /usr/sbin/zabbix_server
+    host_sh 'dpkg -r zabbix-server-pgsql >/dev/null 2>&1'
+    [ "$(pkg_state zabbix-server-pgsql)" = config-files ] || fail "the test server package is not in state rc"
+    remove_args zabbix_agent
+    converge "${tok[@]}" "${rm_args[@]}"
+    zabbix_agent_spec | assert_paths_gone
+    zabbix_shared_spec | assert_paths_there
+    host_sh 'test -e /etc/zabbix/zabbix_server.conf' || fail "the configuration of the server is gone"
+    assert_pkgs_installed zabbix-release
+    host_sh 'getent passwd zabbix >/dev/null' || fail "the zabbix user was removed"
+    [ "$(pkg_state zabbix-server-pgsql)" = config-files ] || fail "the server package changed state"
+    converge "${tok[@]}" "${rm_args[@]}"
+    changed_zero
+  fi
+
   if scenario package_anchors; then
     echo "-- package_anchors"
     removal_host
@@ -840,7 +971,7 @@ run_release() {
       'netdata-archive-keyring.gpg' '/etc/apt/sources.list.d/netdata*' '/etc/systemd/system/netdata*' '/lib/systemd/system/netdata*' \
       '/etc/zabbix, /run/zabbix]' 'zabbix-release' '/etc/apt/sources.list.d/zabbix*' 'user [zabbix]' 'zabbix-sender' \
       '/lib/systemd/system/check-mk-agent*' '/etc/systemd/system/cmk-agent-ctl*' 'user [cmk-agent]' 'user [netdata]'; do
-      printf '%s\n' "$out" | grep -qF -- "$word" || fail "the check run does not name: $word"
+      [[ $out == *"$word"* ]] || fail "the check run does not name: $word"
     done
     netdata_spec | assert_paths_there
     zabbix_agent_spec | assert_paths_there

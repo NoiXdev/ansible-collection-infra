@@ -11,29 +11,6 @@
   register: pulsix_agent_rm_unit_state
   changed_when: false
 
-# Stop and disable are separate: systemd refuses to stop an inactive unit whose
-# file cannot be loaded, and some versions drop the result of the stop that
-# "disable --now" does. A stop that fails must fail the run.
-- name: Stop the units that run
-  ansible.builtin.command: systemctl stop {{ item.item }}  # noqa: command-instead-of-module
-  loop: "{{ pulsix_agent_rm_unit_state.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  when:
-    - "'LoadState=not-found' not in item.stdout_lines"
-    - "'ActiveState=inactive' not in item.stdout_lines"
-  changed_when: true
-
-- name: Disable the units that exist
-  ansible.builtin.command: systemctl disable {{ item.item }}  # noqa: command-instead-of-module
-  loop: "{{ pulsix_agent_rm_unit_state.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  when: "'LoadState=not-found' not in item.stdout_lines"
-  changed_when: >-
-    item.stdout_lines | select('in', ['UnitFileState=enabled', 'UnitFileState=enabled-runtime',
-       'UnitFileState=linked', 'UnitFileState=linked-runtime', 'UnitFileState=alias']) | list | length > 0
-
 - name: Read the installed packages
   ansible.builtin.command: dpkg-query -W -f='${Package} ${db:Status-Status}\n'
   register: pulsix_agent_rm_dpkg
@@ -54,6 +31,39 @@
       {%- endif -%}
       {%- endfor -%}
       {{ found }}
+
+# Refused before any change: a purge that would take other packages along.
+- name: Check that the purge takes nothing else
+  ansible.builtin.include_tasks: check_purge.yml
+  vars:
+    pulsix_agent_purge: "{{ pulsix_agent_rm_found }}"
+  when: pulsix_agent_rm_found | length > 0
+
+# Stop and disable are separate: systemd refuses to stop an inactive unit whose
+# file cannot be loaded, and some versions drop the result of the stop that
+# "disable --now" does. A stop that fails must fail the run. The stop goes by
+# ActiveState alone: a unit whose file is gone (LoadState not-found) can still
+# run. A failed unit runs nothing, and stopping it would report a change on
+# every run.
+- name: Stop the units that run
+  ansible.builtin.command: systemctl stop {{ item.item }}  # noqa: command-instead-of-module
+  loop: "{{ pulsix_agent_rm_unit_state.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - "'ActiveState=inactive' not in item.stdout_lines"
+    - "'ActiveState=failed' not in item.stdout_lines"
+  changed_when: true
+
+- name: Disable the units that exist
+  ansible.builtin.command: systemctl disable {{ item.item }}  # noqa: command-instead-of-module
+  loop: "{{ pulsix_agent_rm_unit_state.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: "'LoadState=not-found' not in item.stdout_lines"
+  changed_when: >-
+    item.stdout_lines | select('in', ['UnitFileState=enabled', 'UnitFileState=enabled-runtime',
+       'UnitFileState=linked', 'UnitFileState=linked-runtime', 'UnitFileState=alias']) | list | length > 0
 
 - name: Purge the packages
   ansible.builtin.apt:

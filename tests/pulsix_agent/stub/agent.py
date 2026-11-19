@@ -2,8 +2,10 @@
 """Stand-in for the Pulsix agent in the pulsix_agent role's tests.
 
 Without /etc/pulsix/agent.crt it enrolls: the token pxa1.NOIXTESTVALID.secret.pin
-writes the file; pxa1.NOIXTESTREFUSED.secret.pin and any other token exit with 2,
-like the real agent after a refusal. Then it
+writes the identity in the real agent's order (agent.key, agent.ca.pem,
+agent.crt, then agent.json, here two seconds after the certificate);
+pxa1.NOIXTESTREFUSED.secret.pin and any other token exit with 2, like the real
+agent after a refusal. Then it
 follows /var/lib/pulsix-stub/mode, which it polls about once a second, so a
 scenario can change the mode of a running agent:
 
@@ -23,7 +25,8 @@ import time
 
 VALID_TOKEN = "pxa1.NOIXTESTVALID.secret.pin"
 REFUSED_TOKEN = "pxa1.NOIXTESTREFUSED.secret.pin"
-CERT = "/etc/pulsix/agent.crt"
+DIR = "/etc/pulsix"
+CERT = DIR + "/agent.crt"
 MODE_FILE = "/var/lib/pulsix-stub/mode"
 LINES = {
     "stream-failed": "agent stream failed: stub",
@@ -56,10 +59,21 @@ def enroll():
     if token == REFUSED_TOKEN or token != VALID_TOKEN:
         log("enrollment refused")
         sys.exit(2)
-    os.makedirs(os.path.dirname(CERT), mode=0o700, exist_ok=True)
-    with open(CERT, "w") as handle:
-        handle.write("stub certificate\n")
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    for name, text in (("agent.key", "stub key\n"), ("agent.ca.pem", "stub CA\n"), ("agent.crt", "stub certificate\n")):
+        write(name, text)
+    time.sleep(2)
+    write("agent.json", '{"host_id": "stub"}\n')
     log("enrolled")
+
+
+def write(name, text):
+    """Write DIR/name atomically, as the real agent does."""
+    tmp = os.path.join(DIR, "." + name + ".tmp")
+    with open(tmp, "w") as handle:
+        handle.write(text)
+    os.chmod(tmp, 0o600)
+    os.rename(tmp, os.path.join(DIR, name))
 
 
 def connect(addr):
