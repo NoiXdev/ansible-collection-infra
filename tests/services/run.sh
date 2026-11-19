@@ -803,6 +803,31 @@ php_failed_run_reloads() {
   php_running typo-fixed
 }
 
+# php_failed_switch_keeps_updates: a switch run that fails after the switch
+# (an extension that does not exist) leaves packages.sury.org's pattern in
+# unattended-upgrades: without the PPA, PHP keeps getting its updates. The
+# PPA's source is a stand-in (a comment), so the switch check finds nothing
+# from it; the run removes it and refreshes. The next run removes the PPA's
+# pattern too.
+php_failed_switch_keeps_updates() {
+  local dir="$here/php" log="$out/php-switch-typo.log"
+  echo "== php: a switch run that fails later (an extension typo) leaves packages.sury.org's pattern in unattended-upgrades"
+  hx php sh -c 'rm /etc/apt/apt.conf.d/52noixdev-php-sury && echo "# stand-in" > /etc/apt/sources.list.d/ondrej-php.sources \
+    && echo "// stand-in" > /etc/apt/apt.conf.d/52noixdev-php-ppa'
+  if play php "$dir/converge.yml" "${upgraded[@]}" \
+      -e '{"php_versions": [{"version": "8.3", "extensions": ["intll"]}, {"version": "8.4", "extensions": ["intl", "mbstring"]}]}' >"$log" 2>&1; then
+    fail "php: the switch run with php8.3-intll did not fail"
+  fi
+  grep -qF "php8.3-intll" "$log" || { cat "$log" >&2; fail "php: the failure does not name php8.3-intll"; }
+  hx php test ! -e /etc/apt/sources.list.d/ondrej-php.sources || fail "php: the switch run did not remove the PPA's source"
+  hx php test -e /etc/apt/apt.conf.d/52noixdev-php-sury || fail "php: the failed switch run left no 52noixdev-php-sury"
+  php_running switch-typo
+  play php "$dir/converge.yml" "${upgraded[@]}" >"$out/php-switch-typo-fixed.log" 2>&1 \
+    || { cat "$out/php-switch-typo-fixed.log" >&2; fail "php: the fixed run after the failed switch failed"; }
+  play php "$dir/verify.yml" "${upgraded[@]}"
+  php_running switch-typo-fixed
+}
+
 suite_php() {
   local dir="$here/php" codename version policy prod staging tries rotate name conf stanza key fpr mirror
   local pool='{"name": "production", "version": "8.3", "user": "app_prod"}'
@@ -1025,6 +1050,7 @@ print(hashlib.sha256(urllib.request.urlopen(sys.argv[1]).read()).hexdigest())' h
     -e '{"php_versions": [{"version": "8.3", "extensions": ["intll"]}, {"version": "8.4", "extensions": ["intl", "mbstring"]}]}'
   php_running typo
   php_failed_run_reloads
+  php_failed_switch_keeps_updates
 
   echo "== php: invalid pools are refused before any change"
   refused php unknown-user "php: php_pools entry production runs as nosuchuser, which does not exist; the role does not create users" \

@@ -216,8 +216,27 @@
           from the ondrej/php PPA; the host stays on the PPA
       when: php_apt_origins.ppa_only | length > 0
 
+# Here, once the switch check passed and before the PPA goes: a run that
+# fails later (an extension that does not exist, a failed install) leaves the
+# host with packages.sury.org's pattern, so its PHP keeps getting security
+# updates. packages.sury.org's other repositories (apache2, nginx, bind) have
+# the same origin and codename and no label, so the pattern matches them too:
+# on a host where one of them was added by hand, unattended-upgrades upgrades
+# its packages as well. Accepted: those sources are not the role's, and their
+# security updates are what such a host wants anyway. The PPA's pattern goes
+# in tasks/updates.yml.
+- name: Let unattended-upgrades install packages.sury.org's updates
+  ansible.builtin.template:
+    src: 52noixdev-php-sury.j2
+    dest: /etc/apt/apt.conf.d/52noixdev-php-sury
+    owner: root
+    group: root
+    mode: "0644"
+
 # The installed packages stay as they are (tasks/versions.yml does not
 # upgrade): they move to packages.sury.org's versions with the next upgrade.
+# In check mode the switch check above does not run, so on a host with the
+# PPA this reports changed even where the real run would stay on the PPA.
 - name: Remove the PPA's source, key and pin
   ansible.builtin.file:
     path: "{{ item }}"

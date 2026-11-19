@@ -1,9 +1,9 @@
 ---
-# unattended-upgrades installs packages.sury.org's updates in both modes. One
-# master per pool: after each dpkg run that upgraded a php<v>-* package, the
-# apt hook restarts that version's pools one at a time. Classic mode has no
-# hook and no script: the package's own restart (and needrestart's) applies
-# there.
+# unattended-upgrades installs packages.sury.org's updates in both modes (its
+# pattern is written in tasks/repository.yml). One master per pool: after each
+# dpkg run that upgraded a php<v>-* package, the apt hook restarts that
+# version's pools one at a time. Classic mode has no hook and no script: the
+# package's own restart (and needrestart's) applies there.
 - name: Install the rolling restart
   ansible.builtin.template:
     src: php-fpm-rolling-restart.sh.j2
@@ -55,22 +55,11 @@
     - /etc/needrestart/conf.d/50noixdev-php-fpm.conf
   when: not php_fpm_per_pool_service | bool
 
-# packages.sury.org's other repositories (apache2, nginx, bind) have the same
-# origin and codename and no label, so the pattern matches them too: on a host
-# where one of them was added by hand, unattended-upgrades upgrades its
-# packages as well. Accepted: those sources are not the role's, and their
-# security updates are what such a host wants anyway.
-- name: Let unattended-upgrades install packages.sury.org's updates
-  ansible.builtin.template:
-    src: 52noixdev-php-sury.j2
-    dest: /etc/apt/apt.conf.d/52noixdev-php-sury
-    owner: root
-    group: root
-    mode: "0644"
-
 # The PPA's pattern, from before the switch to packages.sury.org. It stays
 # while the PPA's source does (a run that did not reach tasks/repository.yml's
 # switch, e.g. with php_versions empty): the PPA's packages keep their updates.
+# Removed here, not with the PPA's other files, so a host with php_versions
+# empty and without the PPA's source loses it too.
 - name: Look for the PPA's source
   ansible.builtin.stat:
     path: /etc/apt/sources.list.d/ondrej-php.sources
