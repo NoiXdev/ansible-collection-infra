@@ -51,10 +51,20 @@
   vars:
     stat: "{{ dict(backrest_script_stats.results | map(attribute='item.key') | zip(backrest_script_stats.results | map(attribute='stat')) | list) }}"
 
+# Each report file is a curl configuration with one url line; its content is
+# empty when the file must not exist. The success file is for healthchecks only.
+# validate.yml refuses whitespace, quotes and backslashes in the URL, so it
+# needs no escaping between the quotes.
 - name: Work out the report
   ansible.builtin.set_fact:
-    backrest_notify_content: >-
-      {{ 'url = "' ~ (backrest_notify_target | replace('\\', '\\\\') | replace('"', '\\"')) ~ '"\n' if backrest_notify_url | length > 0 else '' }}
+    backrest_notify_files:
+      - path: "{{ backrest_notify_file }}"
+        content: >-
+          {{ ('url = "' ~ backrest_notify_target ~ '"') if backrest_notify_url | length > 0 else '' }}
+      - path: "{{ backrest_notify_success_file }}"
+        content: >-
+          {{ ('url = "' ~ backrest_notify_base ~ '"')
+             if backrest_notify_url | length > 0 and backrest_notify_type == 'healthchecks' else '' }}
     backrest_repo_hooks: >-
       {{ [{
            'conditions': ['CONDITION_ANY_ERROR', 'CONDITION_SNAPSHOT_WARNING'],
@@ -63,8 +73,9 @@
          }] if backrest_notify_url | length > 0 else [] }}
   vars:
     backrest_notify_action: "{{ 'actionDiscord' if backrest_notify_type == 'discord' else 'actionHealthchecks' }}"
-    # backrest-finish posts to the same address that Backrest's healthchecks hook does.
-    backrest_notify_target: "{{ backrest_notify_url if backrest_notify_type == 'discord' else (backrest_notify_url | regex_replace('/+$', '')) ~ '/fail' }}"
+    backrest_notify_base: "{{ backrest_notify_url | regex_replace('/+$', '') }}"
+    # backrest-finish posts failures to the same address that Backrest's healthchecks hook does.
+    backrest_notify_target: "{{ backrest_notify_url if backrest_notify_type == 'discord' else backrest_notify_base ~ '/fail' }}"
   no_log: true
   ignore_errors: true
   register: backrest_notify_build
@@ -74,16 +85,25 @@
     msg: The report cannot be worked out from backrest_notify_type and backrest_notify_url.
   when: backrest_notify_build is failed
 
-- name: Look at the report file
+- name: Look at the report files
   ansible.builtin.stat:
-    path: "{{ backrest_notify_file }}"
-  register: backrest_notify_stat
+    path: "{{ item.path }}"
+  loop: "{{ backrest_notify_files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: backrest_notify_stats
+  no_log: true
+  ignore_errors: true
 
-- name: Compare the report file
+- name: Stop when the report files cannot be read
+  ansible.builtin.fail:
+    msg: The report files below {{ backrest_config_dir }} cannot be read.
+  when: backrest_notify_stats is failed
+
+- name: Compare the report files
   ansible.builtin.set_fact:
     backrest_notify_changed: >-
-      {{ (backrest_notify_content | length > 0 and (not backrest_notify_stat.stat.exists
-            or backrest_notify_stat.stat.checksum != backrest_notify_content | hash('sha1')
-            or backrest_notify_stat.stat.mode != '0600'))
-         or (backrest_notify_content | length == 0 and backrest_notify_stat.stat.exists) }}
+      {% set ns = namespace(changed=false) %}{% for r in backrest_notify_stats.results %}{% set c = r.item.content %}{%
+           if (c | length > 0 and (not r.stat.exists or r.stat.checksum != c | hash('sha1') or r.stat.mode != '0600'))
+              or (c | length == 0 and r.stat.exists) %}{% set ns.changed = true %}{% endif %}{% endfor %}{{ ns.changed }}
   no_log: true

@@ -58,8 +58,11 @@ backrest_repo_hooks: []
 
 # The report: a curl configuration with the notify URL (mode 0600, so the URL
 # is on no command line and in no script), which backrest-finish reads. It
-# exists only while backrest_notify_url is set.
+# exists only while backrest_notify_url is set. For healthchecks the second
+# file holds the check's base address, which backrest-finish pings after a
+# complete backup, so that the check is up again after a failure.
 backrest_notify_file: /etc/backrest/notify.curl
+backrest_notify_success_file: /etc/backrest/notify-success.curl
 # Written by the role on its first run; the age check counts from it on a host
 # that has no good backup yet.
 backrest_first_run_file: /var/lib/backrest/first-run

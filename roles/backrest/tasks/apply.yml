@@ -103,29 +103,29 @@
   loop_control:
     label: "{{ item.dest }}"
 
-- name: Write the report file
+- name: Write the report files
   ansible.builtin.copy:
-    content: "{{ backrest_notify_content }}"
-    dest: "{{ backrest_notify_file }}"
+    content: "{{ item.content }}"
+    dest: "{{ item.path }}"
     owner: root
     group: root
     mode: "0600"
-  when: backrest_notify_content | length > 0
+  loop: "{{ backrest_notify_files | selectattr('content', 'ne', '') | list }}"
   no_log: true
   diff: false
   ignore_errors: true
   register: backrest_notify_write
 
-- name: Remove the report file when there is no URL
-  ansible.builtin.file:
-    path: "{{ backrest_notify_file }}"
-    state: absent
-  when: backrest_notify_content | length == 0
-
-- name: Stop when the report file cannot be written
+- name: Stop when the report files cannot be written
   ansible.builtin.fail:
-    msg: "{{ backrest_notify_file }} could not be written."
+    msg: The report files below {{ backrest_config_dir }} could not be written.
   when: backrest_notify_write is failed
+
+- name: Remove the report files that are not needed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ backrest_notify_files | selectattr('content', 'eq', '') | map(attribute='path') | list }}"
 
 # The marker of the age check on a host without a good backup; written once.
 - name: Note the first run

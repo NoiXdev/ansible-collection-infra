@@ -72,7 +72,12 @@
   a PostgreSQL dump from a running Compose service, or a command dump whose `dump.output` must be
   a directory. An app that fails is left out of the snapshot while the healthy apps are still
   backed up; the backup then shows as failed and one report goes out (`backrest_notify_type`
-  `discord` or `healthchecks`, no generic webhooks; the URL is a secret kept in a `0600` file).
+  `discord` or `healthchecks`, no generic webhooks; the URL is a secret kept in `0600` files;
+  Healthchecks also gets a success ping after every complete backup). A dump that the backup did
+  not write never enters a snapshot, and an app whose `requires_path` vanishes after it was
+  active fails the backup until the next run. The plan lists only the dump directory; the other
+  paths reach restic at each backup through a file of the paths that exist, so one missing path
+  does not stop the snapshot of the rest.
   Plans changed in the UI are put back by the next run; a new app is backed up after the next run;
   a changed configuration waits for a running backup. The run fails when the last good backup is
   older than `backrest_max_age_hours`. Nothing secret reaches the output or a process list.

@@ -1,13 +1,17 @@
 #!/bin/sh
 # Managed by Ansible. Run by Backrest after each snapshot. Exits 0 and touches
-# the last-success file when backrest-prepare recorded no failure; otherwise
-# prints the failures, sends them as one report when there is a notify file,
-# and exits 1, so the backup shows as failed. Backrest sends no report for a
-# failing hook of this kind, so this script does. A failed send changes
-# nothing about the exit status.
+# the last-success file when backrest-prepare recorded no failure (for
+# Healthchecks it then pings the check's base address); otherwise prints the
+# failures, sends them as one report when there is a notify file, and exits 1,
+# so the backup shows as failed. Backrest sends no report for a failing hook of
+# this kind, so this script does. A failed send changes nothing about the exit
+# status.
 failures={{ backrest_failures_file | quote }}
 last_success={{ backrest_last_success_file | quote }}
 notify={{ backrest_notify_file | quote }}
+{% if backrest_notify_type == 'healthchecks' %}
+notify_success={{ backrest_notify_success_file | quote }}
+{% endif %}
 
 # report <text>: sends the text to the address in the notify file. curl reads
 # the address from that file, so it is on no command line, and its own output
@@ -52,3 +56,12 @@ if ! touch "$last_success"; then
   report "cannot touch $last_success"
   exit 1
 fi
+{% if backrest_notify_type == 'healthchecks' %}
+# The success ping to the check's base address: without it the check stays
+# down after the first failure, and the next failure alerts nobody.
+if [ -f "$notify_success" ] && ! printf 'backrest on %s: the backup is complete' "$(hostname)" \
+  | curl --config "$notify_success" --silent --fail --max-time 20 -H "Content-Type: text/plain" --data-binary @- >/dev/null 2>&1; then
+  echo "backrest-finish: the success report could not be sent" >&2
+fi
+{% endif %}
+exit 0
