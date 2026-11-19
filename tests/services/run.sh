@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host service roles (nodejs, redis, mariadb, mysql, php, composer, nginx) on a systemd Ubuntu
-# container, one fresh container per role:
+# container, one fresh container per role; php_switch (24.04 only) moves a
+# host from the released v0.6.0 php role's PPA to packages.sury.org:
 #
 #   NOIXDEV_INFRA_SERVICES="nodejs redis" UBUNTU=26.04 tests/services/run.sh
 #
@@ -18,7 +19,7 @@ root="$(dirname "$tests")"
 ubuntu="${UBUNTU:-26.04}"
 prefix="${NOIXDEV_INFRA_TEST_HOST:-noixdev-infra-services-$ubuntu}"
 out="$tests/output/services-$ubuntu"
-services="${NOIXDEV_INFRA_SERVICES:-nodejs redis mariadb mysql php composer nginx}"
+services="${NOIXDEV_INFRA_SERVICES:-nodejs redis mariadb mysql php php_switch composer nginx}"
 
 started=()
 cleanup() {
@@ -703,10 +704,10 @@ suite_mysql() {
   [ "$(hx mysql systemctl is-active mysql || true)" = active ] || fail "mysql: the server stopped after the refused mariadb run"
 }
 
-# ask POOL ROOT: what ROOT/app.php reports through the pool's socket (nothing
-# when the pool does not answer).
+# ask POOL ROOT [ROLE]: what ROOT/app.php reports through the pool's socket
+# in ROLE's container (php by default; nothing when the pool does not answer).
 ask() {
-  hx php env SCRIPT_FILENAME="$2/app.php" REQUEST_METHOD=GET cgi-fcgi -bind -connect "/run/php/$1.sock" 2>/dev/null || true
+  hx "${3:-php}" env SCRIPT_FILENAME="$2/app.php" REQUEST_METHOD=GET cgi-fcgi -bind -connect "/run/php/$1.sock" 2>/dev/null || true
 }
 
 # php_running: production and staging still run as PROD and STAGING after a
@@ -1278,13 +1279,14 @@ suite_php_classic() {
     || fail "php: pool.d should keep only the file the role does not manage: $files"
 }
 
-# rr_count: how many messages the rolling restart has in the journal.
-rr_count() { hx php sh -c 'journalctl --sync && journalctl -q -t php-fpm-rolling-restart -o cat | wc -l'; }
+# rr_count [ROLE]: how many messages the rolling restart has in the journal
+# of ROLE's container (php by default).
+rr_count() { hx "${1:-php}" sh -c 'journalctl --sync && journalctl -q -t php-fpm-rolling-restart -o cat | wc -l'; }
 
-# rr_since COUNT: the rolling restart's messages after the first COUNT, with
-# the PIDs taken out.
+# rr_since COUNT [ROLE]: the rolling restart's messages after the first COUNT
+# (in ROLE's container, php by default), with the PIDs taken out.
 rr_since() {
-  hx php sh -c 'journalctl --sync && journalctl -q -t php-fpm-rolling-restart -o cat' \
+  hx "${2:-php}" sh -c 'journalctl --sync && journalctl -q -t php-fpm-rolling-restart -o cat' \
     | tail -n +"$(($1 + 1))" | sed -E 's/ \(pid [0-9]+\)$//'
 }
 
@@ -1490,6 +1492,202 @@ suite_php_updates() {
     || { cat "$out/php-ppa-pattern.log" >&2; fail "php: the run with php_versions empty failed"; }
   hx php test -e /etc/apt/apt.conf.d/52noixdev-php-ppa || fail "php: the PPA's pattern went while its source is there"
   hx php rm /etc/apt/sources.list.d/ondrej-php.sources /etc/apt/apt.conf.d/52noixdev-php-ppa
+}
+
+# switch_state: the files of sources.list.d, keyrings, preferences.d and
+# apt.conf.d (listing with times, and checksums) and every package's version
+# in the php_switch container, to compare before and after a run.
+switch_state() {
+  hx php_switch sh -c 'cd /etc/apt && for d in sources.list.d keyrings preferences.d apt.conf.d; do
+      ls -l --full-time "$d" && find "$d" -maxdepth 1 -type f -exec md5sum {} + | sort; done && dpkg-query -W'
+}
+
+# switch_php_versions: every php* package's version in the php_switch container.
+switch_php_versions() { hx php_switch dpkg-query -W -f '${Package} ${Version}\n' 'php*'; }
+
+# switch_pools_answer NAME: production and staging answer in the php_switch
+# container.
+switch_pools_answer() {
+  ask production /srv/prod php_switch | grep -qF '"user":"app_prod"' || fail "php_switch/$1: production does not answer"
+  ask staging /srv/staging php_switch | grep -qF '"user":"app_staging"' || fail "php_switch/$1: staging does not answer"
+}
+
+# switch_no_downgrade NAME BEFORE: no package of BEFORE (switch_php_versions'
+# output) has a lower version now, or is gone.
+switch_no_downgrade() {
+  local down
+  down="$(hx php_switch sh -c 'echo "$1" | while read -r p v; do
+      [ -n "$v" ] || continue
+      n="$(dpkg-query -W -f "\${Version}" "$p" 2>/dev/null || true)"
+      if [ -z "$n" ] || dpkg --compare-versions "$n" lt "$v"; then echo "$p $v -> ${n:-gone}"; fi
+    done' sh "$2")"
+  [ -z "$down" ] || fail "php_switch/$1: PHP packages went down: $down"
+}
+
+# switch_sury_version PACKAGE: the highest version packages.sury.org has of
+# PACKAGE in the lists (empty when it has none).
+switch_sury_version() {
+  local v best=''
+  for v in $(hx php_switch apt-cache madison "$1" | awk -F '|' '$3 ~ /:\/\/packages\.sury\.org\// { gsub(/ /, "", $2); print $2 }'); do
+    if [ -z "$best" ] || hx php_switch dpkg --compare-versions "$v" gt "$best"; then best="$v"; fi
+  done
+  echo "$best"
+}
+
+# The switch from the ondrej/php PPA: a host set up by the released v0.6.0
+# role (one master per pool, production on 8.3, staging on 8.4) moves on its
+# next run without touching a PHP package or a pool, unless it has a package
+# packages.sury.org lacks, and then gets packages.sury.org's updates through
+# unattended-upgrades and the rolling restart. Classic mode is not covered:
+# the repository steps do not depend on the mode.
+suite_php_switch() {
+  local dir="$here/php" old="$out/v0.6.0" tree="$out/v0.6.0/ansible_collections/noixdev/infra"
+  local old_files='sources.list.d/ondrej-php.sources keyrings/ondrej-php.asc preferences.d/ondrej-php apt.conf.d/52noixdev-php-ppa'
+  local new_files='sources.list.d/sury-php.sources keyrings/sury-php.gpg preferences.d/sury-php apt.conf.d/52noixdev-php-sury'
+  local message log rc before after prod staging pkg='' candidate versions down count line p v pool was installed sury now ahead=''
+  if [ "$ubuntu" != 24.04 ]; then
+    echo "== php_switch: skipped on $ubuntu: the ondrej/php PPA has packages for 24.04 only"
+    return 0
+  fi
+  git -C "$root" rev-parse -q --verify 'v0.6.0^{commit}' >/dev/null || fail "php_switch: the tag v0.6.0 is missing (git fetch --tags)"
+  start php_switch
+
+  echo "== php_switch: the released v0.6.0 role sets the host up from the PPA"
+  hx php_switch sh -c 'apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q needrestart unattended-upgrades >/dev/null' \
+    || fail "php_switch: needrestart and unattended-upgrades could not be installed"
+  # unattended-upgrades runs below when the test says so, not from its timers.
+  hx php_switch systemctl disable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+  rm -rf "$old"
+  mkdir -p "$tree"
+  git -C "$root" archive v0.6.0 | tar -x -C "$tree"
+  # The old role from the tag: its tree comes first, so no other
+  # noixdev.infra is found. The rest of the path brings community.docker.
+  ANSIBLE_COLLECTIONS_PATH="$old:${ANSIBLE_COLLECTIONS_PATH#"$tests/output:"}" \
+    play php_switch "$tree/tests/services/php/converge.yml" >"$out/php_switch-v0.6.0.log" 2>&1 \
+    || { cat "$out/php_switch-v0.6.0.log" >&2; fail "php_switch: the v0.6.0 role failed"; }
+  ANSIBLE_COLLECTIONS_PATH="$old:${ANSIBLE_COLLECTIONS_PATH#"$tests/output:"}" \
+    play php_switch "$tree/tests/services/php/verify.yml" >"$out/php_switch-v0.6.0-verify.log" 2>&1 \
+    || { cat "$out/php_switch-v0.6.0-verify.log" >&2; fail "php_switch: the v0.6.0 host does not verify"; }
+  hx php_switch sh -c 'cd /etc/apt && for f in $1; do test -e "$f" || exit 1; done' sh "$old_files" \
+    || fail "php_switch: the v0.6.0 role did not write the PPA's four files"
+  [ -z "$(hx php_switch find /etc/apt -name '*sury*')" ] || fail "php_switch: the v0.6.0 run wrote packages.sury.org's files"
+  switch_pools_answer v0.6.0
+
+  echo "== php_switch: --check before the switch changes nothing and does not fail in the repository tasks"
+  before="$(switch_state)"
+  prod="$(pid php_switch php-fpm@production)"
+  staging="$(pid php_switch php-fpm@staging)"
+  log="$out/php_switch-check.log"
+  rc=0
+  play php_switch "$dir/converge.yml" --check >"$log" 2>&1 || rc=$?
+  # A failed task names its file in the error's Origin line.
+  if grep -E '^Origin: .*/roles/php/tasks/(checks|repository|origins)\.yml:' "$log"; then
+    cat "$log" >&2
+    fail "php_switch: --check failed in checks.yml, repository.yml or origins.yml"
+  fi
+  grep -qF "noixdev.infra.php : Remove the PPA's source, key and pin]" "$log" \
+    || { cat "$log" >&2; fail "php_switch: --check did not get past the switch check"; }
+  echo "   --check exited $rc$(grep -m 1 '^Origin: ' "$log" | sed 's/^/; first failure: /' || true)"
+  after="$(switch_state)"
+  [ "$after" = "$before" ] || fail "php_switch: --check changed the host: $(diff <(echo "$before") <(echo "$after") || true)"
+  [ "$(pid php_switch php-fpm@production)" = "$prod" ] || fail "php_switch: production restarted in --check"
+  [ "$(pid php_switch php-fpm@staging)" = "$staging" ] || fail "php_switch: staging restarted in --check"
+
+  echo "== php_switch: a package only the PPA has keeps the host on the PPA, as found"
+  # sqlsrv is built for amd64 only, libvirt-php for arm64 too; neither is on
+  # packages.sury.org for noble. The first the PPA offers here is the one.
+  for candidate in php8.3-sqlsrv php8.3-libvirt-php; do
+    if hx php_switch apt-cache policy "$candidate" | awk '/^ *Candidate:/ { c = $2; next }
+        $NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); next }
+        v == c && $2 ~ /^https?:\/\/ppa\.launchpadcontent\.net\// { found = 1 }
+        END { exit !found }'; then
+      pkg="$candidate"
+      break
+    fi
+  done
+  [ -n "$pkg" ] || fail "php_switch: the PPA offers neither php8.3-sqlsrv nor php8.3-libvirt-php on $(hx php_switch dpkg --print-architecture)"
+  echo "   the PPA-only package on $(hx php_switch dpkg --print-architecture): $pkg"
+  hx php_switch env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$pkg" >/dev/null || fail "php_switch: $pkg could not be installed"
+  before="$(switch_state)"
+  prod="$(pid php_switch php-fpm@production)"
+  staging="$(pid php_switch php-fpm@staging)"
+  # The switch check undoes its own files and refreshes the lists, so the run
+  # reports changes: not the refused helper.
+  message="php: packages.sury.org has no $pkg, which this host has from the ondrej/php PPA; the host stays on the PPA"
+  log="$out/php_switch-ppa-only.log"
+  if play php_switch "$dir/converge.yml" >"$log" 2>&1; then
+    fail "php_switch: the run with $pkg from the PPA did not fail"
+  fi
+  grep -qF -- "$message" "$log" || { cat "$log" >&2; fail "php_switch: expected the message: $message"; }
+  after="$(switch_state)"
+  [ "$after" = "$before" ] || fail "php_switch: the refused switch changed the host: $(diff <(echo "$before") <(echo "$after") || true)"
+  [ -z "$(hx php_switch find /etc/apt -name '*sury*')" ] || fail "php_switch: the refused switch left packages.sury.org's files"
+  [ "$(pid php_switch php-fpm@production)" = "$prod" ] || fail "php_switch: production restarted on the refused switch"
+  [ "$(pid php_switch php-fpm@staging)" = "$staging" ] || fail "php_switch: staging restarted on the refused switch"
+  switch_pools_answer ppa-only
+  hx php_switch env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q "$pkg" >/dev/null || fail "php_switch: $pkg could not be purged"
+
+  echo "== php_switch: the switch (and idempotence) keeps every PHP package and pool as it is"
+  versions="$(switch_php_versions)"
+  prod="$(pid php_switch php-fpm@production)"
+  staging="$(pid php_switch php-fpm@staging)"
+  converge php_switch switch "$dir/converge.yml"
+  play php_switch "$dir/verify.yml"
+  hx php_switch sh -c 'cd /etc/apt && for f in $1; do test -e "$f" || exit 1; done && for f in $2; do test ! -e "$f" || exit 1; done' \
+    sh "$new_files" "$old_files" || fail "php_switch: after the switch: $(hx php_switch sh -c 'cd /etc/apt && ls -d $1 $2 2>&1' sh "$new_files" "$old_files")"
+  after="$(switch_php_versions)"
+  [ "$after" = "$versions" ] || fail "php_switch: the switch changed PHP packages: $(diff <(echo "$versions") <(echo "$after") || true)"
+  [ "$(pid php_switch php-fpm@production)" = "$prod" ] || fail "php_switch: production restarted on the switch"
+  [ "$(pid php_switch php-fpm@staging)" = "$staging" ] || fail "php_switch: staging restarted on the switch"
+  switch_pools_answer switch
+  # The pin (990, below 1000) never takes a newer version from the PPA back
+  # to packages.sury.org's older one.
+  down=''
+  while read -r p installed now; do
+    [ -n "$p" ] || continue
+    if hx php_switch dpkg --compare-versions "$now" lt "$installed"; then down="$down $p $installed -> $now;"; fi
+  done <<<"$(hx php_switch apt-get -s dist-upgrade | awk '$1 == "Inst" && $2 ~ /^php/ && $3 ~ /^\[/ {
+      gsub(/[][]/, "", $3); gsub(/[()]/, "", $4); print $2, $3, $4 }')"
+  [ -z "$down" ] || fail "php_switch: apt-get dist-upgrade would downgrade:$down"
+
+  echo "== php_switch: unattended-upgrades brings packages.sury.org's versions, the hook restarts the pools one at a time"
+  # Decided per package before the run: on arm64 packages.sury.org builds
+  # snapshots that sort below the PPA's version of the same release.
+  for p in php8.3-fpm php8.4-fpm; do
+    installed="$(hx php_switch dpkg-query -W -f '${Version}' "$p")"
+    sury="$(switch_sury_version "$p")"
+    [ -n "$sury" ] || fail "php_switch: packages.sury.org has no $p"
+    if hx php_switch dpkg --compare-versions "$sury" gt "$installed"; then
+      ahead+="$p $sury"$'\n'
+      echo "   $p: packages.sury.org's $sury is ahead of the installed $installed"
+    else
+      echo "   $p: packages.sury.org's $sury is not ahead of the installed $installed: it stays (no downgrade)"
+    fi
+  done
+  versions="$(switch_php_versions)"
+  prod="$(pid php_switch php-fpm@production)"
+  staging="$(pid php_switch php-fpm@staging)"
+  count="$(rr_count php_switch)"
+  # The image's policy-rc.d stays: the hook restarts the pools with systemctl.
+  hx php_switch unattended-upgrade -v >"$out/php_switch-uu.log" 2>&1 \
+    || { cat "$out/php_switch-uu.log" >&2; fail "php_switch: unattended-upgrade failed"; }
+  switch_no_downgrade unattended-upgrade "$versions"
+  while read -r p sury; do
+    [ -n "$p" ] || continue
+    now="$(hx php_switch dpkg-query -W -f '${Version}' "$p")"
+    [ "$now" = "$sury" ] || { cat "$out/php_switch-uu.log" >&2; fail "php_switch: $p is $now, not packages.sury.org's $sury"; }
+    v="${p#php}"
+    v="${v%-fpm}"
+    if [ "$v" = 8.3 ]; then pool=production was="$prod"; else pool=staging was="$staging"; fi
+    [ "$(pid php_switch "php-fpm@$pool")" != "$was" ] || fail "php_switch: $pool did not restart on PHP $v's upgrade"
+    for line in "PHP $v packages were upgraded: restarting the pools one at a time" "restarting $pool (PHP $v)" "$pool answers"; do
+      [ "$(rr_since "$count" php_switch | grep -cxF "$line" || true)" = 1 ] \
+        || fail "php_switch: the journal does not have '$line' once: $(rr_since "$count" php_switch)"
+    done
+  done <<<"$ahead"
+  [ -n "$ahead" ] || echo "   packages.sury.org is not ahead of the PPA here: nothing went down"
+  switch_pools_answer unattended-upgrade
+  play php_switch "$dir/verify.yml"
 }
 
 # ncurl URL [curl args]: the headers and body of URL, asked in the nginx
