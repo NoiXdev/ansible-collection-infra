@@ -1,16 +1,26 @@
 #!/bin/sh
 # Managed by Ansible. Run by Backrest before each snapshot. Dumps the apps and
-# checks their paths. What fails is left out of this snapshot through the
-# exclude file and recorded in the failures file; the other apps are still
-# backed up, and backrest-finish marks the backup as failed afterwards. Exits
-# non-zero only when it cannot do its own work, which stops the snapshot.
+# checks their paths, and writes the paths that exist to the targets file,
+# which restic reads besides the dump directory (restic fails the whole backup
+# when a path it is given does not exist). What fails is left out of this
+# snapshot, through the exclude file or by not being a target, and recorded
+# in the failures file; the other apps are still backed up, and backrest-finish
+# marks the backup as failed afterwards. At the end everything in the dump
+# directory that this run did not write is left out as well, so a snapshot
+# never holds a stale dump. Exits non-zero only when it cannot do its own work,
+# which stops the snapshot.
 # The paths below are quoted on purpose; a path may hold $ and \ characters.
-# shellcheck disable=SC2016
+# Every helper is rendered, also those that no app of this host calls.
+# shellcheck disable=SC2016,SC2317,SC2329
 umask 077
 excludes={{ backrest_excludes_file | quote }}
+targets={{ backrest_targets_file | quote }}
 failures={{ backrest_failures_file | quote }}
 active_apps={{ backrest_active_apps_file | quote }}
+dump_dir={{ backrest_dump_dir | quote }}
 dump_timeout={{ backrest_dump_timeout | int }}
+# The apps whose dump this run wrote, each followed by a space.
+refreshed=" "
 
 die() {
   echo "backrest-prepare: $*" >&2
@@ -39,14 +49,28 @@ exclude() {
   printf '%s\n' "$1" | sed -e 's/[\\*?[]/\\&/g' -e 's/\$/[$]/g' >>"$excludes" || die "cannot write $excludes"
 }
 
+# target <path>: backs the path up when it exists.
+target() {
+  if [ -e "$1" ] || [ -h "$1" ]; then
+    printf '%s\n' "$1" >>"$targets" || die "cannot write $targets"
+  fi
+}
+
 is_active() {
   grep -qxF -- "$app" "$active_apps" 2>/dev/null
 }
 
+# is_empty_dir <directory>: it has no entry (or cannot be read).
+is_empty_dir() {
+  [ -z "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+}
+
 # check_path <path>: it must exist and not be empty (an unmounted volume is empty).
+# A missing path is not a target; an empty one is, but left out.
 check_path() {
+  target "$1"
   if [ -d "$1" ]; then
-    [ -z "$(ls -A -- "$1" 2>/dev/null)" ] || return 0
+    is_empty_dir "$1" || return 0
   elif [ -s "$1" ]; then
     return 0
   fi
@@ -60,48 +84,81 @@ dump_failed() {
   exclude "$1"
 }
 
-# dump_postgres <project> <service> <user> <database> <output>
+# dump_postgres <project> <service> <user> <database> <output>: on success the
+# app joins the refreshed dumps; a failed dump is left out by the sweep at the end.
 dump_postgres() {
   tmp="$5.tmp"
   rm -f "$tmp"
   ids=$(docker ps -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=$2") \
-    || { dump_failed "$5" "docker ps failed"; return 0; }
+    || { fail_app "docker ps failed"; return 0; }
   count=$(printf '%s\n' "$ids" | grep -c .)
   if [ "$count" != 1 ]; then
-    dump_failed "$5" "found $count containers running for compose project $1, service $2; expected 1"
+    fail_app "found $count containers running for compose project $1, service $2; expected 1"
     return 0
   fi
   if timeout "$dump_timeout" docker exec "$ids" pg_dump -Fc -U "$3" "$4" >"$tmp" \
     && timeout "$dump_timeout" docker exec -i "$ids" pg_restore --list <"$tmp" >/dev/null \
     && mv -f "$tmp" "$5"; then
+    refreshed="$refreshed$app "
     return 0
   fi
   rm -f "$tmp"
-  dump_failed "$5" "the dump of database $4 failed, was not readable or took longer than $dump_timeout seconds"
+  fail_app "the dump of database $4 failed, was not readable or took longer than $dump_timeout seconds"
 }
 
-# dump_command <command> <output directory>
+# dump_command <command> <output directory>: the output is a target only as a
+# directory, whose content the exclude file can leave out when the dump failed.
 dump_command() {
+  dump_command_run "$@"
+  if [ -d "$2" ]; then target "$2"; fi
+}
+dump_command_run() {
   if ! timeout "$dump_timeout" "$1" </dev/null; then
     dump_failed "$2" "$1 failed or took longer than $dump_timeout seconds"
   elif [ ! -d "$2" ]; then
     dump_failed "$2" "$1 left no directory at $2; the output of a command dump must be a directory, because restic keeps a path it is given and a single file could not be left out"
+  elif is_empty_dir "$2"; then
+    dump_failed "$2" "$1 left an empty directory at $2"
   fi
 }
 
+# sweep_dump_dir: leaves out everything in the dump directory that this run did
+# not write: the dumps of apps that failed, were skipped, are not in the plan
+# yet or were removed from the role, and any other file.
+sweep_dump_dir() {
+  for entry in "$dump_dir"/* "$dump_dir"/.[!.]* "$dump_dir"/..?*; do
+    [ -e "$entry" ] || [ -h "$entry" ] || continue
+    case "$entry" in
+      "$dump_dir"/*.dump)
+        name=${entry#"$dump_dir"/}
+        name=${name%.dump}
+        case "$name" in
+          '' | *[!a-z0-9_-]*) ;;
+          *) case "$refreshed" in *" $name "*) continue ;; esac ;;
+        esac
+        ;;
+    esac
+    exclude "$entry"
+  done
+}
+
 empty_file "$excludes"
+empty_file "$targets"
 empty_file "$failures"
 {% for app in backrest_apps %}
 
 app={{ app.name | quote }}
 {% if app.requires_path is defined %}
-if [ -e {{ app.requires_path | quote }} ]; then installed=yes; else installed=no; fi
-{% else %}
-installed=yes
-{% endif %}
-if [ "$installed" = no ]; then
+required={{ app.requires_path | quote }}
+if [ ! -e "$required" ] && is_active; then
+  # Its storage may be gone: nothing of it is a target.
+  fail_app "requires_path $required is gone, but the app was installed at the last role run"
+elif [ ! -e "$required" ]; then
   echo "backrest-prepare: $app: not installed, skipped" >&2
 elif ! is_active; then
+{% else %}
+if ! is_active; then
+{% endif %}
   fail_app "is installed but not in the backup plan yet; run the playbook"
 else
   :
@@ -115,4 +172,14 @@ else
 {% endif %}
 fi
 {% endfor %}
+
+app=backrest_extra_paths
+{% for path in backrest_extra_paths %}
+target {{ path | quote }}
+[ -e {{ path | quote }} ] || [ -h {{ path | quote }} ] || fail_app {{ (path ~ ' is missing') | quote }}
+{% endfor %}
+
+sweep_dump_dir
+# A path that two apps share is given once.
+sort -u -o "$targets" "$targets" || die "cannot write $targets"
 exit 0

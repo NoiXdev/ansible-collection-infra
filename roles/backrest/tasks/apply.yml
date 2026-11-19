@@ -163,15 +163,18 @@
     group: root
     mode: "0600"
 
-# Without the file restic fails; the prepare script replaces it at each backup.
-- name: Create an empty exclude file when there is none
+# Without them restic fails; the prepare script replaces them at each backup.
+- name: Create an empty exclude file and targets file when there are none
   ansible.builtin.copy:
     content: ""
-    dest: "{{ backrest_excludes_file }}"
+    dest: "{{ item }}"
     owner: root
     group: root
     mode: "0600"
     force: false
+  loop:
+    - "{{ backrest_excludes_file }}"
+    - "{{ backrest_targets_file }}"
 
 - name: Reload systemd
   ansible.builtin.systemd_service:

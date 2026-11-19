@@ -28,6 +28,7 @@
     - {key: config, path: "{{ backrest_config_file }}"}
     - {key: active_apps, path: "{{ backrest_active_apps_file }}"}
     - {key: excludes, path: "{{ backrest_excludes_file }}"}
+    - {key: targets, path: "{{ backrest_targets_file }}"}
     - {key: config_dir, path: "{{ backrest_config_dir }}"}
     - {key: data_dir, path: "{{ backrest_data_dir }}"}
     - {key: cache_dir, path: "{{ backrest_cache_dir }}"}
@@ -86,16 +87,6 @@
       version 6. Nothing was changed.
   when: backrest_current_version | string != '6'
 
-# Backrest sorts the plan's paths when it starts (byte order); the role sorts them
-# the same way, or every run would see a difference and restart the service.
-- name: Work out the paths of the plan
-  ansible.builtin.set_fact:
-    backrest_plan_paths: >-
-      {{ ([backrest_dump_dir] + backrest_active_apps | map(attribute='paths', default=[]) | flatten
-           + backrest_active_apps | selectattr('dump.type', 'defined') | selectattr('dump.type', 'equalto', 'command')
-             | map(attribute='dump.output') | list
-           + backrest_extra_paths) | unique | sort(case_sensitive=true) | list }}
-
 - name: Work out the configuration the role wants
   ansible.builtin.set_fact:
     backrest_desired: >-
@@ -128,10 +119,10 @@
       {{ {
            'id': backrest_plan_id,
            'repo': backrest_repo_id,
-           'paths': backrest_plan_paths,
+           'paths': [backrest_dump_dir],
            'schedule': {'cron': backrest_schedule, 'clock': clock_local},
            'retention': {'policyTimeBucketed': backrest_retention | dict2items | rejectattr('value', 'equalto', 0) | list | items2dict},
-           'backup_flags': ['--exclude-file=' ~ backrest_excludes_file],
+           'backup_flags': ['--exclude-file=' ~ backrest_excludes_file, '--files-from-verbatim=' ~ backrest_targets_file],
          } | combine({'excludes': backrest_excludes} if backrest_excludes | length > 0 else {})
            | combine({'hooks': backrest_plan_hooks} if backrest_plan_hooks | length > 0 else {}) }}
   no_log: true

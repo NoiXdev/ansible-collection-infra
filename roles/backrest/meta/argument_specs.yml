@@ -53,7 +53,8 @@ argument_specs:
         type: list
         elements: dict
         description: >-
-          Apps to back up; see defaults/main.yml for the keys. The output of a command dump must be a directory.
+          Apps to back up; see defaults/main.yml for the keys. dump.command is one executable path,
+          without arguments; the output of a command dump must be a directory.
       backrest_extra_paths:
         type: list
         elements: path

@@ -99,7 +99,9 @@
     that:
       - item.dump.command | default('') is match('^/')
       - item.dump.output | default('') is match('^/')
-    fail_msg: "App {{ item.name }}: a command dump needs dump.command and dump.output as absolute paths."
+    fail_msg: >-
+      App {{ item.name }}: a command dump needs dump.command (one executable path, without
+      arguments) and dump.output as absolute paths.
     quiet: true
   loop: "{{ backrest_apps | selectattr('dump', 'defined') | selectattr('dump.type', 'equalto', 'command') | list }}"
   loop_control:
@@ -128,3 +130,21 @@
   loop: "{{ backrest_apps }}"
   loop_control:
     label: "{{ item.name }}"
+
+# backrest-prepare leaves out of every snapshot whatever in the dump directory
+# it did not write in that run; a path below it would never be backed up.
+- name: Check that no path to back up is in the dump directory
+  ansible.builtin.assert:
+    that: >-
+      (backrest_apps | map(attribute='paths', default=[]) | flatten
+       + backrest_apps | selectattr('dump.type', 'defined') | selectattr('dump.type', 'equalto', 'command')
+         | map(attribute='dump.output') | list
+       + backrest_extra_paths)
+      | map('regex_replace', '/+$', '') | map('regex_replace', '$', '/')
+      | select('match', (backrest_dump_dir | regex_replace('/+$', '') ~ '/') | regex_escape)
+      | list | length == 0
+    fail_msg: >-
+      A path of backrest_apps (paths or dump.output) or of backrest_extra_paths is backrest_dump_dir
+      or below it. That directory holds the role's own dumps, and everything else in it is left out
+      of every snapshot; move the path elsewhere.
+    quiet: true

@@ -20,9 +20,14 @@ backrest_repo_env: {}
 
 # Apps to back up. Keys: name (required), requires_path, paths, dump
 # ({type: postgres, project, service, user, database} or
-# {type: command, command, output}). The output of a command dump must be a
-# directory: restic keeps a path it is given, so a failed dump can only be left
-# out of the snapshot when it is below one.
+# {type: command, command, output}). dump.command is one executable path,
+# without arguments. The output of a command dump must be a directory, with
+# something in it: restic keeps a path it is given, so a failed dump can only
+# be left out of the snapshot when it is below one. requires_path marks the app
+# as installed; keep it off the storage whose loss should be detected, because
+# once the role runs without it the app counts as not installed.
+# Nothing to back up may lie in backrest_dump_dir: everything in it that is not
+# a dump the last prepare run wrote is left out of the snapshot.
 backrest_apps: []
 backrest_extra_paths: []
 backrest_excludes: []

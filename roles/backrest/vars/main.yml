@@ -35,6 +35,11 @@ backrest_plan_id: nightly
 # restic reads this through the plan's --exclude-file; backrest-prepare
 # replaces it at each backup. It must exist, or restic fails.
 backrest_excludes_file: /var/lib/backrest/excludes
+# The paths to back up besides the dump directory, one per line, which restic
+# reads through the plan's --files-from-verbatim. backrest-prepare writes the
+# ones that exist at each backup: restic fails the whole backup, healthy apps
+# included, when a path it is given does not exist.
+backrest_targets_file: /var/lib/backrest/targets
 # One installed app name per line, as of the last run of the role.
 backrest_active_apps_file: /var/lib/backrest/active-apps
 
