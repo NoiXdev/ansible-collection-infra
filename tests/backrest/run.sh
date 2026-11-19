@@ -17,6 +17,10 @@
 # is saved, the failed part is left out and the backup is marked failed.
 # The scenario "reports" checks the failure reports (one message per failed
 # backup, secret URL) and the age check.
+# The scenario "restore" restores a snapshot through the API and compares it
+# with the source, "rebuild" lets a host with nothing left find the snapshots of
+# the old one, and "secrets" looks for the secrets in the output of verbose runs
+# and in process lists, also while restic runs.
 #
 # BACKREST_UBUNTU selects the releases (default "24.04 26.04");
 # NOIXDEV_INFRA_BACKREST_TESTS selects scenarios (see the end of the file);
@@ -43,7 +47,8 @@ capture_url="$(value_of "$here/vars.yml" test_capture_url)"
 version=1.14.1
 release_url="https://github.com/garethgeorge/backrest/releases/download/v$version"
 checksums="backrest_${version}_checksums.txt"
-config=/etc/backrest/config.json
+config_dir=/etc/backrest
+config=$config_dir/config.json
 data_dir=/var/lib/backrest
 repo_id=offsite
 plan_id=nightly
@@ -141,12 +146,17 @@ cfg_with() { h cat "$config" | jq -c "$1"; }
 save_config() { h cp -p "$config" /tmp/config.saved; }
 restore_config() { h cp -p /tmp/config.saved "$config"; }
 
+# login_config <password>: a curl configuration that holds the login, which
+# curl reads from its standard input: the password is then in no process list
+# of the test host, where the scenario "secrets" looks for it.
+login_config() { printf 'user = "%s:%s"\n' "$ui_user" "$1"; }
+
 # api <Rpc> [json]: POST /v1.Backrest/<Rpc> with the login. Prints the answer,
 # keeps its HTTP status for api_status and fails unless it is a 2xx.
 api() {
   local rpc="$1" body='{}' status
   [ "$#" -lt 2 ] || body="$2"
-  status="$(h curl -sS -o /tmp/api-answer -w '%{http_code}' --max-time 900 -u "$ui_user:$ui_password" \
+  status="$(login_config "$ui_password" | hi curl -sS -o /tmp/api-answer -w '%{http_code}' --max-time 900 -K - \
     -H 'Content-Type: application/json' -d "$body" "$ui_url/v1.Backrest/$rpc")" || status=000
   printf '%s\n' "$status" >"$out/api.status"
   h cat /tmp/api-answer
@@ -161,11 +171,13 @@ import json, sys
 ops = [o for o in json.load(sys.stdin).get("operations", []) if "operationBackup" in o]
 print(ops[-1].get("status", "") if ops else "none")'
 }
-snapshot_count() {
+snapshot_ids() {
   api ListSnapshots "{\"repoId\":\"$repo_id\",\"planId\":\"$plan_id\"}" | python3 -c '
 import json, sys
-print(len(json.load(sys.stdin).get("snapshots", [])))'
+for s in json.load(sys.stdin).get("snapshots", []):
+    print(s["id"])'
 }
+snapshot_count() { snapshot_ids | wc -l | tr -d ' '; }
 # The id of the newest snapshot. Retention keeps one snapshot per day, so the
 # number of snapshots is no sign of a new one.
 newest_snapshot() {
@@ -388,7 +400,7 @@ print("yes" if len(repo.get("guid", "")) == 64 and "autoInitialize" not in repo 
 
 # login_status <password>: the HTTP status of an RPC with this password.
 login_status() {
-  h curl -s -o /dev/null -w '%{http_code}' -u "$ui_user:$1" -H 'Content-Type: application/json' -d '{}' \
+  login_config "$1" | hi curl -s -o /dev/null -w '%{http_code}' -K - -H 'Content-Type: application/json' -d '{}' \
     "$ui_url/v1.Backrest/GetConfig"
 }
 
@@ -508,7 +520,7 @@ test_contract() {
 
 # Leaves the host as the next scenario expects it: no Backrest at all.
 contract_cleanup() {
-  h systemctl disable --now backrest
+  h systemctl disable --now backrest 2>/dev/null
   h rm -rf /etc/systemd/system/backrest.service /usr/local/bin/backrest /etc/backrest "$data_dir" \
     /var/cache/backrest /opt/release /srv/data
   h systemctl daemon-reload
@@ -582,7 +594,7 @@ print(json.dumps({"backrest_repo_password": "p\"a\x27ss $HOME \\n {x} #é"}))' >
   guid="$(cfg '.repos[0].guid')"
   [ "${#guid}" = 64 ] || fail "the repository id was not written back"
   sync="$(cfg '.sync.identity.keyId')"
-  [ "$sync" != null ] && [ -n "$sync" ] || fail "no sync identity in config.json"
+  if [ "$sync" = null ] || [ -z "$sync" ]; then fail "no sync identity in config.json"; fi
   [ "$(h stat -c %a "$config")" = 600 ] || fail "config.json is not mode 0600"
   [ "$(h stat -c %a "$data_dir/excludes")" = 600 ] || fail "the exclude file is not mode 0600"
   # The UI requires a login.
@@ -996,6 +1008,161 @@ assert "truncated" in content' || fail "a long report is not truncated below 200
   role_converge_unchanged -e "@$out/reports-apps.json"
 }
 
+# db_psql <database> <sql>: runs psql in the shop database container; prints the bare result.
+db_psql() {
+  h sh -c "docker exec -e PGOPTIONS=\"-c client_min_messages=warning\" \$(docker ps -q --filter label=com.docker.compose.project=shop --filter label=com.docker.compose.service=db) psql -qtA -U shop -d '$1' -c '$2'" | tr -d ' \r'
+}
+
+# prepare_shop: the app "shop" (files and a database with rows), its variables
+# in $out/shop-apps.json, and a repository path of its own: prepare_shop <name>.
+prepare_shop() {
+  write_role_vars "$1"
+  python3 -c '
+import json, sys
+shop = {"name": "shop", "paths": ["/srv/shop"],
+        "dump": {"type": "postgres", "project": "shop", "service": "db", "user": "shop", "database": "shop"}}
+with open(sys.argv[1] + "/shop-apps.json", "w", encoding="utf-8") as f:
+    json.dump({"backrest_apps": [shop]}, f)' "$out"
+  h mkdir -p /srv/shop/sub
+  h sh -c 'echo a >/srv/shop/a.txt; echo b >/srv/shop/sub/b.txt; head -c 4096 /dev/urandom >/srv/shop/sub/random.bin'
+  compose up -d --wait db
+  db_psql shop 'create table if not exists t (i int); insert into t select generate_series(1, 25)' >/dev/null
+  # Whatever an earlier scenario left: a dump directory that is a small file
+  # system, and a host with a good backup or an old first run, which the age check reads.
+  if h mountpoint -q "$dump_dir"; then h umount "$dump_dir"; fi
+  h rm -f "$data_dir/last-success" "$data_dir/first-run"
+  role_converge -e "@$out/shop-apps.json"
+}
+
+# wait_restore: waits for the newest restore operation and fails unless it succeeded.
+wait_restore() {
+  local _ status=none
+  for _ in $(seq 1 120); do
+    status="$(api GetOperations '{"selector":{},"lastN":"200"}' | python3 -c '
+import json, sys
+ops = [o for o in json.load(sys.stdin).get("operations", []) if "operationRestore" in o]
+print(ops[-1].get("status", "STATUS_INPROGRESS") if ops else "none")')"
+    case "$status" in
+      STATUS_SUCCESS) return 0 ;;
+      STATUS_ERROR) fail "the restore failed" ;;
+    esac
+    sleep 1
+  done
+  fail "the restore did not finish (status $status)"
+}
+
+# restore <path> <target>: restores the path of the newest snapshot into the target directory.
+restore() {
+  local body
+  body="$(python3 -c '
+import json, sys
+print(json.dumps({"repoId": sys.argv[1], "planId": sys.argv[2], "snapshotId": sys.argv[3], "path": sys.argv[4], "target": sys.argv[5]}))' \
+    "$repo_id" "$plan_id" "$(newest_snapshot)" "$1" "$2")"
+  api Restore "$body" >/dev/null || fail "the restore answered $(api_status)"
+  wait_restore
+}
+
+# A snapshot restored through the API equals the source.
+test_restore() {
+  local restored=/tmp/restored count dumps
+  echo "== restore (ubuntu $1)"
+  prepare_shop restore
+  h rm -rf "$restored"
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup did not succeed"
+  restore /srv/shop "$restored/files"
+  restore "$dump_dir" "$restored/dumps"
+  h find "$restored" >"$out/restored.list"
+  # Restoring a path puts its last element below the target.
+  dumps="$restored/dumps/$(basename "$dump_dir")"
+  h diff -r /srv/shop "$restored/files/shop" || fail "the restored files differ from the source ($(tr '\n' ' ' <"$out/restored.list"))"
+  # The restored dump loads into an empty database, and has the rows of the source.
+  h test -s "$dumps/shop.dump" || fail "the dump was not restored"
+  db_psql postgres 'drop database if exists restored' >/dev/null
+  db_psql postgres 'create database restored' >/dev/null
+  h sh -c "docker exec -i \$(docker ps -q --filter label=com.docker.compose.project=shop --filter label=com.docker.compose.service=db) pg_restore -U shop -d restored --no-owner <'$dumps/shop.dump'" \
+    || fail "the restored dump does not load"
+  count="$(db_psql restored 'select count(*) from t')"
+  if [ "$count" != "$(db_psql shop 'select count(*) from t')" ] || [ "$count" -le 0 ]; then
+    fail "the restored database has $count rows, not the rows of the source"
+  fi
+  db_psql postgres 'drop database restored' >/dev/null
+  h rm -rf "$restored"
+}
+
+# A new host with the same repository URI and password finds the old snapshots.
+test_rebuild() {
+  local old new
+  echo "== rebuild (ubuntu $1)"
+  prepare_shop rebuild
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup did not succeed"
+  old="$(newest_snapshot)"
+  # The new host: nothing of Backrest is left, not its configuration, its
+  # repository id, its sync identity or its operation log. The role installs it all again.
+  h systemctl disable --now backrest 2>/dev/null
+  h rm -rf "$config_dir" "$data_dir" /var/cache/backrest /usr/local/bin/backrest /etc/systemd/system/backrest.service \
+    /usr/local/sbin/backrest-prepare /usr/local/sbin/backrest-finish
+  h systemctl daemon-reload
+  role_converge -e "@$out/shop-apps.json"
+  snapshot_ids | grep -qxF -- "$old" || fail "the new host does not list the snapshot of the old host"
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup on the new host did not succeed"
+  new="$(newest_snapshot)"
+  [ "$new" != "$old" ] || fail "the backup on the new host made no new snapshot"
+  in_snapshot /srv/shop/a.txt "$dump_dir/shop.dump"
+}
+
+# secrets_in <file>: fails when a secret of the run is in the file; names only which one.
+secrets_in() {
+  local name value
+  for name in repo_password s3_secret_key ui_password notify_secret bcrypt_b64 bcrypt_hash; do
+    value="${!name}"
+    if grep -qF -- "$value" "$1"; then fail "the $name is in $2"; fi
+  done
+}
+
+# No secret in the output of a verbose run, and none in a process list: also
+# while restic runs, because that is what receives the repository password.
+test_secrets() {
+  local notify_secret bcrypt_b64 bcrypt_hash
+  echo "== secrets (ubuntu $1)"
+  notify_secret="$(openssl rand -hex 12)"
+  prepare_shop secrets
+  bcrypt_b64="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["backrest_users"][0]["password_bcrypt"])' "$out/role-vars.json")"
+  bcrypt_hash="$(python3 -c 'import base64, sys; print(base64.b64decode(sys.argv[1]).decode())' "$bcrypt_b64")"
+  [ "${#bcrypt_hash}" = 60 ] || fail "the test could not decode the login hash"
+
+  # Verbose runs that change things, and one that changes nothing.
+  converge -vvv --diff -e "@$out/role-vars.json" -e "@$out/shop-apps.json" -e backrest_notify_url="$capture_url/$notify_secret"
+  secrets_in "$out/converge.log" "the output of a verbose run"
+  converge -vvv --diff -e "@$out/role-vars.json" -e "@$out/shop-apps.json" -e backrest_notify_url="$capture_url/$notify_secret" \
+    -e '{"backrest_schedule": "0 3 * * *", "backrest_excludes": ["*.tmp"]}'
+  secrets_in "$out/converge.log" "the output of a verbose run with changes"
+  converge -vvv --diff -e "@$out/role-vars.json" -e "@$out/shop-apps.json" -e backrest_notify_url="$capture_url/$notify_secret" \
+    -e '{"backrest_schedule": "0 3 * * *", "backrest_excludes": ["*.tmp"]}'
+  secrets_in "$out/converge.log" "the output of a verbose run without changes"
+
+  # Process lists, sampled in the test host while a backup runs (a big file
+  # keeps restic busy) and while a failed one sends its report.
+  h sh -c 'head -c 100000000 /dev/urandom >/srv/shop/sub/big.bin'
+  h sh -c 'rm -f /tmp/ps.stop /tmp/ps.out'
+  h_bg 'while [ ! -e /tmp/ps.stop ]; do ps -eo args >>/tmp/ps.out; sleep 0.02; done'
+  run_backup
+  [ "$(last_status)" = STATUS_SUCCESS ] || fail "the backup did not succeed"
+  compose stop db
+  run_backup
+  [ "$(last_status)" = STATUS_ERROR ] || fail "the failed backup did not fail"
+  compose up -d --wait db
+  h touch /tmp/ps.stop
+  sleep 1
+  h cat /tmp/ps.out >"$out/ps.out"
+  grep -Eq 'restic.* backup' "$out/ps.out" || fail "the samples never saw restic run: the test proves nothing"
+  grep -q 'ps -eo args' "$out/ps.out" || fail "the samples are not process lists"
+  secrets_in "$out/ps.out" "a process list"
+  h rm -f /srv/shop/sub/big.bin /tmp/ps.stop /tmp/ps.out
+}
+
 # write_contract <file>: the measured answers. No value may depend on the run.
 write_contract() {
   cat >"$1" <<CONTRACT
@@ -1036,7 +1203,7 @@ CONTRACT
 }
 
 # All scenarios by default; NOIXDEV_INFRA_BACKREST_TESTS="refusals install" runs only these.
-scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install config apps reports}"
+scenarios="${NOIXDEV_INFRA_BACKREST_TESTS:-contract refusals install config apps reports restore rebuild secrets}"
 first=
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -1048,7 +1215,10 @@ for ubuntu in $releases; do
       config) test_config "$ubuntu" ;;
       apps) test_apps "$ubuntu" ;;
       reports) test_reports "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (contract, refusals, install, config, apps, reports)" ;;
+      restore) test_restore "$ubuntu" ;;
+      rebuild) test_rebuild "$ubuntu" ;;
+      secrets) test_secrets "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (contract, refusals, install, config, apps, reports, restore, rebuild, secrets)" ;;
     esac
   done
   case " $scenarios " in

@@ -64,6 +64,19 @@
   real manager is not part of the tests. Its scenario `release_match` runs on the controller, once
   per run, needs network access, and fails when the pinned release and the role's unit file or
   failure lines disagree.
+- `backrest`: new role that installs Backrest 1.14.1 (restic with a web UI) from the
+  checksum-verified release as the systemd service `backrest`, and owns its `config.json`: one
+  repository (`backrest_repo_uri`, `backrest_repo_password`, `backrest_repo_env`), one plan with
+  retention, prune and check schedules, and the web logins of `backrest_users` (the base64 of a
+  bcrypt hash; the UI always requires a login). `backrest_apps` lists the apps to back up: paths,
+  a PostgreSQL dump from a running Compose service, or a command dump whose `dump.output` must be
+  a directory. An app that fails is left out of the snapshot while the healthy apps are still
+  backed up; the backup then shows as failed and one report goes out (`backrest_notify_type`
+  `discord` or `healthchecks`, no generic webhooks; the URL is a secret kept in a `0600` file).
+  Plans changed in the UI are put back by the next run; a new app is backed up after the next run;
+  a changed configuration waits for a running backup. The run fails when the last good backup is
+  older than `backrest_max_age_hours`. Nothing secret reaches the output or a process list.
+  Needs `docker` only for Compose dumps.
 
 ## 0.6.0 — 2026-11-17
 
