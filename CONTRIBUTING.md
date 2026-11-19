@@ -27,7 +27,7 @@ UBUNTU=24.04 tests/services/run.sh  # the service roles, on their own (also UBUN
 
 `tests/all.sh` runs the suites `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
 `host` (`tests/host/run.sh` on Ubuntu 24.04 and 26.04, set `HOST_UBUNTU` for fewer),
-`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow` and `cloudpanel` (`tests/<suite>/run.sh`). It stops at
+`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow`, `cloudpanel` and `pulsix_agent` (`tests/<suite>/run.sh`). It stops at
 the first failing suite unless you pass `--keep-going`, and ends with a summary of each
 suite's result and runtime; the output of each suite is also in
 `tests/output/all/<suite>.log`. `--summary FILE` writes a machine-readable summary, one line

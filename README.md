@@ -36,6 +36,7 @@ are on the documentation site.
 | `docker_check` | Internal: checks for the Docker CLI, the compose plugin and a running daemon, included first by every role that runs on Docker (not meant to be run on its own) |
 | `pulsix_manager` | Pulsix manager, database and any number of local workers |
 | `pulsix_worker` | Any number of remote Pulsix workers, enrolled with one-time tokens |
+| `pulsix_agent` | Pulsix agent installed and enrolled with a pinned version, and on request the removal of Netdata, the Zabbix agent and the Checkmk agent once the agent is connected |
 | `fail2ban` | fail2ban on the systemd journal with nftables bans |
 | `crowdsec` | CrowdSec agent and its firewall bouncer, which also covers published Docker ports |
 | `oh_my_zsh` | zsh with one shared, pinned Oh My Zsh checkout and a managed `~/.zshrc` per user, with the noix theme or your own |

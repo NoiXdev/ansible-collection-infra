@@ -41,6 +41,25 @@
   reserved characters there.
 - `n8n`: the rollback of a failed update now fails when `docker stop` of a container of the stack
   fails without a message; only "No such container" (it exited meanwhile) is still ignored.
+- `pulsix_agent` (new role): installs the Pulsix agent from a pinned release (`pulsix_agent_version`,
+  default `0.1.0-rc.4`; `pulsix_agent_download_url` for another source) on Ubuntu 24.04 and 26.04,
+  `x86_64` and `aarch64`. The binary is checked against its `.sha256` before it is used, runs as a
+  systemd unit, and is enrolled with `pulsix_agent_manager_addr` (IPv6 hosts in brackets) and a
+  token. Tokens are per host (`pulsix_agent_enroll_tokens`, keyed by inventory host name, wins) or
+  shared (`pulsix_agent_enroll_token`); they are passed at run time, never stored, and are not left
+  in the agent's environment file or process after enrollment. A failed enrollment or a refused
+  certificate fails the run with the agent's own message. The role proves that the agent holds a
+  connection to the manager before it goes on. Removing other monitoring is opt-in: list
+  `netdata`, `zabbix_agent` and/or `checkmk_agent` in `pulsix_agent_remove`, and the role removes
+  exactly those tools completely, and only after the connection proof; without the list, or when
+  the proof fails, nothing is removed. On a shared Zabbix host (any other `zabbix-*` package in a
+  state other than `not-installed` or `config-files`, including a manually installed
+  `zabbix-sender` or `zabbix-get`) the shared configuration, package sources and `zabbix` user
+  stay, while auto-installed `zabbix-sender` and `zabbix-get` are purged with the agent. The test
+  suite `pulsix_agent` runs against a stub agent and manager, not a real one: enrollment against a
+  real manager is not part of the tests. Its scenario `release_match` runs on the controller, once
+  per run, needs network access, and fails when the pinned release and the role's unit file or
+  failure lines disagree.
 
 ## 0.6.0 — 2026-11-17
 

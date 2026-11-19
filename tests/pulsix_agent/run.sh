@@ -858,9 +858,59 @@ run_release() {
   fi
 }
 
-for ubuntu in $releases; do
-  run_release "$ubuntu"
-  cleanup
-done
+# release_match: the pin and the role agree. Runs once per suite run, on the
+# controller, and needs network access. The unit file of the pinned release must
+# equal the role's copy, and the pinned binaries must verify against their
+# checksum and carry the two failure lines the role's connection proof reads.
+release_match() {
+  local version base default_url arch tmp want have line
+  version="$(awk '/^pulsix_agent_version:/ { print $2; exit }' "$root/roles/pulsix_agent/defaults/main.yml")"
+  [ -n "$version" ] || fail "release_match: no pulsix_agent_version in the role defaults"
+  base="https://raw.githubusercontent.com/NoiXdev/pulsix/v$version"
+  default_url="https://github.com/NoiXdev/pulsix/releases/download/v$version/pulsix-agent-linux-"
+  tmp="$(mktemp -d)"
+  if ! curl -fsSL --retry 3 -o "$tmp/pulsix-agent.service" "$base/deploy/agent/systemd/pulsix-agent.service"; then
+    rm -rf "$tmp"
+    fail "release_match: cannot download the unit file of v$version"
+  fi
+  if ! cmp -s "$tmp/pulsix-agent.service" "$root/roles/pulsix_agent/files/pulsix-agent.service"; then
+    diff "$tmp/pulsix-agent.service" "$root/roles/pulsix_agent/files/pulsix-agent.service" >&2 || true
+    rm -rf "$tmp"
+    fail "release_match: roles/pulsix_agent/files/pulsix-agent.service differs from the unit file of v$version; the pin and the role disagree"
+  fi
+  for arch in amd64 arm64; do
+    if ! curl -fsSL --retry 3 -o "$tmp/agent-$arch" "$default_url$arch" ||
+      ! curl -fsSL --retry 3 -o "$tmp/agent-$arch.sha256" "$default_url$arch.sha256"; then
+      rm -rf "$tmp"
+      fail "release_match: cannot download the $arch agent of v$version"
+    fi
+    want="$(tr -d '\r' <"$tmp/agent-$arch.sha256" | awk '{ print tolower($1); exit }')"
+    have="$(cd "$tmp" && { sha256sum "agent-$arch" 2>/dev/null || shasum -a 256 "agent-$arch"; } | cut -d' ' -f1)"
+    if [ -z "$want" ] || [ "$want" != "$have" ]; then
+      rm -rf "$tmp"
+      fail "release_match: the $arch agent of v$version does not match its checksum"
+    fi
+    for line in 'agent stream failed' "the manager refused this agent's certificate"; do
+      if ! LC_ALL=C grep -a -F -q "$line" "$tmp/agent-$arch"; then
+        rm -rf "$tmp"
+        fail "release_match: the $arch agent of v$version lacks the line '$line'; the connection proof would not see it"
+      fi
+    done
+  done
+  rm -rf "$tmp"
+  echo "release_match: unit file and both agents of v$version match the role"
+}
+
+if scenario release_match; then
+  release_match
+fi
+
+# With release_match as the only scenario no host is needed.
+if [ "${NOIXDEV_INFRA_PULSIX_AGENT_TESTS:-}" != release_match ]; then
+  for ubuntu in $releases; do
+    run_release "$ubuntu"
+    cleanup
+  done
+fi
 
 noix_done
