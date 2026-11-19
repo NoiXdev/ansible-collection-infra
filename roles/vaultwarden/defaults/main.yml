@@ -1,0 +1,98 @@
+---
+# Vaultwarden release (tag of docker.io/vaultwarden/server, X.Y.Z without a
+# v, the Debian variant); 1.37.0 or newer. No latest and no -alpine.
+vaultwarden_version: 1.37.5
+vaultwarden_image: docker.io/vaultwarden/server
+
+# Directory of the compose project (compose.yaml, the secrets, markers).
+# Its basename is the compose project name.
+vaultwarden_dir: /opt/vaultwarden
+# The data: Vaultwarden's /data (attachments, icons, keys, the SQLite
+# database) and, with vaultwarden_database postgres, the PostgreSQL data, one
+# subdirectory each. It can be a mountpoint of its own (a block volume).
+vaultwarden_data_dir: "{{ vaultwarden_dir }}/data"
+vaultwarden_data_dir_mountpoint: false
+
+# The vault, only through Traefik: vaultwarden_hostname is required.
+# vaultwarden_url is the origin the clients see (DOMAIN).
+vaultwarden_hostname: ""
+vaultwarden_url: https://{{ vaultwarden_hostname }}
+# Traefik: external network and entrypoints of the routes; empty entrypoints
+# use Traefik's default ones. Two routers on vaultwarden_hostname:
+#   <project>        everything but /admin, with vaultwarden_traefik_middlewares
+#   <project>-admin  /admin, with vaultwarden_traefik_admin_entrypoints and
+#                    vaultwarden_traefik_admin_middlewares (an IP allowlist,
+#                    for example)
+# Both at vaultwarden_traefik_priority, the admin router one above; keep it
+# above catch-all routers such as the traefik role's error pages routes.
+vaultwarden_traefik_network: proxy
+vaultwarden_traefik_entrypoints: []
+vaultwarden_traefik_middlewares: []
+vaultwarden_traefik_admin_entrypoints: "{{ vaultwarden_traefik_entrypoints }}"
+vaultwarden_traefik_admin_middlewares: []
+vaultwarden_traefik_priority: 100
+
+# Where the vault lives:
+#   sqlite             a SQLite file in the data directory
+#   postgres           a PostgreSQL container of the project
+#   postgres_external  a PostgreSQL server of your own (vaultwarden_db_host)
+# The role does not move an installation from one to another.
+vaultwarden_database: sqlite
+# PostgreSQL 18 or newer: older images keep the database on a volume of their
+# own, outside vaultwarden_data_dir, and are refused.
+vaultwarden_postgres_image: docker.io/library/postgres:18
+# Required with postgres and postgres_external, without a default; keep it in
+# a vault:
+#   vaultwarden_db_password   password of the PostgreSQL user
+vaultwarden_db_host: ""
+vaultwarden_db_port: 5432
+vaultwarden_db_name: vaultwarden
+vaultwarden_db_user: vaultwarden
+# TLS to an external server: disable, prefer or require.
+vaultwarden_db_sslmode: prefer
+
+# Argon2id PHC hash of the admin token (/admin); empty switches the admin
+# page off. Made with docker run --rm -it vaultwarden/server:<version>
+# /vaultwarden hash; a plain token is refused.
+vaultwarden_admin_token_hash: ""
+
+vaultwarden_signups_allowed: false
+vaultwarden_invitation_org_name: Vaultwarden
+
+# Mail (invitations, verification); empty host sends none. security is
+# starttls, force_tls or off; from is required with a host, password with a
+# username.
+vaultwarden_smtp:
+  host: ""
+  port: 587
+  security: starttls
+  username: ""
+  password: ""
+  from: ""
+  from_name: Vaultwarden
+
+# Push notifications through Bitwarden's relay: both of the installation id
+# and key, from https://bitwarden.com/host/, or neither. The region is us or
+# eu.
+vaultwarden_push_installation_id: ""
+vaultwarden_push_installation_key: ""
+vaultwarden_push_region: us
+
+# More settings for the Vaultwarden container (SENDS_ALLOWED, LOG_LEVEL,
+# ...). The settings the role sets itself are refused, and every PUSH_*,
+# SMTP_*, ROCKET_* and *_FILE key; true and false become true and false.
+vaultwarden_env: {}
+
+# Backups taken before every update (a dump of the database, a copy of the
+# data and the compose file), in vaultwarden_data_dir/backups; the newest
+# vaultwarden_backups_keep are kept.
+vaultwarden_backups_keep: 3
+# Seconds to wait for Vaultwarden (and its database) to become healthy.
+vaultwarden_health_timeout: 300
+# Seconds a rollback after a failed update waits for the previous version.
+vaultwarden_rollback_timeout: "{{ vaultwarden_health_timeout }}"
+
+# For one run, after an update that did not finish: true restores the backup
+# from before it and ends the run. Refused without such an update; remove it
+# after the run.
+vaultwarden_restore_interrupted: false

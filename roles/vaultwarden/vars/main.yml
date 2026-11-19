@@ -1,0 +1,62 @@
+---
+# The compose project name: compose's default for the directory.
+vaultwarden_project: "{{ vaultwarden_dir | basename }}"
+# Mode 0644: it holds no secret, which reach the containers as files of
+# vaultwarden_secrets_dir.
+vaultwarden_compose_file: "{{ vaultwarden_dir }}/compose.yaml"
+# Mode 0700. Mode 0600 files, only those in use: admin_token, database_url,
+# smtp_password, push_installation_key.
+vaultwarden_secrets_dir: "{{ vaultwarden_dir }}/secrets"
+# The database the installation was made with (sqlite, postgres, or the
+# external server and database), so that another one is refused.
+vaultwarden_target_file: "{{ vaultwarden_dir }}/database-target"
+
+# The subdirectories of vaultwarden_data_dir whose absence means the data is
+# missing (an unmounted volume): only install creates them.
+vaultwarden_data_subdirs: "{{ ['vaultwarden'] + (['postgres'] if vaultwarden_database == 'postgres' else []) }}"
+vaultwarden_backup_dir: "{{ vaultwarden_data_dir }}/backups"
+# Written after a failed update; that version is not tried again while it
+# exists.
+vaultwarden_marker_file: "{{ vaultwarden_dir }}/update-failed"
+# Written before an install creates anything and removed once Vaultwarden is
+# healthy; while it exists every run refuses.
+vaultwarden_install_marker: "{{ vaultwarden_dir }}/install-incomplete"
+# Written before the first change of an update and removed once it is healthy
+# or rolled back; a run that stopped in between leaves it, with a copy of the
+# compose file and of the secrets directory it replaces, for the next run.
+vaultwarden_update_marker: "{{ vaultwarden_dir }}/update-in-progress"
+vaultwarden_update_marker_compose: "{{ vaultwarden_dir }}/update-in-progress.compose.yaml"
+vaultwarden_update_marker_secrets: "{{ vaultwarden_dir }}/update-in-progress.secrets"
+
+# The oldest release the role runs.
+vaultwarden_min_version: 1.37.0
+# PostgreSQL majors: the own container from 18 on (see vaultwarden_postgres_image),
+# an external server from 15 on.
+vaultwarden_postgres_major: >-
+  {%- set name = (vaultwarden_postgres_image | string).split('@')[0].rpartition('/')[2] -%}
+  {{ (name.rpartition(':')[2] if ':' in name else '') | regex_search('^[0-9]+') | default('', true) }}
+
+# The settings the role sets itself; vaultwarden_env must not hold them, nor
+# a key with one of the prefixes or the suffix below.
+vaultwarden_env_owned:
+  - DOMAIN
+  - DATABASE_URL
+  - ADMIN_TOKEN
+  - DISABLE_ADMIN_TOKEN
+  - SIGNUPS_ALLOWED
+  - INVITATIONS_ALLOWED
+  - INVITATION_ORG_NAME
+  - PASSWORD_HINTS_ALLOWED
+  - DATA_FOLDER
+  - CONFIG_FILE
+  - ENV_FILE
+vaultwarden_env_owned_prefixes: [PUSH_, SMTP_, ROCKET_]
+vaultwarden_env_owned_suffix: _FILE
+
+# The admin token the role accepts: an Argon2id PHC string.
+vaultwarden_admin_hash_pattern: '^\$argon2id\$v=19\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+$'
+
+# vaultwarden_smtp with the defaults of its keys that it leaves out.
+vaultwarden_smtp_settings: >-
+  {{ {'host': '', 'port': 587, 'security': 'starttls', 'username': '', 'password': '', 'from': '', 'from_name': 'Vaultwarden'}
+     | combine(vaultwarden_smtp if vaultwarden_smtp is mapping else {}) }}

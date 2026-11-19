@@ -21,6 +21,8 @@
 #   cloudpanel  tests/cloudpanel/run.sh (CloudPanel's real installer)
 #   backrest    tests/backrest/run.sh (Backrest, MinIO and PostgreSQL), once per
 #               Ubuntu release in BACKREST_UBUNTU (default "24.04 26.04")
+#   vaultwarden tests/vaultwarden/run.sh (Vaultwarden, Traefik and PostgreSQL), once
+#               per Ubuntu release in VAULTWARDEN_UBUNTU (default "24.04 26.04")
 #
 # It stops at the first suite that fails, unless --keep-going is given, and
 # ends with a summary: each entry's result and runtime. Each suite's output
@@ -56,7 +58,7 @@ out="$here/output/all"
 # suites. tests/attest.sh and .github/scripts/verify-tests-attestation.sh read
 # these lines (keep each on one line): an attestation needs every suite, host
 # and services once per release.
-all_suites=(e2e host services harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel pulsix_agent backrest)
+all_suites=(e2e host services harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel pulsix_agent backrest vaultwarden)
 host_releases=(24.04 26.04)
 services_releases=(24.04 26.04)
 

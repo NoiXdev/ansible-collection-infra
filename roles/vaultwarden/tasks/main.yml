@@ -1,0 +1,227 @@
+---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
+- name: Check that vaultwarden_hostname is set
+  ansible.builtin.assert:
+    that: vaultwarden_hostname | default('') | string is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+    fail_msg: >-
+      vaultwarden_hostname is required and must be a host name: the vault is
+      reached only through Traefik at that name. The role changes nothing.
+    quiet: true
+
+- name: Check vaultwarden_database
+  ansible.builtin.assert:
+    that: vaultwarden_database in ['sqlite', 'postgres', 'postgres_external']
+    fail_msg: >-
+      vaultwarden_database {{ vaultwarden_database }} is not one the role
+      runs: it must be sqlite, postgres (a PostgreSQL container of the
+      project) or postgres_external (a PostgreSQL server of your own). The
+      role changes nothing.
+    quiet: true
+
+- name: Check that vaultwarden_db_password is set
+  ansible.builtin.assert:
+    that: vaultwarden_db_password | default('') | string | length > 0
+    fail_msg: >-
+      vaultwarden_db_password is required with vaultwarden_database
+      {{ vaultwarden_database }}: the password of the PostgreSQL user. Keep
+      it in a vault. The role changes nothing.
+    quiet: true
+  when: vaultwarden_database != 'sqlite'
+
+- name: Check that vaultwarden_db_host is set
+  ansible.builtin.assert:
+    that: vaultwarden_db_host | default('') | string is match('^[A-Za-z0-9][A-Za-z0-9.:-]*$')
+    fail_msg: >-
+      vaultwarden_db_host is required with vaultwarden_database
+      postgres_external and must be a host name or address of the PostgreSQL
+      server. The role changes nothing.
+    quiet: true
+  when: vaultwarden_database == 'postgres_external'
+
+- name: Check vaultwarden_version
+  ansible.builtin.assert:
+    that:
+      - vaultwarden_version | string is match('^\d+\.\d+\.\d+$')
+      - vaultwarden_version | string is version(vaultwarden_min_version, '>=')
+    fail_msg: >-
+      vaultwarden_version {{ vaultwarden_version }} is not a release the role
+      runs: it must look like X.Y.Z (no v, no latest, no variant suffix such
+      as -alpine) and be {{ vaultwarden_min_version }} or newer. The role
+      changes nothing.
+    quiet: true
+
+# The names end up in compose, Traefik rules and docker filters unquoted.
+- name: Check the Vaultwarden settings
+  ansible.builtin.assert:
+    that:
+      - vaultwarden_image | length > 0
+      - vaultwarden_dir is match('^/')
+      - vaultwarden_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - vaultwarden_data_dir is match('^/')
+      - vaultwarden_url is match('^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$')
+      - vaultwarden_traefik_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - (vaultwarden_traefik_entrypoints + vaultwarden_traefik_admin_entrypoints) | reject('match', '^[A-Za-z0-9][A-Za-z0-9_-]*$') | list | length == 0
+      - (vaultwarden_traefik_middlewares + vaultwarden_traefik_admin_middlewares) | reject('match', '^[A-Za-z0-9][A-Za-z0-9_.@-]*$') | list | length == 0
+      - vaultwarden_traefik_priority | int >= 1
+      - vaultwarden_db_port | int >= 1
+      - vaultwarden_db_port | int <= 65535
+      - vaultwarden_db_name is match('^[A-Za-z_][A-Za-z0-9_]*$')
+      - vaultwarden_db_user is match('^[A-Za-z_][A-Za-z0-9_]*$')
+      - vaultwarden_invitation_org_name | string | trim | length > 0
+      - vaultwarden_backups_keep | int >= 1
+      - vaultwarden_health_timeout | int > 0
+      - vaultwarden_rollback_timeout | int > 0
+    fail_msg: >-
+      vaultwarden_dir and vaultwarden_data_dir must be absolute paths, the
+      basename of vaultwarden_dir (the compose project) only lowercase
+      letters, digits, - and _; vaultwarden_url an http(s) origin without a
+      path; vaultwarden_traefik_network a network name,
+      vaultwarden_traefik_entrypoints and
+      vaultwarden_traefik_admin_entrypoints entrypoint names and
+      vaultwarden_traefik_middlewares and
+      vaultwarden_traefik_admin_middlewares middleware names
+      (name@provider); vaultwarden_db_name and vaultwarden_db_user plain
+      identifiers (letters, digits and _); vaultwarden_db_port a port;
+      vaultwarden_image and vaultwarden_invitation_org_name must be set;
+      vaultwarden_traefik_priority, vaultwarden_backups_keep,
+      vaultwarden_health_timeout and vaultwarden_rollback_timeout must be
+      positive. The role changes nothing.
+    quiet: true
+
+- name: Check vaultwarden_db_sslmode
+  ansible.builtin.assert:
+    that: vaultwarden_db_sslmode in ['disable', 'prefer', 'require']
+    fail_msg: >-
+      vaultwarden_db_sslmode {{ vaultwarden_db_sslmode }} is not one the role
+      sets: use disable, prefer or require. verify-ca and verify-full would
+      need a root certificate the role does not provide. The role changes
+      nothing.
+    quiet: true
+
+# From 18 on the image keeps its cluster below /var/lib/postgresql (in
+# 18/docker), which compose.yaml binds to vaultwarden_data_dir/postgres.
+# Older images declare the volume /var/lib/postgresql/data, which Docker
+# mounts as an anonymous volume over the bind: the database would live
+# outside vaultwarden_data_dir, and docker compose down -v would take the
+# vault with it.
+- name: Check the PostgreSQL major
+  ansible.builtin.assert:
+    that:
+      - vaultwarden_postgres_major | length > 0
+      - vaultwarden_postgres_major | int >= 18
+    fail_msg: >-
+      vaultwarden_postgres_image {{ vaultwarden_postgres_image }} is not
+      PostgreSQL 18 or newer (the tag must start with the major, as in
+      postgres:18 or postgres:18.1-alpine). Older images keep the database
+      on a volume of their own (/var/lib/postgresql/data) instead of below
+      /var/lib/postgresql, which the role binds to
+      {{ vaultwarden_data_dir }}/postgres, so it would live outside
+      vaultwarden_data_dir. The role changes nothing.
+    quiet: true
+  when: vaultwarden_database == 'postgres'
+
+# The message quotes nothing of the value: a plain token would be the admin
+# page's password.
+- name: Check vaultwarden_admin_token_hash
+  ansible.builtin.assert:
+    that: vaultwarden_admin_token_hash | string is match(vaultwarden_admin_hash_pattern) or vaultwarden_admin_token_hash | string | length == 0
+    fail_msg: >-
+      vaultwarden_admin_token_hash is not an Argon2id hash
+      ($argon2id$v=19$m=...,t=...,p=...$salt$hash): the role does not take a
+      plain admin token. Make the hash with docker run --rm -it
+      vaultwarden/server:{{ vaultwarden_version }} /vaultwarden hash, or
+      leave it empty to switch the admin page off. The value is not shown.
+      The role changes nothing.
+    quiet: true
+
+- name: Check vaultwarden_signups_allowed
+  ansible.builtin.assert:
+    that: vaultwarden_signups_allowed is boolean
+    fail_msg: vaultwarden_signups_allowed must be true or false. The role changes nothing.
+    quiet: true
+
+- name: Check vaultwarden_smtp
+  ansible.builtin.assert:
+    that:
+      - vaultwarden_smtp is mapping
+      - vaultwarden_smtp.keys() | difference(['host', 'port', 'security', 'username', 'password', 'from', 'from_name']) | length == 0
+      - vaultwarden_smtp_settings.security in ['starttls', 'force_tls', 'off']
+      - vaultwarden_smtp_settings.port | int >= 1
+      - vaultwarden_smtp_settings.port | int <= 65535
+      - vaultwarden_smtp_settings.host | string is match('^[A-Za-z0-9.-]*$')
+      - vaultwarden_smtp_settings.host | string | length == 0 or vaultwarden_smtp_settings.from | string is match('^[^@\s]+@[^@\s]+$')
+      - vaultwarden_smtp_settings.username | string | length == 0 or vaultwarden_smtp_settings.password | string | length > 0
+    fail_msg: >-
+      vaultwarden_smtp takes host, port, security, username, password, from
+      and from_name; security must be starttls, force_tls or off, port a
+      port, host a host name, from (an e-mail address) is required when host
+      is set, and password when username is set. The values are not shown.
+      The role changes nothing.
+    quiet: true
+
+# Both or neither: the relay needs the pair.
+- name: Check the push settings
+  ansible.builtin.assert:
+    that:
+      - (vaultwarden_push_installation_id | string | length > 0) == (vaultwarden_push_installation_key | string | length > 0)
+      - vaultwarden_push_region in ['us', 'eu']
+    fail_msg: >-
+      vaultwarden_push_installation_id and vaultwarden_push_installation_key
+      must be set both (push notifications through Bitwarden's relay) or
+      neither, and vaultwarden_push_region must be us or eu. The values are
+      not shown. The role changes nothing.
+    quiet: true
+
+- name: Check vaultwarden_env
+  ansible.builtin.assert:
+    that:
+      - vaultwarden_env is mapping
+      - vaultwarden_env.keys() | reject('match', '^[A-Z][A-Z0-9_]*$') | list | length == 0
+      - vaultwarden_env.values() | select('mapping') | list | length == 0
+      - vaultwarden_env.values() | reject('string') | select('iterable') | list | length == 0
+      - vaultwarden_owned | length == 0
+    fail_msg: >-
+      vaultwarden_env keys must be environment variable names (uppercase
+      letters, digits and _) with plain values, and the role sets these
+      itself: {{ vaultwarden_env_owned | join(', ') }} (and every
+      {{ vaultwarden_env_owned_prefixes | join('*, ') }}* and *{{ vaultwarden_env_owned_suffix }}
+      key). Use the role's variables instead (vaultwarden_url,
+      vaultwarden_database, vaultwarden_admin_token_hash,
+      vaultwarden_signups_allowed, vaultwarden_smtp,
+      vaultwarden_push_*, ...). The role changes nothing.
+    quiet: true
+  vars:
+    vaultwarden_owned: >-
+      {{ (vaultwarden_env if vaultwarden_env is mapping else {}).keys()
+         | select('in', vaultwarden_env_owned)
+         | union((vaultwarden_env if vaultwarden_env is mapping else {}).keys()
+                 | select('match', '^(' ~ vaultwarden_env_owned_prefixes | join('|') ~ ')'))
+         | union((vaultwarden_env if vaultwarden_env is mapping else {}).keys()
+                 | select('search', vaultwarden_env_owned_suffix ~ '$'))
+         | sort }}
+
+# A key left empty in YAML (KEY:) is null, which would reach Vaultwarden as
+# the text None. The message names the keys, not the values.
+- name: Check that vaultwarden_env has a value for every key
+  ansible.builtin.assert:
+    that: vaultwarden_env_null | length == 0
+    fail_msg: >-
+      vaultwarden_env has no value for {{ vaultwarden_env_null | join(', ') }}
+      (null, as a key left empty in YAML is), which would reach Vaultwarden
+      as the text None. Set a value, '' for an empty one, or remove the key.
+      The role changes nothing.
+    quiet: true
+  vars:
+    vaultwarden_env_null: "{{ vaultwarden_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
+
+# The point where the state of the installation, install and update plug in
+# (later tasks replace this placeholder): the settings are valid, and nothing
+# has been changed yet.
+- name: Settings are valid
+  ansible.builtin.debug:
+    msg: The settings of {{ vaultwarden_project }} are valid; the role does not install anything yet.

@@ -1,0 +1,22 @@
+---
+# Test-only values; nothing here is a secret. run.sh generates the passwords
+# and keys of each run (role-vars.json).
+traefik_dir: /opt/traefik
+# One plain-HTTP entrypoint: no TLS, so no ACME e-mail.
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+    as_default: true
+# A middleware that denies every client (192.0.2.1 is a documentation
+# address), for the admin router scenarios.
+traefik_dynamic_files:
+  deny.yml:
+    http:
+      middlewares:
+        deny:
+          ipAllowList:
+            sourceRange: [192.0.2.1/32]
+
+vaultwarden_hostname: vaultwarden.test
+vaultwarden_url: http://vaultwarden.test

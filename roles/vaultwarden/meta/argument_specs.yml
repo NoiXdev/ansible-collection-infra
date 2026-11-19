@@ -1,0 +1,174 @@
+---
+argument_specs:
+  main:
+    short_description: Vaultwarden in Docker Compose, behind Traefik
+    # The required settings are not required here: the role's own checks
+    # name them when they are missing.
+    options:
+      vaultwarden_version:
+        type: str
+        description: >-
+          Vaultwarden image tag (X.Y.Z, no v, no latest, no variant); 1.37.0
+          or newer.
+      vaultwarden_image:
+        type: str
+        description: Vaultwarden image without its tag.
+      vaultwarden_dir:
+        type: path
+        description: >-
+          Directory of the compose project (compose.yaml, the secrets,
+          markers). Its basename is the compose project name.
+      vaultwarden_data_dir:
+        type: path
+        description: >-
+          Directory of the data (Vaultwarden's /data and, with postgres, the
+          PostgreSQL data); can be a mountpoint of its own.
+      vaultwarden_data_dir_mountpoint:
+        type: bool
+        description: Fail every run unless vaultwarden_data_dir is a mountpoint.
+      vaultwarden_hostname:
+        type: str
+        description: Host name of the Traefik routers (required).
+      vaultwarden_url:
+        type: str
+        description: Origin the clients reach Vaultwarden at, without a path (DOMAIN).
+      vaultwarden_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      vaultwarden_traefik_entrypoints:
+        type: list
+        elements: str
+        description: Traefik entrypoints of the vault router; empty uses Traefik's default ones.
+      vaultwarden_traefik_middlewares:
+        type: list
+        elements: str
+        description: Traefik middlewares (name@provider) of the vault router.
+      vaultwarden_traefik_admin_entrypoints:
+        type: list
+        elements: str
+        description: >-
+          Traefik entrypoints of the /admin router (default
+          vaultwarden_traefik_entrypoints).
+      vaultwarden_traefik_admin_middlewares:
+        type: list
+        elements: str
+        description: >-
+          Traefik middlewares (name@provider) of the /admin router (an IP
+          allowlist, for example).
+      vaultwarden_traefik_priority:
+        type: int
+        description: >-
+          Priority of the vault router; the admin router gets this plus 1.
+          Keep it above catch-all routers.
+      vaultwarden_database:
+        type: str
+        choices: [sqlite, postgres, postgres_external]
+        description: >-
+          Where the vault lives: a SQLite file, a PostgreSQL container of the
+          project, or a PostgreSQL server of your own.
+      vaultwarden_postgres_image:
+        type: str
+        description: >-
+          PostgreSQL image with its tag, major 18 or newer (older images keep
+          the database on a volume of their own, outside vaultwarden_data_dir).
+          Used with postgres.
+      vaultwarden_db_password:
+        type: str
+        no_log: true
+        description: >-
+          Password of the PostgreSQL user (required with postgres and
+          postgres_external). Keep it in a vault.
+      vaultwarden_db_host:
+        type: str
+        description: Host name or address of the external PostgreSQL server (required with postgres_external).
+      vaultwarden_db_port:
+        type: int
+        description: Port of the external PostgreSQL server.
+      vaultwarden_db_name:
+        type: str
+        description: Name of the PostgreSQL database.
+      vaultwarden_db_user:
+        type: str
+        description: Name of the PostgreSQL user.
+      vaultwarden_db_sslmode:
+        type: str
+        choices: [disable, prefer, require]
+        description: TLS to the external PostgreSQL server.
+      vaultwarden_admin_token_hash:
+        type: str
+        no_log: true
+        description: >-
+          Argon2id PHC hash of the admin token; empty switches the admin page
+          off. A plain token is refused.
+      vaultwarden_signups_allowed:
+        type: bool
+        description: Whether anyone can register (SIGNUPS_ALLOWED); invitations always work.
+      vaultwarden_invitation_org_name:
+        type: str
+        description: Organisation name in invitation mails.
+      vaultwarden_smtp:
+        type: dict
+        description: >-
+          Mail settings: host (empty sends none), port, security (starttls,
+          force_tls or off), username, password, from (required with host)
+          and from_name.
+        options:
+          host:
+            type: str
+            description: SMTP server; empty sends no mail.
+          port:
+            type: int
+            description: SMTP port.
+          security:
+            type: str
+            description: starttls, force_tls or off (checked by the role).
+          username:
+            type: str
+            description: SMTP user; empty sends without a login.
+          password:
+            type: str
+            no_log: true
+            description: SMTP password (required with username).
+          from:
+            type: str
+            description: Sender address (required with host).
+          from_name:
+            type: str
+            description: Sender name.
+      vaultwarden_push_installation_id:
+        type: str
+        no_log: true
+        description: Installation id for push notifications; set together with the key, or neither.
+      vaultwarden_push_installation_key:
+        type: str
+        no_log: true
+        description: Installation key for push notifications; set together with the id, or neither.
+      vaultwarden_push_region:
+        type: str
+        choices: [us, eu]
+        description: Region of Bitwarden's push relay.
+      vaultwarden_env:
+        type: dict
+        description: >-
+          More settings for the Vaultwarden container (environment
+          variables); the settings the role sets itself are refused.
+      vaultwarden_backups_keep:
+        type: int
+        description: >-
+          Number of backups (a dump of the database, a copy of the data and
+          the compose file, taken before every update) kept in
+          vaultwarden_data_dir/backups.
+      vaultwarden_health_timeout:
+        type: int
+        description: Seconds to wait for Vaultwarden and its database to become healthy.
+      vaultwarden_rollback_timeout:
+        type: int
+        description: >-
+          Seconds a rollback after a failed update waits for the previous
+          version (default vaultwarden_health_timeout).
+      vaultwarden_restore_interrupted:
+        type: bool
+        description: >-
+          For one run only: after an update that did not finish, restore the
+          backup from before it and end the run. Refused when there is no such
+          update; remove it after the run.
