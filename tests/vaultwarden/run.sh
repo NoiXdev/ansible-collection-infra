@@ -167,6 +167,8 @@ user_email=user@example.test
 # The database password holds every character a URL must encode (and $, quotes).
 db_password="$(openssl rand -hex 12)"" pa\$s\"w'o@r/d:x#y%z"
 new_db_password="$(openssl rand -hex 12)"" ne\$w\"p'a@s/s:w#d%"
+# The db_password scenario changes db_password; start_host sets it back.
+initial_db_password="$db_password"
 initial_admin_token="$(openssl rand -hex 12)"' ad$m"in tok'
 rotated_admin_token="$(openssl rand -hex 12)"' ro$t"ated adm'
 smtp_password="$(openssl rand -hex 12)"' sm$t"p pw'
@@ -360,6 +362,9 @@ start_host() {
   org_name='Noix Test Org'
   current_smtp_password="$smtp_password"
   current_push_key="$push_key"
+  db_password="$initial_db_password"
+  # The PostgreSQL test servers of this host publish on its own address.
+  pg_ip=
   set_mailpit_login
 
   echo "== test host (ubuntu $ubuntu)"
