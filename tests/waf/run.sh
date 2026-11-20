@@ -238,8 +238,20 @@ direct() {
 # audit: the WAF's stdout (its audit log, one JSON line per event).
 audit() { h docker logs "$waf" 2>/dev/null; }
 audit_lines() { audit | wc -l | tr -d ' '; }
-# recorded: the recording backend's lines, "<request line> | <UA> | <bytes>".
+# recorded: the recording backend's lines,
+# "<request line> | <UA> | <body sha256> | <body bytes>".
 recorded() { h docker logs waf-fixtures-recorder-1 2>/dev/null; }
+# arrived_whole <method> <path> <file>: the recorder got one request
+# "<method> <path>" whose body is the test host's file, byte for byte.
+arrived_whole() {
+  local sum size
+  sum="$(h sha256sum "$3" | cut -d' ' -f1)"
+  size="$(h stat -c %s "$3")"
+  recorded | grep -qF "$1 $2 HTTP/1.1 | " || { recorded >&2; fail "the backend did not get $1 $2"; }
+  recorded | grep -qF -- "$1 $2 HTTP/1.1 | curl" || fail "the backend got $1 $2 from another client"
+  recorded | grep -F "$1 $2 HTTP/1.1 | " | grep -qE " \| $sum \| $size\$" \
+    || { recorded >&2; fail "the body of $1 $2 did not arrive whole ($size bytes, sha256 $sum)"; }
+}
 recorder_ip() { h docker inspect -f '{{(index .NetworkSettings.Networks "proxy").IPAddress}}' waf-fixtures-recorder-1; }
 # websocket <host header> <path> <idle seconds>: through the web entrypoint, a
 # WebSocket upgrade, a text message, the given idle time and a second message;
@@ -333,6 +345,32 @@ test_traefik() {
   [ "$(direct block.test '/?exec=/bin/bash' -H 'X-Forwarded-For: 203.0.113.9')" = 403 ] \
     || fail "a direct attack was not refused"
   if audit | grep -qF 203.0.113.9; then fail "the WAF believed a client's X-Forwarded-For"; fi
+
+  echo "-- inspected bodies reach the backend whole: small, 3 MiB, chunked"
+  # Below the inspection limit, in a type the Core Rule Set allows at
+  # paranoia 1; no Expect header (CRS refuses it, 920450).
+  h sh -c 'printf "{\"a\": \"b\"}" >/tmp/small.json'
+  # 200 items of prose: about 3 MiB, 400 arguments (SecArgumentsLimit is 1000).
+  h python3 -c 'import json; open("/tmp/big.json", "w").write(json.dumps({"items": [{"id": i, "text": "lorem ipsum dolor sit amet " * 580} for i in range(200)]}))'
+  expect 200 block.test /small -X POST -H 'Content-Type: application/json' -H 'Expect:' --data-binary @/tmp/small.json
+  arrived_whole POST /small /tmp/small.json
+  expect 200 block.test /big -X POST -H 'Content-Type: application/json' -H 'Expect:' --data-binary @/tmp/big.json
+  arrived_whole POST /big /tmp/big.json
+  expect 200 block.test /chunked -X POST -H 'Content-Type: application/json' -H 'Expect:' \
+    -H 'Transfer-Encoding: chunked' --data-binary @/tmp/big.json
+  arrived_whole POST /chunked /tmp/big.json
+  # The same bodies are inspected: an attack in JSON, with a length or
+  # chunked, never arrives; JSON that cannot be parsed is refused.
+  expect 403 block.test /json-attack -X POST -H 'Content-Type: application/json' -H 'Expect:' \
+    --data-binary '{"exec": "/bin/bash"}'
+  expect 403 block.test /chunked-attack -X POST -H 'Content-Type: application/json' -H 'Expect:' \
+    -H 'Transfer-Encoding: chunked' --data-binary '{"exec": "/bin/bash"}'
+  expect 400 block.test /broken-json -X POST -H 'Content-Type: application/json' -H 'Expect:' \
+    --data-binary '{"a": '
+  if recorded | grep -Eq '/json-attack|/chunked-attack|/broken-json'; then
+    recorded >&2
+    fail "an attack or a broken body in JSON reached the backend"
+  fi
 
   echo "-- the site's settings with a port, in upper case and with a trailing dot"
   # A path starting with :8443 goes to the alt entrypoint.
