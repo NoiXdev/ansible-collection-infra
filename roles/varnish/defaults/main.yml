@@ -50,9 +50,10 @@ varnish_between_bytes_timeout: 60
 #     profile: generic                 # generic (the default), shopware or typo3
 #     purge_token: "..."               # required, at least 32 of A-Za-z0-9._~-, unique
 #     microcache: 0                    # seconds, 0..300; not with shopware: a 200, 301
-#                                      # or 404 the app does not make cacheable (no TTL,
-#                                      # private, no-cache, no-store) is kept that long,
-#                                      # never one with Set-Cookie
+#                                      # or 404 the app does not make cacheable (no
+#                                      # max-age, s-maxage or Expires; private, no-cache,
+#                                      # no-store) is kept that long, never one with
+#                                      # Set-Cookie. Without it such a page is not cached.
 #     health_path: ""                  # e.g. /health; probed every 5 s (200 = healthy, sick
 #                                      # after 3 failures of 5); while sick, stale pages
 #                                      # are served for varnish_grace_sick

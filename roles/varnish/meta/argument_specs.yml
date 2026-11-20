@@ -77,8 +77,9 @@ argument_specs:
             site needs its own.
           - >-
             microcache, seconds from 0 to 300 (default 0) a 200, 301 or 404 that the app does not
-            make cacheable (no TTL, private, no-cache, no-store) is kept, never one with
-            Set-Cookie; not with the profile shopware.
+            make cacheable (no max-age, s-maxage or Expires; private, no-cache, no-store) is kept,
+            never one with Set-Cookie; not with the profile shopware. Without microcache such a
+            page is not cached.
           - >-
             health_path, empty (the default) or a path starting with / that Varnish probes for the
             backend's health; health_host (required with health_path), the lower-case host name

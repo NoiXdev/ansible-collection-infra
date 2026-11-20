@@ -12,8 +12,8 @@
 # The scenario "install" installs Varnish Software's 9.1 with two sites in
 # front of tests/varnish/backend.py (in place of nginx's inner server) and
 # checks the packages, the loopback listeners, the front key and that only a
-# request with it reaches the backend; a second run changes nothing, and a
-# deleted key is created anew.
+# request with it reaches the backend; a second run changes nothing, a
+# deleted key is created anew, and without any site the VCL still compiles.
 #
 # The scenario "badvcl" runs a copy of the collection whose VCL does not
 # compile and checks that the run fails before the running VCL is touched,
@@ -235,6 +235,12 @@ test_install() {
   [ "$answer" = 403 ] || fail "install: the old key got $answer, not 403"
   no_key_in_logs /root/old-front.key
   h rm /root/old-front.key
+
+  echo "== install: without sites the VCL compiles, and every request passes"
+  printf '%s\n' '{"test_varnish": true, "varnish_sites": []}' >"$out/install-nosites-vars.json"
+  run_ok install-nosites converge.yml -e "@$out/install-nosites-vars.json"
+  h sh -c "! grep -q 'X-Noix-Site ==' $vcl" || fail "install: the VCL without sites still has site blocks"
+  run_ok install-nosites-verify verify.yml
 }
 
 test_badvcl() {
@@ -321,7 +327,7 @@ expect() {
 # front of tests/varnish/backend.py: its count=<n> shows how often a request
 # reached it.
 test_cache() {
-  local p gz plain
+  local p c gz plain
   echo "== cache: what the app allows is cached, per site (ubuntu $1)"
   use_host "$1" varnish
   start_backend
@@ -404,8 +410,8 @@ test_cache() {
   req b b.test "$p" -H 'Cookie: consent=yes'
   expect "typo3 with a consent cookie it does not strip" 200 PASS "count=4 host=b.test path=$p"
 
-  echo "== cache: private, Set-Cookie, Authorization, POST, 5xx and other sites pass"
-  for p in '/c/private?cc=private' '/c/nocc-cookie?sc=s%3D1' '/c/vary?cc=public,max-age=60&vary=%2A' \
+  echo "== cache: private, no cache headers, Set-Cookie, Authorization, POST, 5xx and other sites pass"
+  for p in '/c/private?cc=private' '/c/nocc' '/c/nocc-cookie?sc=s%3D1' '/c/vary?cc=public,max-age=60&vary=%2A' \
     '/c/500?cc=public,max-age=60&status=500' '/c/sc?cc=public,max-age=60&sc=s%3D1'; do
     req a a.test "$p"
     [ "$cache" != HIT ] || fail "$p was a HIT on the first request"
@@ -430,26 +436,27 @@ test_cache() {
   expect "that site again" 200 PASS "count=2 host=a.test path=$p"
 
   echo "== cache: tracking parameters and the order of the query do not count"
-  req a a.test '/c/q?a=1&b=2'
-  expect "a query" 200 MISS "count=1 host=a.test path=/c/q?a=1&b=2"
-  req a a.test '/c/q?utm_source=x&b=2&a=1&gclid=y'
-  expect "the query reordered, with tracking parameters" 200 HIT "count=1 host=a.test path=/c/q?a=1&b=2"
-  req a a.test '/c/q?xutm_source=x&a=1&b=2'
-  expect "a parameter that only ends like a tracking one" 200 MISS "count=1 host=a.test path=/c/q?a=1&b=2&xutm_source=x"
+  c='cc=public,max-age=60'
+  req a a.test "/c/q?a=1&b=2&$c"
+  expect "a query" 200 MISS "count=1 host=a.test path=/c/q?a=1&b=2&$c"
+  req a a.test "/c/q?utm_source=x&b=2&$c&a=1&gclid=y"
+  expect "the query reordered, with tracking parameters" 200 HIT "count=1 host=a.test path=/c/q?a=1&b=2&$c"
+  req a a.test "/c/q?xutm_source=x&a=1&b=2&$c"
+  expect "a parameter that only ends like a tracking one" 200 MISS "count=1 host=a.test path=/c/q?a=1&b=2&$c&xutm_source=x"
   # Shopware's short names (kw, pa, pp ...) may be content elsewhere: only the
   # shopware profile removes them.
-  req a a.test '/c/kw?kw=x'
-  expect "a search for x" 200 MISS "count=1 host=a.test path=/c/kw?kw=x"
-  req a a.test '/c/kw?kw=y'
-  expect "a search for y" 200 MISS "count=1 host=a.test path=/c/kw?kw=y"
-  req a a.test '/c/kw?kw=x'
-  expect "the search for x again" 200 HIT "count=1 host=a.test path=/c/kw?kw=x"
-  req s s.test '/c/kw?a=1'
-  expect "a page of the shopware site" 200 MISS "count=1 host=s.test path=/c/kw?a=1"
-  req s s.test '/c/kw?kw=x&a=1&pa=2'
-  expect "the page with Shopware-only tracking parameters" 200 HIT "count=1 host=s.test path=/c/kw?a=1"
+  req a a.test "/c/kw?$c&kw=x"
+  expect "a search for x" 200 MISS "count=1 host=a.test path=/c/kw?$c&kw=x"
+  req a a.test "/c/kw?$c&kw=y"
+  expect "a search for y" 200 MISS "count=1 host=a.test path=/c/kw?$c&kw=y"
+  req a a.test "/c/kw?$c&kw=x"
+  expect "the search for x again" 200 HIT "count=1 host=a.test path=/c/kw?$c&kw=x"
+  req s s.test "/c/kw?a=1&$c"
+  expect "a page of the shopware site" 200 MISS "count=1 host=s.test path=/c/kw?a=1&$c"
+  req s s.test "/c/kw?kw=x&a=1&pa=2&$c"
+  expect "the page with Shopware-only tracking parameters" 200 HIT "count=1 host=s.test path=/c/kw?a=1&$c"
 
-  echo "== cache: the microcache keeps private pages for 5 s, and the app's TTL otherwise"
+  echo "== cache: the microcache keeps private and header-less pages for 5 s, and the app's TTL otherwise"
   p='/c/micro?cc=private'
   req m m.test "$p"
   expect "a private page of the microcache site" 200 MISS "count=1 host=m.test path=$p"
@@ -466,9 +473,15 @@ test_cache() {
   expect "a private 500" 500 PASS "count=2 host=m.test path=/c/micro-500?cc=private&status=500"
   req m m.test "$p" -H 'Cookie: session=1'
   expect "the private page with a session cookie" 200 PASS "count=2 host=m.test path=$p"
+  req m m.test /c/micro-nocc
+  expect "a page without cache headers" 200 MISS "count=1 host=m.test path=/c/micro-nocc"
+  req m m.test /c/micro-nocc
+  expect "the page without cache headers within 5 s" 200 HIT "count=1 host=m.test path=/c/micro-nocc"
   sleep 6
   req m m.test "$p"
   expect "the private page after 6 s" 200 MISS "count=3 host=m.test path=$p"
+  req m m.test /c/micro-nocc
+  expect "the page without cache headers after 6 s" 200 MISS "count=2 host=m.test path=/c/micro-nocc"
   req m m.test '/c/micro-long?cc=public,max-age=60'
   expect "the cacheable page after 6 s" 200 HIT "count=1 host=m.test path=/c/micro-long?cc=public,max-age=60"
   no_key_in_logs

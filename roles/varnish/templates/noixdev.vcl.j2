@@ -143,8 +143,10 @@ sub noixdev_site_recv {
 {% endfor %}
 }
 
+{% if varnish_sites_normalized | length > 0 %}
 # GET and HEAD without Authorization and without any cookie (after the
-# stripping) are looked up; everything else passes.
+# stripping) are looked up; everything else passes. (Only with sites: an
+# unused sub does not compile.)
 sub noixdev_lookup {
     if (req.method != "GET" && req.method != "HEAD") {
         return (pass);
@@ -162,6 +164,7 @@ sub noixdev_lookup {
     }
     return (hash);
 }
+{% endif %}
 
 # The site is part of the key: two sites never share an object.
 sub vcl_hash {
@@ -191,9 +194,15 @@ sub vcl_backend_response {
     if (beresp.http.Set-Cookie || beresp.http.Vary == "*") {
         call noixdev_hit_for_miss;
     }
+    # Varnish's default TTL never applies: without max-age or s-maxage in
+    # Cache-Control and without Expires the app did not make the response
+    # cacheable.
+    if (!beresp.http.Expires && beresp.http.Cache-Control !~ "(?i)(?:^|[,\s])(?:s-maxage|max-age)\s*=") {
+        set beresp.ttl = 0s;
+    }
     call noixdev_site_backend_response;
     # What the app made cacheable is cached for the app's TTL (s-maxage,
-    # max-age, Expires, or Varnish's default TTL without any of them).
+    # max-age or Expires).
     if (beresp.ttl <= 0s
         || beresp.http.Surrogate-Control ~ "(?i)no-store"
         || (!beresp.http.Surrogate-Control && beresp.http.Cache-Control ~ "(?i)(?:private|no-cache|no-store)")) {

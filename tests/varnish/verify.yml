@@ -135,8 +135,8 @@
       register: test_answers
       changed_when: false
 
-    # Site a is in varnish_sites and / sends no Cache-Control: cached for
-    # Varnish's default TTL.
+    # / sends no cache headers: never cached, whether site a is in
+    # varnish_sites or not.
     - name: Check that only the request with the key reached the backend
       ansible.builtin.assert:
         that:
@@ -144,7 +144,7 @@
           - 'test_answers.results[0].stdout is search("(?mi)^X-Noix-Cache: SYNTH\r?$")'
           - test_answers.results[1].stdout is match('HTTP/1.1 403 ')
           - test_answers.results[2].stdout is match('HTTP/1.1 200 ')
-          - 'test_answers.results[2].stdout is search("(?mi)^X-Noix-Cache: (MISS|HIT)\r?$")'
+          - 'test_answers.results[2].stdout is search("(?mi)^X-Noix-Cache: PASS\r?$")'
           - test_answers.results[2].stdout is search('(?m)^count=[0-9]+ host=a[.]test path=/$')
           - 'test_answers.results | map(attribute="stdout") | select("search", "(?mi)^(Via|X-Varnish):") | list | length == 0'
         fail_msg: "{{ test_answers.results | map(attribute='stdout') | list }}"
