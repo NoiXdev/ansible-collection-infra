@@ -95,6 +95,20 @@
           {{ verify_container.Config.Image }}, {{ verify_container.State.Status }},
           {{ verify_container.State.Health.Status | default('no health') }}.
 
+    # While the admin page is on, the vault's router leaves /admin to the
+    # admin router, which may sit on other entrypoints.
+    - name: Check the rule of the vault's router
+      ansible.builtin.assert:
+        that: verify_container.Config.Labels['traefik.http.routers.vaultwarden.rule'] | default('') == verify_vault_rule
+        fail_msg: >-
+          The vault's router has the rule
+          {{ verify_container.Config.Labels['traefik.http.routers.vaultwarden.rule'] | default('none') }},
+          not {{ verify_vault_rule }}.
+      vars:
+        verify_vault_rule: >-
+          {{ 'Host(`vaultwarden.test`) && !PathPrefix(`/admin`)' if verify_admin | bool
+             else 'Host(`vaultwarden.test`)' }}
+
     - name: Check that no port is published
       ansible.builtin.assert:
         that:

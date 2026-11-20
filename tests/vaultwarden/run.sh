@@ -17,9 +17,11 @@
 #             client.py, and the official Bitwarden CLI logging in, creating
 #             a login item and reading it back; then the admin router with a
 #             middleware that denies everything (/admin denied by Traefik,
-#             /alive and /api/ still answering) and the admin page switched
-#             off (Vaultwarden's own disabled page, no admin router, no
-#             admin_token file)
+#             /alive and /api/ still answering), the admin router on the
+#             plain HTTP entrypoint (on HTTPS /admin and its other spellings
+#             match no router, Traefik's own 404; on HTTP the middleware
+#             denies it) and the admin page switched off (Vaultwarden's own
+#             disabled page, no admin router, no admin_token file)
 #   config_json
 #             a config.json saved on the admin page refused before any
 #             change, naming its keys and showing none of its values (at
@@ -690,6 +692,25 @@ test_install() {
   expect_answer 200 '' /alive
   expect_answer 200 '"version"' /api/config
   vw_converge_unchanged -e '{"vaultwarden_traefik_admin_middlewares": ["deny@file"], "vaultwarden_health_timeout": 240}'
+
+  # The admin router on another entrypoint (plain HTTP, web): on the vault's
+  # entrypoint no router takes /admin, so Traefik answers with its own 404
+  # (the test Traefik has no error-page catch-all), also for the spellings
+  # that Traefik and Vaultwarden could read differently; on web the admin
+  # router answers, with its middleware.
+  echo "== install: the admin router on another entrypoint (ubuntu $1)"
+  local admin_web='{"vaultwarden_traefik_admin_entrypoints": ["web"], "vaultwarden_traefik_admin_middlewares": ["deny@file"]}'
+  vw_converge -e "$admin_web"
+  wait_answer 404 '404 page not found' /admin
+  expect_answer 404 '404 page not found' /admin/users/overview
+  expect_answer 404 '404 page not found' //admin
+  expect_answer 404 '404 page not found' /admin/
+  answer="$(h curl -s --max-time 30 -w '\n%{http_code}' http://vaultwarden.test/admin)"
+  [ "$answer" = $'Forbidden\n403' ] \
+    || fail "the admin router on web did not deny /admin: ${answer##*$'\n'} $(printf '%s' "${answer%$'\n'*}" | head -c 200)"
+  expect_answer 200 '' /alive
+  expect_answer 200 '"version"' /api/config
+  vw_converge_unchanged -e "$admin_web"
 
   echo "== install: the admin page off (ubuntu $1)"
   vw_converge -e vaultwarden_admin_token_hash=

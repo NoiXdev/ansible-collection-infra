@@ -23,10 +23,10 @@ defaults in `defaults/main.yml`.
 | `vaultwarden_hostname` | required | The host name Traefik routes to the vault |
 | `vaultwarden_url` | `https://<hostname>` | The origin the clients see |
 | `vaultwarden_traefik_network` | `proxy` | Traefik's network |
-| `vaultwarden_traefik_entrypoints` | `[]` | Entrypoints of the vault's router (empty: Traefik's default ones) |
-| `vaultwarden_traefik_middlewares` | `[]` | Middlewares of the vault's router |
-| `vaultwarden_traefik_admin_entrypoints` | the vault's | Entrypoints of the router of `/admin` |
-| `vaultwarden_traefik_admin_middlewares` | `[]` | Middlewares of the router of `/admin` (an IP allowlist, for example) |
+| `vaultwarden_traefik_entrypoints` | `[]` | Entrypoints of the vault's router (empty: Traefik's default ones); while the admin page is on, it leaves `/admin` to the admin router |
+| `vaultwarden_traefik_middlewares` | `[]` | Middlewares of the vault's router, which do not apply to `/admin` while the admin page is on |
+| `vaultwarden_traefik_admin_entrypoints` | the vault's | Entrypoints of the router of `/admin`, the only ones `/admin` answers on |
+| `vaultwarden_traefik_admin_middlewares` | `[]` | Middlewares of the router of `/admin`, the only ones that apply there (an IP allowlist, for example) |
 | `vaultwarden_traefik_priority` | `100` | Priority of the routers (the admin router one above) |
 | `vaultwarden_database` | `sqlite` | `sqlite`, `postgres` (a container of the project) or `postgres_external` (a server of your own) |
 | `vaultwarden_postgres_image` | `docker.io/library/postgres:18` | PostgreSQL image of the own database (18 or newer); for an external server the role runs the client of the server's major from the same repository |
@@ -62,10 +62,13 @@ tables.
 
 The admin page is on only with `vaultwarden_admin_token_hash`, an Argon2id hash
 made with `docker run --rm -it vaultwarden/server:<version> /vaultwarden hash`;
-a plain token is refused. A save of settings on the admin page writes a
-`config.json` that would override the role's settings, so every run refuses
-while it exists and names the keys it holds; managing users there does not
-write it.
+a plain token is refused. While it is on, the vault's router leaves `/admin` to
+a router of its own, so `/admin` answers only on
+`vaultwarden_traefik_admin_entrypoints`, with
+`vaultwarden_traefik_admin_middlewares`. A save of settings on the admin page
+writes a `config.json` that would override the role's settings, so every run
+refuses while it exists and names the keys it holds; managing users there does
+not write it.
 
 ## Secrets
 

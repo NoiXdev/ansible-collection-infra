@@ -65,6 +65,11 @@
 {%- set router = vaultwarden_project -%}
 {%- set admin_router = vaultwarden_project ~ '-admin' -%}
 {%- set host_rule = 'Host(`' ~ vaultwarden_hostname ~ '`)' -%}
+{#- While the admin page is on, the vault's router leaves /admin to the admin
+    router: a router competes only on its own entrypoints, so on an
+    entrypoint of the vault that is not one of the admin page the vault's
+    router would serve /admin without the admin middlewares. -#}
+{%- set vault_rule = host_rule ~ (' && !PathPrefix(`/admin`)' if 'admin_token' in vaultwarden_secrets else '') -%}
 # Managed by the noixdev.infra.vaultwarden role; changes are overwritten.
 
 services:
@@ -122,8 +127,9 @@ services:
       - traefik.enable=true
       - {{ q('traefik.docker.network=' ~ vaultwarden_traefik_network) }}
       # The web vault, the API of the apps and extensions, and their
-      # notifications (websockets on the same port).
-      - {{ q('traefik.http.routers.' ~ router ~ '.rule=' ~ host_rule) }}
+      # notifications (websockets on the same port); not /admin while the
+      # admin page is on.
+      - {{ q('traefik.http.routers.' ~ router ~ '.rule=' ~ vault_rule) }}
 {% if vaultwarden_traefik_entrypoints | length > 0 %}
       - {{ q('traefik.http.routers.' ~ router ~ '.entrypoints=' ~ vaultwarden_traefik_entrypoints | join(',')) }}
 {% endif %}
@@ -133,7 +139,8 @@ services:
 {% endif %}
       - {{ q('traefik.http.routers.' ~ router ~ '.service=' ~ vaultwarden_project) }}
 {% if 'admin_token' in vaultwarden_secrets %}
-      # The admin page, only while it is on, with middlewares of its own.
+      # The admin page, only while it is on, with entrypoints and middlewares
+      # of its own.
       - {{ q('traefik.http.routers.' ~ admin_router ~ '.rule=' ~ host_rule ~ ' && PathPrefix(`/admin`)') }}
 {%   if vaultwarden_traefik_admin_entrypoints | length > 0 %}
       - {{ q('traefik.http.routers.' ~ admin_router ~ '.entrypoints=' ~ vaultwarden_traefik_admin_entrypoints | join(',')) }}

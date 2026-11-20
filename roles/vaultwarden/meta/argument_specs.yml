@@ -38,23 +38,29 @@ argument_specs:
       vaultwarden_traefik_entrypoints:
         type: list
         elements: str
-        description: Traefik entrypoints of the vault router; empty uses Traefik's default ones.
+        description: >-
+          Traefik entrypoints of the vault router; empty uses Traefik's default
+          ones. While the admin page is on, the vault router leaves /admin to
+          the /admin router.
       vaultwarden_traefik_middlewares:
         type: list
         elements: str
-        description: Traefik middlewares (name@provider) of the vault router.
+        description: >-
+          Traefik middlewares (name@provider) of the vault router; while the
+          admin page is on, they do not apply to /admin.
       vaultwarden_traefik_admin_entrypoints:
         type: list
         elements: str
         description: >-
           Traefik entrypoints of the /admin router (default
-          vaultwarden_traefik_entrypoints).
+          vaultwarden_traefik_entrypoints), the only ones /admin answers on
+          while the admin page is on.
       vaultwarden_traefik_admin_middlewares:
         type: list
         elements: str
         description: >-
           Traefik middlewares (name@provider) of the /admin router (an IP
-          allowlist, for example).
+          allowlist, for example), the only ones that apply to /admin.
       vaultwarden_traefik_priority:
         type: int
         description: >-
