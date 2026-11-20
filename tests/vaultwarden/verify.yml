@@ -6,9 +6,13 @@
 # of the eu region, vaultwarden_env; the secrets only as *_FILE, never as
 # values), its mounts (the data subdirectory, the secrets directory
 # read-only) and the files: the compose file 0644, the secrets directory 0700
-# with only the files in use, each 0600, and the database target sqlite.
+# with only the files in use, each 0600, and the database target.
+# With verify_database postgres (default sqlite) also the db container
+# (the pinned PostgreSQL image, healthy, no published port, the password only
+# as POSTGRES_PASSWORD_FILE, its cluster bind and its password file mounted
+# read-only), the database_url and db_password files and the target postgres.
 # Extra variables: verify_admin (the admin page is on), verify_org_name,
-# verify_push_id.
+# verify_push_id, verify_database.
 - name: Verify
   hosts: all
   gather_facts: false
@@ -16,9 +20,18 @@
     verify_dir: /opt/vaultwarden
     verify_defaults: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../roles/vaultwarden/defaults/main.yml') | from_yaml }}"
     verify_image: "{{ verify_defaults.vaultwarden_image }}:{{ verify_defaults.vaultwarden_version }}"
-    verify_container: "{{ (verify_inspect.stdout | from_json)[0] }}"
+    verify_database: sqlite
+    verify_postgres: "{{ verify_database == 'postgres' }}"
+    verify_all: "{{ verify_inspect.stdout | from_json }}"
+    # The containers are named <project>-<service>-1.
+    verify_container: "{{ verify_all | selectattr('Name', 'eq', '/vaultwarden-vaultwarden-1') | first }}"
+    verify_db: "{{ verify_all | selectattr('Name', 'eq', '/vaultwarden-db-1') | first | default({}) }}"
+    verify_pg_image: "{{ verify_defaults.vaultwarden_postgres_image }}"
     verify_env: "{{ verify_container.Config.Env }}"
-    verify_secret_files: "{{ (['admin_token'] if verify_admin | bool else []) + ['push_installation_key', 'smtp_password'] }}"
+    verify_secret_files: >-
+      {{ (['admin_token'] if verify_admin | bool else [])
+         + (['database_url', 'db_password'] if verify_postgres | bool else [])
+         + ['push_installation_key', 'smtp_password'] }}
     verify_expected_env:
       - DOMAIN=https://vaultwarden.test
       - SIGNUPS_ALLOWED=false
@@ -48,14 +61,16 @@
       register: verify_ids
       changed_when: false
 
-    - name: Check that the project has one container
+    - name: Check the containers of the project
       ansible.builtin.assert:
-        that: verify_ids.stdout_lines | length == 1
-        fail_msg: "The project has {{ verify_ids.stdout_lines | length }} containers, not one (vaultwarden)."
+        that: verify_ids.stdout_lines | length == (2 if verify_postgres | bool else 1)
+        fail_msg: >-
+          The project has {{ verify_ids.stdout_lines | length }} containers,
+          not {{ 'two (vaultwarden and db)' if verify_postgres | bool else 'one (vaultwarden)' }}.
 
     - name: Inspect the container
       ansible.builtin.command:
-        argv: [docker, inspect, "{{ verify_ids.stdout_lines[0] }}"]
+        argv: "{{ ['docker', 'inspect'] + verify_ids.stdout_lines }}"
       register: verify_inspect
       changed_when: false
 
@@ -76,9 +91,42 @@
     - name: Check that no port is published
       ansible.builtin.assert:
         that:
-          - verify_container.HostConfig.PortBindings | default({}, true) | length == 0
-          - verify_container.NetworkSettings.Ports | default({}, true) | dict2items | selectattr('value') | list | length == 0
-        fail_msg: "The container publishes a port: {{ verify_container.NetworkSettings.Ports }}"
+          - item.HostConfig.PortBindings | default({}, true) | length == 0
+          - item.NetworkSettings.Ports | default({}, true) | dict2items | selectattr('value') | list | length == 0
+        fail_msg: "{{ item.Name }} publishes a port: {{ item.NetworkSettings.Ports }}"
+      loop: "{{ verify_all }}"
+      loop_control:
+        label: "{{ item.Name }}"
+
+    - name: Check the db container
+      ansible.builtin.assert:
+        that:
+          - verify_db.Config.Labels['com.docker.compose.service'] == 'db'
+          - verify_db.Config.Image == verify_pg_image
+          - verify_db.State.Running
+          - verify_db.State.Health.Status == 'healthy'
+          - verify_db.HostConfig.RestartPolicy.Name == 'unless-stopped'
+          - "'POSTGRES_PASSWORD_FILE=/run/secrets-vw/db_password' in verify_db.Config.Env"
+          - "'POSTGRES_DB=vaultwarden' in verify_db.Config.Env"
+          - "'POSTGRES_USER=vaultwarden' in verify_db.Config.Env"
+          - verify_db.Config.Env | select('match', '^POSTGRES_PASSWORD=') | list | length == 0
+          - verify_db_cluster.Type == 'bind'
+          - verify_db_cluster.Source == verify_dir ~ '/data/postgres'
+          - verify_db_cluster.RW
+          - verify_db_password.Type == 'bind'
+          - verify_db_password.Source == verify_dir ~ '/secrets/db_password'
+          - not verify_db_password.RW
+          # Vaultwarden waits for it.
+          - (verify_container.Config.Labels['com.docker.compose.depends_on'] | default('')) is search('db:service_healthy')
+        fail_msg: >-
+          The db container is not the pinned PostgreSQL image, healthy, with
+          its password only as a file and its cluster and password mounts:
+          {{ verify_db.Config.Image | default('missing') }},
+          {{ verify_db.Mounts | default([]) }}.
+      vars:
+        verify_db_cluster: "{{ verify_db.Mounts | selectattr('Destination', 'eq', '/var/lib/postgresql') | first | default({}) }}"
+        verify_db_password: "{{ verify_db.Mounts | selectattr('Destination', 'eq', '/run/secrets-vw/db_password') | first | default({}) }}"
+      when: verify_postgres | bool
 
     - name: Check the environment
       ansible.builtin.assert:
@@ -88,6 +136,7 @@
           # No secret as a value, and the client address left to Vaultwarden's
           # default header (X-Real-IP, which Traefik sets).
           - verify_env | select('match', '^(ADMIN_TOKEN|SMTP_PASSWORD|PUSH_INSTALLATION_KEY|DATABASE_URL|IP_HEADER)=') | list | length == 0
+          - ('DATABASE_URL_FILE=/run/secrets-vw/database_url' in verify_env) == (verify_postgres | bool)
         fail_msg: >-
           The environment lacks {{ verify_expected_env | difference(verify_env) }},
           or ADMIN_TOKEN_FILE does not follow the admin page
@@ -151,5 +200,5 @@
 
     - name: Check the database target
       ansible.builtin.assert:
-        that: "(verify_target.content | b64decode | from_yaml) == {'database': 'sqlite'}"
-        fail_msg: "The database target is not sqlite: {{ verify_target.content | b64decode }}"
+        that: "(verify_target.content | b64decode | from_yaml) == {'database': verify_database}"
+        fail_msg: "The database target is not {{ verify_database }}: {{ verify_target.content | b64decode }}"

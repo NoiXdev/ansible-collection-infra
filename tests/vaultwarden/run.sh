@@ -38,6 +38,22 @@
 #             restarts Vaultwarden, which reads the new secrets file; a new
 #             vaultwarden_invitation_org_name restarts it too, and an invite
 #             mail names it; the item is still readable
+#   install_postgres
+#             a fresh install with the own PostgreSQL (the cluster in
+#             <data>/postgres, a password with $, quotes, @, / and a space,
+#             percent-encoded in database_url, which and the password file
+#             of the db service are the only places it is written): verify.yml
+#             with both containers, the database target, tables in PostgreSQL
+#             and no SQLite file, an idempotent second run, a registration
+#             and the CLI reading an item back
+#   mode_switch
+#             the same host with another database mode refused before any
+#             change, naming both modes (also where the data of the new mode
+#             is missing)
+#   db_password
+#             a new vaultwarden_db_password the database does not have refused
+#             before any change; taken once ALTER USER set it, with Vaultwarden
+#             restarted on it and the item still readable
 # Every converge's output must not hold a test secret, and every successful
 # converge of a scenario is repeated and must change nothing.
 #
@@ -78,7 +94,9 @@ user_email=user@example.test
 # Generated for this run, so that no test secret lives in the repository. The
 # secrets hold $, a quote and a space, so that the tests prove they reach the
 # database, the files and the URL as written.
-db_password="$(openssl rand -hex 12)"' pa$s"w ord'
+# The database password holds every character a URL must encode (and $, quotes).
+db_password="$(openssl rand -hex 12)"" pa\$s\"w'o@r/d:x#y%z"
+new_db_password="$(openssl rand -hex 12)"" ne\$w\"p'a@s/s:w#d%"
 admin_token="$(openssl rand -hex 12)"' ad$m"in tok'
 smtp_password="$(openssl rand -hex 12)"' sm$t"p pw'
 rotated_smtp_password="$(openssl rand -hex 12)"' ro$t"ated pw'
@@ -92,7 +110,7 @@ admin_hash=
 org_name='Noix Test Org'
 current_smtp_password="$smtp_password"
 # No converge's output may hold one of these; make_admin_hash adds the hash.
-secrets=("$db_password" "$admin_token" "$smtp_password" "$rotated_smtp_password" "$push_key" "$user_password")
+secrets=("$db_password" "$new_db_password" "$admin_token" "$smtp_password" "$rotated_smtp_password" "$push_key" "$user_password")
 
 cleanup() {
   [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
@@ -159,15 +177,22 @@ expect_not_in_log() {
 
 # The variables the vaultwarden role needs in every scenario; the secrets of
 # this run in files of mode 0600. db-vars.json holds the database password, so
-# that a scenario can run with or without it.
+# that a scenario can run with or without it (new-db-vars.json: the new one).
+write_db_vars() {
+  (
+    umask 077
+    env "DB_PASSWORD=$2" python3 -c '
+import json, os
+print(json.dumps({"vaultwarden_db_password": os.environ["DB_PASSWORD"]}))' >"$out/$1"
+  )
+}
 write_role_vars() {
   (
     umask 077
     printf '{"test_vaultwarden": true}\n' >"$out/role-vars.json"
-    env "DB_PASSWORD=$db_password" python3 -c '
-import json, os
-print(json.dumps({"vaultwarden_db_password": os.environ["DB_PASSWORD"]}))' >"$out/db-vars.json"
   )
+  write_db_vars db-vars.json "$db_password"
+  write_db_vars new-db-vars.json "$new_db_password"
 }
 # The settings of an installation: the admin page (the hash of admin_token),
 # SMTP to Mailpit with a login, push of the eu region with a dummy pair, and
@@ -202,6 +227,10 @@ db_vars() { printf '%s\n' "@$out/db-vars.json"; }
 vw_converge() { role_converge -e "@$out/install-vars.json" "$@"; }
 vw_converge_unchanged() { role_converge_unchanged -e "@$out/install-vars.json" "$@"; }
 vw_converge_fails() { role_converge_fails -e "@$out/install-vars.json" "$@"; }
+# The same with the own PostgreSQL and the database password of the run.
+pg_converge() { vw_converge -e vaultwarden_database=postgres -e "$(db_vars)" "$@"; }
+pg_converge_unchanged() { vw_converge_unchanged -e vaultwarden_database=postgres -e "$(db_vars)" "$@"; }
+pg_converge_fails() { vw_converge_fails -e vaultwarden_database=postgres -e "$(db_vars)" "$@"; }
 
 # verify [-e ...]: verify.yml with the settings of an installation.
 verify() {
@@ -610,10 +639,143 @@ test_reconfigure() {
   expect_item read
 }
 
+# The own PostgreSQL scenarios share one installation, made afresh over
+# whatever the host holds (the SQLite one of the scenarios above), so they
+# come last.
+# Removes the installation and its data: reset_installation.
+reset_installation() {
+  h test -e "$app_dir/compose.yaml" || return 0
+  compose down --volumes >/dev/null 2>&1
+  h rm -rf "$app_dir"
+}
+# Whether the database takes a password: db_login <password>. It connects over
+# the network as Vaultwarden does (the local socket needs no password); the
+# password goes through stdin into the environment of psql.
+pg_login_script='PGPASSWORD="$(cat; echo x)"; PGPASSWORD="${PGPASSWORD%x}"; export PGPASSWORD;
+PGCONNECT_TIMEOUT=10 exec psql --host=db --username=vaultwarden --dbname=vaultwarden --no-psqlrc --tuples-only --command="SELECT 1"'
+db_login() {
+  printf '%s' "$1" | hi docker compose --project-directory "$app_dir" exec -T db sh -c "$pg_login_script" >/dev/null 2>&1
+}
+# A statement of the vaultwarden database as its owner over the local socket:
+# db_sql <statement>.
+db_sql() {
+  compose exec -T db psql --username=vaultwarden --dbname=vaultwarden --no-psqlrc --tuples-only --no-align --command="'$1'"
+}
+# An installation with the own PostgreSQL, the user and the item.
+ensure_postgres_installed() {
+  [ "$(h cat "$app_dir/database-target" 2>/dev/null | sed -n 's/^database: *//p')" = postgres ] && return 0
+  echo "== install with PostgreSQL for $1"
+  reset_installation
+  make_admin_hash
+  pg_converge
+  [ "$(admin_login "$admin_token")" = 200 ] || fail "the admin login failed"
+  invite "$user_email"
+  register "$user_email" "$(invite_link "$user_email" "$org_name")" || fail "the invited address could not register"
+  expect_item create
+}
+
+test_install_postgres() {
+  local expected_url
+  echo "== install_postgres (ubuntu $1)"
+  reset_installation
+  make_admin_hash
+  pg_converge
+  expect_compose_clean
+  verify -e verify_admin=true -e verify_database=postgres
+  [ "$(h cat "$app_dir/database-target" | sed -n 's/^database: *//p')" = postgres ] \
+    || fail "database-target does not say postgres: $(h cat "$app_dir/database-target")"
+  # The cluster lives below the bind in the data directory, and Vaultwarden
+  # keeps nothing in SQLite.
+  h test -s "$data_dir/postgres/18/docker/PG_VERSION" || fail "no PostgreSQL 18 cluster in $data_dir/postgres"
+  h test ! -e "$data_dir/vaultwarden/db.sqlite3" || fail "Vaultwarden made a SQLite database beside PostgreSQL"
+  # The password reaches the database and the URL as written: encoded in the
+  # URL (every character a URL must encode), verbatim in the password file.
+  expected_url="$(env "DB_PASSWORD=$db_password" python3 -c '
+import os, urllib.parse
+print("postgresql://vaultwarden:" + urllib.parse.quote(os.environ["DB_PASSWORD"], safe="") + "@db:5432/vaultwarden", end="")')"
+  [ "$(h cat "$secrets_dir/database_url")" = "$expected_url" ] || fail "database_url is not the percent-encoded URL"
+  case "$expected_url" in *'$'* | *"'"* | *'"'* | *' '* | *@*@*) fail "the test's expected URL is not encoded" ;; esac
+  [ "$(h cat "$secrets_dir/db_password")" = "$db_password" ] || fail "the password file of the database is not the password as written"
+  [ "$(compose exec -T db cat /run/secrets-vw/db_password)" = "$db_password" ] \
+    || fail "the db container does not read the password as written"
+  [ "$(compose exec -T vaultwarden cat /run/secrets-vw/database_url)" = "$expected_url" ] \
+    || fail "the Vaultwarden container does not read the database URL as written"
+  db_login "$db_password" || fail "the database does not take the password"
+  ! db_login "${db_password}-other" || fail "the database takes another password"
+  pg_converge_unchanged
+
+  [ "$(admin_login "$admin_token")" = 200 ] || fail "the admin login failed"
+  invite "$user_email"
+  register "$user_email" "$(invite_link "$user_email" "$org_name")" || fail "the invited address could not register"
+  expect_item create
+  # The user is a row of PostgreSQL.
+  [ "$(db_sql 'SELECT count(*) FROM users')" -ge 1 ] || fail "PostgreSQL holds no user"
+  expect_answer 200 '"kdfIterations"' /identity/accounts/prelogin -X POST \
+    -H 'Content-Type: application/json' --data '{"email": "nobody@example.test"}'
+}
+
+test_mode_switch() {
+  echo "== mode_switch (ubuntu $1)"
+  ensure_postgres_installed mode_switch
+  note_untouched
+  vw_converge_fails -e vaultwarden_database=sqlite
+  expect_in_log 'vaultwarden_database sqlite'
+  expect_in_log 'with the database postgres'
+  expect_untouched
+
+  # The other way round, as an installation with SQLite would be: the PostgreSQL
+  # data is missing, which the mode must be refused for, not an unmounted volume.
+  h mv "$data_dir/postgres" "$data_dir/postgres.aside"
+  h sed -i 's/^database: postgres/database: sqlite/' "$app_dir/database-target"
+  note_untouched
+  pg_converge_fails
+  expect_in_log 'vaultwarden_database postgres'
+  expect_in_log 'with the database sqlite'
+  expect_untouched
+  h sed -i 's/^database: sqlite/database: postgres/' "$app_dir/database-target"
+  h mv "$data_dir/postgres.aside" "$data_dir/postgres"
+  pg_converge_unchanged
+  expect_item read
+}
+
+test_db_password() {
+  local id
+  echo "== db_password (ubuntu $1)"
+  ensure_postgres_installed db_password
+  note_untouched
+  # A password the database does not have: refused, nothing touched.
+  role_converge_fails -e "@$out/install-vars.json" -e vaultwarden_database=postgres -e "@$out/new-db-vars.json"
+  expect_in_log 'does not take it'
+  expect_in_log 'ALTER USER vaultwarden PASSWORD'
+  expect_untouched
+  db_login "$db_password" || fail "the refused run changed the password of the database"
+
+  # Set in the database as the message says (the statement through stdin,
+  # with ' doubled), then taken: the secrets change, Vaultwarden restarts on
+  # the new URL and still reads its data.
+  id="$(container_id)"
+  env "DB_PASSWORD=$new_db_password" python3 -c '
+import os
+print("ALTER USER vaultwarden PASSWORD \x27" + os.environ["DB_PASSWORD"].replace("\x27", "\x27\x27") + "\x27;")' \
+    | hi docker compose --project-directory "$app_dir" exec -T db psql --username=vaultwarden --dbname=postgres --no-psqlrc >/dev/null
+  db_login "$new_db_password" || fail "ALTER USER did not set the new password"
+  role_converge -e "@$out/install-vars.json" -e vaultwarden_database=postgres -e "@$out/new-db-vars.json"
+  [ "$(container_id)" != "$id" ] || fail "Vaultwarden was not restarted for the new database password"
+  wait_healthy
+  [ "$(h cat "$secrets_dir/db_password")" = "$new_db_password" ] || fail "the password file of the database was not updated"
+  db_password="$new_db_password"
+  write_role_vars
+  verify -e verify_admin=true -e verify_database=postgres
+  expect_compose_clean
+  pg_converge_unchanged
+  ! db_login "${db_password}x" || fail "the database takes another password"
+  expect_item read
+}
+
 # All scenarios by default; NOIXDEV_INFRA_VAULTWARDEN_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure"
+all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure install_postgres mode_switch db_password"
 scenarios="${NOIXDEV_INFRA_VAULTWARDEN_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -626,6 +788,9 @@ for ubuntu in $releases; do
       mountpoint) test_mountpoint "$ubuntu" ;;
       noop_down) test_noop_down "$ubuntu" ;;
       reconfigure) test_reconfigure "$ubuntu" ;;
+      install_postgres) test_install_postgres "$ubuntu" ;;
+      mode_switch) test_mode_switch "$ubuntu" ;;
+      db_password) test_db_password "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

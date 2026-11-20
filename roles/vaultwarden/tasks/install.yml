@@ -36,14 +36,20 @@
         mode: "0755"
 
     # The container runs as root; the subdirectory holds the database, the
-    # attachments and the key that signs the logins.
-    - name: Create the data subdirectory
+    # attachments and the key that signs the logins. PostgreSQL chowns its
+    # data on start.
+    - name: Create the data subdirectories
       ansible.builtin.file:
-        path: "{{ vaultwarden_data_dir }}/vaultwarden"
+        path: "{{ vaultwarden_data_dir }}/{{ item.name }}"
         state: directory
         owner: root
         group: root
-        mode: "0700"
+        mode: "{{ item.mode }}"
+      loop: >-
+        {{ [{'name': 'vaultwarden', 'mode': '0700'}]
+           + ([{'name': 'postgres', 'mode': '0755'}] if vaultwarden_database == 'postgres' else []) }}
+      loop_control:
+        label: "{{ item.name }}"
 
     - name: Write the secrets
       ansible.builtin.include_tasks: secrets.yml

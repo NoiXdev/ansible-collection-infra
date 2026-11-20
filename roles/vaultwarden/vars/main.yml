@@ -4,8 +4,8 @@ vaultwarden_project: "{{ vaultwarden_dir | basename }}"
 # Mode 0644: it holds no secret, which reach the containers as files of
 # vaultwarden_secrets_dir.
 vaultwarden_compose_file: "{{ vaultwarden_dir }}/compose.yaml"
-# Mode 0700. Mode 0600 files, only those in use: admin_token, database_url,
-# smtp_password, push_installation_key.
+# Mode 0700. Mode 0600 files, only those in use: admin_token, database_url
+# and db_password (the own PostgreSQL), smtp_password, push_installation_key.
 vaultwarden_secrets_dir: "{{ vaultwarden_dir }}/secrets"
 # The database the installation was made with (sqlite, postgres, or the
 # external server and database), so that another one is refused.
@@ -62,7 +62,7 @@ vaultwarden_smtp_settings: >-
      | combine(vaultwarden_smtp if vaultwarden_smtp is mapping else {}) }}
 
 # The services of the compose project.
-vaultwarden_services: [vaultwarden]
+vaultwarden_services: "{{ ['vaultwarden'] + (['db'] if vaultwarden_database == 'postgres' else []) }}"
 # Where the container reads the secrets files (vaultwarden_secrets_dir, bound
 # read-only).
 vaultwarden_container_secrets_dir: /run/secrets-vw
@@ -77,9 +77,24 @@ vaultwarden_push_uris:
 vaultwarden_database_target:
   database: "{{ vaultwarden_database }}"
 
+# The own PostgreSQL's database and user as Vaultwarden's DATABASE_URL names
+# them (the host is the compose service db). The role writes the URL, which
+# holds the password percent-encoded, only to the secrets file database_url:
+# Jinja's urlencode leaves / alone, so that is encoded here.
+vaultwarden_postgres_url: >-
+  postgresql://{{ vaultwarden_db_user | string | urlencode | replace('/', '%2F') }}:{{
+  vaultwarden_db_password | string | urlencode | replace('/', '%2F') }}@db:5432/{{ vaultwarden_db_name }}
+
 # The compose file as the role writes it; compared with the one on disk. It
 # needs vaultwarden_secrets, which state.yml sets.
 vaultwarden_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
+
+# The error of the psql check of a new vaultwarden_db_password: the last line
+# of stderr that names an error (else its last line), no value of it.
+vaultwarden_hidden_error: >-
+  {%- set stderr = (vaultwarden_hidden.stderr | default('') | trim).splitlines() -%}
+  {{ ((stderr | select('search', 'Error:') | list) or stderr
+      or ['exit code ' ~ vaultwarden_hidden.rc | default('?') | string]) | last | trim }}
 
 # The task that failed and its error: for a command the last line of stderr
 # that names an error (else its last line), for anything else the first line

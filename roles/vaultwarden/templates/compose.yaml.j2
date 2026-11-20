@@ -49,6 +49,10 @@
         }) -%}
 {%-   endif -%}
 {%- endif -%}
+{#- Vaultwarden takes the backend from the URL's scheme. -#}
+{%- if 'database_url' in vaultwarden_secrets -%}
+{%-   set _ = env.update({'DATABASE_URL_FILE': secrets ~ '/database_url'}) -%}
+{%- endif -%}
 {%- if 'push_installation_key' in vaultwarden_secrets -%}
 {%-   set _ = env.update({
         'PUSH_ENABLED': 'true',
@@ -64,8 +68,34 @@
 # Managed by the noixdev.infra.vaultwarden role; changes are overwritten.
 
 services:
+{% if vaultwarden_database == 'postgres' %}
+  # The own PostgreSQL, on the project's network only. It reads the
+  # password from its file of the secrets directory (mounted alone, read-only).
+  db:
+    image: {{ q(vaultwarden_postgres_image) }}
+    environment:
+      POSTGRES_DB: {{ q(vaultwarden_db_name) }}
+      POSTGRES_USER: {{ q(vaultwarden_db_user) }}
+      POSTGRES_PASSWORD_FILE: {{ q(secrets ~ '/db_password') }}
+    healthcheck:
+      test: {{ ['CMD', 'pg_isready', '-U', vaultwarden_db_user, '-d', vaultwarden_db_name] | to_json }}
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    # PostgreSQL 18 and newer keep the cluster below /var/lib/postgresql.
+    volumes:
+{{ bind(vaultwarden_data_dir ~ '/postgres', '/var/lib/postgresql') }}
+{{ bind(vaultwarden_secrets_dir ~ '/db_password', secrets ~ '/db_password', read_only=true) }}
+    restart: unless-stopped
+
+{% endif %}
   vaultwarden:
     image: {{ q(vaultwarden_image ~ ':' ~ vaultwarden_version) }}
+{% if vaultwarden_database == 'postgres' %}
+    depends_on:
+      db:
+        condition: service_healthy
+{% endif %}
     environment:
 {% for key, value in env | dictsort %}
       {{ key }}: {{ q(value) }}

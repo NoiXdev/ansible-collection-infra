@@ -10,14 +10,16 @@
 # vaultwarden_compose_on_disk (it parsed), vaultwarden_installed_version,
 # vaultwarden_installed_database (from vaultwarden_target_file, empty
 # without it), vaultwarden_secrets (file name to content of the secrets the
-# role writes), vaultwarden_secrets_changed and vaultwarden_down (the
-# services that are not running). Refuses, before any change and in this
-# order: a vaultwarden_data_dir that is not a mountpoint (with
-# vaultwarden_data_dir_mountpoint), an installation without its data
+# role writes), vaultwarden_secrets_changed, vaultwarden_db_password_changed
+# and vaultwarden_down (the services that are not running). Refuses, before
+# any change and in this order: a vaultwarden_data_dir that is not a
+# mountpoint (with vaultwarden_data_dir_mountpoint), an installation of
+# another database mode, an installation without its data
 # subdirectories (an unmounted volume), a config.json saved on the admin
 # page, a compose file that is not YAML, an install that did not complete
-# (its marker), a compose file without a Vaultwarden version and a
-# downgrade. Changes nothing.
+# (its marker), a compose file without a Vaultwarden version, a downgrade,
+# with the own PostgreSQL a vaultwarden_db_password the database does not
+# take and a cluster of another major or more than one. Changes nothing.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -64,6 +66,40 @@
     vaultwarden_data_present: >-
       {{ vaultwarden_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
   no_log: true
+
+# Not secret: the database mode (and for an external server where it is).
+- name: Read the database target
+  ansible.builtin.slurp:
+    src: "{{ vaultwarden_target_file }}"
+  register: vaultwarden_target_read
+  failed_when: false
+  when: vaultwarden_installed
+
+- name: Note the installed database
+  ansible.builtin.set_fact:
+    vaultwarden_installed_database: "{{ (vaultwarden_target_parsed if vaultwarden_target_parsed is mapping else {}).database | default('') }}"
+  vars:
+    vaultwarden_target_parsed: "{{ (vaultwarden_target_read.content | default('') | b64decode or '{}') | from_yaml }}"
+
+# Vaultwarden cannot move between database backends, and with another one it
+# would make an empty vault: refused before the data check, which would take
+# the other mode's missing subdirectory for an unmounted volume.
+- name: Refuse an installation of another database mode
+  ansible.builtin.fail:
+    msg: >-
+      vaultwarden_database {{ vaultwarden_database }} was set, but the
+      installation in {{ vaultwarden_dir }} was made with the database
+      {{ vaultwarden_installed_database }} ({{ vaultwarden_target_file }}).
+      Vaultwarden has no tool to move its data between database modes, and
+      with another one it would start an empty vault; the role changes
+      nothing. Set vaultwarden_database back to
+      {{ vaultwarden_installed_database }}. Moving to another mode is manual
+      work: dump and convert the data, then remove
+      {{ vaultwarden_target_file }}.
+  when:
+    - vaultwarden_installed
+    - vaultwarden_installed_database | length > 0
+    - vaultwarden_installed_database != vaultwarden_database
 
 # Only install creates the subdirectories, and compose does not create a
 # missing one (create_host_path: false), so their absence beside a compose
@@ -209,28 +245,17 @@
           vaultwarden_version to {{ vaultwarden_installed_version }} or newer.
       when: vaultwarden_version is version(vaultwarden_installed_version, '<')
 
-# Not secret: the database mode (and for an external server where it is).
-- name: Read the database target
-  ansible.builtin.slurp:
-    src: "{{ vaultwarden_target_file }}"
-  register: vaultwarden_target_read
-  failed_when: false
-  when: vaultwarden_installed
-
-- name: Note the installed database
-  ansible.builtin.set_fact:
-    vaultwarden_installed_database: "{{ (vaultwarden_target_parsed if vaultwarden_target_parsed is mapping else {}).database | default('') }}"
-  vars:
-    vaultwarden_target_parsed: "{{ (vaultwarden_target_read.content | default('') | b64decode or '{}') | from_yaml }}"
-
 # What the secrets files hold (only those in use): the Argon2id hash of the
-# admin token, the SMTP password (with a login) and the push installation
-# key.
+# admin token, with the own PostgreSQL the database URL (the password
+# percent-encoded) and the password itself for the db service, the SMTP
+# password (with a login) and the push installation key.
 - name: Note the secrets the role writes
   ansible.builtin.set_fact:
     vaultwarden_secrets: >-
       {{ ({'admin_token': vaultwarden_admin_token_hash | string}
           if vaultwarden_admin_token_hash | string | length > 0 else {})
+         | combine({'database_url': vaultwarden_postgres_url | string, 'db_password': vaultwarden_db_password | string}
+                   if vaultwarden_database == 'postgres' else {})
          | combine({'smtp_password': vaultwarden_smtp_settings.password | string}
                    if vaultwarden_smtp_settings.host | string | length > 0
                       and vaultwarden_smtp_settings.username | string | length > 0 else {})
@@ -255,6 +280,8 @@
   no_log: true
 
 # A file that cannot be read compares as changed, so a reconfigure writes it.
+# vaultwarden_db_password_changed: the password file of the db service (the
+# one the database was made with, or last given) is not the password given.
 - name: Compare the secrets files with what the role writes
   ansible.builtin.set_fact:
     vaultwarden_secrets_changed: >-
@@ -263,6 +290,13 @@
       {%-   set _ = found.update({read.item | basename: (read.content | b64decode) if read.content is defined else none}) -%}
       {%- endfor -%}
       {{ found != vaultwarden_secrets }}
+    vaultwarden_db_password_changed: >-
+      {%- set found = {} -%}
+      {%- for read in vaultwarden_secrets_read.results | default([]) -%}
+      {%-   set _ = found.update({read.item | basename: (read.content | b64decode) if read.content is defined else none}) -%}
+      {%- endfor -%}
+      {{ vaultwarden_installed and vaultwarden_database == 'postgres'
+         and found.db_password | default(none) != vaultwarden_secrets.db_password }}
   no_log: true
 
 - name: Read the services that run
@@ -272,6 +306,126 @@
   register: vaultwarden_ps
   changed_when: false
   when: vaultwarden_installed
+
+# PostgreSQL takes POSTGRES_PASSWORD_FILE only when it creates the cluster: on
+# an existing one a new vaultwarden_db_password would reach Vaultwarden but
+# not the database, which Vaultwarden could not connect to. The secrets
+# directory records the password the role wrote last; compared in a no_log
+# task above, so that neither password is in the output.
+# A new password may be the database's already, set by hand as the refusal
+# below says. Asked over the network as Vaultwarden connects (the local socket
+# needs no password); the password goes through stdin into the environment of
+# psql (the x keeps trailing newlines), and the task is no_log. The next task
+# fails with the error.
+- name: Check that the database takes the new vaultwarden_db_password
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - db
+      - sh
+      - -c
+      - >-
+        PGPASSWORD="$(cat; echo x)"; PGPASSWORD="${PGPASSWORD%x}"; export PGPASSWORD;
+        PGCONNECT_TIMEOUT=10 exec psql --host=db --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"
+        --no-psqlrc --tuples-only --command='SELECT 1'
+    chdir: "{{ vaultwarden_dir }}"
+    stdin: "{{ vaultwarden_db_password }}"
+    stdin_add_newline: false
+  register: vaultwarden_hidden
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - vaultwarden_installed
+    - vaultwarden_database == 'postgres'
+    - vaultwarden_db_password_changed | bool
+    - "'db' in vaultwarden_ps.stdout_lines"
+
+- name: Refuse a vaultwarden_db_password the database does not take
+  ansible.builtin.fail:
+    msg: >-
+      vaultwarden_db_password differs from the password in
+      {{ vaultwarden_secrets_dir }}/db_password, and the database does not
+      take it ({{ 'the db service is not running, so the role cannot ask'
+      if 'db' not in vaultwarden_ps.stdout_lines else vaultwarden_hidden_error }}).
+      PostgreSQL takes a password only when it creates the database, so
+      Vaultwarden could not connect with the new one; the role changes
+      nothing. To change the password, set it in the database first: in
+      {{ vaultwarden_dir }} run docker compose exec db psql -U
+      {{ vaultwarden_db_user }} -d postgres and enter \password
+      {{ vaultwarden_db_user }} (an ALTER USER {{ vaultwarden_db_user }}
+      PASSWORD that keeps the password off the command line), then run the
+      role again with the new vaultwarden_db_password. Or set
+      vaultwarden_db_password back to the old one.
+  when:
+    - vaultwarden_installed
+    - vaultwarden_database == 'postgres'
+    - vaultwarden_db_password_changed | bool
+    - "'db' not in vaultwarden_ps.stdout_lines or vaultwarden_hidden.rc != 0"
+
+# The PostgreSQL image keeps its cluster in a directory per major below the
+# mount (18/docker; main.yml refuses images older than 18): another major
+# starts an empty cluster or none at all, so the one cluster's PG_VERSION must
+# name the major of vaultwarden_postgres_image. More than one cluster (an old
+# one left by pg_upgrade) is refused: which one is current cannot be told, and
+# a stale one would start with old data. Up to three levels deep, above the
+# PG_VERSION files of the databases inside a cluster.
+- name: Look for the PostgreSQL cluster
+  ansible.builtin.find:
+    paths: "{{ vaultwarden_data_dir }}/postgres"
+    patterns: [PG_VERSION]
+    file_type: file
+    recurse: true
+    depth: 3
+  register: vaultwarden_pg_version_files
+  when:
+    - vaultwarden_installed
+    - vaultwarden_database == 'postgres'
+
+- name: Read the PostgreSQL major of the cluster
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ vaultwarden_pg_version_files.files | default([]) | map(attribute='path') | sort }}"
+  register: vaultwarden_pg_version_read
+
+- name: Refuse more than one PostgreSQL cluster
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_data_dir }}/postgres holds more than one PostgreSQL
+      cluster: {{ vaultwarden_pg_clusters | join(', ') }}. The role cannot
+      tell which one Vaultwarden uses (an old one left by pg_upgrade would
+      start with old data) and changes nothing. Move every cluster but the
+      current one out of {{ vaultwarden_data_dir }}/postgres, then run the
+      role again.
+  vars:
+    vaultwarden_pg_clusters: >-
+      {%- set found = [] -%}
+      {%- for read in vaultwarden_pg_version_read.results -%}
+      {%-   set _ = found.append(read.item ~ ' (PostgreSQL ' ~ (read.content | b64decode | trim) ~ ')') -%}
+      {%- endfor -%}
+      {{ found }}
+  when: vaultwarden_pg_version_read.results | length > 1
+
+- name: Refuse another PostgreSQL major
+  ansible.builtin.fail:
+    msg: >-
+      vaultwarden_postgres_image {{ vaultwarden_postgres_image }} is
+      PostgreSQL {{ vaultwarden_postgres_major }}, but the database in
+      {{ vaultwarden_data_dir }}/postgres is PostgreSQL
+      {{ vaultwarden_pg_major }}
+      ({{ vaultwarden_pg_version_read.results[0].item }}). A new major does
+      not read the old cluster; the role changes nothing. Set
+      vaultwarden_postgres_image back to PostgreSQL {{ vaultwarden_pg_major }},
+      or upgrade the cluster (pg_upgrade, or a dump restored into the new
+      major) first.
+  vars:
+    vaultwarden_pg_major: "{{ vaultwarden_pg_version_read.results[0].content | b64decode | trim }}"
+  when:
+    - vaultwarden_pg_version_read.results | length == 1
+    - vaultwarden_postgres_major != vaultwarden_pg_major
 
 - name: Decide what to do
   ansible.builtin.set_fact:
