@@ -32,6 +32,13 @@
 # with input that could change the ban, and no longer for a site taken out
 # of varnish_sites.
 #
+# The scenario "shopware" checks the shopware profile (Shopware 6.7's VCL):
+# the variants by sw-cache-hash and sw-currency (not by the session), the
+# pass on a hit for logged-in or cart-filled visitors, the paths that always
+# pass, shared media, the cart widget answered by Varnish, ESI, the app's
+# bypass header, the Cache-Control clients get, and PURGE of xkey tags and of
+# a URL on that site only.
+#
 # The scenario "foreign" installs Ubuntu's varnish, and on a second host
 # Varnish Software's 9.0, and checks that the role refuses both before any
 # change.
@@ -722,6 +729,197 @@ test_purge() {
   inv_secrets=()
 }
 
+# header <line>: the last answer of req has the header line (case-insensitive
+# name); no_header <name>: it has no such header.
+header() {
+  printf '%s\n' "$headers" | grep -qiFx -- "$1" || fail "no header '$1' in: $(printf '%s\n' "$headers" | tr '\n' '|')"
+}
+no_header() {
+  ! printf '%s\n' "$headers" | grep -qi "^$1:" || fail "the header $1 reached the client"
+}
+
+# The shopware profile: Shopware 6.7's VCL (shopware/varnish-shopware) inside
+# the role's frame, next to a generic site with the same paths.
+test_shopware() {
+  local ta=0123456789abcdef0123456789abcdef ts=ssssssssssssssssssssssssssssssss c='cc=public,s-maxage=60'
+  local p x1 x2 never='Cache-Control: no-store, no-cache, must-revalidate, max-age=0'
+  echo "== shopware: Shopware's cookies choose the variant, not the session (ubuntu $1)"
+  use_host "$1" varnish
+  start_backend
+  printf '%s\n' '{"test_varnish": true, "varnish_sites": [
+    {"name": "a", "purge_token": "0123456789abcdef0123456789abcdef"},
+    {"name": "s", "profile": "shopware", "purge_token": "ssssssssssssssssssssssssssssssss"}]}' >"$out/shopware-vars.json"
+  host_state=varnish
+  run_ok shopware converge.yml -e "@$out/shopware-vars.json"
+  inv_secrets=("$ta" "$ts" "$(printf 'a:%s' "$ta" | base64)" "$(printf 's:%s' "$ts" | base64)" "$(h cat "$key")")
+
+  p="/sw/page?$c"
+  req s s.test "$p" -H 'Cookie: session-=x; sw-cache-hash=h1'
+  expect "a page with sw-cache-hash h1" 200 MISS "count=1 host=s.test path=$p"
+  header "$never"
+  header 'Pragma: no-cache'
+  header 'Expires: -1'
+  req s s.test "$p" -H 'Cookie: session-=x; sw-cache-hash=h1'
+  expect "the page with h1 again" 200 HIT "count=1 host=s.test path=$p"
+  req s s.test "$p" -H 'Cookie: session-=y; sw-cache-hash=h1; _ga=1'
+  expect "the page with h1 and another session" 200 HIT "count=1 host=s.test path=$p"
+  req s s.test "$p" -H 'Cookie: session-=x; sw-cache-hash=h2'
+  expect "the page with sw-cache-hash h2" 200 MISS "count=2 host=s.test path=$p"
+  req s s.test "$p" -H 'Cookie: sw-currency=c1'
+  expect "the page with sw-currency c1 and no hash" 200 MISS "count=3 host=s.test path=$p"
+  req s s.test "$p" -H 'Cookie: sw-currency=c1'
+  expect "the page with c1 again" 200 HIT "count=3 host=s.test path=$p"
+  req s s.test "$p" -H 'Cookie: sw-currency=c1; sw-cache-hash=h1'
+  expect "the page with c1 and h1 (the hash wins)" 200 HIT "count=1 host=s.test path=$p"
+  req s s.test "$p" -H 'Cookie: sw-cache-hash=h1' -H 'sw-cache-hash: h2'
+  expect "the page with the header sw-cache-hash h2 (it wins over the cookie)" 200 HIT "count=2 host=s.test path=$p"
+  req s s.test "$p"
+  expect "the page without cookies" 200 MISS "count=4 host=s.test path=$p"
+  # Generic sites are unchanged: any cookie passes, the app's header stays.
+  req a a.test "$p"
+  expect "the generic site's page" 200 MISS "count=1 host=a.test path=$p"
+  header "Cache-Control: public,s-maxage=60"
+  req a a.test "$p" -H 'Cookie: sw-cache-hash=h1'
+  expect "the generic site's page with sw-cache-hash" 200 PASS "count=2 host=a.test path=$p"
+
+  echo "== shopware: what reaches the backend"
+  p="/sw/echo?$c&echo=Cookie"
+  req s s.test "$p" -H 'Cookie: session-=x; sw-cache-hash=h1; _ga=1'
+  expect "a page that echoes the cookies" 200 MISS
+  header 'X-Echo: session-=x; sw-cache-hash=h1'
+  p="/sw/echo?$c&echo=Surrogate-Capability"
+  req s s.test "$p"
+  expect "a page that echoes Surrogate-Capability" 200 MISS
+  header 'X-Echo: shopware=ESI/1.0'
+  req a a.test "$p"
+  expect "the generic site's page that echoes Surrogate-Capability" 200 MISS
+  no_header X-Echo
+  p="/media/echo.jpg?cc=public,max-age=60&echo=Cookie"
+  req s s.test "$p" -H 'Cookie: session-=x; sw-cache-hash=h1'
+  expect "media that echoes the cookies" 200 MISS
+  no_header X-Echo
+
+  echo "== shopware: a hit passes when the visitor's sw-states meet the object's"
+  p="/sw/inv?$c&inv=logged-in"
+  req s s.test "$p"
+  expect "a page invalidated by logged-in" 200 MISS "count=1 host=s.test path=$p"
+  no_header sw-invalidation-states
+  req s s.test "$p"
+  expect "that page again" 200 HIT "count=1 host=s.test path=$p"
+  no_header sw-invalidation-states
+  req s s.test "$p" -H 'Cookie: sw-states=logged-in'
+  expect "that page, logged in" 200 PASS "count=2 host=s.test path=$p"
+  req s s.test "$p" -H 'Cookie: sw-states=cart-filled'
+  expect "that page with a filled cart" 200 HIT "count=1 host=s.test path=$p"
+  p="/sw/inv?$c&inv=cart-filled"
+  req s s.test "$p"
+  expect "a page invalidated by cart-filled" 200 MISS "count=1 host=s.test path=$p"
+  req s s.test "$p" -H 'Cookie: sw-states=logged-in,cart-filled'
+  expect "that page, logged in with a filled cart" 200 PASS "count=2 host=s.test path=$p"
+
+  echo "== shopware: checkout, account, admin and api pass"
+  for p in "/checkout/cart?$c" "/account?$c" "/admin?$c" "/api/x?$c"; do
+    req s s.test "$p"
+    expect "$p" 200 PASS "count=1 host=s.test path=$p"
+    req s s.test "$p"
+    expect "$p again" 200 PASS "count=2 host=s.test path=$p"
+  done
+
+  echo "== shopware: media is one object for every visitor, with the app's Cache-Control"
+  p='/media/a.jpg?cc=public,max-age=60'
+  req s s.test "$p" -H 'Cookie: session-=x; sw-cache-hash=h1'
+  expect "media with h1" 200 MISS "count=1 host=s.test path=$p"
+  header 'Cache-Control: public,max-age=60'
+  req s s.test "$p" -H 'Cookie: session-=y; sw-cache-hash=h2; sw-currency=c1'
+  expect "media with h2" 200 HIT "count=1 host=s.test path=$p"
+  header 'Cache-Control: public,max-age=60'
+  req s s.test "$p"
+  expect "media without cookies" 200 HIT "count=1 host=s.test path=$p"
+  p='/sw/private?cc=private'
+  req s s.test "$p"
+  expect "a private page" 200 PASS "count=1 host=s.test path=$p"
+  header 'Cache-Control: private'
+
+  echo "== shopware: /widgets/checkout/info without a hash or a filled cart is answered by Varnish"
+  req s s.test /widgets/checkout/info
+  expect "the cart widget without cookies" 204 SYNTH ""
+  req s s.test /widgets/checkout/info -H 'Cookie: session-=x'
+  expect "the cart widget without sw-cache-hash" 204 SYNTH ""
+  req s s.test /widgets/checkout/info -H 'Cookie: sw-cache-hash=h1; sw-states=logged-in'
+  expect "the cart widget with an empty cart" 204 SYNTH ""
+  req s s.test /widgets/checkout/info -H 'Cookie: sw-cache-hash=h1'
+  expect "the cart widget with a hash" 200 PASS "count=1 host=s.test path=/widgets/checkout/info"
+  req s s.test /widgets/checkout/info -H 'Cookie: sw-cache-hash=h1; sw-states=cart-filled'
+  expect "the cart widget with a filled cart" 200 PASS "count=2 host=s.test path=/widgets/checkout/info"
+  req a a.test /widgets/checkout/info
+  expect "the generic site's /widgets/checkout/info" 200 PASS "count=1 host=a.test path=/widgets/checkout/info"
+
+  echo "== shopware: ESI fragments are included, on the shopware site only"
+  p="/sw/esi?$c&esi=1"
+  req s s.test "$p"
+  expect "a page with an ESI include" 200 MISS "<p>count=1 host=s.test path=$p</p>"$'\n'"count=1 host=s.test path=/frag"
+  no_header Surrogate-Control
+  req s s.test "$p"
+  expect "the page again (the fragment is not cached)" 200 HIT "<p>count=1 host=s.test path=$p</p>"$'\n'"count=2 host=s.test path=/frag"
+  req a a.test "$p"
+  expect "the generic site's page with an ESI include" 200 MISS "<p>count=1 host=a.test path=$p</p>"$'\n''<esi:include src="/frag"/>'
+
+  echo "== shopware: sw-dynamic-cache-bypass is never stored"
+  p="/sw/bypass?bypass=1&$c"
+  req s s.test "$p"
+  [ "$cache" != HIT ] || fail "$p was a HIT on the first request"
+  no_header sw-dynamic-cache-bypass
+  req s s.test "$p"
+  expect "the bypassed page again" 200 PASS "count=2 host=s.test path=$p"
+  sleep 2
+  req s s.test "$p"
+  [ "$cache" != HIT ] || fail "$p was a HIT after 2 s"
+  case "$body" in "count=3 host=s.test path=$p") ;; *) fail "$p did not reach the backend a third time: '$body'" ;; esac
+
+  echo "== shopware: PURGE of xkey tags and of a URL acts on the shopware site only"
+  x1="/sw/x1?$c&xkey=product-1"
+  x2="/sw/x2?$c&xkey=product-2"
+  seen MISS s s.test "$x1" "$x2"
+  seen HIT s s.test "$x1" "$x2"
+  seen MISS a a.test "$x1"
+  seen HIT a a.test "$x1"
+  req s s.test "$x1" -H 'Cookie: sw-cache-hash=h1'
+  expect "the h1 variant of x1" 200 MISS
+  inv PURGE / -u "s:$ts" -H 'xkey: product-1'
+  inv_expect "PURGE of product-1 as s" 200
+  seen MISS s s.test "$x1"
+  seen HIT s s.test "$x2"
+  seen HIT a a.test "$x1"
+  req s s.test "$x1" -H 'Cookie: sw-cache-hash=h1'
+  expect "the h1 variant of x1 after the purge" 200 MISS
+  # kw and pa are Shopware-only tracking parameters: the purge drops them as
+  # the shopware site's requests do.
+  p="/sw/kw?a=1&$c"
+  seen MISS s s.test "$p"
+  seen HIT s s.test "$p"
+  req s s.test "$p" -H 'Cookie: sw-cache-hash=h1'
+  expect "the h1 variant of the page" 200 MISS
+  seen MISS a a.test "$p"
+  inv PURGE "/sw/kw?kw=x&a=1&pa=2&$c" -u "s:$ts"
+  inv_expect "PURGE of the page with kw and pa as s" 200
+  seen MISS s s.test "$p"
+  req s s.test "$p" -H 'Cookie: sw-cache-hash=h1'
+  expect "the h1 variant of the page after the purge" 200 MISS
+  seen HIT a a.test "$p"
+
+  echo "== shopware: with shopware sites only the VCL compiles"
+  printf '%s\n' '{"test_varnish": true, "varnish_sites": [
+    {"name": "s", "profile": "shopware", "purge_token": "ssssssssssssssssssssssssssssssss"}]}' >"$out/shopware-only-vars.json"
+  run_ok shopware-only converge.yml -e "@$out/shopware-only-vars.json"
+  req s s.test "/sw/page?$c" -H 'Cookie: session-=z; sw-cache-hash=h1'
+  expect "the page with h1 on the shopware-only VCL" 200 HIT "count=1 host=s.test path=/sw/page?$c"
+  req a a.test "/sw/page?$c"
+  expect "the page of the removed generic site" 200 PASS
+  no_key_in_logs
+  no_token_in_logs "${inv_secrets[@]:0:4}"
+  inv_secrets=()
+}
+
 # Grace: a stale object is served for 30 s while the site counts as healthy,
 # and for 6 h while its health probe says sick; a refresh that fails never
 # replaces it.
@@ -826,7 +1024,7 @@ test_foreign() {
 }
 
 # All scenarios by default; "tests/varnish/run.sh invalid" runs only these.
-scenarios="${*:-invalid valid install badvcl cache purge grace foreign}"
+scenarios="${*:-invalid valid install badvcl cache purge shopware grace foreign}"
 for ubuntu in $releases; do
   host_state=
   for scenario in $scenarios; do
@@ -837,9 +1035,10 @@ for ubuntu in $releases; do
       badvcl) test_badvcl "$ubuntu" ;;
       cache) test_cache "$ubuntu" ;;
       purge) test_purge "$ubuntu" ;;
+      shopware) test_shopware "$ubuntu" ;;
       grace) test_grace "$ubuntu" ;;
       foreign) test_foreign "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (invalid, valid, install, badvcl, cache, purge, grace, foreign)" ;;
+      *) fail "unknown scenario $scenario (invalid, valid, install, badvcl, cache, purge, shopware, grace, foreign)" ;;
     esac
   done
   cleanup

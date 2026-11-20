@@ -19,6 +19,10 @@ host and path, from 1). Query parameters set the answer:
              Accept-Encoding either way)
     echo=    the name of a request header: its value comes back in X-Echo
              (no X-Echo when the request has no such header)
+    inv=     sw-invalidation-states (Shopware's states that make a hit pass)
+    bypass=  sw-dynamic-cache-bypass (Shopware's "do not store this")
+    esi=1    Surrogate-Control: content="ESI/1.0", and the body is
+             "<p><line></p>", a newline and <esi:include src="/frag"/>
 
 While the file /tmp/backend-sick exists every request answers 500 "sick"
 (counted like the others), GET /health included; otherwise GET /health
@@ -34,7 +38,14 @@ from os.path import exists
 from urllib.parse import parse_qs, urlsplit
 
 SICK = "/tmp/backend-sick"
-HEADERS = {"cc": "Cache-Control", "xkey": "xkey", "tags": "X-Cache-Tags", "vary": "Vary"}
+HEADERS = {
+    "cc": "Cache-Control",
+    "xkey": "xkey",
+    "tags": "X-Cache-Tags",
+    "vary": "Vary",
+    "inv": "sw-invalidation-states",
+    "bypass": "sw-dynamic-cache-bypass",
+}
 
 counts = {}
 counts_lock = threading.Lock()
@@ -76,6 +87,9 @@ class Handler(BaseHTTPRequestHandler):
         status = int(params["status"][-1]) if "status" in params else 200
         body = sized(line, int(params["size"][-1])) if "size" in params else (line + "\n").encode()
         headers = [(name, params[key][-1]) for key, name in HEADERS.items() if key in params]
+        if "esi" in params:
+            body = f'<p>{line}</p>\n<esi:include src="/frag"/>\n'.encode()
+            headers.append(("Surrogate-Control", 'content="ESI/1.0"'))
         headers += [("Set-Cookie", value) for value in params.get("sc", [])]
         if "echo" in params and params["echo"][-1] in self.headers:
             headers.append(("X-Echo", self.headers[params["echo"][-1]]))

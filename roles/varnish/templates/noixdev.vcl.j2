@@ -25,6 +25,13 @@ vcl 4.1;
         set req.url = regsub(req.url, "[?&]$", "");
     }
 {%- endmacro %}
+{#
+  The condition "the request is for one of the sites named" (req or bereq).
+#}
+{% macro for_sites(scope, names) -%}
+{%- for name in names %}{{ ' || ' if not loop.first }}{{ scope }}.http.X-Noix-Site == "{{ name }}"{% endfor -%}
+{%- endmacro %}
+{% set shopware_sites = varnish_sites_normalized | selectattr('profile', 'eq', 'shopware') | map(attribute='name') | list %}
 
 import std;
 import cookie;
@@ -108,12 +115,54 @@ sub noixdev_normalize {
 {{ strip_parameters(varnish_tracking_parameters_common) }}
     set req.url = std.querysort(req.url);
 }
-{% if varnish_sites_normalized | selectattr('profile', 'eq', 'shopware') | list | length > 0 %}
+{% if shopware_sites | length > 0 %}
 
 # The shopware profile also removes the rest of Shopware's list
 # (varnish_tracking_parameters_shopware); the query stays sorted.
 sub noixdev_shopware_normalize {
 {{ strip_parameters(varnish_tracking_parameters_shopware) }}
+}
+
+# The shopware profile's request rules: Shopware 6.7's VCL
+# (shopware/varnish-shopware, 6.7/rootfs/etc/varnish/default.vcl at 518efcf,
+# read 2026-11-20) in the role's frame. A cookie does not make the request
+# pass: Shopware names the variant of a page in its cookies sw-cache-hash
+# (else sw-currency), and the visitor's states (logged-in, cart-filled) in
+# sw-states, which make a hit pass when the object's sw-invalidation-states
+# names them (vcl_hit). They are read here, before any cookie is stripped.
+# (Only with shopware sites: an unused sub does not compile.)
+sub noixdev_shopware_recv {
+    if (req.method != "GET" && req.method != "HEAD") {
+        return (pass);
+    }
+    if (req.http.Authorization) {
+        return (pass);
+    }
+    # Never cached (Shopware's list); with a query too.
+    if (req.url ~ "^/(?:checkout|account|admin|api)(?:[/?].*)?$") {
+        return (pass);
+    }
+    # Assets need no cookie: one object for every visitor, and the backend
+    # gets none.
+    if (req.url ~ "^/(?:media|thumbnail|theme|bundles)/") {
+        unset req.http.Cookie;
+    }
+    cookie.parse(req.http.Cookie);
+    # A sw-cache-hash request header wins over the cookie (Shopware's rule).
+    if (!req.http.sw-cache-hash) {
+        set req.http.sw-cache-hash = cookie.get("sw-cache-hash");
+    }
+    set req.http.X-Noix-Sw-Currency = cookie.get("sw-currency");
+    set req.http.X-Noix-Sw-States = cookie.get("sw-states");
+    # The cart widget of a visitor without a context or with an empty cart:
+    # nothing to show, answered here.
+    if (req.url == "/widgets/checkout/info"
+        && (req.http.sw-cache-hash == ""
+            || (cookie.isset("sw-states") && req.http.X-Noix-Sw-States !~ "cart-filled"))) {
+        return (synth(204, ""));
+    }
+    # The app sends ESI to Varnish only when asked.
+    set req.http.Surrogate-Capability = "shopware=ESI/1.0";
 }
 {% endif %}
 
@@ -189,7 +238,8 @@ sub noixdev_invalidate_site {
 {% endif %}
 
 # One block per site of varnish_sites; a request for another site passes
-# (vcl_recv). Each block ends in noixdev_lookup, which passes or looks up.
+# (vcl_recv). Each block ends in noixdev_lookup, which passes or looks up
+# (shopware: noixdev_shopware_recv passes, noixdev_hash looks up).
 sub noixdev_site_recv {
 {% for site in varnish_sites_normalized %}
 {% set strip = varnish_strip_cookies + site.strip_cookies %}
@@ -200,6 +250,7 @@ sub noixdev_site_recv {
 {% endif %}
 {% if site.profile == 'shopware' %}
         call noixdev_shopware_normalize;
+        call noixdev_shopware_recv;
 {% endif %}
 {% if site.profile == 'typo3' %}
         # TYPO3's sessions (frontend and backend user) always pass, even if
@@ -218,15 +269,20 @@ sub noixdev_site_recv {
             }
         }
 {% endif %}
+{% if site.profile == 'shopware' %}
+        # Looked up with the remaining cookies (noixdev_shopware_recv).
+        call noixdev_hash;
+{% else %}
         call noixdev_lookup;
+{% endif %}
     }
 {% endfor %}
 }
 
-{% if varnish_sites_normalized | length > 0 %}
+{% if varnish_sites_normalized | rejectattr('profile', 'eq', 'shopware') | list | length > 0 %}
 # GET and HEAD without Authorization and without any cookie (after the
-# stripping) are looked up; everything else passes. (Only with sites: an
-# unused sub does not compile.)
+# stripping) are looked up; everything else passes. (Only with sites of
+# another profile than shopware: an unused sub does not compile.)
 sub noixdev_lookup {
     if (req.method != "GET" && req.method != "HEAD") {
         return (pass);
@@ -234,9 +290,15 @@ sub noixdev_lookup {
     if (req.http.Authorization || req.http.Cookie) {
         return (pass);
     }
-    # A stale object is served (and refreshed in the background) for
-    # varnish_grace_healthy while the site's backend is healthy, for
-    # varnish_grace_sick while its probe says sick.
+    call noixdev_hash;
+}
+
+{% endif %}
+{% if varnish_sites_normalized | length > 0 %}
+# The lookup. A stale object is served (and refreshed in the background) for
+# varnish_grace_healthy while the site's backend is healthy, for
+# varnish_grace_sick while its probe says sick.
+sub noixdev_hash {
     if (std.healthy(req.backend_hint)) {
         set req.grace = {{ varnish_grace_healthy }}s;
     } else {
@@ -251,8 +313,43 @@ sub vcl_hash {
     hash_data(req.http.X-Noix-Site);
     hash_data(req.http.host);
     hash_data(req.url);
+{% if shopware_sites | length > 0 %}
+    # The shopware profile: Shopware's variant of the page (its context hash,
+    # else the currency).
+    if ({{ for_sites('req', shopware_sites) }}) {
+        if (req.http.sw-cache-hash != "") {
+            hash_data("+context=" + req.http.sw-cache-hash);
+        } elsif (req.http.X-Noix-Sw-Currency != "") {
+            hash_data("+currency=" + req.http.X-Noix-Sw-Currency);
+        }
+    }
+{% endif %}
     return (lookup);
 }
+{% if shopware_sites | length > 0 %}
+
+# The shopware profile: a logged-in visitor or one with a filled cart does
+# not get an object the app marked as changing with that state
+# (sw-invalidation-states).
+sub vcl_hit {
+    if (({{ for_sites('req', shopware_sites) }}) && req.http.X-Noix-Sw-States) {
+        if (req.http.X-Noix-Sw-States ~ "logged-in" && obj.http.sw-invalidation-states ~ "logged-in") {
+            return (pass);
+        }
+        if (req.http.X-Noix-Sw-States ~ "cart-filled" && obj.http.sw-invalidation-states ~ "cart-filled") {
+            return (pass);
+        }
+    }
+}
+
+# The shopware profile's internal headers never reach the backend.
+sub vcl_backend_fetch {
+    if ({{ for_sites('bereq', shopware_sites) }}) {
+        unset bereq.http.X-Noix-Sw-Currency;
+        unset bereq.http.X-Noix-Sw-States;
+    }
+}
+{% endif %}
 
 sub vcl_backend_response {
     # What a ban selects objects by: the site, the host and the URL as
@@ -272,6 +369,9 @@ sub vcl_backend_response {
     if (!beresp.http.X-Cache-Tags) {
         set beresp.http.X-Cache-Tags = "";
     }
+{% if shopware_sites | length > 0 %}
+    call noixdev_shopware_backend_response;
+{% endif %}
     if (bereq.uncacheable) {
         return (deliver);
     }
@@ -312,6 +412,35 @@ sub noixdev_hit_for_miss {
     set beresp.grace = 0s;
     return (deliver);
 }
+{% if shopware_sites | length > 0 %}
+
+# The shopware profile's response rules (Shopware 6.7's VCL), before any
+# other rule ends the response: ESI is processed on passes too, and a page
+# the app marks with sw-dynamic-cache-bypass is not stored, for 1 s only (a
+# 5xx stays with the 5xx rule, so a failed background refresh keeps the
+# stale object). The role's rules stay: Set-Cookie, 5xx and responses without
+# a TTL are not stored, and the grace is the role's.
+sub noixdev_shopware_backend_response {
+    if ({{ for_sites('bereq', shopware_sites) }}) {
+        unset beresp.http.X-Powered-By;
+        unset beresp.http.Server;
+        if (beresp.http.Surrogate-Control ~ "ESI/1.0") {
+            unset beresp.http.Surrogate-Control;
+            set beresp.do_esi = true;
+        }
+        if (beresp.http.sw-dynamic-cache-bypass == "1" && beresp.status < 500) {
+            unset beresp.http.sw-dynamic-cache-bypass;
+            set beresp.uncacheable = true;
+            set beresp.ttl = 1s;
+            set beresp.grace = 0s;
+            return (deliver);
+        }
+        if (bereq.url ~ "\.js$" || beresp.http.Content-Type ~ "text") {
+            set beresp.do_gzip = true;
+        }
+    }
+}
+{% endif %}
 
 # The microcache: a 200, 301 or 404 the app did not make cacheable (private,
 # no-cache, no-store, no TTL) is kept for the site's microcache seconds, and
@@ -351,6 +480,9 @@ sub vcl_deliver {
         set resp.http.X-Noix-Cache = resp.http.X-Noix-Cache + "+grace";
     }
     call noixdev_debug_header;
+{% if shopware_sites | length > 0 %}
+    call noixdev_shopware_deliver;
+{% endif %}
     unset resp.http.X-Noix-Site;
     unset resp.http.X-Noix-Host;
     unset resp.http.X-Noix-Url;
@@ -359,6 +491,23 @@ sub vcl_deliver {
     unset resp.http.Via;
     unset resp.http.X-Varnish;
 }
+{% if shopware_sites | length > 0 %}
+
+# The shopware profile (Shopware 6.7's VCL): browsers keep no page, only the
+# assets and store-api answers, as the app sent them; Shopware's
+# invalidation states and its Link header stay inside.
+sub noixdev_shopware_deliver {
+    if ({{ for_sites('req', shopware_sites) }}) {
+        if (resp.http.Cache-Control !~ "private" && req.url !~ "^/(?:theme|media|thumbnail|bundles|store-api)/") {
+            set resp.http.Pragma = "no-cache";
+            set resp.http.Expires = "-1";
+            set resp.http.Cache-Control = "no-store, no-cache, must-revalidate, max-age=0";
+        }
+        unset resp.http.sw-invalidation-states;
+        unset resp.http.Link;
+    }
+}
+{% endif %}
 
 sub vcl_synth {
     set resp.http.X-Noix-Cache = "SYNTH";
