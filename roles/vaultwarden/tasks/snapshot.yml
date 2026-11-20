@@ -1,0 +1,154 @@
+---
+# The backup before an update, with Vaultwarden stopped (the own PostgreSQL
+# keeps running for its dump): vaultwarden_backup_dir/<UTC time>-<installed
+# version>-to-<new version>/ (root's, mode 0700) with
+#   compose.yaml   the compose file the installed version ran with (0600)
+#   secrets/       a copy of vaultwarden_secrets_dir (0700, files 0600)
+#   vaultwarden/   a copy of the data subdirectory (the SQLite database with
+#                  its -wal and -shm, attachments, sends, the keys that sign
+#                  the logins), cp -a, without icon_cache/, which Vaultwarden
+#                  fetches again
+#   vaultwarden.dump
+#                  with PostgreSQL: pg_dump -Fc, read back in full
+#                  (pg_restore --list, then the whole archive to /dev/null);
+#                  the own one in its db container over the local socket, the
+#                  external one in a one-off container of
+#                  vaultwarden_client_image (the server's major), the password
+#                  through stdin
+# Made below <name>.partial and renamed once complete; sets vaultwarden_backup
+# last, so a failure before that has changed nothing but the partial
+# directory, which the caller removes.
+
+- name: Create the backup directory
+  ansible.builtin.file:
+    path: "{{ vaultwarden_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Name the backup
+  ansible.builtin.set_fact:
+    vaultwarden_backup_next: >-
+      {{ vaultwarden_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ vaultwarden_installed_version }}-to-{{ vaultwarden_version }}
+
+# A leftover of a run stopped during its backup is made afresh.
+- name: Create the partial backup
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      partial={{ (vaultwarden_backup_next ~ '.partial') | quote }}
+      rm -rf "$partial"
+      mkdir -m 0700 "$partial"
+  changed_when: true
+
+# Over the local socket of the database container, which needs no password.
+- name: Dump the own PostgreSQL
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 077
+      dump={{ (vaultwarden_backup_next ~ '.partial/vaultwarden.dump') | quote }}
+      docker compose exec -T db pg_dump --format=custom --username={{ vaultwarden_db_user | quote }} \
+        --dbname={{ vaultwarden_db_name | quote }} >"$dump"
+      docker compose exec -T db pg_restore --list <"$dump" >/dev/null
+      docker compose exec -T db pg_restore --file=/dev/null <"$dump"
+    chdir: "{{ vaultwarden_dir }}"
+  changed_when: true
+  when: vaultwarden_database == 'postgres'
+
+# The partial backup bound into the client container, which writes the dump
+# there as root with umask 077. The task holds the password (stdin), so it is
+# no_log; the next task fails with psql's error line, which quotes none.
+- name: Dump the external PostgreSQL
+  ansible.builtin.command:
+    argv: >-
+      {{ vaultwarden_external_docker
+         + ['--mount', 'type=bind,source=' ~ vaultwarden_backup_next ~ '.partial,target=/backup',
+            '--entrypoint', 'sh', vaultwarden_client_image, '-c',
+            vaultwarden_external_shell ~ ' umask 077;'
+            ~ ' pg_dump --format=custom --file=/backup/vaultwarden.dump "$@";'
+            ~ ' pg_restore --list /backup/vaultwarden.dump >/dev/null;'
+            ~ ' pg_restore --file=/dev/null /backup/vaultwarden.dump', 'sh']
+         + vaultwarden_external_login }}
+    stdin: "{{ vaultwarden_db_password }}"
+    stdin_add_newline: false
+  register: vaultwarden_external_dump
+  changed_when: true
+  failed_when: false
+  no_log: true
+  when: vaultwarden_database == 'postgres_external'
+
+- name: Fail when the external PostgreSQL cannot be dumped
+  ansible.builtin.fail:
+    msg: >-
+      The dump of the external PostgreSQL {{ vaultwarden_external_target }}
+      with {{ vaultwarden_client_image }} failed or cannot be read back:
+      {{ vaultwarden_external_error }}
+  vars:
+    vaultwarden_external_result: "{{ vaultwarden_external_dump }}"
+  when:
+    - vaultwarden_database == 'postgres_external'
+    - vaultwarden_external_dump.rc != 0
+
+# One cp -a per entry, icon_cache/ left out; the directory itself with the
+# owner and mode of the original. It holds the keys that sign the logins;
+# the backup directory is root's only.
+- name: Copy the data of Vaultwarden
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      src={{ (vaultwarden_data_dir ~ '/vaultwarden') | quote }}
+      copy={{ (vaultwarden_backup_next ~ '.partial/vaultwarden') | quote }}
+      mkdir "$copy"
+      for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+        if { [ -e "$entry" ] || [ -L "$entry" ]; } && [ "${entry##*/}" != icon_cache ]; then
+          cp -a -- "$entry" "$copy/"
+        fi
+      done
+      chown --reference="$src" "$copy"
+      chmod --reference="$src" "$copy"
+  changed_when: true
+
+# The compose file holds no secret, but the copies of the backup are kept as
+# the secrets are: no_log, with a failure message of their own.
+- name: Keep the compose file and the secrets with the backup
+  block:
+    - name: Keep the compose file with the backup
+      ansible.builtin.copy:
+        dest: "{{ vaultwarden_backup_next }}.partial/compose.yaml"
+        content: "{{ vaultwarden_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Keep the secrets with the backup
+      ansible.builtin.command:
+        argv: [cp, -a, "{{ vaultwarden_secrets_dir }}", "{{ vaultwarden_backup_next }}.partial/secrets"]
+      changed_when: true
+      no_log: true
+  rescue:
+    - name: Fail on the compose file or the secrets of the backup
+      ansible.builtin.fail:
+        msg: >-
+          Writing the copy of the compose file or of the secrets in
+          {{ vaultwarden_backup_next }}.partial failed
+          ({{ ansible_failed_task.name }}); the error is not shown, as it can
+          quote a secret. Check that {{ vaultwarden_backup_dir }} is writable
+          and has space.
+
+# Not into a backup of that name (the same second), which mv would move it
+# into.
+- name: Complete the backup
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      backup={{ vaultwarden_backup_next | quote }}
+      if [ -e "$backup" ]; then echo "Error: $backup exists" >&2; exit 1; fi
+      mv "$backup.partial" "$backup"
+  changed_when: true
+
+- name: Note the backup
+  ansible.builtin.set_fact:
+    vaultwarden_backup: "{{ vaultwarden_backup_next }}"

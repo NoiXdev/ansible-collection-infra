@@ -1,0 +1,276 @@
+---
+# Rolls Vaultwarden back to the backup vaultwarden_backup (snapshot.yml), with
+# nothing else than that variable from its includer: every container of the
+# project stopped; the compose file and the secrets put back from the backup;
+# with the own PostgreSQL the database recreated empty and loaded from the
+# dump (in the previous db container: the compose file comes first); with the
+# external one, in one transaction, the schema public dropped with everything
+# in it (tables of the failed version's migrations among them), created again
+# and the dump loaded; the entries of the data subdirectory moved aside to
+# <backup>-failed/vaultwarden (<backup>-failed-<UTC time> when that exists: a
+# rollback that was stopped and run again has put the failed attempt's there
+# already) and the copy put in their place, the subdirectory itself kept
+# (compose never creates it) and icon_cache/ left as it is; then the previous
+# Vaultwarden started and checked with health.yml, both waits bounded by
+# vaultwarden_rollback_timeout. Never fails by itself: vaultwarden_healthy
+# says whether Vaultwarden is healthy again, vaultwarden_restore_error what
+# failed.
+
+- name: Roll back to the backup
+  block:
+    # All of it: the failed version must not write to the database while it
+    # is restored.
+    - name: Stop Vaultwarden for the rollback
+      ansible.builtin.command:
+        argv: [docker, compose, stop]
+        chdir: "{{ vaultwarden_dir }}"
+      changed_when: true
+
+    # Then every other container of the project that still runs (one of a
+    # service the compose file on disk does not name).
+    - name: Find the containers of Vaultwarden that still run
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --quiet
+          - --filter
+          - label=com.docker.compose.project={{ vaultwarden_project }}
+      register: vaultwarden_still_running
+      changed_when: false
+
+    # One that is gone since docker ps needs no stop; any other error fails
+    # the rollback, and so does a failure without a message: a container may
+    # still run and write to the database.
+    - name: Stop the containers of Vaultwarden that still run
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'stop'] + vaultwarden_still_running.stdout_lines }}"
+      register: vaultwarden_stopped
+      changed_when: true
+      failed_when: >-
+        vaultwarden_stopped.rc != 0
+        and (vaultwarden_stopped.stderr_lines | length == 0
+             or vaultwarden_stopped.stderr_lines | reject('search', 'No such container') | list | length > 0)
+      when: vaultwarden_still_running.stdout_lines | length > 0
+
+    # The secrets files in place, the directory itself kept (the containers
+    # bind it): no_log, with a failure message of its own.
+    - name: Put the previous compose file and secrets back
+      block:
+        - name: Put the previous compose file back
+          ansible.builtin.copy:
+            src: "{{ vaultwarden_backup }}/compose.yaml"
+            dest: "{{ vaultwarden_compose_file }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0644"
+          no_log: true
+
+        - name: Put the previous secrets back
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              copy={{ (vaultwarden_backup ~ '/secrets') | quote }}
+              dir={{ vaultwarden_secrets_dir | quote }}
+              test -d "$copy"
+              mkdir -p -m 0700 "$dir"
+              find "$dir" -mindepth 1 -delete
+              cp -a "$copy/." "$dir/"
+              chmod 0700 "$dir"
+          changed_when: true
+          no_log: true
+      rescue:
+        - name: Fail on the previous compose file or secrets
+          ansible.builtin.fail:
+            msg: >-
+              Putting the compose file or the secrets of {{ vaultwarden_backup }}
+              back into {{ vaultwarden_dir }} failed ({{ ansible_failed_task.name }});
+              the error is not shown, as it can quote a secret. Check the
+              backup and that {{ vaultwarden_dir }} is writable and has space.
+
+    - name: Put the own PostgreSQL back
+      when: vaultwarden_database == 'postgres'
+      block:
+        - name: Start the previous database
+          community.docker.docker_compose_v2:
+            project_src: "{{ vaultwarden_dir }}"
+            services: [db]
+            state: present
+            pull: missing
+
+        - name: Note when the wait for the database starts
+          ansible.builtin.set_fact:
+            vaultwarden_wait_start: "{{ now().timestamp() }}"
+
+        # Fails after vaultwarden_rollback_timeout seconds; retries is an
+        # upper bound. Over TCP: the image's init server listens on its socket
+        # only.
+        - name: Wait for the database
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - exec
+              - -T
+              - db
+              - pg_isready
+              - -h
+              - 127.0.0.1
+              - "--username={{ vaultwarden_db_user }}"
+              - "--dbname={{ vaultwarden_db_name }}"
+              - --timeout=2
+            chdir: "{{ vaultwarden_dir }}"
+          register: vaultwarden_db_ready
+          until: >-
+            vaultwarden_db_ready.rc == 0
+            or now().timestamp() - vaultwarden_wait_start | float >= vaultwarden_rollback_timeout | int
+          retries: "{{ (vaultwarden_rollback_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
+          delay: 2
+          changed_when: false
+
+        # An empty database, not pg_restore --clean: --clean drops only what
+        # is in the dump, so tables the new version added would stay. Over
+        # the local socket, which needs no password.
+        - name: Recreate the database
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - exec
+              - -T
+              - db
+              - psql
+              - "--username={{ vaultwarden_db_user }}"
+              - --dbname=postgres
+              - --no-psqlrc
+              - --set=ON_ERROR_STOP=1
+            chdir: "{{ vaultwarden_dir }}"
+            stdin: |
+              DROP DATABASE IF EXISTS "{{ vaultwarden_db_name }}" WITH (FORCE);
+              CREATE DATABASE "{{ vaultwarden_db_name }}" OWNER "{{ vaultwarden_db_user }}";
+          changed_when: true
+
+        - name: Load the dump into the database
+          ansible.builtin.shell:
+            cmd: >-
+              docker compose exec -T db pg_restore --single-transaction --exit-on-error
+              --username={{ vaultwarden_db_user | quote }} --dbname={{ vaultwarden_db_name | quote }}
+              <{{ (vaultwarden_backup ~ '/vaultwarden.dump') | quote }}
+            chdir: "{{ vaultwarden_dir }}"
+          changed_when: true
+
+    # The dump read into SQL first (on a tmpfs of the client container), and
+    # psql run only when pg_restore exited 0: streamed straight into psql, a pg_restore
+    # that stopped half way would leave psql a script that ends early, which
+    # --single-transaction commits. The drop, the new schema and the load
+    # commit together or not at all (ON_ERROR_STOP). The owner of the
+    # database may drop public: from PostgreSQL 15 on it owns it (as
+    # pg_database_owner), and after a first rollback it made it itself. The
+    # password goes through stdin, so the task is no_log; the next task fails
+    # with psql's error line, which quotes none.
+    - name: Put the external PostgreSQL back
+      ansible.builtin.command:
+        argv: >-
+          {{ vaultwarden_external_docker
+             + ['--mount', 'type=bind,source=' ~ vaultwarden_backup ~ '/vaultwarden.dump,target=/backup/vaultwarden.dump,readonly',
+                '--tmpfs', '/restore:mode=0700',
+                '--entrypoint', 'sh', vaultwarden_client_image, '-c',
+                vaultwarden_external_shell
+                ~ ' if ! pg_restore --no-owner --no-privileges --file=/restore/vaultwarden.sql /backup/vaultwarden.dump;'
+                ~ ' then echo "Error: pg_restore did not read the dump to the end; nothing was loaded" >&2; exit 1; fi;'
+                ~ ' exec psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --single-transaction "$@"'
+                ~ ' --command="SET client_min_messages = warning"'
+                ~ ' --command="DROP SCHEMA public CASCADE" --command="CREATE SCHEMA public"'
+                ~ ' --file=/restore/vaultwarden.sql', 'sh']
+             + vaultwarden_external_login }}
+        stdin: "{{ vaultwarden_db_password }}"
+        stdin_add_newline: false
+      register: vaultwarden_external_restore
+      changed_when: true
+      failed_when: false
+      no_log: true
+      when: vaultwarden_database == 'postgres_external'
+
+    - name: Fail when the external PostgreSQL cannot be put back
+      ansible.builtin.fail:
+        msg: >-
+          Loading {{ vaultwarden_backup }}/vaultwarden.dump into the external
+          PostgreSQL {{ vaultwarden_external_target }} with
+          {{ vaultwarden_client_image }} failed (nothing of it was committed,
+          so the database is as the failed update left it):
+          {{ vaultwarden_external_error }}
+      vars:
+        vaultwarden_external_result: "{{ vaultwarden_external_restore }}"
+      when:
+        - vaultwarden_database == 'postgres_external'
+        - vaultwarden_external_restore.rc != 0
+
+    # The copy first; then the entries of the subdirectory are moved, one
+    # rename each (the first that fails stops the restore, which then fails,
+    # before the copy is put in place), so the subdirectory itself never goes
+    # missing and a restore stopped anywhere in between can be run again: a
+    # leftover copy is made afresh, and every entry is in the subdirectory,
+    # in the copy or set aside. icon_cache/ (not in the backup) stays.
+    - name: Put the data of Vaultwarden back
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          backup={{ vaultwarden_backup | quote }}
+          root={{ vaultwarden_data_dir | quote }}
+          aside="$backup-failed"
+          if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+          # Every entry of $1 but icon_cache into the directory $2, one rename
+          # each; the first that fails stops the script (set -e).
+          move_entries() {
+            for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+              if { [ -e "$entry" ] || [ -L "$entry" ]; } && [ "${entry##*/}" != icon_cache ]; then
+                mv -- "$entry" "$2/"
+              fi
+            done
+          }
+          test -d "$backup/vaultwarden"
+          rm -rf "$root/.vaultwarden.restore"
+          cp -a "$backup/vaultwarden" "$root/.vaultwarden.restore"
+          mkdir -m 0700 "$aside"
+          mkdir "$aside/vaultwarden"
+          move_entries "$root/vaultwarden" "$aside/vaultwarden"
+          # Nothing of the failed attempt may stay beside the copy.
+          for entry in "$root/vaultwarden"/* "$root/vaultwarden"/.[!.]* "$root/vaultwarden"/..?*; do
+            if { [ -e "$entry" ] || [ -L "$entry" ]; } && [ "${entry##*/}" != icon_cache ]; then
+              echo "Error: $root/vaultwarden is not empty after it was set aside" >&2
+              exit 1
+            fi
+          done
+          move_entries "$root/.vaultwarden.restore" "$root/vaultwarden"
+          chown --reference="$backup/vaultwarden" "$root/vaultwarden"
+          chmod --reference="$backup/vaultwarden" "$root/vaultwarden"
+          rmdir "$root/.vaultwarden.restore"
+      changed_when: true
+
+    # The restored database already has the previous version's schema, so
+    # nothing migrates.
+    - name: Start the previous Vaultwarden
+      community.docker.docker_compose_v2:
+        project_src: "{{ vaultwarden_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that the previous Vaultwarden is healthy
+      ansible.builtin.include_tasks: health.yml
+      vars:
+        vaultwarden_health_wait: "{{ vaultwarden_rollback_timeout }}"
+
+    - name: Note the rollback
+      ansible.builtin.set_fact:
+        vaultwarden_restore_error: >-
+          {{ '' if vaultwarden_healthy
+             else 'Vaultwarden ' ~ vaultwarden_installed_version | default('?') ~ ' is not healthy within '
+                  ~ vaultwarden_rollback_timeout ~ ' seconds (' ~ vaultwarden_health_lines | join('; ') ~ ')' }}
+
+  rescue:
+    - name: Note the failed rollback
+      ansible.builtin.set_fact:
+        vaultwarden_healthy: false
+        vaultwarden_restore_error: "{{ vaultwarden_failure | trim }}"

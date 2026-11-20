@@ -1,0 +1,275 @@
+---
+# The pin is newer than the installed version. The new image first (a failed
+# pull changes nothing); then Vaultwarden stopped (the own PostgreSQL keeps
+# running for its dump), the backup (snapshot.yml: the compose file, the
+# secrets, the data subdirectory and with PostgreSQL the dump), the secrets
+# and the compose file written with the new version, Vaultwarden started (it
+# migrates the database on start) and checked (health.yml: the containers,
+# /alive, a prelogin and the database check), and the backups pruned to the
+# newest vaultwarden_backups_keep. A failure before the backup is complete
+# removes the partial backup, starts Vaultwarden as it was and fails. After
+# it, restore.yml rolls back to the backup, the marker vaultwarden_marker_file
+# names the failed version, and the run fails.
+# From the first change on, vaultwarden_update_marker says how far the update
+# got (step backup, then step update with the backup), with a copy of the
+# compose file and of the secrets directory it replaces; it is removed once
+# the update is healthy, or after the recovery or the rollback, so that only a
+# run that stopped leaves it (the marker before its copies: a run stopped in
+# between leaves only the marker, never a copy without it).
+
+- name: Update Vaultwarden
+  vars:
+    vaultwarden_new_image: "{{ vaultwarden_image }}:{{ vaultwarden_version }}"
+    vaultwarden_update_marker_content: |
+      # Written by the noixdev.infra.vaultwarden role while it updates
+      # Vaultwarden, and removed once the update is healthy or rolled back. A
+      # run that finds it refuses until it is dealt with.
+      {{ {'from_version': vaultwarden_installed_version, 'to_version': vaultwarden_version, 'step': vaultwarden_update_step}
+         | combine({'backup': vaultwarden_backup} if vaultwarden_update_step == 'update' else {})
+         | combine({'time': vaultwarden_update_started})
+         | to_nice_yaml(sort_keys=false) }}
+  block:
+    - name: Look for the image of Vaultwarden {{ vaultwarden_version }}
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ vaultwarden_new_image }}"]
+      register: vaultwarden_new_image_local
+      changed_when: false
+      failed_when: false
+
+    - name: Pull Vaultwarden {{ vaultwarden_version }}
+      ansible.builtin.command:
+        argv: [docker, pull, --quiet, "{{ vaultwarden_new_image }}"]
+      changed_when: true
+      when: vaultwarden_new_image_local.rc != 0
+
+    - name: Note when the update starts
+      ansible.builtin.set_fact:
+        vaultwarden_update_started: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    # Right before the first change. The marker first: a run stopped before
+    # the copies are written leaves the marker, which the next run cleans up
+    # with them, but never a copy without a marker.
+    - name: Write the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ vaultwarden_update_marker }}"
+        content: "{{ vaultwarden_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        vaultwarden_update_step: backup
+
+    # The secrets as they are, and the compose file (which holds none, but is
+    # kept as they are): no_log, with a failure message of their own.
+    - name: Keep the compose file and the secrets from before the update
+      block:
+        - name: Keep the compose file from before the update
+          ansible.builtin.copy:
+            dest: "{{ vaultwarden_update_marker_compose }}"
+            content: "{{ vaultwarden_compose_before }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+
+        - name: Keep the secrets from before the update
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              copy={{ vaultwarden_update_marker_secrets | quote }}
+              rm -rf "$copy"
+              cp -a {{ vaultwarden_secrets_dir | quote }} "$copy"
+          changed_when: true
+          no_log: true
+      rescue:
+        - name: Fail on the copies from before the update
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ vaultwarden_update_marker_compose }} or
+              {{ vaultwarden_update_marker_secrets }}, the copies of the
+              compose file and the secrets from before the update, failed
+              ({{ ansible_failed_task.name }}); the error is not shown, as it
+              can quote a secret. Check that {{ vaultwarden_dir }} is writable
+              and has space, then run the role again.
+
+    # Nothing writes to the database or the data during the backup: SQLite is
+    # consistent once Vaultwarden is down (its -wal and -shm go with it).
+    - name: Stop Vaultwarden for the update
+      ansible.builtin.command:
+        argv: [docker, compose, stop, vaultwarden]
+        chdir: "{{ vaultwarden_dir }}"
+      changed_when: true
+
+    - name: Back up the database and the data
+      ansible.builtin.include_tasks: snapshot.yml
+
+    # From here on the secrets, the compose file and the database change; the
+    # backup holds them as they were.
+    - name: Note the backup in the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ vaultwarden_update_marker }}"
+        content: "{{ vaultwarden_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        vaultwarden_update_step: update
+
+    - name: Write the secrets
+      ansible.builtin.include_tasks: secrets.yml
+
+    - name: Write the compose file with Vaultwarden {{ vaultwarden_version }}
+      ansible.builtin.copy:
+        dest: "{{ vaultwarden_compose_file }}"
+        content: "{{ vaultwarden_compose }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # Vaultwarden runs its migrations on start, before it answers /alive.
+    - name: Start Vaultwarden {{ vaultwarden_version }}
+      community.docker.docker_compose_v2:
+        project_src: "{{ vaultwarden_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+        recreate: "{{ 'always' if vaultwarden_secrets_changed | bool else 'auto' }}"
+
+    - name: Check the health of Vaultwarden {{ vaultwarden_version }}
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Vaultwarden is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Vaultwarden {{ vaultwarden_version }} is not healthy within
+          {{ vaultwarden_health_timeout }} seconds
+          ({{ vaultwarden_health_lines | join('; ') }})
+      when: not vaultwarden_healthy
+
+  rescue:
+    - name: Note what failed
+      ansible.builtin.set_fact:
+        vaultwarden_update_error: "{{ vaultwarden_failure | trim }}"
+
+    - name: Recover from a failure before the backup was complete
+      when: vaultwarden_backup is not defined
+      block:
+        - name: Remove the partial backup
+          ansible.builtin.file:
+            path: "{{ vaultwarden_backup_next }}.partial"
+            state: absent
+          when: vaultwarden_backup_next is defined
+
+        # The compose file and the secrets are still the ones the run started
+        # with.
+        - name: Start Vaultwarden again
+          block:
+            - name: Start the installed Vaultwarden again
+              community.docker.docker_compose_v2:
+                project_src: "{{ vaultwarden_dir }}"
+                state: present
+          rescue:
+            - name: Note the failed start
+              ansible.builtin.set_fact:
+                vaultwarden_restart_error: "{{ vaultwarden_failure | trim }}"
+
+        # Nothing but the partial backup had changed.
+        - name: Remove the marker of the update that failed before the backup
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ vaultwarden_update_marker_files }}"
+
+        - name: Fail when the update failed before the backup
+          ansible.builtin.fail:
+            msg: >-
+              The Vaultwarden update from {{ vaultwarden_installed_version }}
+              to {{ vaultwarden_version }} in {{ vaultwarden_dir }} failed
+              before anything changed ({{ vaultwarden_update_error }}).
+              {{ ('Vaultwarden ' ~ vaultwarden_installed_version ~ ' was started again; run the role again'
+                  ~ ' once the cause is fixed.')
+                 if vaultwarden_restart_error is not defined
+                 else ('Starting Vaultwarden ' ~ vaultwarden_installed_version ~ ' again failed too ('
+                       ~ vaultwarden_restart_error ~ '); start it with docker compose up -d in '
+                       ~ vaultwarden_dir ~ '.') }}
+
+    - name: Roll back to the backup
+      ansible.builtin.include_tasks: restore.yml
+
+    # Written whether or not the rollback worked: the failed version is not
+    # tried again on the next run.
+    - name: Write the marker of the failed update
+      ansible.builtin.copy:
+        dest: "{{ vaultwarden_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.vaultwarden role: the update to
+          # failed_version failed. The role does not try that version again
+          # while this file exists (no version at all when rolled_back_to is
+          # null: the rollback failed too); remove it to retry.
+          {{ {'failed_version': vaultwarden_version,
+              'rolled_back_to': vaultwarden_installed_version if vaultwarden_healthy else none,
+              'backup': vaultwarden_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')}
+             | combine({} if vaultwarden_healthy else {'restore_error': vaultwarden_restore_error})
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    # After update-failed: a run stopped before leaves this marker, and the
+    # next one refuses as for an update that did not finish.
+    - name: Remove the marker of the rolled back update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ vaultwarden_update_marker_files }}"
+
+    - name: Fail with the rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Vaultwarden update from {{ vaultwarden_installed_version }} to
+          {{ vaultwarden_version }} in {{ vaultwarden_dir }} failed
+          ({{ vaultwarden_update_error }}) and was rolled back: Vaultwarden
+          {{ vaultwarden_installed_version }} runs again, healthy, with the
+          compose file, the secrets, the data{{ ' and the database' if vaultwarden_database != 'sqlite' else '' }}
+          of the backup {{ vaultwarden_backup }}; the data of the failed
+          attempt is in {{ vaultwarden_backup }}-failed. The role does not try
+          {{ vaultwarden_version }} again while {{ vaultwarden_marker_file }}
+          exists: remove it to retry (rm {{ vaultwarden_marker_file }}), or
+          set vaultwarden_version to another version.
+      when: vaultwarden_healthy
+
+    - name: Fail with the failed rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Vaultwarden update from {{ vaultwarden_installed_version }} to
+          {{ vaultwarden_version }} in {{ vaultwarden_dir }} failed
+          ({{ vaultwarden_update_error }}), and rolling back to
+          {{ vaultwarden_installed_version }} failed too
+          ({{ vaultwarden_restore_error }}), so Vaultwarden may be down.
+          {{ vaultwarden_restore_hint }} {{ vaultwarden_marker_file }} refuses
+          every version; remove it once Vaultwarden runs again.
+
+# Only after a successful update (the rescue always fails), and outside the
+# block, so that nothing after the health check can roll it back.
+- name: Remove the marker of the update in progress
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ vaultwarden_update_marker_files }}"
+
+# Only after a successful update; the names start with the time, so they
+# sort by age. <backup>-failed directories of rolled back updates stay.
+- name: Find the backups
+  ansible.builtin.find:
+    paths: "{{ vaultwarden_backup_dir }}"
+    file_type: directory
+    patterns: ["{{ vaultwarden_backup_pattern }}"]
+    use_regex: true
+  register: vaultwarden_backups
+
+- name: Remove the oldest backups
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (vaultwarden_backups.files | map(attribute='path') | sort)[: -(vaultwarden_backups_keep | int)] }}"

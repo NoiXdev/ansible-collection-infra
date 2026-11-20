@@ -74,6 +74,26 @@
 #             refused before any change, naming both targets and the file; a
 #             wrong password and a user who does not own the database refused
 #             too; the item is still readable
+#   failed_update_sqlite, failed_update_postgres, failed_update_external
+#             an installation of the previous release (1.37.4) with the item
+#             and an attachment (made with the official CLI), updated (a) to
+#             an image that exits at once: rolled back with the item and the
+#             attachment, update-failed naming the version, a run with it
+#             refused before any change, a run with another version removing
+#             the marker; (b) to the release of the defaults with the database
+#             broken right after the backup (a docker wrapper on the test host
+#             renames the users table, or for the external server revokes the
+#             right to read it and adds a table): Vaultwarden turns healthy,
+#             the database check fails, rolled back; for the external server
+#             the added table is gone and the next update succeeds
+#   update_sqlite, update_postgres, update_external
+#             that installation updated to the release of the defaults: the
+#             backup (root's 0700, the compose file, the secrets, the data
+#             without icon_cache, the SQLite database or a dump pg_restore
+#             reads), the item and the attachment read back, no marker,
+#             idempotent; a downgrade refused before any change; with SQLite
+#             vaultwarden_backups_keep 1 over a second update (the release of
+#             the defaults tagged 1.37.6) keeps only the newest backup
 # Every converge's output must not hold a test secret, and every successful
 # converge of a scenario is repeated and must change nothing.
 #
@@ -280,6 +300,7 @@ start_host() {
   h rm -f /usr/sbin/policy-rc.d
   h sh -c 'echo "127.0.0.1 vaultwarden.test" >>/etc/hosts'
   docker cp "$here/client.py" "$host:/root/client.py" >/dev/null
+  attachment_sum=
 
   echo "== test host (ubuntu $ubuntu)"
   converge
@@ -407,8 +428,11 @@ register() {
 
 # The official CLI in a container on the test host's network: it logs in as
 # user_email, creates the login item noix-test with item_password ("create"),
-# syncs and prints the item's password ("read" only reads). The passwords go
-# through an env file of mode 0600 on the test host, not a command line.
+# syncs and prints the item's password ("read" only reads); "attach" adds the
+# file /root/bw-files/noix-attachment.bin of the test host to the item, and
+# "attachment" (or "attach", after it) downloads that attachment and prints
+# its sha256. The passwords go through an env file of mode 0600 on the test
+# host, not a command line.
 bw_script='
 set -eu
 export BITWARDENCLI_APPDATA_DIR=/tmp/bw
@@ -420,7 +444,18 @@ if [ "$1" = create ]; then
     | bw encode | xargs bw create item --nointeraction >/dev/null
 fi
 bw sync --nointeraction >/dev/null
-bw get password noix-test --nointeraction
+case "$1" in
+  attach | attachment)
+    id="$(bw get item noix-test --nointeraction | node -p "JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")).id")"
+    if [ "$1" = attach ]; then
+      bw create attachment --file /files/noix-attachment.bin --itemid "$id" --nointeraction >/dev/null
+      bw sync --nointeraction >/dev/null
+    fi
+    bw get attachment noix-attachment.bin --itemid "$id" --output /tmp/attachment.bin --nointeraction >/dev/null
+    sha256sum /tmp/attachment.bin | cut -d " " -f 1
+    ;;
+  *) bw get password noix-test --nointeraction ;;
+esac
 '
 bw_cli() {
   if ! h docker image inspect "$bw_image" >/dev/null 2>&1; then
@@ -428,15 +463,30 @@ bw_cli() {
       | hi docker build -q -t "$bw_image" - >/dev/null
   fi
   printf 'BW_PASSWORD=%s\nBW_ITEM=%s\n' "$user_password" "$item_password" | hi sh -c 'umask 077; cat >/root/bw.env'
+  h mkdir -p /root/bw-files
   printf '%s' "$bw_script" | hi docker run --rm -i --network host --add-host vaultwarden.test:127.0.0.1 \
     --env NODE_TLS_REJECT_UNAUTHORIZED=0 --env "BW_SERVER=$base" --env "BW_EMAIL=$user_email" \
-    --env-file /root/bw.env "$bw_image" sh -s "$1" 2>"$out/bw.log"
+    --env-file /root/bw.env --volume /root/bw-files:/files:ro "$bw_image" sh -s "$1" 2>"$out/bw.log"
 }
 # Fails unless the CLI reads the item's password back: expect_item create|read.
 expect_item() {
   local got
   got="$(bw_cli "$1")" || { cat "$out/bw.log" >&2; fail "the Bitwarden CLI failed ($1)"; }
   [ "$got" = "$item_password" ] || { cat "$out/bw.log" >&2; fail "the Bitwarden CLI read another item password ($1): ${got:0:40}"; }
+}
+# The attachment's bytes (random, once per test host) and their sha256.
+attachment_sum=
+# Fails unless the CLI downloads the attachment of the item with the bytes it
+# uploaded: expect_attachment attach|read (attach uploads it first).
+expect_attachment() {
+  local got
+  if [ -z "$attachment_sum" ]; then
+    h sh -c 'mkdir -p /root/bw-files && head -c 3000 /dev/urandom >/root/bw-files/noix-attachment.bin'
+    attachment_sum="$(h sha256sum /root/bw-files/noix-attachment.bin | cut -d ' ' -f 1)"
+  fi
+  got="$(bw_cli "$([ "$1" = attach ] && echo attach || echo attachment)")" \
+    || { cat "$out/bw.log" >&2; fail "the Bitwarden CLI failed on the attachment ($1)"; }
+  [ "$got" = "$attachment_sum" ] || { cat "$out/bw.log" >&2; fail "the attachment came back with other bytes ($1): ${got:0:64}"; }
 }
 
 # docker compose in app_dir on the test host: compose <args...>.
@@ -1003,10 +1053,283 @@ test_target_changed() {
   expect_item read
 }
 
+# The update scenarios: an installation of the previous release
+# (old_version) with the user, the item and an attachment, updated to the
+# release of the defaults (new_version). An image that exits at once
+# (busybox), tagged as new_version of a test repository, fails an update; the
+# release of the defaults tagged as next_version of it is a newer release that
+# works.
+old_version=1.37.4
+new_version="$(value_of "$defaults" vaultwarden_version)"
+next_version=1.37.6
+old_image="$(value_of "$defaults" vaultwarden_image):$old_version"
+test_repo=test.invalid/vaultwarden
+busybox=busybox:1.37.0
+backups="$data_dir/backups"
+marker="$app_dir/update-failed"
+progress="$app_dir/update-in-progress"
+
+# set_mode <mode>: the options of the role (mode_args) and of verify.yml
+# (verify_args) for the database mode.
+mode_args=()
+verify_args=()
+set_mode() {
+  case "$1" in
+    sqlite) mode_args=() verify_args=() ;;
+    postgres)
+      mode_args=(-e vaultwarden_database=postgres -e "@$out/db-vars.json")
+      verify_args=(-e verify_database=postgres)
+      ;;
+    postgres_external)
+      ensure_pg_servers
+      mode_args=(-e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" -e "vaultwarden_db_port=$pg_port" -e "@$out/db-vars.json")
+      verify_args=(-e verify_database=postgres_external -e "verify_db_host=$pg_ip" -e "verify_db_port=$pg_port")
+      ;;
+  esac
+}
+# vw_converge and its variants with the options of set_mode (bash 3.2 has no
+# empty "${a[@]}" under set -u).
+m_converge() { vw_converge ${mode_args[@]+"${mode_args[@]}"} "$@"; }
+m_converge_unchanged() { vw_converge_unchanged ${mode_args[@]+"${mode_args[@]}"} "$@"; }
+m_converge_fails() { vw_converge_fails ${mode_args[@]+"${mode_args[@]}"} "$@"; }
+m_verify() { verify -e verify_admin=true ${verify_args[@]+"${verify_args[@]}"} "$@"; }
+
+# The image and state of the vaultwarden container.
+vw_service() { compose ps --all --format "'{{.Image}} {{.State}} {{.Health}}'" vaultwarden; }
+# The complete backups (not partial, not -failed), oldest first.
+complete_backups() { h sh -c "ls $backups 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z-[0-9.]+-to-[0-9.]+\$' || true"; }
+# The newest backup of an update from <from> to <to>: newest_backup <from> <to>.
+newest_backup() {
+  local name
+  name="$(complete_backups | grep -F -- "-$1-to-$2" | tail -n 1)"
+  [ -n "$name" ] || fail "no backup of the update from $1 to $2 in $backups: $(h ls -A "$backups" 2>&1)"
+  printf '%s\n' "$backups/$name"
+}
+# Fails when the marker of an update in progress or one of its copies is left.
+expect_no_progress() {
+  h sh -c "test ! -e $progress && test ! -e $progress.compose.yaml && test ! -e $progress.secrets" \
+    || fail "an update left $progress or a copy of it ($1): $(h sh -c "ls -d $progress*")"
+}
+# A file in icon_cache, which a backup leaves out and a rollback leaves in place.
+put_icon() { h sh -c "mkdir -p $data_dir/vaultwarden/icon_cache && echo noix >$data_dir/vaultwarden/icon_cache/noix.test.png"; }
+expect_icon() { h test -s "$data_dir/vaultwarden/icon_cache/noix.test.png" || fail "icon_cache lost its file ($1)"; }
+# The external database emptied, as a fresh one for an install.
+reset_external_db() {
+  h docker exec noixdev-vaultwarden-pg psql --username=postgres --no-psqlrc --set=ON_ERROR_STOP=1 \
+    --command='DROP DATABASE IF EXISTS vaultwarden WITH (FORCE)' --command='CREATE DATABASE vaultwarden OWNER vaultwarden' >/dev/null
+}
+# An installation of old_version in the mode of set_mode <mode> with the user,
+# the item and the attachment, kept when the host has one without a marker:
+# ensure_old_installed <mode> <scenario>.
+ensure_old_installed() {
+  set_mode "$1"
+  if [ "$(h cat "$app_dir/database-target" 2>/dev/null | sed -n 's/^database: *//p')" = "$1" ] \
+    && h grep -qF "server:$old_version\"" "$app_dir/compose.yaml" 2>/dev/null && ! h test -e "$marker"; then
+    return 0
+  fi
+  echo "== install $old_version with $1 for $2"
+  reset_installation
+  [ "$1" != postgres_external ] || reset_external_db
+  make_admin_hash
+  m_converge -e "vaultwarden_version=$old_version"
+  [ "$(admin_login "$admin_token")" = 200 ] || fail "the admin login failed"
+  invite "$user_email"
+  register "$user_email" "$(invite_link "$user_email" "$org_name")" || fail "the invited address could not register"
+  expect_item create
+  expect_attachment attach
+}
+# Fails unless the backup <dir> of mode <mode> holds what snapshot.yml makes:
+# root's 0700, compose.yaml (0600) of version <from>, the secrets (0700, files
+# 0600, those in use), the data subdirectory without icon_cache and with the
+# attachment, with SQLite the database with the user, with PostgreSQL a dump
+# that pg_restore reads: expect_backup <dir> <mode> <from>.
+expect_backup() {
+  local dir="$1" mode="$2" from="$3"
+  [ "$(h stat -c '%U %a' "$backups" "$dir" | sort -u)" = "root 700" ] || fail "$backups or $dir is not root's 0700"
+  [ "$(h stat -c '%U %a' "$dir/compose.yaml")" = "root 600" ] || fail "$dir/compose.yaml is not root's 0600"
+  h grep -qF "server:$from\"" "$dir/compose.yaml" || fail "$dir/compose.yaml is not the one of $from"
+  [ "$(h stat -c '%U %a' "$dir/secrets")" = "root 700" ] || fail "$dir/secrets is not root's 0700"
+  [ "$(h sh -c "stat -c '%U %a' $dir/secrets/* | sort -u")" = "root 600" ] || fail "the files of $dir/secrets are not root's 0600"
+  [ "$(h ls "$dir/secrets")" = "$(h ls "$secrets_dir")" ] || fail "$dir/secrets does not hold the secrets in use: $(h ls "$dir/secrets")"
+  h test -d "$dir/vaultwarden" || fail "$dir has no copy of the data"
+  h test ! -e "$dir/vaultwarden/icon_cache" || fail "the backup $dir holds icon_cache"
+  h sh -c "ls $dir/vaultwarden/attachments/*/* >/dev/null 2>&1" || fail "the backup $dir holds no attachment"
+  h test -s "$dir/vaultwarden/rsa_key.pem" || fail "the backup $dir lacks the key that signs the logins"
+  if [ "$mode" = sqlite ]; then
+    [ "$(h python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM users").fetchone()[0])' \
+      "$dir/vaultwarden/db.sqlite3")" -ge 1 ] || fail "the SQLite copy in $dir holds no user"
+  else
+    h test ! -e "$dir/vaultwarden/db.sqlite3" || fail "the backup $dir has a SQLite database with $mode"
+    [ "$(h head -c 5 "$dir/vaultwarden.dump")" = PGDMP ] || fail "the backup $dir has no dump in pg_dump's custom format"
+    h sh -c "docker run --rm -i --entrypoint pg_restore docker.io/library/postgres:18 --list <$dir/vaultwarden.dump" >"$out/dump.list" \
+      || fail "pg_restore cannot read the dump in $dir"
+    grep -q 'TABLE public users ' "$out/dump.list" || fail "the dump in $dir has no users table"
+  fi
+}
+# Fails unless the run <what> rolled back to old_version: its message, the
+# container of old_version healthy, the marker naming the failed version, the
+# rollback and the backup (with the data of the failed attempt beside it), no
+# marker of an update in progress, icon_cache as it was, verify.yml with the
+# old image, and the item and the attachment read back.
+expect_rolled_back() {
+  local backup
+  expect_in_log "update from $old_version to $new_version in $app_dir failed"
+  expect_in_log "was rolled back: Vaultwarden $old_version runs again"
+  [ "$(vw_service)" = "$old_image running healthy" ] || fail "Vaultwarden after the rollback ($1): $(vw_service)"
+  h grep -qx "failed_version: $new_version" "$marker" || fail "the marker does not name $new_version ($1): $(h cat "$marker")"
+  h grep -qx "rolled_back_to: $old_version" "$marker" || fail "the marker does not name $old_version ($1): $(h cat "$marker")"
+  h grep -q '^time: ' "$marker" || fail "the marker has no time ($1): $(h cat "$marker")"
+  backup="$(h sed -n 's/^backup: //p' "$marker")"
+  h test -d "$backup/vaultwarden" || fail "the marker's backup $backup has no data ($1)"
+  h test -d "$backup-failed/vaultwarden" || fail "the data of the failed update was not set aside to $backup-failed ($1)"
+  expect_in_log "$backup"
+  expect_no_progress "$1"
+  expect_icon "$1"
+  m_verify -e "verify_image=$old_image"
+  expect_compose_clean
+  expect_item read
+  expect_attachment read
+}
+
+# A docker on the test host, ahead of the real one in the PATH, that runs the
+# script /root/fault.sh once, right before the first docker compose up of a
+# compose file of new_version: the database broken after the backup, as a new
+# release could break it, while Vaultwarden starts and turns healthy.
+# install_fault <script>.
+install_fault() {
+  local real
+  real="$(h sh -c 'command -v docker')"
+  [ "$real" != /usr/local/sbin/docker ] || fail "a docker wrapper is left in /usr/local/sbin"
+  printf '%s\n' "$1" | hi sh -c 'cat >/root/fault.sh'
+  h rm -f /root/fault.log
+  hi sh -c 'cat >/usr/local/sbin/docker && chmod 755 /usr/local/sbin/docker' <<WRAPPER
+#!/bin/sh
+case " \$* " in
+  *" compose "*" up "*)
+    if [ -e /root/fault.sh ] && grep -qF 'server:$new_version"' $app_dir/compose.yaml; then
+      sh /root/fault.sh >>/root/fault.log 2>&1 && rm /root/fault.sh
+    fi
+    ;;
+esac
+exec $real "\$@"
+WRAPPER
+}
+remove_fault() {
+  h test ! -e /root/fault.sh || fail "the database fault was not injected: $(h cat /root/fault.log 2>&1)"
+  h rm -f /usr/local/sbin/docker
+}
+
+# update_scenario <mode> <ubuntu>: from old_version with the item and the
+# attachment to new_version: the backup, the item and the attachment, no
+# marker; idempotent; a downgrade to old_version refused before any change.
+# With SQLite also vaultwarden_backups_keep 1 over two updates (the second to
+# next_version): only the newest backup is kept.
+update_scenario() {
+  local backup
+  echo "== update_$1 (ubuntu $2)"
+  ensure_old_installed "$1" "update_$1"
+  put_icon
+  m_converge -e vaultwarden_backups_keep=1
+  grep -qF 'update.yml' "$out/converge.log" || fail "the new version was not an update"
+  [ "$(vw_service)" = "$image running healthy" ] || fail "Vaultwarden after the update: $(vw_service)"
+  expect_no_progress "after the update"
+  h test ! -e "$marker" || fail "the update left $marker"
+  backup="$(newest_backup "$old_version" "$new_version")"
+  expect_backup "$backup" "$1" "$old_version"
+  [ "$(complete_backups | wc -l | tr -d ' ')" = 1 ] || fail "vaultwarden_backups_keep 1 kept more: $(complete_backups)"
+  m_verify
+  expect_compose_clean
+  expect_icon "after the update"
+  expect_item read
+  expect_attachment read
+  m_converge_unchanged -e vaultwarden_backups_keep=1
+
+  # Vaultwarden cannot migrate its database down.
+  note_untouched
+  m_converge_fails -e "vaultwarden_version=$old_version"
+  expect_in_log "vaultwarden_version $old_version is lower than the installed version $new_version"
+  expect_untouched
+  [ "$(complete_backups | wc -l | tr -d ' ')" = 1 ] || fail "the refused downgrade made a backup: $(complete_backups)"
+
+  [ "$1" = sqlite ] || return 0
+  echo "== update_$1: pruning (ubuntu $2)"
+  h docker tag "$image" "$test_repo:$next_version"
+  m_converge -e vaultwarden_backups_keep=1 -e "vaultwarden_image=$test_repo" -e "vaultwarden_version=$next_version"
+  [ "$(vw_service)" = "$test_repo:$next_version running healthy" ] || fail "Vaultwarden after the second update: $(vw_service)"
+  h test ! -e "$backup" || fail "the older backup $backup was not pruned"
+  complete_backups | grep -qx "[0-9TZ]*-$new_version-to-$next_version" || fail "the newest backup is not the only one: $(complete_backups)"
+  [ "$(complete_backups | wc -l | tr -d ' ')" = 1 ] || fail "vaultwarden_backups_keep 1 kept more: $(complete_backups)"
+  expect_item read
+  expect_attachment read
+}
+test_update_sqlite() { update_scenario sqlite "$1"; }
+test_update_postgres() { update_scenario postgres "$1"; }
+test_update_external() { update_scenario postgres_external "$1"; }
+
+# failed_update_scenario <mode> <ubuntu> <fault script>: from old_version with
+# the item and the attachment, (a) to an image that exits at once: rolled
+# back, update-failed naming the version, which a run with it is refused
+# for, and removed by a run with another version; (b) to new_version with a
+# database broken after the backup (the fault script, by install_fault):
+# Vaultwarden healthy, the database check fails, rolled back.
+failed_update_scenario() {
+  echo "== failed_update_$1 (ubuntu $2): an image that exits"
+  ensure_old_installed "$1" "failed_update_$1"
+  put_icon
+  h docker pull -q "$busybox" >/dev/null
+  h docker tag "$busybox" "$test_repo:$new_version"
+  m_converge_fails -e "vaultwarden_image=$test_repo" -e vaultwarden_health_timeout=30 -e vaultwarden_rollback_timeout=300
+  expect_rolled_back "an image that exits"
+  h docker rmi "$test_repo:$new_version" >/dev/null
+
+  echo "== failed_update_$1: the failed version refused (ubuntu $2)"
+  note_untouched
+  m_converge_fails
+  expect_in_log "$marker exists: the Vaultwarden update to $new_version failed"
+  expect_in_log "rolled back to $old_version"
+  expect_untouched
+  # Another version (the installed one) succeeds and removes the marker.
+  m_converge -e "vaultwarden_version=$old_version"
+  h test ! -e "$marker" || fail "a successful run with $old_version kept the marker"
+  m_converge_unchanged -e "vaultwarden_version=$old_version"
+
+  echo "== failed_update_$1: a broken database (ubuntu $2)"
+  install_fault "$3"
+  m_converge_fails -e vaultwarden_health_timeout=120 -e vaultwarden_rollback_timeout=300
+  remove_fault
+  expect_in_log "vaultwarden running healthy"
+  expect_in_log "the users and ciphers tables cannot be read"
+  expect_rolled_back "a broken database"
+  h rm "$marker"
+}
+test_failed_update_sqlite() {
+  failed_update_scenario sqlite "$1" \
+    "python3 -c 'import sqlite3; db = sqlite3.connect(\"$data_dir/vaultwarden/db.sqlite3\"); db.execute(\"ALTER TABLE users RENAME TO users_broken\"); db.commit()'"
+}
+test_failed_update_postgres() {
+  failed_update_scenario postgres "$1" \
+    "cd $app_dir && docker compose exec -T db psql --username=vaultwarden --dbname=vaultwarden --set=ON_ERROR_STOP=1 --command='ALTER TABLE users RENAME TO users_broken'"
+}
+# With the external server the fault is a right revoked and a table the failed
+# release's migration made, which the rollback drops with the schema; then
+# the next update succeeds.
+test_failed_update_external() {
+  failed_update_scenario postgres_external "$1" \
+    "docker exec noixdev-vaultwarden-pg psql --username=postgres --dbname=vaultwarden --set=ON_ERROR_STOP=1 --command='REVOKE SELECT ON users FROM vaultwarden' && docker exec noixdev-vaultwarden-pg psql --username=vaultwarden --dbname=vaultwarden --set=ON_ERROR_STOP=1 --command='CREATE TABLE noix_failed_migration (id integer)'"
+  [ "$(ext_sql "SELECT count(*) FROM pg_tables WHERE tablename = 'noix_failed_migration'")" = 0 ] \
+    || fail "the table the failed update made is left after the rollback"
+  echo "== failed_update_postgres_external: the next update (ubuntu $1)"
+  m_converge
+  [ "$(vw_service)" = "$image running healthy" ] || fail "Vaultwarden after the next update: $(vw_service)"
+  h test ! -e "$marker" || fail "the next update left $marker"
+  expect_item read
+  expect_attachment read
+}
+
 # All scenarios by default; NOIXDEV_INFRA_VAULTWARDEN_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure install_postgres mode_switch db_password external_refusals install_external target_changed"
+all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure failed_update_sqlite update_sqlite install_postgres mode_switch db_password failed_update_postgres update_postgres external_refusals install_external target_changed failed_update_external update_external"
 scenarios="${NOIXDEV_INFRA_VAULTWARDEN_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -1025,6 +1348,12 @@ for ubuntu in $releases; do
       external_refusals) test_external_refusals "$ubuntu" ;;
       install_external) test_install_external "$ubuntu" ;;
       target_changed) test_target_changed "$ubuntu" ;;
+      failed_update_sqlite) test_failed_update_sqlite "$ubuntu" ;;
+      update_sqlite) test_update_sqlite "$ubuntu" ;;
+      failed_update_postgres) test_failed_update_postgres "$ubuntu" ;;
+      update_postgres) test_update_postgres "$ubuntu" ;;
+      failed_update_external) test_failed_update_external "$ubuntu" ;;
+      update_external) test_update_external "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

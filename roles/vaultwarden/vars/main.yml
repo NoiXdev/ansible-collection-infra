@@ -27,6 +27,16 @@ vaultwarden_install_marker: "{{ vaultwarden_dir }}/install-incomplete"
 vaultwarden_update_marker: "{{ vaultwarden_dir }}/update-in-progress"
 vaultwarden_update_marker_compose: "{{ vaultwarden_dir }}/update-in-progress.compose.yaml"
 vaultwarden_update_marker_secrets: "{{ vaultwarden_dir }}/update-in-progress.secrets"
+# Removed together, the marker first: a run stopped in between leaves only a
+# copy, never a marker without its copies.
+vaultwarden_update_marker_files:
+  - "{{ vaultwarden_update_marker }}"
+  - "{{ vaultwarden_update_marker_compose }}"
+  - "{{ vaultwarden_update_marker_secrets }}"
+# The name of a complete backup below vaultwarden_backup_dir:
+# <UTC time>-<from version>-to-<to version>. Pruning takes only these, not
+# the <backup>-failed directories of rolled back updates.
+vaultwarden_backup_pattern: '^\d{8}T\d{6}Z-\d+\.\d+\.\d+-to-\d+\.\d+\.\d+$'
 
 # The oldest release the role runs.
 vaultwarden_min_version: 1.37.0
@@ -141,6 +151,42 @@ vaultwarden_external_psql:
   - --no-align
   - --command
 
+# The same for pg_dump and pg_restore of an update and its rollback: a
+# one-off container of vaultwarden_client_image (the server's major), with the
+# options of vaultwarden_external_docker, then the mounts a task adds, then
+# vaultwarden_external_shell with the task's script (which gets the
+# connection options of vaultwarden_external_login as "$@"). The password goes
+# through stdin into the environment, as for vaultwarden_external_psql.
+vaultwarden_external_docker:
+  - docker
+  - run
+  - --rm
+  - --interactive
+  - --env
+  - "PGSSLMODE={{ vaultwarden_db_sslmode }}"
+  - --env
+  - PGCONNECT_TIMEOUT=10
+vaultwarden_external_shell: >-
+  PGPASSWORD="$(cat; echo x)"; PGPASSWORD="${PGPASSWORD%x}"; export PGPASSWORD; set -eu;
+vaultwarden_external_login:
+  - "--host={{ vaultwarden_db_host }}"
+  - "--port={{ vaultwarden_db_port | int }}"
+  - "--username={{ vaultwarden_db_user }}"
+  - "--dbname={{ vaultwarden_db_name }}"
+
+# The database check of health.yml: the tables Vaultwarden reads on a login
+# and for the vault. Vaultwarden itself turns an error of such a read into
+# "no such user" (prelogin answers 200 on a broken users table), so the role
+# reads them itself.
+vaultwarden_db_check_sql: SELECT (SELECT count(*) FROM users) + (SELECT count(*) FROM ciphers)
+# For SQLite with the host's Python (the image has no sqlite3): the file
+# opened without creating it, read only.
+vaultwarden_db_check_sqlite: |
+  import sqlite3, sys, urllib.parse
+  db = sqlite3.connect('file:' + urllib.parse.quote(sys.argv[1]) + '?mode=rw', uri=True, timeout=10)
+  db.execute('PRAGMA query_only = 1')
+  print(db.execute(sys.argv[2]).fetchone()[0])
+
 # The error of a psql check of the external server: the last line of stderr
 # that names an error (else its last line), from the result the task that
 # fails sets as vaultwarden_external_result. psql quotes the server's error,
@@ -179,3 +225,33 @@ vaultwarden_install_hint: >-
   {{ vaultwarden_target_file }}, {{ vaultwarden_install_marker }} and the
   subdirectories {{ vaultwarden_data_subdirs | join(' and ') }} of
   {{ vaultwarden_data_dir }}, then run the role again.
+
+# After a failed rollback: how to put the backup vaultwarden_backup back by
+# hand, with the step of the database mode.
+vaultwarden_restore_hint: >-
+  Roll back by hand in {{ vaultwarden_dir }}: run docker compose stop; copy
+  {{ vaultwarden_restore_from }}/compose.yaml to {{ vaultwarden_compose_file }}
+  and the files of {{ vaultwarden_restore_from }}/secrets into
+  {{ vaultwarden_secrets_dir }};{{ (' ' ~ vaultwarden_restore_hint_database[vaultwarden_database])
+  if vaultwarden_restore_hint_database[vaultwarden_database] else '' }} put the
+  entries of {{ vaultwarden_restore_from }}/vaultwarden in place of those of
+  {{ vaultwarden_data_dir }}/vaultwarden (cp -a; keep the directory itself);
+  then run docker compose up -d.
+vaultwarden_restore_from: "{{ vaultwarden_backup | default('?', true) }}"
+vaultwarden_restore_hint_database:
+  sqlite: ""
+  postgres: >-
+    run docker compose up -d db; recreate the database (docker compose exec -T
+    db psql -U {{ vaultwarden_db_user }} -d postgres -c 'DROP DATABASE IF EXISTS
+    {{ vaultwarden_db_name }} WITH (FORCE)' -c 'CREATE DATABASE
+    {{ vaultwarden_db_name }} OWNER {{ vaultwarden_db_user }}') and load the dump
+    with docker compose exec -T db pg_restore --single-transaction -U
+    {{ vaultwarden_db_user }} -d {{ vaultwarden_db_name }} <
+    {{ vaultwarden_restore_from }}/vaultwarden.dump;
+  postgres_external: >-
+    in the database {{ vaultwarden_external_target }}, in one transaction, drop
+    the schema public with everything in it and create it again (DROP SCHEMA
+    public CASCADE; CREATE SCHEMA public), then load
+    {{ vaultwarden_restore_from }}/vaultwarden.dump (pg_restore --no-owner
+    --no-privileges -f - of PostgreSQL {{ vaultwarden_external_major | default("the server's major") }}
+    into psql --single-transaction);

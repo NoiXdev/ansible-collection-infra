@@ -17,7 +17,10 @@
 # mountpoint (with vaultwarden_data_dir_mountpoint), an installation of
 # another database mode, an external installation of another server or
 # database, an installation without its data
-# subdirectories (an unmounted volume), a config.json saved on the admin
+# subdirectories (an unmounted volume), after a failed update every version
+# when its rollback failed too, else the failed version (vaultwarden_marker_file,
+# read into vaultwarden_marker_read and vaultwarden_marker), an update that
+# did not finish (vaultwarden_update_marker), a config.json saved on the admin
 # page, a compose file that is not YAML, an install that did not complete
 # (its marker), a compose file without a Vaultwarden version, a downgrade,
 # with the own PostgreSQL a vaultwarden_db_password the database does not
@@ -154,6 +157,95 @@
   when:
     - vaultwarden_installed
     - vaultwarden_data_missing | length > 0
+
+# Written by update.yml after a failed update; it names the failed version.
+# Not secret: the versions, the backup, the time and the error.
+- name: Read the marker of a failed update
+  ansible.builtin.slurp:
+    src: "{{ vaultwarden_marker_file }}"
+  register: vaultwarden_marker_read
+  failed_when: false
+
+# A marker that is not YAML cannot say which version failed.
+- name: Check the marker of a failed update
+  when: vaultwarden_marker_read.content is defined
+  block:
+    - name: Parse the marker of a failed update
+      ansible.builtin.set_fact:
+        vaultwarden_marker: "{{ vaultwarden_marker_yaml if vaultwarden_marker_yaml is mapping else {} }}"
+      vars:
+        vaultwarden_marker_yaml: "{{ vaultwarden_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Fail on a marker of a failed update that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ vaultwarden_marker_file }} exists, but it is not YAML, so the role
+          cannot tell which Vaultwarden update failed and changes nothing.
+          Check Vaultwarden, then remove the file (rm
+          {{ vaultwarden_marker_file }}).
+
+# The rollback failed (or the marker does not say it worked): the database
+# may be empty or half restored, and the backup holds the data. Any version
+# would take a backup of that database, come up healthy and remove the
+# marker, the last pointer to the real backup, so every version is refused,
+# before the version checks: a rollback that failed before it put the
+# previous compose file back leaves the failed version in it, and an older
+# pin must hear this, not the downgrade refusal.
+- name: Refuse every version after a failed rollback
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_marker_file }} exists: the Vaultwarden update to
+      {{ vaultwarden_marker.failed_version | default('?') }} failed on
+      {{ vaultwarden_marker.time | default('?') }}, and rolling back failed
+      too ({{ vaultwarden_marker.restore_error | default('?') }}). The
+      database and the data may be empty or half restored; they are in the
+      backup {{ vaultwarden_backup }}. The role refuses every version and
+      changes nothing until Vaultwarden is restored. {{ vaultwarden_restore_hint }}
+      Then check Vaultwarden (log in, open an item) and remove the marker (rm
+      {{ vaultwarden_marker_file }}).
+  vars:
+    vaultwarden_backup: "{{ vaultwarden_marker.backup | default('?', true) }}"
+  when:
+    - vaultwarden_marker_read.content is defined
+    - not vaultwarden_marker.rolled_back_to | default(none)
+
+# A marker that names no version blocks every version.
+- name: Refuse the version of a failed update
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_marker_file }} exists: the Vaultwarden update to
+      {{ vaultwarden_version }} failed on {{ vaultwarden_marker.time | default('?') }}
+      (rolled back to {{ vaultwarden_marker.rolled_back_to }}; backup
+      {{ vaultwarden_marker.backup | default('?') }}). The role does not try
+      {{ vaultwarden_version }} again and changes nothing while the marker
+      names it. To try again, remove it (rm {{ vaultwarden_marker_file }}); or
+      set vaultwarden_version to another version, and the marker is removed
+      once a run with it succeeds.
+  when:
+    - vaultwarden_marker_read.content is defined
+    - (vaultwarden_marker.failed_version | default(vaultwarden_version) | string) == vaultwarden_version | string
+
+# Left by a run that stopped during an update (update.yml): the compose
+# file, the secrets and the data may be the new version's, half migrated.
+# The role does not guess; the marker says how far the update got.
+- name: Look for the marker of an update in progress
+  ansible.builtin.stat:
+    path: "{{ vaultwarden_update_marker }}"
+    get_checksum: false
+  register: vaultwarden_update_marker_stat
+
+- name: Refuse an update that did not finish
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_update_marker }} exists: a Vaultwarden update in
+      {{ vaultwarden_dir }} did not finish (the run stopped during it), so the
+      role cannot tell what is installed and changes nothing. The marker
+      names both versions, the step it got to and, with step update, the
+      backup from before it. With step backup nothing had changed yet: remove
+      {{ vaultwarden_update_marker_files | join(' ') }} and run the role
+      again. With step update, put the backup back by hand (its compose.yaml,
+      secrets, vaultwarden and dump, as a rollback does), then remove them.
+  when: vaultwarden_update_marker_stat.stat.exists
 
 # The first save on the admin page writes config.json, and Vaultwarden takes
 # its values over every setting the role writes (the admin token, SMTP and

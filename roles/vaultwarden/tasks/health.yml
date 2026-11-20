@@ -4,11 +4,16 @@
 # reports the health status healthy, then asks Vaultwarden itself, from
 # inside its container: GET /alive, which takes a database connection, and
 # POST /identity/accounts/prelogin for an address that does not exist, which
-# reads the users table; both must answer 200. The image has no sqlite3 (nor
-# psql), so these two are the database check: they prove the connection and
-# the schema the app reads. Sets vaultwarden_healthy and
-# vaultwarden_health_lines (service, state and health of each container, then
-# the two answers). Never fails by itself.
+# looks the address up in the users table; both must answer 200. Then the
+# database check: the role reads the users and ciphers tables as Vaultwarden
+# does (SQLite with the host's Python, as the image has no sqlite3; the own
+# PostgreSQL with psql in its container; the external one with the client of
+# its major as the user Vaultwarden logs in as). Vaultwarden answers a
+# prelogin with its defaults when the read of the users table fails, so
+# without it a broken schema (a table gone, a right revoked) would pass. Sets
+# vaultwarden_healthy and vaultwarden_health_lines (service, state and health
+# of each container, then the two answers and the database check). Never
+# fails by itself.
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:
@@ -57,6 +62,39 @@
   failed_when: false
   when: vaultwarden_containers_healthy | bool
 
+- name: Note whether Vaultwarden answers
+  ansible.builtin.set_fact:
+    vaultwarden_answers: >-
+      {{ vaultwarden_containers_healthy | bool
+         and vaultwarden_health_requests.results | default([]) | selectattr('stdout', 'defined')
+             | selectattr('stdout', 'eq', '200') | list | length == 2 }}
+
+# Read-only. With the external server the password goes through stdin, so
+# the task is no_log; the note below quotes only psql's error line.
+- name: Read the users and ciphers tables
+  ansible.builtin.command:
+    argv: >-
+      {{ (vaultwarden_external_psql + [vaultwarden_db_check_sql]) if vaultwarden_database == 'postgres_external'
+         else ['docker', 'compose', 'exec', '-T', 'db', 'psql', '--username=' ~ vaultwarden_db_user,
+               '--dbname=' ~ vaultwarden_db_name, '--no-psqlrc', '--tuples-only', '--no-align',
+               '--set=ON_ERROR_STOP=1', '--command=' ~ vaultwarden_db_check_sql] if vaultwarden_database == 'postgres'
+         else ['python3', '-c', vaultwarden_db_check_sqlite, vaultwarden_data_dir ~ '/vaultwarden/db.sqlite3',
+               vaultwarden_db_check_sql] }}
+    chdir: "{{ vaultwarden_dir }}"
+    stdin: "{{ vaultwarden_db_password if vaultwarden_database == 'postgres_external' else omit }}"
+    stdin_add_newline: false
+  vars:
+    vaultwarden_external_image: "{{ vaultwarden_client_image | default('') }}"
+  register: vaultwarden_db_check
+  until: vaultwarden_db_check.rc == 0
+  retries: 2
+  delay: 2
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: "{{ vaultwarden_database == 'postgres_external' }}"
+  when: vaultwarden_answers | bool
+
 - name: Note whether Vaultwarden is healthy
   ansible.builtin.set_fact:
     vaultwarden_health_lines: >-
@@ -64,8 +102,11 @@
       {%- for result in vaultwarden_health_requests.results | default([]) if result.skipped is not defined -%}
       {%-   set _ = lines.append(result.item.name ~ ' answered ' ~ (result.stdout | default('', true) or 'nothing')) -%}
       {%- endfor -%}
+      {%- if vaultwarden_db_check.rc is defined -%}
+      {%-   set _ = lines.append('the users and ciphers tables '
+                                 ~ ('read' if vaultwarden_db_check.rc == 0 else 'cannot be read: ' ~ vaultwarden_external_error)) -%}
+      {%- endif -%}
       {{ lines }}
-    vaultwarden_healthy: >-
-      {{ vaultwarden_containers_healthy | bool
-         and vaultwarden_health_requests.results | default([]) | selectattr('stdout', 'defined')
-             | selectattr('stdout', 'eq', '200') | list | length == 2 }}
+    vaultwarden_healthy: "{{ vaultwarden_answers | bool and vaultwarden_db_check.rc | default(1) == 0 }}"
+  vars:
+    vaultwarden_external_result: "{{ vaultwarden_db_check }}"
