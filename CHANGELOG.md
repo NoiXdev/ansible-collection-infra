@@ -114,6 +114,43 @@
   the PPA), and for Ubuntu's own `php<v>-*` packages of a version in `php_versions`, also at a
   version an Ubuntu update has replaced. The unattended-upgrades origin is `deb.sury.org`; it
   also matches another repository of packages.sury.org that a host added itself.
+- `vaultwarden`: new role that runs Vaultwarden (`vaultwarden_version`, pinned, 1.37.0 or newer,
+  no `latest` or `-alpine`), a password vault for the official Bitwarden apps, as one compose
+  project in `vaultwarden_dir` (default `/opt/vaultwarden`), behind Traefik with no published port.
+  It needs Docker. `vaultwarden_hostname` is required. `vaultwarden_database` keeps the vault in
+  SQLite (default), in a PostgreSQL 18 or newer container of the project (`postgres`) or on a
+  PostgreSQL 15 or newer server of your own (`postgres_external`, `vaultwarden_db_host`,
+  `_port`, `_name`, `_user`, `vaultwarden_db_sslmode`), with `vaultwarden_db_password` required for
+  both. An external database must be owned by the user and empty on install, and the role runs
+  the PostgreSQL client of the server's major from the repository of `vaultwarden_postgres_image`.
+  The mode, and for an external server its host, port and database, are recorded at install: a
+  run with another mode or another database is refused, as Vaultwarden would start an empty vault
+  there. Signups are off (`vaultwarden_signups_allowed`); users join by invitation, with
+  `vaultwarden_invitation_org_name` and mail through `vaultwarden_smtp`. The admin page is on only
+  with `vaultwarden_admin_token_hash`, an Argon2id hash (a plain token is refused), behind a
+  router of its own with `vaultwarden_traefik_admin_entrypoints` and
+  `vaultwarden_traefik_admin_middlewares`. Push notifications through Bitwarden's relay take
+  `vaultwarden_push_installation_id` and `_key` (both or neither) and `vaultwarden_push_region`
+  (`us` or `eu`). More settings go through `vaultwarden_env`; the ones the role sets itself, every
+  `PUSH_*`, `SMTP_*`, `ROCKET_*` and `*_FILE` key, and keys without a value are refused. The
+  secrets (the admin hash, the database URL with the password percent-encoded, the SMTP password,
+  the push key) live in `0600` files, not in the compose file, the output or a process list; a
+  changed secret restarts Vaultwarden, also on the run after one that stopped before the restart.
+  A `config.json` written by a save on the admin page, which would override the role's settings,
+  makes every run refuse and name its keys (not its values). The data lives in
+  `vaultwarden_data_dir`, which can be a `base_mounts` volume (`vaultwarden_data_dir_mountpoint`;
+  a path with a comma is refused); a run that finds the installation without its data refuses in
+  every state. Every run checks that Vaultwarden is healthy and reads its database. Before an
+  update the role takes a backup in `<vaultwarden_data_dir>/backups/` (the compose file, the
+  secrets, the data without the icon cache and with PostgreSQL a dump), keeping the newest
+  `vaultwarden_backups_keep`. A failed update is rolled back (`vaultwarden_rollback_timeout`
+  bounds the wait) and writes `update-failed`, which blocks that version; after a rollback that
+  failed too it blocks every version until the backup is restored by hand. A run that stopped
+  during an update leaves `update-in-progress`: stopped during the backup, the next run cleans up
+  and updates; stopped after it, every run refuses until `vaultwarden_restore_interrupted: true`
+  restores the backup for one run (refused when there is no such update) or the marker is
+  removed. A downgrade is refused, and a failed install leaves `install-incomplete`, which makes
+  every later run refuse.
 
 ## 0.6.0 — 2026-11-17
 
