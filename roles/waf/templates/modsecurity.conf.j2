@@ -37,10 +37,13 @@ SecAuditLog /dev/stdout
 # The role's own rules (9599900-9599999): XML and JSON bodies are parsed into
 # arguments, so the Core Rule Set inspects their values (it picks the JSON
 # parser itself only for +json and AWS JSON types, not application/json);
-# a body that cannot be parsed is refused rather than passed uninspected.
+# a body that cannot be parsed is refused rather than passed uninspected. An
+# empty body (a POST or DELETE without one, but with the content type) has
+# nothing to inspect and passes: the XML parser reports an error for it.
 SecRule REQUEST_HEADERS:Content-Type "@rx ^(?:application(?:/soap\+|/)|text/)xml" "id:9599900,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=XML"
 SecRule REQUEST_HEADERS:Content-Type "@rx ^application/json" "id:9599902,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=JSON"
-SecRule REQBODY_ERROR "!@eq 0" "id:9599901,phase:2,t:none,log,deny,status:400,msg:'Failed to parse request body.'"
+SecRule REQBODY_ERROR "!@eq 0" "id:9599901,phase:2,t:none,log,deny,status:400,msg:'Failed to parse request body.',chain"
+  SecRule REQUEST_BODY_LENGTH "!@eq 0" "t:none"
 {% if waf_rules_before | length > 0 %}
 
 # waf_rules_before

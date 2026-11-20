@@ -371,6 +371,13 @@ test_traefik() {
     recorded >&2
     fail "an attack or a broken body in JSON reached the backend"
   fi
+  # A JSON or XML content type without a body (API clients send them) has
+  # nothing to parse and passes.
+  h sh -c ': >/tmp/empty'
+  expect 200 block.test /empty-json -X POST -H 'Content-Type: application/json' -H 'Expect:' -d ''
+  arrived_whole POST /empty-json /tmp/empty
+  expect 200 block.test /empty-xml -X POST -H 'Content-Type: application/xml' -H 'Expect:' -d ''
+  arrived_whole POST /empty-xml /tmp/empty
 
   echo "-- the site's settings with a port, in upper case and with a trailing dot"
   # A path starting with :8443 goes to the alt entrypoint.
