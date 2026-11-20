@@ -511,3 +511,36 @@
       loop_control:
         label: "{{ item.1.name }}"
       when: waf_mode == 'traefik'
+
+# Last, as the anubis role does: the role writes waf.yml into Traefik's file
+# provider directory and joins Traefik's network, so both must be there.
+- name: Check what traefik mode needs from Traefik
+  when: waf_mode == 'traefik'
+  block:
+    - name: Read Traefik's dynamic directory
+      ansible.builtin.stat:
+        path: "{{ waf_traefik_dynamic_dir }}"
+      register: waf_dynamic_dir_stat
+
+    - name: Check Traefik's dynamic directory
+      ansible.builtin.assert:
+        that: waf_dynamic_dir_stat.stat.isdir | default(false)
+        fail_msg: >-
+          waf: {{ waf_traefik_dynamic_dir }} (waf_traefik_dynamic_dir) is not a directory: run the
+          traefik role first, or point it at Traefik's file provider directory
+        quiet: true
+
+    - name: Read Traefik's network
+      ansible.builtin.command:
+        argv: [docker, network, inspect, --format, "{{ '{{.Name}}' }}", "{{ waf_traefik_network }}"]
+      register: waf_network_inspect
+      changed_when: false
+      failed_when: false
+
+    - name: Check Traefik's network
+      ansible.builtin.assert:
+        that: waf_network_inspect.rc == 0
+        fail_msg: >-
+          waf: the Docker network {{ waf_traefik_network }} (waf_traefik_network) does not exist:
+          run the traefik role first, or name Traefik's network
+        quiet: true

@@ -8,3 +8,6 @@
 # Every refusal comes before the first change on the host.
 - name: Check the settings
   ansible.builtin.import_tasks: check.yml
+
+- name: Run the WAF
+  ansible.builtin.import_tasks: apply.yml

@@ -76,8 +76,13 @@ role_fails() {
 expect_in_log() {
   grep -qF -- "$2" "$out/$1.log" || { cat "$out/$1.log" >&2; fail "$1.log lacks: $2"; }
 }
-# untouched: the role changed nothing on the host before it refused.
-untouched() { h test ! -e /opt/waf || fail "waf touched the host before checking its settings"; }
+# untouched: the role changed nothing on the host before it refused: no
+# waf_dir, no container and no Traefik objects.
+untouched() {
+  h test ! -e /opt/waf || fail "waf touched the host before checking its settings"
+  h test ! -e /opt/traefik/dynamic/waf.yml || fail "waf wrote waf.yml before checking its settings"
+  [ -z "$(h docker ps -aq --filter name=^noixdev-waf)" ] || fail "waf started a container before checking its settings"
+}
 # refused <name> <text> [-e ...]: role_fails, then expect_in_log and untouched.
 refused() {
   local name="$1" text="$2"
@@ -88,7 +93,8 @@ refused() {
 }
 
 # probe <host header> <path> [curl args...]: the HTTP status of a request
-# from inside the test host to its port 80 (000 when nothing answers).
+# from inside the test host to its port 80 (000 when nothing answers). A path
+# that starts with :<port> goes to that port instead (another entrypoint).
 probe() {
   local host_header="$1" path="$2"
   shift 2
@@ -178,10 +184,263 @@ test_refusals() {
     -e '{"waf_rules_before": "Include /etc/passwd"}'
   refused unknown-key 'waf: waf_sites entry a has unknown keys (colour)' \
     -e "$(one_site '"colour": "red"')"
+  refused router-key 'waf: waf_sites entry a has routers with unknown keys (colour)' \
+    -e "$(one_site '"routers": [{"entrypoints": ["web"], "colour": "red"}]')"
+  refused router-entrypoint 'waf: waf_sites entry a has an invalid router waf-a-1' \
+    -e "$(one_site '"routers": [{"entrypoints": ["alt"]}]')" -e '{"traefik_entrypoints": [{"name": "web", "port": 80}]}'
+  refused bypass-slashes 'waf: waf_sites entry a has invalid bypass_paths (/a//b)' \
+    -e "$(one_site '"bypass_paths": ["/a//b"]')"
+  # This host has no Traefik: its directory and network are missing.
+  refused no-dynamic-dir 'waf: /opt/traefik/dynamic (waf_traefik_dynamic_dir) is not a directory' \
+    -e "$(one_site '')"
+  refused no-network 'waf: the Docker network proxy (waf_traefik_network) does not exist' \
+    -e "$(one_site '')" -e waf_traefik_dynamic_dir=/tmp
   # /usr/bin holds the docker CLI of the docker role's packages.
   refused no-docker 'The docker CLI was not found' \
     -e '{"test_environment": {"PATH": "/usr/sbin:/sbin"}}'
   expect_in_log no-docker 'Docker is not installed or not running'
+}
+
+# The traefik scenario: the converge arguments, the WAF's container and its
+# address on the proxy network.
+traefik_args=(-e "@$here/traefik.yml" -e test_traefik=true -e test_waf=true)
+waf=noixdev-waf
+waf_url=http://172.31.255.253:8080
+browser='Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0'
+
+# expect <want> <probe arguments...>: one probe must answer want.
+expect() {
+  local want="$1" got
+  shift
+  got="$(probe "$@")"
+  [ "$got" = "$want" ] || fail "probe $*: got $got, expected $want"
+}
+# await <want> <probe arguments...>: the same, retried for up to 30 s, for a
+# change that Traefik (its file provider) or Docker's DNS learns late.
+await() {
+  local want="$1" got=
+  shift
+  for _ in $(seq 30); do
+    got="$(probe "$@")"
+    [ "$got" = "$want" ] && return 0
+    sleep 1
+  done
+  fail "probe $*: got $got, expected $want (for 30 s)"
+}
+# direct <host header> <path> [curl args...]: the HTTP status of a request
+# straight to the WAF's address on the proxy network, past Traefik (curl in
+# the WAF's own container).
+direct() {
+  local host_header="$1" path="$2"
+  shift 2
+  h docker exec "$waf" curl -s -o /dev/null -w '%{http_code}' --max-time 30 -H "Host: $host_header" "$@" "$waf_url$path" || true
+}
+# audit: the WAF's stdout (its audit log, one JSON line per event).
+audit() { h docker logs "$waf" 2>/dev/null; }
+audit_lines() { audit | wc -l | tr -d ' '; }
+# recorded: the recording backend's lines, "<request line> | <UA> | <bytes>".
+recorded() { h docker logs waf-fixtures-recorder-1 2>/dev/null; }
+recorder_ip() { h docker inspect -f '{{(index .NetworkSettings.Networks "proxy").IPAddress}}' waf-fixtures-recorder-1; }
+# websocket <host header> <path> <idle seconds>: through the web entrypoint, a
+# WebSocket upgrade, a text message, the given idle time and a second message;
+# prints both echoes.
+websocket() {
+  hi python3 - "$@" <<'PY'
+import base64, os, socket, sys, time
+
+host, path, idle = sys.argv[1], sys.argv[2], int(sys.argv[3])
+s = socket.create_connection(("127.0.0.1", 80), timeout=idle + 30)
+key = base64.b64encode(os.urandom(16)).decode()
+s.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+           f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+head = b""
+while b"\r\n\r\n" not in head:
+    chunk = s.recv(1)
+    if not chunk:
+        sys.exit(f"closed during the handshake: {head!r}")
+    head += chunk
+status = head.split(b"\r\n", 1)[0].decode()
+if status.split()[1:2] != ["101"]:
+    sys.exit(f"no upgrade: {status}")
+
+
+def exactly(n):
+    data = b""
+    while len(data) < n:
+        chunk = s.recv(n - len(data))
+        if not chunk:
+            sys.exit("the connection was closed")
+        data += chunk
+    return data
+
+
+def send(text):
+    payload, mask = text.encode(), os.urandom(4)
+    s.sendall(bytes([0x81, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+
+def receive():
+    length = exactly(2)[1] & 0x7F
+    if length == 126:
+        length = int.from_bytes(exactly(2), "big")
+    elif length == 127:
+        length = int.from_bytes(exactly(8), "big")
+    return exactly(length).decode()
+
+
+send("noix-ws-1")
+print(receive())
+time.sleep(idle)
+send("noix-ws-2")
+print(receive())
+PY
+}
+
+# The traefik scenario, on the host of the refusals (which must run first:
+# they need a host without the WAF and without Traefik).
+test_traefik() {
+  local before got sum ip
+  echo "== traefik (ubuntu $1)"
+  converge "${traefik_args[@]}"
+  converge_unchanged "${traefik_args[@]}"
+
+  echo "-- the container and the Traefik objects"
+  got="$(h docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.Config.User}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{len .HostConfig.PortBindings}}' "$waf" || true)"
+  [ "$got" = "true 101:101 [ALL] [no-new-privileges:true] 0" ] || fail "the WAF container runs as: $got"
+  got="$(h docker inspect -f '{{(index .NetworkSettings.Networks "proxy").IPAMConfig.IPv4Address}}' "$waf")"
+  [ "$got" = 172.31.255.253 ] || fail "the WAF's address is $got"
+  for name in waf-block-1 waf-detect-1 waf-paused-1 'url: http://172.31.255.253:8080'; do
+    h grep -qF -- "$name" /opt/traefik/dynamic/waf.yml || fail "waf.yml lacks $name"
+  done
+  [ -z "$(h docker ps -aq --filter name=noixdev-waf-check)" ] || fail "the check container was left behind"
+  [ "$(direct unknown.test /)" = 421 ] || fail "an unknown host did not answer 421"
+
+  echo "-- a block site: attacks answer 403 and never reach the backend"
+  await 200 block.test /
+  expect 403 block.test '/?exec=/bin/bash'
+  expect 403 block.test / -A Nikto
+  expect 403 block.test '/?file=../../etc/passwd'
+  recorded | grep -q '^GET / HTTP/1.1 | ' || fail "the backend of block.test saw no request"
+  if recorded | grep -Eq 'exec=|etc/passwd|Nikto'; then
+    recorded >&2
+    fail "the backend of block.test saw an attack"
+  fi
+  for id in 932160 913100 930120; do
+    audit | grep -qF "\"$id\"" || { audit >&2; fail "the audit log lacks rule $id"; }
+  done
+  # Traefik replaces a client's X-Forwarded-For; the WAF believes only Traefik's.
+  expect 403 block.test '/?exec=/bin/bash' -H 'X-Forwarded-For: 203.0.113.9'
+  [ "$(direct block.test '/?exec=/bin/bash' -H 'X-Forwarded-For: 203.0.113.9')" = 403 ] \
+    || fail "a direct attack was not refused"
+  if audit | grep -qF 203.0.113.9; then fail "the WAF believed a client's X-Forwarded-For"; fi
+
+  echo "-- the site's settings with a port, in upper case and with a trailing dot"
+  # A path starting with :8443 goes to the alt entrypoint.
+  await 200 block.test:8443 :8443/
+  expect 403 block.test:8443 ':8443/?exec=/bin/bash'
+  expect 403 BLOCK.test '/?exec=/bin/bash'
+  # tuned.test's paranoia 2 comes from its Host-keyed rule.
+  expect 403 TUNED.test '/?q=a%27b%27c%28%29'
+  [ "$(direct tuned.test. '/?q=a%27b%27c%28%29')" = 403 ] || fail "tuned.test. lost its settings"
+  [ "$(direct TUNED.test:8080 '/?q=a%27b%27c%28%29')" = 403 ] || fail "TUNED.test:8080 lost its settings"
+
+  echo "-- a detect site: attacks pass and are logged"
+  before="$(audit_lines)"
+  expect 200 detect.test '/?exec=/bin/bash'
+  expect 200 detect.test / -A Nikto
+  expect 200 detect.test '/?file=../../etc/passwd'
+  [ "$(audit_lines)" -ge $((before + 3)) ] || { audit >&2; fail "detect.test's attacks were not logged"; }
+
+  echo "-- a registry: an uninspected upload path, the rest inspected"
+  h sh -c 'head -c 20971520 /dev/zero >/tmp/blob'
+  expect 200 registry.test /v2/x/blobs/uploads/1 -X PATCH -H 'Content-Type: application/octet-stream' --data-binary @/tmp/blob
+  recorded | grep -q '^PATCH /v2/x/blobs/uploads/1 HTTP/1.1 | .* | 20971520$' \
+    || { recorded >&2; fail "the backend did not get the whole upload"; }
+  expect 403 registry.test '/v2/../?exec=/bin/bash' --path-as-is
+  [ "$(direct registry.test '/v2/../?exec=/bin/bash' --path-as-is)" = 403 ] || fail "/v2/../ carried the bypass"
+  expect 403 registry.test /api/x -X PUT
+
+  echo "-- an exclusion for one path"
+  expect 200 hooks.test '/webhook/a?exec=/bin/bash'
+  expect 403 hooks.test '/a?exec=/bin/bash'
+  expect 403 hooks.test '/webhook/../a?exec=/bin/bash' --path-as-is
+  [ "$(direct hooks.test '/webhook/../a?exec=/bin/bash' --path-as-is)" = 403 ] || fail "/webhook/../ carried the exclusion"
+
+  echo "-- Anubis before the WAF"
+  got="$(h curl -s --max-time 30 -H 'Host: guarded.test' -A "$browser" -w '\n%{http_code}' 'http://127.0.0.1/?exec=/bin/bash' || true)"
+  [ "${got##*$'\n'}" = 401 ] || fail "guarded.test answered ${got##*$'\n'}, expected Anubis's 401"
+  case "$got" in *anubis_challenge*) ;; *) fail "guarded.test did not answer the challenge page" ;; esac
+
+  echo "-- a WebSocket, idle for longer than a minute"
+  got="$(websocket ws.test /echo 65 || true)"
+  [ "$got" = "$(printf 'noix-ws-1\nnoix-ws-2')" ] || fail "the WebSocket echoed: $got"
+
+  echo "-- paranoia 2 and an extra method for one site only"
+  expect 403 tuned.test '/?q=a%27b%27c%28%29'
+  expect 200 block.test '/?q=a%27b%27c%28%29'
+  expect 200 tuned.test /x -X PUT -d a=b
+  expect 403 block.test /x -X PUT -d a=b
+
+  echo "-- mode off: no inspection, nothing logged"
+  before="$(audit_lines)"
+  expect 200 paused.test '/?exec=/bin/bash'
+  [ "$(audit_lines)" = "$before" ] || { audit >&2; fail "paused.test's request was logged"; }
+
+  echo "-- an absolute-form request line cannot pick a site"
+  [ "$(direct detect.test / --request-target 'http://block.test/')" = 400 ] || fail "absolute form was not refused"
+  [ "$(direct block.test / --request-target 'http://block.test/')" = 400 ] || fail "absolute form was not refused"
+
+  echo "-- a recreated backend with a new address, without a reload"
+  ip="$(recorder_ip)"
+  h sh -c 'cd /opt/waf-fixtures && docker compose -p waf-fixtures rm -s -f recorder' >/dev/null 2>&1
+  # It takes the freed address, so the new recorder gets another one.
+  h docker run -d --name waf-test-placeholder --network proxy "$(sed -n 's/^fixtures_python_image: *//p' "$here/traefik.yml")" sleep 600 >/dev/null
+  h sh -c 'cd /opt/waf-fixtures && docker compose -p waf-fixtures up -d recorder' >/dev/null 2>&1
+  [ "$(recorder_ip)" != "$ip" ] || fail "the recreated recorder kept its address $ip"
+  h docker rm -f waf-test-placeholder >/dev/null
+  await 200 block.test /
+
+  echo "-- the WAF stopped: 504, never the backend; the next converge brings it back"
+  h docker stop "$waf" >/dev/null
+  # Nothing answers on the stopped WAF's fixed address: Traefik gives up at
+  # waf.yml's dial timeout (5 s) with 504.
+  expect 504 block.test / --max-time 15
+  expect 504 paused.test / --max-time 15
+  converge "${traefik_args[@]}"
+  expect 200 block.test /
+  converge_unchanged "${traefik_args[@]}"
+
+  echo "-- broken rules fail the run and leave the running WAF alone"
+  sum="$(h sha256sum /opt/waf/modsecurity.conf /opt/waf/nginx.conf)"
+  if play broken "${traefik_args[@]}" -e '{"waf_rules_before": "SecRule BROKEN"}'; then
+    cat "$out/broken.log" >&2
+    fail "the run with broken rules succeeded"
+  fi
+  expect_in_log broken 'nginx: [emerg]'
+  expect_in_log broken 'nginx: configuration file /etc/nginx/nginx.conf test failed'
+  [ "$(h sha256sum /opt/waf/modsecurity.conf /opt/waf/nginx.conf)" = "$sum" ] || fail "the broken rules reached waf_dir"
+  [ -z "$(h docker ps -aq --filter name=noixdev-waf-check)" ] || fail "the check container was left behind"
+  expect 200 block.test /
+  expect 403 block.test '/?exec=/bin/bash'
+
+  echo "-- detect switched to block changes that site only"
+  converge "${traefik_args[@]}" -e test_detect_mode=block
+  expect 403 detect.test '/?exec=/bin/bash'
+  expect 200 detect.test /
+  expect 200 paused.test '/?exec=/bin/bash'
+  expect 200 hooks.test '/webhook/a?exec=/bin/bash'
+  expect 200 block.test '/?q=a%27b%27c%28%29'
+  converge_unchanged "${traefik_args[@]}" -e test_detect_mode=block
+
+  echo "-- a removed site answers 421 and loses its routers"
+  converge "${traefik_args[@]}" -e test_detect_mode=block -e '{"test_without": ["hooks"]}'
+  [ "$(direct hooks.test /)" = 421 ] || fail "the removed hooks.test did not answer 421"
+  if h grep -qF waf-hooks- /opt/traefik/dynamic/waf.yml; then fail "waf.yml kept the routers of hooks"; fi
+  await 404 hooks.test /
+  expect 200 block.test /
+  converge_unchanged "${traefik_args[@]}" -e test_detect_mode=block -e '{"test_without": ["hooks"]}'
+
+  h docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$waf" | tee "$out/memory-$1.txt"
 }
 
 # All scenarios by default; NOIXDEV_INFRA_WAF_TESTS="refusals" runs only these.
@@ -191,7 +450,8 @@ for ubuntu in $releases; do
   for scenario in $scenarios; do
     case "$scenario" in
       refusals) test_refusals "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (refusals)" ;;
+      traefik) test_traefik "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (refusals traefik)" ;;
     esac
   done
   cleanup

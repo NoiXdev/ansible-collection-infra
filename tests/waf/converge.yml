@@ -1,9 +1,10 @@
 ---
 # The test host's playbook. The setup (the packages the tests call, and
 # Docker) runs unless run.sh passes test_setup=false; the waf role runs only
-# with test_waf=true. test_environment is the environment of every task: the
-# refusal run without Docker hides the docker CLI from PATH with it, as
-# tests/dns_invalid_peer_no_tailscale.yml does.
+# with test_waf=true. test_traefik=true (with -e @traefik.yml) adds Traefik,
+# Anubis and the backends of the traefik scenario. test_environment is the
+# environment of every task: the refusal run without Docker hides the docker
+# CLI from PATH with it, as tests/dns_invalid_peer_no_tailscale.yml does.
 - name: Converge
   hosts: all
   vars_files: [vars.yml]
@@ -21,5 +22,59 @@
   roles:
     - role: noixdev.infra.docker
       when: test_setup | default(true) | bool
+    - role: noixdev.infra.traefik
+      when: test_traefik | default(false) | bool
+    - role: noixdev.infra.anubis
+      when: test_traefik | default(false) | bool
     - role: noixdev.infra.waf
       when: test_waf | default(false) | bool
+  # The WAF resolves its backends per request, so they may come after it.
+  post_tasks:
+    - name: Start the traefik scenario's backends
+      when: test_traefik | default(false) | bool
+      block:
+        - name: Create the fixtures directory
+          ansible.builtin.file:
+            path: "{{ fixtures_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Copy the recording backend
+          ansible.builtin.copy:
+            src: recorder.py
+            dest: "{{ fixtures_dir }}/recorder.py"
+            mode: "0644"
+
+        - name: Write the fixtures compose file
+          ansible.builtin.copy:
+            dest: "{{ fixtures_dir }}/compose.yaml"
+            content: "{{ fixtures_compose | to_nice_yaml(indent=2) }}"
+            mode: "0644"
+          vars:
+            fixtures_compose:
+              services:
+                whoami:
+                  image: "{{ fixtures_whoami_image }}"
+                  networks: [proxy]
+                  restart: unless-stopped
+                whoami2:
+                  image: "{{ fixtures_whoami_image }}"
+                  networks: [proxy]
+                  restart: unless-stopped
+                recorder:
+                  image: "{{ fixtures_python_image }}"
+                  command: [python, -u, /recorder.py]
+                  volumes: [./recorder.py:/recorder.py:ro]
+                  networks: [proxy]
+                  restart: unless-stopped
+              networks:
+                proxy:
+                  name: proxy
+                  external: true
+
+        - name: Start the fixtures
+          community.docker.docker_compose_v2:
+            project_src: "{{ fixtures_dir }}"
+            project_name: waf-fixtures
+            state: present
+            pull: missing

@@ -1,0 +1,52 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+# {{ ansible_managed }}
+# The WAF: nginx with ModSecurity and the Core Rule Set from the image, run
+# with the role's files only (the image's own start script, which writes its
+# configuration from the environment, is bypassed).
+services:
+  # Service and container share the unique name.
+  {{ waf_name }}:
+    image: {{ q(waf_image) }}
+    container_name: {{ waf_name }}
+    entrypoint: [nginx]
+    command: [-g, "daemon off;"]
+    user: "{{ waf_uid }}:{{ waf_uid }}"
+    # waf_dir as nginx's configuration directory, read-only: nginx.conf and
+    # modsecurity.conf (a directory, so a reload reads files the role
+    # replaced).
+    volumes:
+      - {{ q(waf_dir ~ ':' ~ waf_conf_dir ~ ':ro') }}
+    # nginx's temporary files and pid, and ModSecurity's directories.
+    tmpfs:
+      - /tmp
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      # The loopback-only server of nginx.conf.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:{{ waf_health_port }}/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+{% if waf_mode == 'traefik' %}
+    # A fixed address next to Traefik's, so a backend that trusts a proxy
+    # address can trust exactly it. No published port: only Traefik reaches
+    # it.
+    networks:
+      {{ q(waf_traefik_network) }}:
+        ipv4_address: {{ q(waf_traefik_address) }}
+{% endif %}
+    cpus: {{ q(waf_cpus) }}
+    mem_limit: {{ q(waf_memory) }}
+    restart: unless-stopped
+{% if waf_mode == 'traefik' %}
+
+networks:
+  {{ q(waf_traefik_network) }}:
+    name: {{ q(waf_traefik_network) }}
+    external: true
+{% endif %}

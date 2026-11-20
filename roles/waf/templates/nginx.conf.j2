@@ -1,0 +1,137 @@
+{#- The ModSecurity rules of a server block or location, one
+    modsecurity_rules directive per rule (each a single-quoted nginx string;
+    the checks keep quotes out of tags, IDs and targets). -#}
+{%- macro rules(lines, indent) -%}
+{%- set directives = [] -%}
+{%- for line in lines %}{% set _ = directives.append(indent ~ "modsecurity_rules '" ~ line ~ "';") %}{% endfor -%}
+{{ directives | join(waf_newline) }}
+{%- endmacro -%}
+{%- macro exclusion_rules(exclusion) -%}
+{%- set lines = [] -%}
+{%- for tag in exclusion.remove_tags %}{% set _ = lines.append('SecRuleRemoveByTag ' ~ tag) %}{% endfor -%}
+{%- for id in exclusion.remove_ids %}{% set _ = lines.append('SecRuleRemoveById ' ~ id) %}{% endfor -%}
+{%- for target in exclusion.remove_targets %}{% set _ = lines.append('SecRuleUpdateTargetById ' ~ target.id ~ ' "!' ~ target.target ~ '"') %}{% endfor -%}
+{{ lines | to_json }}
+{%- endmacro -%}
+# {{ ansible_managed }}
+# The WAF: one server block per site of waf_sites, picked by Host, which
+# sends the site to its backend after ModSecurity's checks with the Core Rule
+# Set (modsecurity.conf, loaded once for all sites). Paths are matched on the
+# normalized path, so /v2/../x never gets the bypass or exclusion of /v2/.
+load_module {{ waf_module }};
+worker_processes {{ waf_workers }};
+pid /tmp/nginx.pid;
+error_log /dev/stderr notice;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  access_log off;
+  server_tokens off;
+  # What a site accepts at all stays with the proxy in front and the app;
+  # ModSecurity inspects up to the site's request_body_limit.
+  client_max_body_size 0;
+  # The root file system is read-only; /tmp is the container's tmpfs.
+  client_body_temp_path /tmp/client_body;
+  proxy_temp_path /tmp/proxy;
+  fastcgi_temp_path /tmp/fastcgi;
+  uwsgi_temp_path /tmp/uwsgi;
+  scgi_temp_path /tmp/scgi;
+
+  # The client's address for ModSecurity, from the X-Forwarded-For of the
+  # proxy in front only; nobody else can choose it.
+  set_real_ip_from {{ waf_traefik_trusted }};
+  real_ip_header X-Forwarded-For;
+
+  # Backend names are looked up per request: a recreated backend's new
+  # address is used without a reload.
+  resolver {{ waf_resolver }} valid={{ waf_resolver_valid }} ipv6=off;
+  resolver_timeout 5s;
+
+  map $http_upgrade $waf_connection {
+    default upgrade;
+    '' close;
+  }
+
+  # Host, the X-Forwarded-* headers of the proxy in front and the rest of
+  # the request pass unchanged; WebSocket upgrades pass; long uploads and
+  # streams are not cut off after a minute.
+  proxy_http_version 1.1;
+  proxy_set_header Host $http_host;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection $waf_connection;
+  proxy_redirect off;
+  proxy_buffering off;
+  proxy_request_buffering off;
+  proxy_read_timeout {{ waf_proxy_timeout }};
+  proxy_send_timeout {{ waf_proxy_timeout }};
+  proxy_ssl_server_name on;
+
+  modsecurity on;
+  modsecurity_rules_file {{ waf_conf_dir }}/modsecurity.conf;
+
+  # A Host no site lists.
+  server {
+    listen {{ waf_listen_port }} default_server;
+    modsecurity off;
+    return 421;
+  }
+
+  # The container's health check.
+  server {
+    listen 127.0.0.1:{{ waf_health_port }};
+    modsecurity off;
+    location = /healthz {
+      default_type text/plain;
+      return 200 "{{ waf_config_id }}\n";
+    }
+    location / {
+      return 404;
+    }
+  }
+{% for site in waf_sites_public %}
+{% set root_exclusion = site.exclusions | selectattr('path', 'equalto', '/') | list %}
+
+  # Site {{ site.name }} (mode {{ site.mode }}).
+  server {
+    listen {{ waf_listen_port }};
+    server_name {{ site.domains | join(' ') }};
+    # An absolute-form request line (http://other.test/) picks its server
+    # block by its own host, while the site's settings follow Host.
+    if ($request !~ "^[^ ]+ /") {
+      return 400;
+    }
+    set $waf_backend "{{ site.backend }}";
+{% if site.mode == 'off' %}
+    modsecurity off;
+{% else %}
+    # The engine mode, the inspection limit and exclusions for the whole site.
+{{ rules(['SecRuleEngine ' ~ ('On' if site.mode == 'block' else 'DetectionOnly')]
+           + (['SecRequestBodyLimit ' ~ site.request_body_limit]
+              if site.request_body_limit | int != waf_request_body_limit | int else [])
+           + (exclusion_rules(root_exclusion[0]) | from_json if root_exclusion | length > 0 else []), '    ') }}
+{% endif %}
+
+    location / {
+      proxy_pass $waf_backend;
+    }
+{% for path in site.bypass_paths %}
+
+    # Not inspected.
+    location ^~ {{ path }} {
+      modsecurity off;
+      proxy_pass $waf_backend;
+    }
+{% endfor %}
+{% for exclusion in site.exclusions if exclusion.path != '/' %}
+
+    location ^~ {{ exclusion.path }} {
+{{ rules(exclusion_rules(exclusion) | from_json, '      ') }}
+      proxy_pass $waf_backend;
+    }
+{% endfor %}
+  }
+{% endfor %}
+}

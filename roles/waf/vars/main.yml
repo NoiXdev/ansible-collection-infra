@@ -27,9 +27,10 @@ waf_router_priority: 1000
 # key of the same name in waf_sites:
 #   index       the entry's place in waf_sites, from 0 (the base of the
 #               site's rule IDs, 9500000 + 100 * index)
-#   host_regex  ^(?:d1|d2)(?::[0-9]+)?$ of the domains, dots escaped: the
-#               Host header (lower-cased first) of a request for the site,
-#               with or without a port
+#   host_regex  ^(?:d1|d2)[.]?(?::[0-9]+)?$ of the domains, dots escaped:
+#               the Host header (lower-cased first) of a request for the
+#               site, with or without a trailing dot (which nginx also
+#               ignores when it picks the server block) and a port
 #   routers     each with its name waf-<site>-<n> (n from 1), and the
 #               defaults of middlewares, rule (Host() of each domain, joined
 #               with ||) and priority
@@ -74,12 +75,13 @@ waf_sites_public: >-
         'routers': routers if entry.routers is sequence and entry.routers is not string
                    and entry.routers is not mapping else entry.routers,
         'index': loop.index0,
-        'host_regex': '^(?:' ~ domains | map('string') | map('replace', '.', waf_escaped_dot) | join('|') ~ ')(?::[0-9]+)?$'})) -%}
+        'host_regex': '^(?:' ~ domains | map('string') | map('replace', '.', waf_escaped_dot) | join('|') ~ ')[.]?(?::[0-9]+)?$'})) -%}
   {%- endfor -%}
   {{ sites }}
 
 # Replacement strings, kept out of the templates: Ansible versions differ in
 # how a template unescapes a backslash in a string literal.
+waf_newline: "\n"
 waf_host_rule: 'Host(`\1`)'
 waf_escaped_dot: '\.'
 # The port of a URL that matches waf_url_re (empty without one).
@@ -116,7 +118,8 @@ waf_image_re: '^([A-Za-z0-9._-]+(:[0-9]+)?/)?([a-z0-9._-]+/)*[a-z0-9._-]+:[A-Za-
 waf_ipv4: '((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
 waf_ipv4_re: '^{{ waf_ipv4 }}$'
 waf_ipv4_cidr_re: '^{{ waf_ipv4 }}/([0-9]|[12][0-9]|3[0-2])$'
-waf_address_re: '^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$'
+# An IPv4 or IPv6 address or network (nginx's set_real_ip_from).
+waf_address_re: '^({{ waf_ipv4 }}(/([0-9]|[12][0-9]|3[0-2]))?|[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}(/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?)$'
 
 # waf_traefik_address against an IPv4 network waf_cidr (a.b.c.d/n), which
 # the task that asks sets: the address and the network as numbers, and
@@ -133,3 +136,52 @@ waf_cidr_number: >-
 waf_cidr_size: "{{ 2 ** (32 - waf_cidr.split('/')[1] | int) }}"
 waf_cidr_holds_address: >-
   {{ waf_traefik_address_number | int // waf_cidr_size | int == waf_cidr_number | int // waf_cidr_size | int }}
+
+# Compose service, container and the WAF's name on its network, and the
+# throwaway container that tries new settings (nginx -t, no network) before
+# the running WAF gets them.
+waf_name: noixdev-waf
+waf_check_name: noixdev-waf-check
+# The image's user (nginx), which the role keeps.
+waf_uid: 101
+# The new files are rendered here and tried before they replace the ones in
+# waf_dir. waf_dir is the container's /etc/nginx (read-only, a directory so a
+# reload sees files that were replaced); the module and the Core Rule Set
+# come from the image.
+waf_staged_dir: "{{ waf_dir }}/staged"
+waf_files: [nginx.conf, modsecurity.conf, compose.yaml]
+waf_conf_dir: /etc/nginx
+waf_module: /usr/lib/nginx/modules/ngx_http_modsecurity_module.so
+waf_crs_dir: /etc/modsecurity.d/owasp-crs
+waf_unicode_map: /etc/modsecurity.d/unicode.mapping
+# Present while files were put in place that the running nginx has not
+# loaded yet (a run that stopped before the reload leaves it for the next).
+waf_reload_marker: "{{ waf_staged_dir }}/reload-pending"
+# The port the sites are served on (traefik mode: on the WAF's address on
+# the Traefik network, the port of the waf service), and the loopback-only
+# health check server inside the container.
+waf_listen_port: 8080
+waf_health_port: 8932
+waf_traefik_file: "{{ waf_traefik_dynamic_dir }}/waf.yml"
+# A line of the role's waf.yml, so host mode removes only the role's own file.
+waf_traefik_marker: "# Written by the noixdev.infra.waf role (traefik mode)."
+# Docker's resolver in a container on a user-defined network: the backends'
+# names are looked up per request (cached this long), so the check container
+# without a network passes and a recreated backend's new address is used.
+waf_resolver: 127.0.0.11
+waf_resolver_valid: 10s
+# Timeouts towards the backend: WebSockets, server-sent events and long
+# uploads stay open while data flows at least this often.
+waf_proxy_timeout: 3600s
+
+# What a site's allowed_methods and allowed_content_types add to: the Core
+# Rule Set's defaults (REQUEST-901-INITIALIZATION, CRS 4.25), which the
+# site's Host-keyed rule then sets as a whole.
+waf_crs_methods: [GET, HEAD, POST, OPTIONS]
+waf_crs_content_types:
+  - application/x-www-form-urlencoded
+  - multipart/form-data
+  - text/xml
+  - application/xml
+  - application/soap+xml
+  - application/json

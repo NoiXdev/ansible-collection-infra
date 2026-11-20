@@ -1,0 +1,88 @@
+---
+# The traefik scenario's settings (run.sh passes them with -e @traefik.yml),
+# test-only values. Traefik from the traefik role with two plain-HTTP
+# entrypoints on the test host's loopback (no TLS, so no ACME), Anubis on web,
+# and the fixtures of converge.yml on the proxy network: whoami, whoami2 (its
+# /echo is a WebSocket echo) and recorder (prints every request line).
+traefik_dir: /opt/traefik
+traefik_docker_allow_empty_services: true
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+    as_default: true
+  - name: alt
+    port: 8443
+    bind: [127.0.0.1]
+
+anubis_traefik_entrypoints: [web]
+anubis_redirect_domains: [guarded.test]
+# Plain HTTP: a Secure cookie would never come back.
+anubis_env:
+  COOKIE_SECURE: "false"
+
+fixtures_dir: /opt/waf-fixtures
+fixtures_whoami_image: traefik/whoami:v1.12.0
+fixtures_python_image: python:3.13-alpine
+
+# run.sh switches detect to block (-e test_detect_mode=block) and removes
+# sites (-e '{"test_without": ["hooks"]}').
+test_detect_mode: detect
+test_without: []
+waf_sites: "{{ test_sites | rejectattr('name', 'in', test_without) | list }}"
+test_sites:
+  - name: block
+    domains: [block.test]
+    backend: http://recorder:8000
+    mode: block
+    routers:
+      - entrypoints: [web, alt]
+  - name: detect
+    domains: [detect.test]
+    backend: http://whoami:80
+    mode: "{{ test_detect_mode }}"
+    routers:
+      - entrypoints: [web]
+  - name: registry
+    domains: [registry.test]
+    backend: http://recorder:8000
+    mode: block
+    bypass_paths: [/v2/]
+    routers:
+      - entrypoints: [web]
+  - name: hooks
+    domains: [hooks.test]
+    backend: http://whoami:80
+    mode: block
+    exclusions:
+      - path: /webhook/
+        remove_tags: [attack-rce]
+    routers:
+      - entrypoints: [web]
+  - name: guarded
+    domains: [guarded.test]
+    backend: http://whoami:80
+    mode: block
+    routers:
+      - entrypoints: [web]
+        middlewares: [anubis@file]
+  - name: ws
+    domains: [ws.test]
+    backend: http://whoami2:80
+    mode: block
+    routers:
+      - entrypoints: [web]
+  - name: tuned
+    domains: [tuned.test]
+    backend: http://whoami:80
+    mode: block
+    paranoia: 2
+    allowed_methods: [PUT]
+    routers:
+      - entrypoints: [web]
+  - name: paused
+    domains: [paused.test]
+    backend: http://whoami:80
+    mode: "off"
+    routers:
+      - entrypoints: [web]

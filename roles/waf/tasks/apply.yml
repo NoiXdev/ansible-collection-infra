@@ -1,0 +1,235 @@
+---
+# After the checks: render the new files next to the running ones, try them
+# in a throwaway container (nginx -t, no network), put them in place, start
+# or reload the WAF and wait until it serves them; Traefik's waf.yml comes
+# last. A failed try leaves the running WAF, its files and waf.yml unchanged.
+- name: Create the waf directory
+  ansible.builtin.file:
+    path: "{{ waf_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the directory for new settings
+  ansible.builtin.file:
+    path: "{{ waf_staged_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# A checksum of both nginx files (nginx.conf without the id itself), which
+# the health check server answers: after a reload the role waits until
+# nginx serves it.
+- name: Note the id of the new settings
+  ansible.builtin.set_fact:
+    waf_config_id: >-
+      {{ (lookup('ansible.builtin.template', 'nginx.conf.j2', template_vars={'waf_config_id': ''})
+          ~ lookup('ansible.builtin.template', 'modsecurity.conf.j2')) | hash('sha256') }}
+
+- name: Render the new settings
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ waf_staged_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ waf_files }}"
+
+- name: Read the new settings' checksums
+  ansible.builtin.stat:
+    path: "{{ waf_staged_dir }}/{{ item }}"
+    get_attributes: false
+    get_mime: false
+  loop: "{{ waf_files }}"
+  register: waf_staged_stat
+
+- name: Read the running settings' checksums
+  ansible.builtin.stat:
+    path: "{{ waf_dir }}/{{ item }}"
+    get_attributes: false
+    get_mime: false
+  loop: "{{ waf_files }}"
+  register: waf_running_stat
+
+- name: Note whether the settings change
+  ansible.builtin.set_fact:
+    waf_settings_change: >-
+      {{ waf_staged_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list
+         != waf_running_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}
+
+- name: Try the new settings in a check container
+  when: waf_settings_change
+  block:
+    - name: Remove a leftover check container
+      ansible.builtin.command:
+        argv: [docker, rm, --force, "{{ waf_check_name }}"]
+      changed_when: false
+      failed_when: false
+
+    # As the WAF runs, but without a network: nginx -t parses both files and
+    # the Core Rule Set of the (new) image.
+    - name: Test the new settings
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --name
+          - "{{ waf_check_name }}"
+          - --network
+          - none
+          - --read-only
+          - --tmpfs
+          - /tmp
+          - --cap-drop
+          - ALL
+          - --security-opt
+          - no-new-privileges:true
+          - --user
+          - "{{ waf_uid }}:{{ waf_uid }}"
+          - --memory
+          - "{{ waf_memory }}"
+          - --cpus
+          - "{{ waf_cpus }}"
+          - --volume
+          - "{{ waf_staged_dir }}:{{ waf_conf_dir }}:ro"
+          - --entrypoint
+          - nginx
+          - "{{ waf_image }}"
+          - -t
+      register: waf_check
+      changed_when: false
+      failed_when: false
+  always:
+    - name: Remove the check container
+      ansible.builtin.command:
+        argv: [docker, rm, --force, "{{ waf_check_name }}"]
+      changed_when: false
+      failed_when: false
+
+- name: Fail when nginx refuses the new settings
+  ansible.builtin.fail:
+    msg: >-
+      waf: nginx -t refused the new settings in a check container, so the running WAF, its files
+      in {{ waf_dir }} and Traefik's waf.yml are unchanged. Output:
+      {{ (waf_check.stderr ~ ' ' ~ waf_check.stdout) | trim }}
+  when:
+    - waf_settings_change
+    - waf_check.rc != 0
+
+# Removed once the running nginx has loaded the new files, so a run that
+# stops before the reload leaves the reload to the next run.
+- name: Note the reload for the new settings
+  ansible.builtin.copy:
+    dest: "{{ waf_reload_marker }}"
+    content: ""
+    owner: root
+    group: root
+    mode: "0644"
+  when: waf_settings_change
+
+# The rules first: compose.yaml may recreate the container.
+- name: Put the new settings in place
+  ansible.builtin.copy:
+    src: "{{ waf_staged_dir }}/{{ item }}"
+    dest: "{{ waf_dir }}/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [modsecurity.conf, nginx.conf, compose.yaml]
+
+# Recreates the container on a new image or compose setting, and starts a
+# stopped one; either reads the files in place.
+- name: Start the WAF
+  community.docker.docker_compose_v2:
+    project_src: "{{ waf_dir }}"
+    project_name: waf
+    state: present
+    pull: missing
+    remove_orphans: true
+  register: waf_compose
+
+- name: Look for a pending reload
+  ansible.builtin.stat:
+    path: "{{ waf_reload_marker }}"
+    get_checksum: false
+    get_attributes: false
+    get_mime: false
+  register: waf_reload_stat
+
+# Without dropping connections; the files passed nginx -t.
+- name: Reload the WAF with the new settings
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ waf_name }}", nginx, -s, reload]
+  changed_when: true
+  when:
+    - waf_reload_stat.stat.exists
+    - waf_compose is not changed
+
+- name: Note when the health check starts
+  ansible.builtin.set_fact:
+    waf_health_start: "{{ now().timestamp() }}"
+
+# retries is an upper bound; the deadline ends the wait after
+# waf_health_timeout seconds.
+- name: Wait until the WAF is healthy
+  ansible.builtin.command:
+    argv: [docker, inspect, --format, "{{ '{{.State.Status}} {{.State.Health.Status}}' }}", "{{ waf_name }}"]
+  register: waf_health
+  changed_when: false
+  failed_when: false
+  until: >-
+    waf_health.stdout == 'running healthy'
+    or now().timestamp() - waf_health_start | float >= waf_health_timeout | int
+  retries: "{{ waf_health_timeout | int + 1 }}"
+  delay: 1
+
+- name: Fail when the WAF is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      waf: the WAF is not healthy after {{ waf_health_timeout }} seconds (container state:
+      {{ waf_health.stdout | default('') or waf_health.stderr | default('unknown') }}). Every
+      site behind it answers 502 until it is. See docker logs {{ waf_name }}.
+  when: waf_health.stdout != 'running healthy'
+
+# nginx parses the new files after the reload signal while the old workers
+# still serve; the health check answers the id of the files it serves.
+- name: Wait until the WAF serves the new settings
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ waf_name }}", curl, -fsS, "http://127.0.0.1:{{ waf_health_port }}/healthz"]
+  register: waf_served
+  changed_when: false
+  failed_when: false
+  until: >-
+    waf_served.stdout | trim == waf_config_id
+    or now().timestamp() - waf_health_start | float >= waf_health_timeout | int
+  retries: "{{ waf_health_timeout | int + 1 }}"
+  delay: 1
+
+- name: Fail when the WAF does not serve the new settings
+  ansible.builtin.fail:
+    msg: >-
+      waf: the WAF does not serve the new settings after {{ waf_health_timeout }} seconds (it
+      answers {{ waf_served.stdout | default('') | trim or waf_served.stderr | default('') | trim }}).
+      See docker logs {{ waf_name }}.
+  when: waf_served.stdout | trim != waf_config_id
+
+- name: Remove the note of the reload
+  ansible.builtin.file:
+    path: "{{ waf_reload_marker }}"
+    state: absent
+
+# Only once the WAF serves the sites: a new router never points at a WAF
+# that does not know its site yet. The traefik role leaves files it did not
+# write alone.
+- name: Write the Traefik objects
+  ansible.builtin.template:
+    src: traefik.yml.j2
+    dest: "{{ waf_traefik_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: waf_mode == 'traefik'

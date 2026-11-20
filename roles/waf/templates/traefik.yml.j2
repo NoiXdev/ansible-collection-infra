@@ -1,0 +1,37 @@
+# {{ ansible_managed }}
+{{ waf_traefik_marker }}
+# The WAF behind Traefik: service waf, and per site of waf_sites with routers
+# the routers waf-<site>-<n>, which send the site's hosts there. A router the
+# operator controls (labels) can use service waf@file as well; the WAF then
+# needs a waf_sites entry for its Host. The router's middlewares (Anubis,
+# say) run before the WAF. While the WAF is down they answer 504.
+http:
+{% set routers = waf_sites_public | map(attribute='routers') | flatten %}
+{% if routers | length > 0 %}
+  routers:
+{% for router in routers %}
+    {{ router.name }}:
+      rule: {{ router.rule | to_json }}
+      entryPoints: {{ router.entrypoints | to_json }}
+{% if router.middlewares | length > 0 %}
+      middlewares: {{ router.middlewares | to_json }}
+{% endif %}
+      priority: {{ router.priority | int }}
+      service: waf
+{% endfor %}
+{% endif %}
+  # While the WAF is stopped nothing answers on its fixed address, so Traefik
+  # gives up only at its dial timeout and answers 504 (fails closed): after
+  # 5 s instead of Traefik's default 30 s.
+  serversTransports:
+    waf-transport:
+      forwardingTimeouts:
+        dialTimeout: 5s
+  services:
+    waf:
+      loadBalancer:
+        serversTransport: waf-transport
+        # Host as the client sent it: the WAF picks the site by it.
+        passHostHeader: true
+        servers:
+          - url: http://{{ waf_traefik_address }}:{{ waf_listen_port }}
