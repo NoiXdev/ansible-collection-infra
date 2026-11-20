@@ -3,16 +3,18 @@
 #   install      no compose file
 #   update       vaultwarden_version is newer than the installed version
 #   reconfigure  the compose file the role writes differs from the one on
-#                disk, or a secrets file from what the role writes
+#                disk, a secrets file from what the role writes, or a
+#                restart is pending (vaultwarden_restart_marker)
 #   noop         everything as the role writes it
 # Also sets vaultwarden_installed (a compose file exists),
 # vaultwarden_compose_before (the compose file on disk),
 # vaultwarden_compose_on_disk (it parsed), vaultwarden_installed_version,
 # vaultwarden_installed_database (from vaultwarden_target_file, empty
 # without it) and vaultwarden_installed_target (the external server and
-# database it records), vaultwarden_secrets (file name to content of the
-# secrets the role writes), vaultwarden_secrets_changed, vaultwarden_db_password_changed
-# and vaultwarden_down (the services that are not running). Refuses, before
+# database it records, empty when it names none), vaultwarden_secrets (file
+# name to content of the secrets the role writes), vaultwarden_secrets_changed,
+# vaultwarden_db_password_changed, vaultwarden_restart_pending and
+# vaultwarden_down (the services that are not running). Refuses, before
 # any change and in this order: a vaultwarden_data_dir that is not a
 # mountpoint (with vaultwarden_data_dir_mountpoint), an installation of
 # another database mode, an external installation of another server or
@@ -25,10 +27,10 @@
 # (its marker), a compose file without a Vaultwarden version, a downgrade,
 # with the own PostgreSQL a vaultwarden_db_password the database does not
 # take and a cluster of another major or more than one, and with the external
-# one a server the role cannot log in to, older than 15, whose database the
-# user does not own, or (on install) that holds tables (external.yml; it also
-# sets vaultwarden_external_major and vaultwarden_client_image). Changes
-# nothing.
+# one a server the role cannot run its client for or log in to, older than
+# 15, whose database the user does not own, or (on install) that holds
+# tables (external.yml; it also sets vaultwarden_external_major and
+# vaultwarden_client_image). Changes nothing.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -92,7 +94,7 @@
           ~ '/' ~ vaultwarden_target_recorded.name | string)
          if vaultwarden_target_recorded.host is defined and vaultwarden_target_recorded.port is defined
             and vaultwarden_target_recorded.name is defined
-         else 'a database the file does not name' }}
+         else '' }}
   vars:
     vaultwarden_target_parsed: "{{ (vaultwarden_target_read.content | default('') | b64decode or '{}') | from_yaml }}"
     vaultwarden_target_recorded: "{{ vaultwarden_target_parsed if vaultwarden_target_parsed is mapping else {} }}"
@@ -126,11 +128,14 @@
     msg: >-
       The settings name the external database {{ vaultwarden_external_target }}
       (vaultwarden_db_host, vaultwarden_db_port, vaultwarden_db_name), but the
-      installation in {{ vaultwarden_dir }} was made with the database
-      {{ vaultwarden_installed_target }} ({{ vaultwarden_target_file }}).
-      Vaultwarden would build an empty schema in the other database and
-      start an empty vault; the role changes nothing. Set the three back to
-      {{ vaultwarden_installed_target }}. If the database really moved (a dump
+      installation in {{ vaultwarden_dir }} was made with
+      {{ ('the database ' ~ vaultwarden_installed_target) if vaultwarden_installed_target | length > 0
+         else 'a database that ' ~ vaultwarden_target_file ~ ' does not name in full' }}
+      ({{ vaultwarden_target_file }}). Vaultwarden would build an empty schema
+      in the other database and start an empty vault; the role changes
+      nothing. Set the three back to
+      {{ vaultwarden_installed_target if vaultwarden_installed_target | length > 0
+         else 'those of the database the installation was made with' }}. If the database really moved (a dump
       restored elsewhere), remove {{ vaultwarden_target_file }} and run the
       role again.
   when:
@@ -564,11 +569,23 @@
   ansible.builtin.include_tasks: external.yml
   when: vaultwarden_database == 'postgres_external'
 
+# Written by reconfigure.yml before it writes changed secrets, and removed by
+# main.yml once a run ends healthy: a run stopped in between leaves secrets
+# files that equal the settings while the container still runs with the old
+# ones (it reads them on start only), so the next run restarts it.
+- name: Look for a pending restart
+  ansible.builtin.stat:
+    path: "{{ vaultwarden_restart_marker }}"
+    get_checksum: false
+  register: vaultwarden_restart_marker_stat
+
 - name: Decide what to do
   ansible.builtin.set_fact:
     vaultwarden_down: "{{ vaultwarden_services | difference(vaultwarden_ps.stdout_lines | default([])) }}"
+    vaultwarden_restart_pending: "{{ vaultwarden_installed and vaultwarden_restart_marker_stat.stat.exists }}"
     vaultwarden_state: >-
       {{ 'install' if not vaultwarden_installed
          else 'update' if vaultwarden_version is version(vaultwarden_installed_version, '>')
          else 'reconfigure' if vaultwarden_compose_before != vaultwarden_compose or vaultwarden_secrets_changed | bool
+                               or vaultwarden_restart_marker_stat.stat.exists
          else 'noop' }}

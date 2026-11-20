@@ -133,7 +133,7 @@
         state: present
         pull: missing
         remove_orphans: true
-        recreate: "{{ 'always' if vaultwarden_secrets_changed | bool else 'auto' }}"
+        recreate: "{{ 'always' if vaultwarden_secrets_changed | bool or vaultwarden_restart_pending | bool else 'auto' }}"
 
     - name: Check the health of Vaultwarden {{ vaultwarden_version }}
       ansible.builtin.include_tasks: health.yml

@@ -26,8 +26,9 @@
         name: noixdev.infra.traefik
 
     # The SMTP catcher on the Traefik network, where Vaultwarden reaches it as
-    # mailpit (any login, without TLS); its API on 127.0.0.1:8025 of the test
-    # host for run.sh.
+    # mailpit (without TLS); its API on 127.0.0.1:8025 of the test host for
+    # run.sh. It takes only the login in /root/mailpit/smtp-auth, which run.sh
+    # writes before the first converge.
     - name: Look for Mailpit
       ansible.builtin.command:
         argv: [docker, ps, --all, --quiet, --filter, name=^mailpit$]
@@ -44,8 +45,9 @@
           - "--network={{ traefik_network | default('proxy') }}"
           - --restart=unless-stopped
           - --publish=127.0.0.1:8025:8025
+          - --volume=/root/mailpit:/auth:ro
           - "{{ converge_mailpit_image }}"
-          - --smtp-auth-accept-any
+          - --smtp-auth-file=/auth/smtp-auth
           - --smtp-auth-allow-insecure
       changed_when: true
       when: converge_mailpit.stdout | length == 0

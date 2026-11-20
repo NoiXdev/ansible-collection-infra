@@ -93,6 +93,18 @@
       positive. The role changes nothing.
     quiet: true
 
+# The backup and the rollback bind files below it into one-off containers
+# with docker run --mount, whose source ends at the first comma.
+- name: Check that vaultwarden_data_dir has no comma
+  ansible.builtin.assert:
+    that: "',' not in vaultwarden_data_dir"
+    fail_msg: >-
+      vaultwarden_data_dir {{ vaultwarden_data_dir }} holds a comma, which the
+      role cannot pass to Docker as the source of a mount (the backup before
+      an update binds files below it). Use a path without a comma. The role
+      changes nothing.
+    quiet: true
+
 - name: Check vaultwarden_db_sslmode
   ansible.builtin.assert:
     that: vaultwarden_db_sslmode in ['disable', 'prefer', 'require']
@@ -282,3 +294,11 @@
     path: "{{ vaultwarden_marker_file }}"
     state: absent
   when: vaultwarden_marker_read.content is defined
+
+# Reached only by a run that ended healthy, which (re)started Vaultwarden on
+# the secrets files as they are: the restart a stopped reconfigure left
+# pending is done.
+- name: Remove the marker of a pending restart
+  ansible.builtin.file:
+    path: "{{ vaultwarden_restart_marker }}"
+    state: absent

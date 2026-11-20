@@ -2,7 +2,23 @@
 # Same installation, other settings: the secrets and the compose file are
 # written, Vaultwarden brought to them, and checked. Vaultwarden reads its
 # settings (the secrets files among them) only on start, so a changed secret
-# alone, which leaves the compose file as it is, restarts it too.
+# alone, which leaves the compose file as it is, restarts it too. A run
+# stopped after the secrets are written and before that restart would leave
+# files that equal the settings while the container runs with the old ones,
+# so vaultwarden_restart_marker is written first; while it exists every run
+# reconfigures and restarts, and main.yml removes it once a run ends healthy.
+
+- name: Note the restart before the secrets change
+  ansible.builtin.copy:
+    dest: "{{ vaultwarden_restart_marker }}"
+    content: |
+      # Written by the noixdev.infra.vaultwarden role before it changed the
+      # secrets of Vaultwarden, and removed once Vaultwarden runs on them.
+      # While it exists the role restarts Vaultwarden.
+    owner: root
+    group: root
+    mode: "0644"
+  when: vaultwarden_secrets_changed | bool
 
 - name: Write the secrets
   ansible.builtin.include_tasks: secrets.yml
@@ -21,7 +37,7 @@
     state: present
     pull: missing
     remove_orphans: true
-    recreate: "{{ 'always' if vaultwarden_secrets_changed | bool else 'auto' }}"
+    recreate: "{{ 'always' if vaultwarden_secrets_changed | bool or vaultwarden_restart_pending | bool else 'auto' }}"
 
 - name: Check that Vaultwarden is healthy
   ansible.builtin.include_tasks: health.yml

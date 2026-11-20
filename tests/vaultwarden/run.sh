@@ -2,7 +2,8 @@
 # End-to-end test of the vaultwarden role on a throwaway systemd host per
 # Ubuntu release, with Docker inside (the docker role), the traefik role in
 # front (plain HTTP and HTTPS with Traefik's own certificate on 127.0.0.1, and
-# a "deny" middleware; vars.yml) and Mailpit catching the mail (converge.yml):
+# a "deny" middleware; vars.yml) and Mailpit catching the mail (converge.yml;
+# it takes only the SMTP login with the password the role wrote last):
 #   refusals  settings the role must refuse: each run fails with its message
 #             and leaves no /opt/vaultwarden
 #   install   a fresh install with SQLite, the admin page, SMTP to Mailpit
@@ -35,9 +36,13 @@
 #             service and starts nothing
 #   reconfigure
 #             a new SMTP password alone (the compose file stays as it is)
-#             restarts Vaultwarden, which reads the new secrets file; a new
+#             restarts Vaultwarden, which reads the new secrets file; the
+#             push servers of the region us; a new
 #             vaultwarden_invitation_org_name restarts it too, and an invite
-#             mail names it; the item is still readable
+#             mail (sent with the new SMTP password) names it; the item is
+#             still readable; a run stopped after it wrote a new admin token
+#             and before the restart (its docker compose up fails): the next
+#             run restarts Vaultwarden, which takes the new token
 #   install_postgres
 #             a fresh install with the own PostgreSQL (the cluster in
 #             <data>/postgres, a password with $, quotes, @, / and a space,
@@ -49,17 +54,19 @@
 #   mode_switch
 #             the same host with another database mode refused before any
 #             change, naming both modes (also where the data of the new mode
-#             is missing)
+#             is missing); the PostgreSQL data missing refused as an
+#             unmounted volume
 #   db_password
 #             a new vaultwarden_db_password the database does not have refused
-#             before any change; taken once ALTER USER set it, with Vaultwarden
-#             restarted on it and the item still readable
+#             before any change, also while the db service is down; taken
+#             once ALTER USER set it, with Vaultwarden restarted on it and
+#             the item still readable
 #   external_refusals
 #             a fresh install against a PostgreSQL server of the test host
 #             refused before anything is created: a wrong password, a
 #             server without TLS with sslmode require, a user who does not own
 #             the database, a PostgreSQL 14 server, a database that holds a
-#             table
+#             table, a vaultwarden_postgres_image the host cannot pull
 #   install_external
 #             a fresh install with a PostgreSQL 16 server (a container of the
 #             test host, published on its own address) as the external
@@ -85,7 +92,11 @@
 #             renames the users table, or for the external server revokes the
 #             right to read it and adds a table): Vaultwarden turns healthy,
 #             the database check fails, rolled back; for the external server
-#             the added table is gone and the next update succeeds
+#             the added table is gone and the next update succeeds; with
+#             SQLite a marker of a failed rollback refuses every version;
+#             with the own PostgreSQL a dump that fails: the partial backup
+#             and the markers removed, the installed version started again,
+#             no update-failed
 #   update_sqlite, update_postgres, update_external
 #             that installation updated to the release of the defaults: the
 #             backup (root's 0700, the compose file, the secrets, the data
@@ -137,21 +148,29 @@ user_email=user@example.test
 # The database password holds every character a URL must encode (and $, quotes).
 db_password="$(openssl rand -hex 12)"" pa\$s\"w'o@r/d:x#y%z"
 new_db_password="$(openssl rand -hex 12)"" ne\$w\"p'a@s/s:w#d%"
-admin_token="$(openssl rand -hex 12)"' ad$m"in tok'
+initial_admin_token="$(openssl rand -hex 12)"' ad$m"in tok'
+rotated_admin_token="$(openssl rand -hex 12)"' ro$t"ated adm'
 smtp_password="$(openssl rand -hex 12)"' sm$t"p pw'
 rotated_smtp_password="$(openssl rand -hex 12)"' ro$t"ated pw'
 push_key="$(openssl rand -hex 16)"
 push_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 user_password="$(openssl rand -hex 12)"' us$e"r pw'
 item_password="$(openssl rand -hex 12)"
-# The Argon2id hash of admin_token, made once per run (make_admin_hash).
+# The Argon2id hashes of the two admin tokens, made once per run
+# (make_admin_hash, rotate_admin_token).
+initial_admin_hash=
+rotated_admin_hash=
+# What install-vars.json holds; the reconfigure scenario changes them,
+# start_host sets them back for each test host.
+admin_token="$initial_admin_token"
 admin_hash=
-# What install-vars.json holds; the reconfigure scenario changes them.
 org_name='Noix Test Org'
 current_smtp_password="$smtp_password"
-# No converge's output may hold one of these; make_admin_hash adds the hash.
+# No converge's output and no process list may hold one of these; the hashes
+# of the admin tokens are added once made.
 pg_admin_password="$(openssl rand -hex 12)"
-secrets=("$db_password" "$new_db_password" "$admin_token" "$smtp_password" "$rotated_smtp_password" "$push_key" "$user_password" "$pg_admin_password")
+secrets=("$db_password" "$new_db_password" "$initial_admin_token" "$rotated_admin_token" "$smtp_password"
+  "$rotated_smtp_password" "$push_key" "$user_password" "$pg_admin_password")
 
 cleanup() {
   [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
@@ -282,6 +301,18 @@ verify() {
     || { cat "$out/verify.log" >&2; fail "verify.yml failed"; }
 }
 
+# Mailpit takes the SMTP login noix with current_smtp_password only (an
+# htpasswd {SHA} line: a plain one cannot hold the space), so that a mail
+# proves Vaultwarden logs in with the password the role wrote last. Restarts
+# Mailpit, which reads the file on start, when it runs already.
+set_mailpit_login() {
+  env "SMTP_PASSWORD=$current_smtp_password" python3 -c '
+import base64, hashlib, os
+print("noix:{SHA}" + base64.b64encode(hashlib.sha1(os.environ["SMTP_PASSWORD"].encode()).digest()).decode())' \
+    | hi sh -c 'mkdir -p /root/mailpit && cat >/root/mailpit/smtp-auth'
+  if h docker inspect mailpit >/dev/null 2>&1; then h docker restart mailpit >/dev/null; fi
+}
+
 # start_host <ubuntu>: a fresh systemd host with Docker, Traefik and Mailpit,
 # where vaultwarden.test is 127.0.0.1 and client.py is /root/client.py.
 start_host() {
@@ -301,6 +332,11 @@ start_host() {
   h sh -c 'echo "127.0.0.1 vaultwarden.test" >>/etc/hosts'
   docker cp "$here/client.py" "$host:/root/client.py" >/dev/null
   attachment_sum=
+  admin_token="$initial_admin_token"
+  admin_hash="$initial_admin_hash"
+  org_name='Noix Test Org'
+  current_smtp_password="$smtp_password"
+  set_mailpit_login
 
   echo "== test host (ubuntu $ubuntu)"
   converge
@@ -318,19 +354,37 @@ refused() {
   h test ! -e "$app_dir" || fail "$message: $app_dir was created"
 }
 
-# Makes the Argon2id hash of admin_token once per run, with Vaultwarden's own
-# command as the docs give it (docker run -it ... /vaultwarden hash). It reads
-# the token twice from a terminal, which script provides; the token goes
-# through stdin. Then writes install-vars.json.
+# Prints the Argon2id hash of a token, made with Vaultwarden's own command as
+# the docs give it (docker run -it ... /vaultwarden hash). It reads the token
+# twice from a terminal, which script provides; the token goes through stdin.
+# hash_token <token>.
+hash_token() {
+  h docker image inspect "$image" >/dev/null 2>&1 || h docker pull -q "$image" >/dev/null
+  printf '%s\n%s\n' "$1" "$1" \
+    | hi docker run --rm -i --network=none --entrypoint sh "$image" -c 'script -qec "/vaultwarden hash" /dev/null' \
+    | grep -o "[\$]argon2id[^']*" || true
+}
+# Makes the hash of the first admin token once per run, for admin_hash unless
+# a scenario rotated it; then writes install-vars.json.
 make_admin_hash() {
-  if [ -z "$admin_hash" ]; then
-    h docker pull -q "$image" >/dev/null
-    admin_hash="$(printf '%s\n%s\n' "$admin_token" "$admin_token" \
-      | hi docker run --rm -i --network=none --entrypoint sh "$image" -c 'script -qec "/vaultwarden hash" /dev/null' \
-      | grep -o "[\$]argon2id[^']*" || true)"
-    [[ "$admin_hash" == '$argon2id$v=19$'* ]] || fail "/vaultwarden hash made no Argon2id hash"
-    secrets+=("$admin_hash")
+  if [ -z "$initial_admin_hash" ]; then
+    initial_admin_hash="$(hash_token "$initial_admin_token")"
+    [[ "$initial_admin_hash" == '$argon2id$v=19$'* ]] || fail "/vaultwarden hash made no Argon2id hash"
+    secrets+=("$initial_admin_hash")
   fi
+  [ -n "$admin_hash" ] || admin_hash="$initial_admin_hash"
+  write_install_vars
+}
+# The admin page's token rotated: admin_token and admin_hash the second pair
+# (its hash made once per run), install-vars.json written.
+rotate_admin_token() {
+  if [ -z "$rotated_admin_hash" ]; then
+    rotated_admin_hash="$(hash_token "$rotated_admin_token")"
+    [[ "$rotated_admin_hash" == '$argon2id$v=19$'* ]] || fail "/vaultwarden hash made no Argon2id hash"
+    secrets+=("$rotated_admin_hash")
+  fi
+  admin_token="$rotated_admin_token"
+  admin_hash="$rotated_admin_hash"
   write_install_vars
 }
 
@@ -553,6 +607,7 @@ test_refusals() {
   refused 'vaultwarden_smtp takes' -e '{"vaultwarden_smtp": {"username": "u"}}'
   refused 'PostgreSQL 18 or newer' -e vaultwarden_database=postgres -e "$(db_vars)" -e vaultwarden_postgres_image=postgres:17
   refused 'value of vaultwarden_db_sslmode must be one of' -e vaultwarden_db_sslmode=verify-full
+  refused 'holds a comma' -e vaultwarden_data_dir=/opt/vaultwarden/da,ta
 }
 
 test_install() {
@@ -685,10 +740,12 @@ test_reconfigure() {
   make_admin_hash
 
   # A secret alone: the compose file stays, Vaultwarden restarts and reads it.
+  # Mailpit takes the new password only, so the invite below proves it.
   id="$(container_id)"
   secret="$(h sha256sum "$secrets_dir/smtp_password")"
   current_smtp_password="$rotated_smtp_password"
   write_install_vars
+  set_mailpit_login
   vw_converge
   grep -Eq 'changed=[1-9]' "$out/converge.log" || fail "the new SMTP password changed nothing"
   [ "$(h sha256sum "$secrets_dir/smtp_password")" != "$secret" ] || fail "the secrets file of the SMTP password did not change"
@@ -697,7 +754,15 @@ test_reconfigure() {
     || fail "the container does not read the new SMTP password"
   vw_converge_unchanged
 
-  # Another organization name: in the compose file, and in the next invite.
+  # The relay and identity server of the region us.
+  vw_converge -e vaultwarden_push_region=us
+  h grep -qF '"https://push.bitwarden.com"' "$app_dir/compose.yaml" || fail "the compose file lacks the relay of the region us"
+  [ "$(compose exec -T vaultwarden printenv PUSH_RELAY_URI PUSH_IDENTITY_URI | tr '\n' ' ')" \
+    = 'https://push.bitwarden.com https://identity.bitwarden.com ' ] || fail "Vaultwarden does not use the servers of the region us"
+
+  # Another organization name (and the region eu again): in the compose
+  # file, and in the next invite, which Mailpit takes with the new SMTP
+  # password only.
   id="$(container_id)"
   org_name='Noix Rotated Org'
   write_install_vars
@@ -710,6 +775,27 @@ test_reconfigure() {
   invite second@example.test
   invite_link second@example.test "$org_name" >/dev/null
   expect_item read
+
+  # A run stopped after it wrote a new secret and before Vaultwarden was
+  # restarted on it (the docker compose up fails): the next run, whose
+  # settings equal the files, still restarts Vaultwarden, which then takes
+  # the new admin token.
+  echo "== reconfigure: a restart stopped after the secrets (ubuntu $1)"
+  rotate_admin_token
+  # Vaultwarden's docker compose up only (the converge starts Traefik first).
+  install_fault 'touch /root/fault.fail' "*\" --project-directory $app_dir \"*\"up \"*" 'services:'
+  vw_converge_fails
+  remove_fault
+  expect_in_log 'Start Vaultwarden with the new configuration'
+  h test -e "$app_dir/restart-pending" || fail "the stopped reconfigure left no $app_dir/restart-pending"
+  [ "$(h cat "$secrets_dir/admin_token")" = "$admin_hash" ] || fail "the stopped reconfigure did not write the new admin token"
+  [ "$(admin_login "$admin_token")" = 401 ] || fail "Vaultwarden took the new admin token before it was restarted"
+  id="$(container_id)"
+  vw_converge
+  [ "$(container_id)" != "$id" ] || fail "the run after the stopped reconfigure did not restart Vaultwarden"
+  [ "$(admin_login "$admin_token")" = 200 ] || fail "Vaultwarden does not take the new admin token after the restart"
+  h test ! -e "$app_dir/restart-pending" || fail "the healthy run kept $app_dir/restart-pending"
+  vw_converge_unchanged
 }
 
 # The own PostgreSQL scenarios share one installation, made afresh over
@@ -806,6 +892,12 @@ test_mode_switch() {
   expect_in_log 'with the database sqlite'
   expect_untouched
   h sed -i 's/^database: sqlite/database: postgres/' "$app_dir/database-target"
+  # The same mode without its PostgreSQL data: an unmounted volume.
+  note_untouched
+  pg_converge_fails
+  expect_in_log 'lacks postgres: is the volume mounted?'
+  h test ! -e "$data_dir/postgres" || fail "the refused run created $data_dir/postgres"
+  expect_untouched
   h mv "$data_dir/postgres.aside" "$data_dir/postgres"
   pg_converge_unchanged
   # A removed target file comes back with the next run.
@@ -828,6 +920,19 @@ test_db_password() {
   expect_in_log 'ALTER USER vaultwarden PASSWORD'
   expect_untouched
   db_login "$db_password" || fail "the refused run changed the password of the database"
+  # With the db service down the role cannot ask: refused as well.
+  compose stop db >/dev/null 2>&1
+  note_untouched
+  role_converge_fails -e "@$out/install-vars.json" -e vaultwarden_database=postgres -e "@$out/new-db-vars.json"
+  expect_in_log 'the db service is not running, so the role cannot ask'
+  expect_untouched
+  compose start db >/dev/null 2>&1
+  for _ in $(seq 60); do
+    [ "$(compose ps --format "'{{.Health}}'" db)" = healthy ] && break
+    sleep 2
+  done
+  [ "$(compose ps --format "'{{.Health}}'" db)" = healthy ] || fail "the db container did not become healthy again: $(compose ps --all)"
+  wait_healthy
 
   # Set in the database as the message says (the statement through stdin,
   # with ' doubled), then taken: the secrets change, Vaultwarden restarts on
@@ -863,13 +968,21 @@ old_pg_port=55414
 # <major> <port>. The user vaultwarden (the password of the run) owns the
 # databases vaultwarden (empty), vwtables (holds a table) and vwmoved (empty);
 # vwother, with the same password, owns none.
+# One that exists is kept when it runs, is ready and was set up to the end
+# (vwtables holds its table, the last step); any other is made afresh.
 pg_server() {
   local name="$1" major="$2" port="$3"
-  h docker inspect "$name" >/dev/null 2>&1 && return 0
+  if h docker inspect "$name" >/dev/null 2>&1; then
+    if [ "$(h docker inspect --format '{{.State.Running}}' "$name")" = true ] && pg_ready "$name" 60 \
+      && [ "$(h docker exec "$name" psql --username=postgres --dbname=vwtables --no-psqlrc --tuples-only --no-align \
+        --command="SELECT to_regclass('public.leftover') IS NOT NULL" 2>/dev/null)" = t ]; then
+      return 0
+    fi
+    h docker rm -f -v "$name" >/dev/null
+  fi
   printf 'POSTGRES_PASSWORD=%s\n' "$pg_admin_password" | hi sh -c 'umask 077; cat >/root/pg.env'
   h docker run --detach --name "$name" --env-file /root/pg.env --publish "$pg_ip:$port:5432" "docker.io/library/postgres:$major-bookworm" >/dev/null
-  # Over TCP: the init server of the image listens on its socket only.
-  until h docker exec "$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; do sleep 1; done
+  pg_ready "$name" 120 || fail "the PostgreSQL server $name is not ready after 120 seconds: $(h docker logs --tail 20 "$name" 2>&1)"
   env "DB_PASSWORD=$db_password" python3 -c '
 import os
 pw = os.environ["DB_PASSWORD"].replace("\x27", "\x27\x27")
@@ -880,6 +993,16 @@ for name in ("vaultwarden", "vwtables", "vwmoved"):
     | hi docker exec -i "$name" psql --username=postgres --no-psqlrc --set=ON_ERROR_STOP=1 >/dev/null
   h docker exec "$name" psql --username=vaultwarden --dbname=vwtables --no-psqlrc --set=ON_ERROR_STOP=1 \
     --command='CREATE TABLE leftover (id integer)' >/dev/null
+}
+# Whether the server answers within <seconds>: pg_ready <name> <seconds>. Over
+# TCP: the init server of the image listens on its socket only.
+pg_ready() {
+  local name="$1" wait="$2"
+  for _ in $(seq "$wait"); do
+    h docker exec "$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
 }
 ensure_pg_servers() {
   [ -n "$pg_ip" ] || pg_ip="$(h hostname -I | awk '{print $1}')"
@@ -939,13 +1062,19 @@ test_external_refusals() {
     -e "vaultwarden_db_port=$old_pg_port" -e "$(db_vars)"
   refused 'already holds 1 table' -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
     -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" -e vaultwarden_db_name=vwtables
+  # An image the host cannot pull: refused as such, not as a login.
+  refused 'cannot run psql in vaultwarden_postgres_image test.invalid/postgres:18' -e vaultwarden_database=postgres_external \
+    -e "vaultwarden_db_host=$pg_ip" -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" -e vaultwarden_postgres_image=test.invalid/postgres:18
   # The 14 server was refused before its client image was needed.
   if h docker image inspect docker.io/library/postgres:14 >/dev/null 2>&1; then fail "the client image of a refused server was pulled"; fi
-  # The 14 server and the table are what the messages say, and no refusal
-  # touched them.
+  # No refused run made a table: the database vaultwarden of the 16 server
+  # is still empty, and vwtables holds its one table only.
   [ "$(h docker exec noixdev-vaultwarden-pg psql --username=vaultwarden --dbname=vaultwarden --no-psqlrc \
     --tuples-only --no-align --command='SELECT count(*) FROM pg_tables WHERE schemaname = $$public$$')" = 0 ] \
     || fail "a refused run made tables in the external database"
+  [ "$(h docker exec noixdev-vaultwarden-pg psql --username=vaultwarden --dbname=vwtables --no-psqlrc \
+    --tuples-only --no-align --command='SELECT count(*) FROM pg_tables WHERE schemaname = $$public$$')" = 1 ] \
+    || fail "a refused run changed the tables of vwtables"
 }
 
 test_install_external() {
@@ -1192,22 +1321,30 @@ expect_rolled_back() {
 }
 
 # A docker on the test host, ahead of the real one in the PATH, that runs the
-# script /root/fault.sh once, right before the first docker compose up of a
-# compose file of new_version: the database broken after the backup, as a new
-# release could break it, while Vaultwarden starts and turns healthy.
-# install_fault <script>.
+# script /root/fault.sh once, right before the first docker call whose
+# arguments match a case pattern (default: a docker compose up) while the
+# compose file holds a text (default: the image of new_version): by default
+# the database broken after the backup, as a new release could break it,
+# while Vaultwarden starts and turns healthy. A script that creates
+# /root/fault.fail makes that docker call fail instead.
+# install_fault <script> [<case pattern> [<text of the compose file>]].
 install_fault() {
-  local real
+  local real pattern="${2:-*\" compose \"*\" up \"*}" text="${3:-server:$new_version\"}"
   real="$(h sh -c 'command -v docker')"
   [ "$real" != /usr/local/sbin/docker ] || fail "a docker wrapper is left in /usr/local/sbin"
   printf '%s\n' "$1" | hi sh -c 'cat >/root/fault.sh'
-  h rm -f /root/fault.log
+  h rm -f /root/fault.log /root/fault.fail
   hi sh -c 'cat >/usr/local/sbin/docker && chmod 755 /usr/local/sbin/docker' <<WRAPPER
 #!/bin/sh
 case " \$* " in
-  *" compose "*" up "*)
-    if [ -e /root/fault.sh ] && grep -qF 'server:$new_version"' $app_dir/compose.yaml; then
+  $pattern)
+    if [ -e /root/fault.sh ] && grep -qF '$text' $app_dir/compose.yaml; then
       sh /root/fault.sh >>/root/fault.log 2>&1 && rm /root/fault.sh
+      if [ -e /root/fault.fail ]; then
+        rm -f /root/fault.fail
+        echo "Error: the fault of the test" >&2
+        exit 1
+      fi
     fi
     ;;
 esac
@@ -1215,8 +1352,8 @@ exec $real "\$@"
 WRAPPER
 }
 remove_fault() {
-  h test ! -e /root/fault.sh || fail "the database fault was not injected: $(h cat /root/fault.log 2>&1)"
-  h rm -f /usr/local/sbin/docker
+  h test ! -e /root/fault.sh || fail "the fault was not injected: $(h cat /root/fault.log 2>&1)"
+  h rm -f /usr/local/sbin/docker /root/fault.fail
 }
 
 # update_scenario <mode> <ubuntu>: from old_version with the item and the
@@ -1305,10 +1442,42 @@ failed_update_scenario() {
 test_failed_update_sqlite() {
   failed_update_scenario sqlite "$1" \
     "python3 -c 'import sqlite3; db = sqlite3.connect(\"$data_dir/vaultwarden/db.sqlite3\"); db.execute(\"ALTER TABLE users RENAME TO users_broken\"); db.commit()'"
+  # A marker of a rollback that failed (rolled_back_to null): every version
+  # is refused, the installed one and the failed one alike.
+  echo "== failed_update_sqlite: after a failed rollback (ubuntu $1)"
+  h sh -c "printf 'failed_version: $new_version\nrolled_back_to: null\nbackup: $backups/20260101T000000Z-$old_version-to-$new_version\ntime: \"2026-01-01T00:00:00Z\"\nrestore_error: noix test\n' >$marker"
+  note_untouched
+  m_converge_fails
+  expect_in_log "the Vaultwarden update to $new_version failed on 2026-01-01T00:00:00Z, and rolling back failed too (noix test)"
+  expect_in_log "$backups/20260101T000000Z-$old_version-to-$new_version/compose.yaml"
+  expect_untouched
+  m_converge_fails -e "vaultwarden_version=$old_version"
+  expect_in_log "and rolling back failed too (noix test)"
+  expect_untouched
+  h rm "$marker"
 }
 test_failed_update_postgres() {
+  local before
   failed_update_scenario postgres "$1" \
     "cd $app_dir && docker compose exec -T db psql --username=vaultwarden --dbname=vaultwarden --set=ON_ERROR_STOP=1 --command='ALTER TABLE users RENAME TO users_broken'"
+  # A dump that fails: nothing had changed, so the partial backup and the
+  # markers go, the installed version starts again and no update-failed
+  # keeps the version from the next run.
+  echo "== failed_update_postgres: a failed dump (ubuntu $1)"
+  before="$(complete_backups)"
+  install_fault 'touch /root/fault.fail' '*" compose exec "*" pg_dump "*' "server:$old_version\""
+  m_converge_fails
+  remove_fault
+  expect_in_log "update from $old_version to $new_version in $app_dir failed before anything changed"
+  expect_in_log 'Error: the fault of the test'
+  expect_in_log "Vaultwarden $old_version was started again"
+  wait_healthy
+  [ "$(vw_service)" = "$old_image running healthy" ] || fail "Vaultwarden after the failed dump: $(vw_service)"
+  [ -z "$(h sh -c "ls -d $backups/*.partial 2>/dev/null || true")" ] || fail "the failed dump left a partial backup: $(h ls -A "$backups")"
+  [ "$(complete_backups)" = "$before" ] || fail "the failed dump changed the complete backups: $(complete_backups)"
+  expect_no_progress "after the failed dump"
+  h test ! -e "$marker" || fail "the failed dump wrote $marker: $(h cat "$marker")"
+  expect_item read
 }
 # With the external server the fault is a right revoked and a table the failed
 # release's migration made, which the rollback drops with the schema; then

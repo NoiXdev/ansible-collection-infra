@@ -106,14 +106,15 @@ services:
 {{ bind(vaultwarden_data_dir ~ '/vaultwarden', '/data') }}
 {{ bind(vaultwarden_secrets_dir, secrets, read_only=true) }}
     # The image's own check (/healthcheck.sh asks /alive, which takes a
-    # database connection), every 5 seconds while it starts instead of
-    # after the first minute.
+    # database connection), every 5 seconds while it starts (as long as the
+    # role waits for it, vaultwarden_health_timeout) instead of after the
+    # first minute.
     healthcheck:
       test: [CMD, /healthcheck.sh]
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 300s
+      start_period: {{ vaultwarden_health_timeout | int }}s
       start_interval: 5s
     networks: [default, traefik]
     # No published port: Traefik reaches Vaultwarden over its network.

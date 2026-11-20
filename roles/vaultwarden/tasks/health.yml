@@ -40,7 +40,8 @@
     vaultwarden_containers_healthy: "{{ vaultwarden_health_expected | difference(vaultwarden_health.stdout_lines | default([])) | length == 0 }}"
 
 # Prints the status code only; a few tries, as the container can be healthy
-# a moment before a request after a restart is served.
+# a moment before a request after a restart is served. Every request of the
+# loop must answer 200.
 - name: Ask Vaultwarden for /alive and a prelogin
   ansible.builtin.command:
     argv: >-
@@ -66,8 +67,9 @@
   ansible.builtin.set_fact:
     vaultwarden_answers: >-
       {{ vaultwarden_containers_healthy | bool
-         and vaultwarden_health_requests.results | default([]) | selectattr('stdout', 'defined')
-             | selectattr('stdout', 'eq', '200') | list | length == 2 }}
+         and vaultwarden_health_requests.results | default([]) | length > 0
+         and vaultwarden_health_requests.results | selectattr('stdout', 'defined')
+             | selectattr('stdout', 'eq', '200') | list | length == vaultwarden_health_requests.results | length }}
 
 # Read-only. With the external server the password goes through stdin, so
 # the task is no_log; the note below quotes only psql's error line.

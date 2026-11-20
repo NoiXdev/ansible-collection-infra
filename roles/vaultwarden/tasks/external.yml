@@ -33,6 +33,20 @@
   check_mode: false
   no_log: true
 
+# docker run exits 125 when it cannot start the container at all (an image
+# it cannot pull, among others), before psql has tried to log in.
+- name: Refuse an external PostgreSQL the role cannot run its client for
+  ansible.builtin.fail:
+    msg: >-
+      The role cannot run psql in vaultwarden_postgres_image
+      {{ vaultwarden_postgres_image }} to ask the external PostgreSQL
+      {{ vaultwarden_external_target }} for its version: docker run failed
+      ({{ vaultwarden_external_error }}). Check that the host can pull the
+      image. The role changes nothing.
+  vars:
+    vaultwarden_external_result: "{{ vaultwarden_external_probe }}"
+  when: vaultwarden_external_probe.rc == 125
+
 - name: Refuse an external PostgreSQL the role cannot log in to
   ansible.builtin.fail:
     msg: >-
@@ -93,7 +107,7 @@
       with the server's major, {{ vaultwarden_external_major }}).
   vars:
     vaultwarden_external_result: "{{ vaultwarden_external_check }}"
-  when: vaultwarden_external_check.rc != 0 or vaultwarden_external_check.stdout | trim is not match('^[tf]\|[0-9]+$')
+  when: vaultwarden_external_check.rc != 0 or vaultwarden_external_check.stdout | trim is not match('^[tf][|][0-9]+$')
 
 - name: Note what the external database is
   ansible.builtin.set_fact:
