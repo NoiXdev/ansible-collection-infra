@@ -4,6 +4,7 @@ waf_site_keys:
   - name
   - domains
   - backend
+  - backend_fallback
   - mode
   - paranoia
   - detection_paranoia
@@ -38,6 +39,7 @@ waf_sites_public: >-
   {%- set sites = [] -%}
   {%- for site in waf_sites -%}
   {%- set entry = {'backend': waf_host_backend if waf_mode == 'host' else '',
+                   'backend_fallback': '',
                    'mode': 'detect',
                    'paranoia': waf_paranoia,
                    'anomaly_inbound': waf_anomaly_inbound,
@@ -84,7 +86,9 @@ waf_sites_public: >-
 waf_newline: "\n"
 waf_host_rule: 'Host(`\1`)'
 waf_escaped_dot: '\.'
-# The port of a URL that matches waf_url_re (empty without one).
+# The host and the port of a URL that matches waf_url_re (the port empty
+# without one).
+waf_url_host: '\2'
 waf_url_port: '\5'
 
 # Rule IDs of a site come from 9500000 + 100 * index (below 100 per site),
@@ -162,6 +166,13 @@ waf_reload_marker: "{{ waf_staged_dir }}/reload-pending"
 # health check server inside the container.
 waf_listen_port: 8080
 waf_health_port: 8932
+# Where the sites are served: on every address of the container in traefik
+# mode (its own network), on the host's loopback only in host mode.
+waf_listen: "{{ ('127.0.0.1:' ~ waf_host_port) if waf_mode == 'host' else waf_listen_port }}"
+# The address whose X-Forwarded-For the WAF believes: Traefik's, or in host
+# mode the host's nginx on the loopback (recursive: the client's address is
+# the last one in the header that is not the loopback).
+waf_real_ip_from: "{{ '127.0.0.1' if waf_mode == 'host' else waf_traefik_trusted }}"
 waf_traefik_file: "{{ waf_traefik_dynamic_dir }}/waf.yml"
 # A line of the role's waf.yml, so host mode removes only the role's own file.
 waf_traefik_marker: "# Written by the noixdev.infra.waf role (traefik mode)."
@@ -173,6 +184,10 @@ waf_resolver_valid: 10s
 # Timeouts towards the backend: WebSockets, server-sent events and long
 # uploads stay open while data flows at least this often.
 waf_proxy_timeout: 3600s
+# host mode, a site with a backend_fallback: how long its requests go to the
+# fallback after the backend did not answer, before the backend is tried
+# again (it is back that soon after it answers again).
+waf_fallback_retry: 5s
 
 # What a site's allowed_methods and allowed_content_types add to: the Core
 # Rule Set's defaults (REQUEST-901-INITIALIZATION, CRS 4.25), which the

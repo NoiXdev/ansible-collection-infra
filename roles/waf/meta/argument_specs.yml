@@ -120,6 +120,12 @@ argument_specs:
             127.0.0.1 or [::1], not on waf_host_port; waf_host_backend by
             default.
           - >-
+            backend_fallback, host mode only (refused in traefik mode), another
+            loopback URL by the backend's rules and with its scheme (none by
+            default): used while the backend does not answer (connection
+            refused or timed out, never on an HTTP status it answers), such as
+            nginx's inner listener behind a cache on the same host.
+          - >-
             mode, one of detect (the default; matches are logged, nothing is
             blocked), block (a request over the anomaly threshold answers 403)
             or off (forwarded without inspection, for emergencies).

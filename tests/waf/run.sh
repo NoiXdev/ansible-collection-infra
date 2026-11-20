@@ -154,6 +154,18 @@ test_refusals() {
     -e waf_mode=host -e "$(one_site '"backend": "http://127.0.0.1:8930"')"
   refused host-routers 'waf: waf_sites entry a has routers, which host mode does not use' \
     -e waf_mode=host -e "$(one_site '"backend": "http://127.0.0.1:8931", "routers": [{"entrypoints": ["web"]}]')"
+  refused fallback-traefik 'waf: waf_sites entry a has a backend_fallback, which only host mode uses' \
+    -e "$(one_site '"backend_fallback": "http://127.0.0.1:8931"')"
+  # The same address as the backend's, which names its port, the
+  # fallback's from its scheme.
+  refused fallback-same 'waf: waf_sites entry a has the backend http://127.0.0.1:80 and the backend_fallback http://127.0.0.1; the fallback is another address' \
+    -e waf_mode=host -e "$(one_site '"backend": "http://127.0.0.1:80", "backend_fallback": "http://127.0.0.1"')"
+  refused fallback-scheme 'waf: waf_sites entry a has the backend http://127.0.0.1:8939 and the backend_fallback https://127.0.0.1:8931' \
+    -e waf_mode=host -e "$(one_site '"backend": "http://127.0.0.1:8939", "backend_fallback": "https://127.0.0.1:8931"')"
+  refused fallback-loopback 'waf: waf_sites entry a has the backend_fallback http://10.0.0.1:8931; a backend_fallback is' \
+    -e waf_mode=host -e "$(one_site '"backend": "http://127.0.0.1:8939", "backend_fallback": "http://10.0.0.1:8931"')"
+  refused fallback-own-port 'waf: waf_sites entry a has the backend_fallback http://127.0.0.1:8930; a backend_fallback is' \
+    -e waf_mode=host -e "$(one_site '"backend": "http://127.0.0.1:8939", "backend_fallback": "http://127.0.0.1:8930"')"
   refused detection-paranoia 'waf: waf_sites entry a has detection_paranoia 1 below its paranoia 2' \
     -e "$(one_site '"paranoia": 2, "detection_paranoia": 1')"
   refused paranoia 'waf: waf_sites entry a has paranoia 5' \
@@ -577,6 +589,114 @@ test_report() {
   h docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$waf" | tee "$out/memory-report-$1.txt"
 }
 
+# The host scenario: the WAF for the host's nginx on 127.0.0.1:8930, with
+# recorders on the test host's loopback in nginx's place. static uses the
+# default backend, nginx's inner listener 127.0.0.1:8931; cached has a
+# backend (a cache, say) on 8939 and the inner listener as its fallback.
+host_args=(-e test_waf=true -e '{"waf_mode": "host", "waf_sites": [
+  {"name": "static", "domains": ["static.test"], "mode": "block"},
+  {"name": "cached", "domains": ["cached.test"], "mode": "block",
+   "backend": "http://127.0.0.1:8939", "backend_fallback": "http://127.0.0.1:8931"}]}')
+waf_marker='# Written by the noixdev.infra.waf role (traefik mode).'
+
+# start_recorder <name> <port> [status]: recorder.py on the test host's
+# loopback, answering status (200); its lines go to /tmp/recorder-<name>.log.
+start_recorder() {
+  docker exec -d "$host" sh -c "echo \$\$ >/tmp/recorder-$1.pid
+    exec python3 -u /opt/waf-host/recorder.py --bind 127.0.0.1 --port $2 --status ${3:-200} >>/tmp/recorder-$1.log 2>&1"
+  for _ in $(seq 30); do
+    [ -n "$(h ss -Hltn "sport = :$2")" ] && return 0
+    sleep 1
+  done
+  fail "the recorder $1 does not listen on port $2"
+}
+# stop_recorder <name> <port>
+stop_recorder() {
+  h sh -c "kill \$(cat /tmp/recorder-$1.pid)"
+  for _ in $(seq 30); do
+    [ -z "$(h ss -Hltn "sport = :$2")" ] && return 0
+    sleep 1
+  done
+  fail "the recorder $1 still listens on port $2"
+}
+# host_recorded <name>: the recorder's lines, as recorded.
+host_recorded() { h cat "/tmp/recorder-$1.log"; }
+# got_request <name> <path>: the recorder got GET <path>.
+got_request() {
+  host_recorded "$1" | grep -qF "GET $2 HTTP/1.1 | " || { host_recorded "$1" >&2; fail "the recorder $1 did not get $2"; }
+}
+# no_request <name> <text>: no request line the recorder got holds the text.
+no_request() {
+  if host_recorded "$1" | cut -d'|' -f1 | grep -qF -- "$2"; then
+    host_recorded "$1" >&2
+    fail "the recorder $1 got a request with $2"
+  fi
+}
+
+# The host scenario, on the host of the others (it removes the waf.yml of
+# the traefik scenario) or alone.
+test_host() {
+  local got
+  echo "== host (ubuntu $1)"
+  h mkdir -p /opt/waf-host
+  hi sh -c 'cat >/opt/waf-host/recorder.py' <"$here/recorder.py"
+  start_recorder inner 8931
+  # Alone, a waf.yml as traefik mode leaves it.
+  if ! h test -e /opt/traefik/dynamic/waf.yml; then
+    h mkdir -p /opt/traefik/dynamic
+    printf '%s\n' "$waf_marker" | hi sh -c 'cat >/opt/traefik/dynamic/waf.yml'
+  fi
+  h grep -qxF -- "$waf_marker" /opt/traefik/dynamic/waf.yml || fail "the waf.yml before host mode is not the role's"
+  converge "${host_args[@]}"
+  converge_unchanged "${host_args[@]}"
+
+  echo "-- the container on the host's loopback, no Traefik objects"
+  got="$(h docker inspect -f '{{.HostConfig.NetworkMode}} {{.HostConfig.ReadonlyRootfs}} {{.Config.User}} {{.HostConfig.CapDrop}} {{len .HostConfig.PortBindings}}' "$waf" || true)"
+  [ "$got" = "host true 101:101 [ALL] 0" ] || fail "the WAF container runs as: $got"
+  got="$(h ss -Hltn 'sport = :8930' | awk '{print $4}' | sort -u)"
+  [ "$got" = 127.0.0.1:8930 ] || fail "port 8930 listens on: $got"
+  h test ! -e /opt/traefik/dynamic/waf.yml || fail "host mode left waf.yml"
+  [ -z "$(h docker ps -aq --filter name=noixdev-waf-check)" ] || fail "the check container was left behind"
+  expect 421 unknown.test :8930/
+
+  echo "-- a site on nginx's inner listener: attacks answer 403 and never reach it"
+  expect 200 static.test :8930/
+  expect 403 static.test ':8930/?exec=/bin/bash'
+  expect 403 static.test :8930/ -A Nikto
+  got_request inner /
+  no_request inner exec=
+  reported static 932160 --since 10m
+
+  echo "-- the client's address from the X-Forwarded-For of 127.0.0.1"
+  # Recursive: the loopback's own entries are skipped.
+  expect 403 static.test ':8930/?exec=/bin/bash&xff=1' -H 'X-Forwarded-For: 198.51.100.7, 127.0.0.1'
+  audit | grep -F 'xff=1' | grep -qF '"client_ip":"198.51.100.7"' \
+    || { audit >&2; fail "ModSecurity did not see the client's address"; }
+
+  echo "-- a fallback while the backend does not answer, never on a status it answers"
+  # Nothing listens on the backend's port 8939.
+  expect 200 cached.test :8930/fallback
+  got_request inner /fallback
+  expect 403 cached.test ':8930/fallback?exec=/bin/bash'
+  no_request inner exec=
+  start_recorder primary 8939
+  # The WAF tries a backend that did not answer again after 5 s
+  # (waf_fallback_retry).
+  sleep 6
+  expect 200 cached.test :8930/primary
+  got_request primary /primary
+  no_request inner /primary
+  stop_recorder primary 8939
+  start_recorder unavailable 8939 503
+  expect 503 cached.test :8930/unavailable
+  got_request unavailable /unavailable
+  no_request inner /unavailable
+  stop_recorder unavailable 8939
+  stop_recorder inner 8931
+
+  h docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$waf" | tee "$out/memory-host-$1.txt"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_WAF_TESTS="refusals" runs only these.
 scenarios="${NOIXDEV_INFRA_WAF_TESTS:-refusals traefik report host}"
 for ubuntu in $releases; do
@@ -586,7 +706,8 @@ for ubuntu in $releases; do
       refusals) test_refusals "$ubuntu" ;;
       traefik) test_traefik "$ubuntu" ;;
       report) test_report "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (refusals traefik report)" ;;
+      host) test_host "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (refusals traefik report host)" ;;
     esac
   done
   cleanup

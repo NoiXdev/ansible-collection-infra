@@ -216,6 +216,18 @@
         label: "{{ item.name }}"
       when: waf_mode == 'traefik'
 
+    - name: Check that traefik mode sites have no fallback
+      ansible.builtin.assert:
+        that: item.backend_fallback is string and item.backend_fallback | length == 0
+        fail_msg: >-
+          waf: waf_sites entry {{ item.name }} has a backend_fallback, which only host mode uses
+          (a second loopback backend of the host's nginx sites)
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: waf_mode == 'traefik'
+
     - name: Check the host mode backends
       when: waf_mode == 'host'
       block:
@@ -249,6 +261,55 @@
               {{ item.backend | regex_replace(waf_url_re, waf_url_port)
                  or (443 if item.backend is match('^https:') else 80) }}
           loop: "{{ waf_sites_public }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        # A cache in front of nginx's inner listener falls back to the
+        # listener itself while it does not answer; the same rules as the
+        # backend's.
+        - name: Check the fallbacks
+          ansible.builtin.assert:
+            that:
+              - item.backend_fallback is string
+              - item.backend_fallback is match(waf_loopback_url_re)
+              - waf_port | int >= 1 and waf_port | int <= 65535
+              - waf_port | int != waf_host_port | int
+            fail_msg: >-
+              waf: waf_sites entry {{ item.name }} has the backend_fallback {{ item.backend_fallback }};
+              a backend_fallback is an http:// or https:// URL on 127.0.0.1 or [::1] with an
+              optional port (1 to 65535, not the WAF's own waf_host_port) and no path, such as
+              nginx's inner listener http://127.0.0.1:8931
+            quiet: true
+          vars:
+            waf_port: >-
+              {{ item.backend_fallback | string | regex_replace(waf_url_re, waf_url_port)
+                 or (443 if item.backend_fallback | string is match('^https:') else 80) }}
+          loop: "{{ waf_sites_public | rejectattr('backend_fallback', 'equalto', '') | list }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        # One nginx upstream holds both, with one scheme.
+        - name: Check that a fallback is another backend
+          ansible.builtin.assert:
+            that:
+              - waf_addresses[0] != waf_addresses[1]
+              - item.backend_fallback.split(':')[0] == item.backend.split(':')[0]
+            fail_msg: >-
+              waf: waf_sites entry {{ item.name }} has the backend {{ item.backend }} and the
+              backend_fallback {{ item.backend_fallback }}; the fallback is another address and
+              port than the backend, with the same scheme (both http:// or both https://)
+            quiet: true
+          vars:
+            # host:port of each, the port from the scheme when it names none.
+            waf_addresses: >-
+              {%- set addresses = [] -%}
+              {%- for url in [item.backend, item.backend_fallback] -%}
+              {%- set _ = addresses.append(url | regex_replace(waf_url_re, waf_url_host) ~ ':'
+                                           ~ (url | regex_replace(waf_url_re, waf_url_port)
+                                              or (443 if url is match('^https:') else 80))) -%}
+              {%- endfor -%}
+              {{ addresses }}
+          loop: "{{ waf_sites_public | rejectattr('backend_fallback', 'equalto', '') | list }}"
           loop_control:
             label: "{{ item.name }}"
 

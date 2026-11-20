@@ -15,7 +15,8 @@ waf_dir: /opt/waf
 # router the operator controls can use service waf@file instead.
 # host: for the nginx role on the same host (sites with waf: true). The
 # container uses the host's network, listens on 127.0.0.1:waf_host_port only
-# and writes no Traefik objects.
+# and writes no Traefik objects (it removes the waf.yml it wrote in traefik
+# mode).
 waf_mode: traefik
 # The traefik role's network and file provider directory when it set them.
 waf_traefik_network: "{{ traefik_network | default('proxy') }}"
@@ -72,6 +73,15 @@ waf_health_timeout: 60
 #                                        # address on the Traefik network;
 #                                        # host mode: on 127.0.0.1 or [::1],
 #                                        # waf_host_backend by default
+#     backend_fallback: http://127.0.0.1:8931   # host mode only, another
+#                                        # loopback URL with the backend's
+#                                        # scheme (default none): used while
+#                                        # the backend does not answer
+#                                        # (refused or timed out, not on a
+#                                        # status it answers), so a stopped
+#                                        # cache in front of nginx's inner
+#                                        # listener still gets every request
+#                                        # inspected
 #     mode: detect                   # detect (log only, the default), block,
 #                                    # off (proxy only, for emergencies)
 #     paranoia: 1                    # blocking level 1-4 (waf_paranoia)

@@ -1,11 +1,20 @@
-"""The traefik scenario's recording backend: answers 200 to every request
-and prints "<request line> | <User-Agent> | <body sha256> | <body bytes>" for
-each to stdout (docker logs), so the suite can tell which requests got past
-the WAF and whether their bodies arrived whole. Bodies come with a
-Content-Length or chunked."""
+"""The suite's recording backend: answers every request with one status (200
+unless --status says otherwise) and prints "<request line> | <User-Agent> |
+<body sha256> | <body bytes>" for each to stdout, so the suite can tell which
+requests got past the WAF and whether their bodies arrived whole. Bodies come
+with a Content-Length or chunked. It listens on port 8000 of every address
+(the traefik scenario's container), or on --bind and --port (the host
+scenario's loopback)."""
 
+import argparse
 import hashlib
 import http.server
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--bind", default="")
+parser.add_argument("--port", type=int, default=8000)
+parser.add_argument("--status", type=int, default=200)
+options = parser.parse_args()
 
 
 class Recorder(http.server.BaseHTTPRequestHandler):
@@ -41,7 +50,7 @@ class Recorder(http.server.BaseHTTPRequestHandler):
         print(f"{self.requestline} | {self.headers.get('User-Agent', '')} | {digest.hexdigest()} | {length}",
               flush=True)
         body = b"recorded\n"
-        self.send_response(200)
+        self.send_response(options.status)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -54,4 +63,4 @@ class Recorder(http.server.BaseHTTPRequestHandler):
         pass
 
 
-http.server.ThreadingHTTPServer(("", 8000), Recorder).serve_forever()
+http.server.ThreadingHTTPServer((options.bind, options.port), Recorder).serve_forever()

@@ -2,7 +2,8 @@
 # After the checks: render the new files next to the running ones, try them
 # in a throwaway container (nginx -t, no network), put them in place, start
 # or reload the WAF and wait until it serves them; Traefik's waf.yml comes
-# last. A failed try leaves the running WAF, its files and waf.yml unchanged.
+# last (written in traefik mode, removed in host mode). A failed try leaves
+# the running WAF, its files and waf.yml unchanged.
 - name: Create the waf directory
   ansible.builtin.file:
     path: "{{ waf_dir }}"
@@ -233,6 +234,25 @@
     group: root
     mode: "0644"
   when: waf_mode == 'traefik'
+
+# Left by traefik mode, it would route the sites to a WAF that is no longer
+# on Traefik's network. Only the role's own file (its marker line): a file of
+# that name from elsewhere stays.
+- name: Look for the role's Traefik objects in host mode
+  ansible.builtin.command:
+    argv: [grep, -qxF, -e, "{{ waf_traefik_marker }}", --, "{{ waf_traefik_file }}"]
+  register: waf_traefik_own
+  changed_when: false
+  failed_when: false
+  when: waf_mode == 'host'
+
+- name: Remove the role's Traefik objects in host mode
+  ansible.builtin.file:
+    path: "{{ waf_traefik_file }}"
+    state: absent
+  when:
+    - waf_mode == 'host'
+    - waf_traefik_own.rc == 0
 
 - name: Install the report of the WAF's events
   ansible.builtin.template:

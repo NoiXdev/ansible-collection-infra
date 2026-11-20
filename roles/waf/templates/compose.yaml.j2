@@ -39,6 +39,10 @@ services:
     networks:
       {{ q(waf_traefik_network) }}:
         ipv4_address: {{ q(waf_traefik_address) }}
+{% else %}
+    # The host's network, for the host's nginx: nginx.conf listens on
+    # 127.0.0.1 only (waf_host_port, and the health check's port).
+    network_mode: host
 {% endif %}
     cpus: {{ q(waf_cpus) }}
     mem_limit: {{ q(waf_memory) }}
