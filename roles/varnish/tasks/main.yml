@@ -11,10 +11,11 @@
 - name: Check the settings and the sites
   ansible.builtin.include_tasks: validate.yml
 
-# "ii " or "hi " (held): the second letter is the installed state.
+# "ii ", "hi " (held), "iU " (unpacked) ...: the second letter is the
+# current state; n (not installed) and c (config files only) mean no package.
 - name: Read the installed varnish packages
   ansible.builtin.command:
-    argv: "{{ ['dpkg-query', '-W', '-f', '${db:Status-Abbrev}|${Package}|${Version}|${Maintainer}\n'] + varnish_distro_packages }}"
+    argv: "{{ ['dpkg-query', '-W', '-f', '${db:Status-Abbrev}|${Package}|${Version}|${Maintainer}\n'] + varnish_packages }}"
   register: varnish_installed
   changed_when: false
   failed_when: false
@@ -30,7 +31,7 @@
       {{ varnish_apt_url | urlsplit('hostname') }}; the role manages Varnish Software's packages only
   vars:
     varnish_foreign: >-
-      {{ varnish_installed.stdout_lines | select('match', '^.i') | map('split', '|')
+      {{ varnish_installed.stdout_lines | select('match', '^.[^nc]') | map('split', '|')
          | rejectattr(3, 'match', varnish_vendor_maintainer | regex_escape) | list }}
   when: varnish_foreign | length > 0
 
@@ -41,7 +42,7 @@
       varnish_version is {{ varnish_version }}; a series change is a separate, deliberate step
   vars:
     varnish_installed_varnish: >-
-      {{ varnish_installed.stdout_lines | select('match', '^.i *[|]varnish[|]') | map('split', '|') | first | default([]) }}
+      {{ varnish_installed.stdout_lines | select('match', '^.[^nc] *[|]varnish[|]') | map('split', '|') | first | default([]) }}
     varnish_installed_version: "{{ varnish_installed_varnish[2] }}"
     varnish_installed_series: "{{ varnish_installed_version | regex_replace('^([0-9]+:)?([0-9]+[.][0-9]+)[.].*$', '\\2') }}"
   when:

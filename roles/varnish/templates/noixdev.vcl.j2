@@ -1,6 +1,17 @@
 vcl 4.1;
 # managed by noixdev.infra (varnish role). Changes here are overwritten.
 # It holds the front key: root:varnish 0640, as varnishd reads it as varnish.
+{#
+  A cookie list as one regular expression of whole names: a trailing * means
+  prefix; everything else is literal (names may hold "." and "-").
+#}
+{% macro cookie_regex(names) -%}
+{%- set parts = [] -%}
+{%- for name in names -%}
+{%- set _ = parts.append((name[:-1] | regex_escape ~ '.*') if name.endswith('*') else name | regex_escape) -%}
+{%- endfor -%}
+^(?:{{ parts | join('|') }})$
+{%- endmacro %}
 
 import std;
 import cookie;
@@ -12,7 +23,7 @@ acl noixdev_local {
     "::1";
 }
 
-# nginx's inner server.
+# nginx's inner server: the backend of every site without a health probe.
 backend default {
     .host = "{{ varnish_backend_host }}";
     .port = "{{ varnish_backend_port }}";
@@ -20,6 +31,33 @@ backend default {
     .first_byte_timeout = {{ varnish_first_byte_timeout }}s;
     .between_bytes_timeout = {{ varnish_between_bytes_timeout }}s;
 }
+{% for site in varnish_sites_normalized if site.health_path != '' %}
+
+# {{ site.name }}: the same inner server, with the site's health probe (through
+# nginx and the app, so a dead PHP pool makes the site sick). Sick after 3
+# failures of the last 5; healthy at the start.
+backend site_{{ site.name }} {
+    .host = "{{ varnish_backend_host }}";
+    .port = "{{ varnish_backend_port }}";
+    .connect_timeout = {{ varnish_connect_timeout }}s;
+    .first_byte_timeout = {{ varnish_first_byte_timeout }}s;
+    .between_bytes_timeout = {{ varnish_between_bytes_timeout }}s;
+    .probe = {
+        .request =
+            "GET {{ site.health_path }} HTTP/1.1"
+            "Host: {{ site.health_host }}"
+            "X-Forwarded-Proto: https"
+            "User-Agent: Varnish health probe"
+            "Connection: close";
+        .expected_response = 200;
+        .interval = 5s;
+        .timeout = 4s;
+        .window = 5;
+        .threshold = 3;
+        .initial = 3;
+    }
+}
+{% endfor %}
 
 sub vcl_recv {
     if (client.ip !~ noixdev_local) {
@@ -32,24 +70,154 @@ sub vcl_recv {
         return (synth(403, "Forbidden"));
     }
     unset req.http.X-Noix-Front;
+    call noixdev_normalize;
     call noixdev_site_recv;
+    # A site that is not in varnish_sites: never cached.
     return (pass);
 }
 
-# One block per site of varnish_sites; a request for another site passes.
+# One cache key per page: the host in lower case without a port, the query
+# without tracking parameters (Shopware 6.7's list) and sorted.
+sub noixdev_normalize {
+    if (req.http.host) {
+        set req.http.host = std.tolower(regsub(req.http.host, ":[0-9]+$", ""));
+    }
+    if (req.url ~ "[?&](?:{{ varnish_tracking_parameters | map('regex_escape') | join('|') }})(?:=|&|$)") {
+        set req.url = regsuball(req.url, "([?&])(?:{{ varnish_tracking_parameters | map('regex_escape') | join('|') }})(?:=[^&]*)?(?=&|$)", "\1");
+        set req.url = regsuball(req.url, "&{2,}", "&");
+        set req.url = regsub(req.url, "\?&", "?");
+        set req.url = regsub(req.url, "[?&]$", "");
+    }
+    set req.url = std.querysort(req.url);
+}
+
+# One block per site of varnish_sites; a request for another site passes
+# (vcl_recv). Each block ends in noixdev_lookup, which passes or looks up.
 sub noixdev_site_recv {
 {% for site in varnish_sites_normalized %}
+{% set strip = varnish_strip_cookies + site.strip_cookies %}
     if (req.http.X-Noix-Site == "{{ site.name }}") {
         # {{ site.name }}: {{ site.profile }}
+{% if site.health_path != '' %}
+        set req.backend_hint = site_{{ site.name }};
+{% endif %}
+{% if site.profile == 'typo3' %}
+        # TYPO3's sessions (frontend and backend user) always pass, even if
+        # strip_cookies names them.
+        if (req.http.Cookie ~ "(?:^|;) *(?:fe_typo_user|be_typo_user)=") {
+            return (pass);
+        }
+{% endif %}
+{% if strip | length > 0 %}
+        if (req.http.Cookie) {
+            cookie.parse(req.http.Cookie);
+            cookie.filter_re("{{ cookie_regex(strip) }}");
+            set req.http.Cookie = cookie.get_string();
+            if (req.http.Cookie == "") {
+                unset req.http.Cookie;
+            }
+        }
+{% endif %}
+        call noixdev_lookup;
     }
 {% endfor %}
 }
 
-# The builtin rules decide; nothing is cached (every request passes).
+# GET and HEAD without Authorization and without any cookie (after the
+# stripping) are looked up; everything else passes.
+sub noixdev_lookup {
+    if (req.method != "GET" && req.method != "HEAD") {
+        return (pass);
+    }
+    if (req.http.Authorization || req.http.Cookie) {
+        return (pass);
+    }
+    # A stale object is served (and refreshed in the background) for
+    # varnish_grace_healthy while the site's backend is healthy, for
+    # varnish_grace_sick while its probe says sick.
+    if (std.healthy(req.backend_hint)) {
+        set req.grace = {{ varnish_grace_healthy }}s;
+    } else {
+        set req.grace = {{ varnish_grace_sick }}s;
+    }
+    return (hash);
+}
+
+# The site is part of the key: two sites never share an object.
+sub vcl_hash {
+    hash_data(req.http.X-Noix-Site);
+    hash_data(req.http.host);
+    hash_data(req.url);
+    return (lookup);
+}
+
 sub vcl_backend_response {
+    # What a ban selects objects by: the site, the host and the URL as
+    # normalized (an app's own headers of these names are overwritten).
+    set beresp.http.X-Noix-Site = bereq.http.X-Noix-Site;
+    set beresp.http.X-Noix-Host = bereq.http.host;
+    set beresp.http.X-Noix-Url = bereq.url;
+    if (bereq.uncacheable) {
+        return (deliver);
+    }
+    if (beresp.status >= 500) {
+        # A failed background refresh keeps the stale object.
+        if (bereq.is_bgfetch) {
+            return (abandon);
+        }
+        call noixdev_hit_for_miss;
+    }
+    # A session start is never shared.
+    if (beresp.http.Set-Cookie || beresp.http.Vary == "*") {
+        call noixdev_hit_for_miss;
+    }
+    call noixdev_site_backend_response;
+    # What the app made cacheable is cached for the app's TTL (s-maxage,
+    # max-age, Expires, or Varnish's default TTL without any of them).
+    if (beresp.ttl <= 0s
+        || beresp.http.Surrogate-Control ~ "(?i)no-store"
+        || (!beresp.http.Surrogate-Control && beresp.http.Cache-Control ~ "(?i)(?:private|no-cache|no-store)")) {
+        call noixdev_hit_for_miss;
+    }
+    set beresp.grace = {{ varnish_grace_sick }}s;
+    return (deliver);
+}
+
+# Not stored: the requests for the URL go to the backend for a while (without
+# waiting for each other), until it answers with something cacheable.
+sub noixdev_hit_for_miss {
+    set beresp.uncacheable = true;
+    set beresp.ttl = 10s;
+    set beresp.grace = 0s;
+    return (deliver);
+}
+
+# The microcache: a 200, 301 or 404 the app did not make cacheable (private,
+# no-cache, no-store, no TTL) is kept for the site's microcache seconds, and
+# not served stale beyond them.
+sub noixdev_site_backend_response {
+{% for site in varnish_sites_normalized if site.microcache | int > 0 %}
+    if (bereq.http.X-Noix-Site == "{{ site.name }}"
+        && (beresp.status == 200 || beresp.status == 301 || beresp.status == 404)
+        && (beresp.ttl <= 0s || beresp.http.Cache-Control ~ "(?i)(?:private|no-cache|no-store)")) {
+        set beresp.ttl = {{ site.microcache | int }}s;
+        set beresp.grace = 0s;
+        return (deliver);
+    }
+{% endfor %}
+}
+
+# A background refresh that cannot reach the backend (sick, refused, timed
+# out) keeps the stale object.
+sub vcl_backend_error {
+    if (bereq.is_bgfetch) {
+        return (abandon);
+    }
 }
 
 # X-Noix-Cache tells nginx the cache status (for its log); nginx removes it.
+# "+grace": a stale object was served. The headers bans and tags use stay in
+# the cache.
 sub vcl_deliver {
     if (obj.uncacheable) {
         set resp.http.X-Noix-Cache = "PASS";
@@ -58,12 +226,36 @@ sub vcl_deliver {
     } else {
         set resp.http.X-Noix-Cache = "MISS";
     }
+    if (obj.hits > 0 && obj.ttl <= 0s) {
+        set resp.http.X-Noix-Cache = resp.http.X-Noix-Cache + "+grace";
+    }
+    call noixdev_debug_header;
+    unset resp.http.X-Noix-Site;
+    unset resp.http.X-Noix-Host;
+    unset resp.http.X-Noix-Url;
+    unset resp.http.xkey;
+    unset resp.http.X-Cache-Tags;
     unset resp.http.Via;
     unset resp.http.X-Varnish;
 }
 
 sub vcl_synth {
     set resp.http.X-Noix-Cache = "SYNTH";
+    call noixdev_debug_header;
     unset resp.http.Via;
     unset resp.http.X-Varnish;
+}
+
+# X-Cache (the same as X-Noix-Cache) for the sites with debug_header.
+sub noixdev_debug_header {
+{% set debug_sites = varnish_sites_normalized | selectattr('debug_header') | map(attribute='name') | list %}
+{% if debug_sites | length > 0 %}
+    if ({% for name in debug_sites %}{{ ' || ' if not loop.first }}req.http.X-Noix-Site == "{{ name }}"{% endfor %}) {
+        set resp.http.X-Cache = resp.http.X-Noix-Cache;
+    } else {
+        unset resp.http.X-Cache;
+    }
+{% else %}
+    unset resp.http.X-Cache;
+{% endif %}
 }

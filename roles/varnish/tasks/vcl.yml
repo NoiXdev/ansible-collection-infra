@@ -44,6 +44,9 @@
   register: varnish_vcl_compared
 
 # Not a handler: the new VCL is compiled and in place before Varnish starts.
+# Writing, compiling and removing the .new file run in check mode too (they
+# change nothing else), so --check compiles the new VCL; only the move is
+# left out.
 - name: Write, compile and load the new VCL
   when: varnish_vcl_differs
   vars:
@@ -56,6 +59,7 @@
         owner: root
         group: varnish
         mode: "0640"
+      check_mode: false
       diff: false
       no_log: true
 
@@ -67,6 +71,7 @@
       register: varnish_vcl_compiled
       changed_when: false
       failed_when: false
+      check_mode: false
       no_log: true
 
     - name: Stop on a VCL that does not compile
@@ -86,3 +91,4 @@
       ansible.builtin.file:
         path: "{{ varnish_vcl }}.new"
         state: absent
+      check_mode: false

@@ -11,13 +11,21 @@ host and path, from 1). Query parameters set the answer:
     sc=      Set-Cookie (one header per sc=)
     xkey=    xkey
     tags=    X-Cache-Tags
+    vary=    Vary
     status=  the status code (default 200)
     size=    the body is that many bytes: the line above, a newline and digits
     sleep=   seconds to wait before answering
+    gzip=    the body is gzipped when the request accepts gzip (Vary:
+             Accept-Encoding either way)
+    echo=    the name of a request header: its value comes back in X-Echo
+             (no X-Echo when the request has no such header)
 
-GET /health answers 200, or 500 while the file /tmp/backend-sick exists.
+While the file /tmp/backend-sick exists every request answers 500 "sick"
+(counted like the others), GET /health included; otherwise GET /health
+answers 200 and is not counted.
 """
 
+import gzip
 import sys
 import threading
 import time
@@ -26,7 +34,7 @@ from os.path import exists
 from urllib.parse import parse_qs, urlsplit
 
 SICK = "/tmp/backend-sick"
-HEADERS = {"cc": "Cache-Control", "xkey": "xkey", "tags": "X-Cache-Tags"}
+HEADERS = {"cc": "Cache-Control", "xkey": "xkey", "tags": "X-Cache-Tags", "vary": "Vary"}
 
 counts = {}
 counts_lock = threading.Lock()
@@ -52,12 +60,16 @@ class Handler(BaseHTTPRequestHandler):
         if length:
             self.rfile.read(length)
         url = urlsplit(self.path)
+        host = self.headers.get("Host", "")
+        if exists(SICK):
+            if url.path != "/health":
+                count(host, self.path)
+            self.send(500, b"sick\n", [])
+            return
         if url.path == "/health" and self.command == "GET":
-            sick = exists(SICK)
-            self.send(500 if sick else 200, b"sick\n" if sick else b"ok\n", [])
+            self.send(200, b"ok\n", [])
             return
         params = parse_qs(url.query, keep_blank_values=True)
-        host = self.headers.get("Host", "")
         line = f"count={count(host, self.path)} host={host} path={self.path}"
         if "sleep" in params:
             time.sleep(float(params["sleep"][-1]))
@@ -65,6 +77,13 @@ class Handler(BaseHTTPRequestHandler):
         body = sized(line, int(params["size"][-1])) if "size" in params else (line + "\n").encode()
         headers = [(name, params[key][-1]) for key, name in HEADERS.items() if key in params]
         headers += [("Set-Cookie", value) for value in params.get("sc", [])]
+        if "echo" in params and params["echo"][-1] in self.headers:
+            headers.append(("X-Echo", self.headers[params["echo"][-1]]))
+        if "gzip" in params:
+            headers.append(("Vary", "Accept-Encoding"))
+            if "gzip" in self.headers.get("Accept-Encoding", ""):
+                body = gzip.compress(body)
+                headers.append(("Content-Encoding", "gzip"))
         self.send(status, body, headers)
 
     def send(self, status, body, headers):

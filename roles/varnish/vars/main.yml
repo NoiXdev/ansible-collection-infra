@@ -12,12 +12,31 @@ varnish_vendor_maintainer: Varnish Software
 varnish_apt_component: main
 varnish_apt_keyring: /etc/apt/keyrings/varnish.asc
 
-# Installed packages of these names that are not the repository's are refused.
-varnish_distro_packages: [varnish, varnish-modules]
-
-# The packages the role installs, and the ones the apt pin covers.
+# The packages the role installs; installed packages of these names that are
+# not the repository's are refused. The apt pin covers varnish-dev too.
 varnish_packages: [varnish, varnish-modules]
 varnish_apt_packages: varnish varnish-dev varnish-modules
+
+# Query parameters that only the browser's JavaScript reads (analytics, ad
+# click ids): removed from the URL before the cache lookup, for every
+# profile. Shopware 6.7's list, verbatim (shopware/varnish-shopware,
+# 6.7/rootfs/etc/varnish/default.vcl at 518efcf, read 2026-11-20); only
+# whole parameter names match.
+varnish_tracking_parameters: [
+  pk_campaign, piwik_campaign, pk_kwd, piwik_kwd, pk_keyword, piwik_keyword, mtm_campaign,
+  matomo_campaign, mtm_cid, matomo_cid, mtm_kwd, matomo_kwd, mtm_keyword, matomo_keyword,
+  mtm_source, matomo_source, mtm_medium, matomo_medium, mtm_content, matomo_content, mtm_group,
+  matomo_group, mtm_placement, matomo_placement, pixelId, kwid, kw, chl, dv, nk, pa, camid, adgid,
+  yclid, utm_term, utm_source, utm_medium, utm_campaign, utm_content, cx, ie, cof, siteurl, _ga,
+  adgroupid, campaignid, adid, utm_id, utm_source_platform, utm_creative_format,
+  utm_marketing_tactic, _gl, gclsrc, gPromoCode, gQT, gclid, srsltid, dclid, gbraid, wbraid,
+  gad_source, gad_campaignid, fbclid, fb_action_ids, fb_action_types, fb_source, mc_cid, mc_eid,
+  _bta_tid, _bta_c, trk_contact, trk_msg, trk_module, trk_sid, gdfms, gdftrk, gdffi, _ke, _kx,
+  redirect_log_mongo_id, redirect_mongo_id, sb_referer_host, mkwid, pcrid, ef_id, s_kwcid,
+  msclkid, dm_i, epik, pp, twclid, hsa_cam, hsa_grp, hsa_mt, hsa_src, hsa_ad, hsa_acc, hsa_net,
+  hsa_kw, hsa_tgt, hsa_ver, _branch_match_id, mkevt, mkcid, mkrid, campid, toolid, customid,
+  igshid, si, ttclid, ScCid, rtid, irclickid, klar_source, klar_cpid, klar_adid
+]
 
 # The role's files (see defaults/main.yml for their owners and modes).
 varnish_vcl: /etc/varnish/noixdev.vcl

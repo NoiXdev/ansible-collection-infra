@@ -16,7 +16,15 @@
 # deleted key is created anew.
 #
 # The scenario "badvcl" runs a copy of the collection whose VCL does not
-# compile and checks that the run fails before the running VCL is touched.
+# compile and checks that the run fails before the running VCL is touched,
+# with --check too (which compiles the new VCL and changes nothing).
+#
+# The scenario "cache" checks the cache rules of the generic and typo3
+# profiles and the microcache (what is cached, what passes, the cookies and
+# query parameters that do not count, HEAD, gzip and Range, the headers
+# clients get), and "grace" that stale pages are served while the backend
+# fails: 30 s for a site without a health probe, well beyond for a site whose
+# probe says sick.
 #
 # The scenario "foreign" installs Ubuntu's varnish, and on a second host
 # Varnish Software's 9.0, and checks that the role refuses both before any
@@ -257,10 +265,264 @@ test_badvcl() {
   grep -qF "Symbol not found: 'noixdev_unknown_keyword'" "$out/badvcl-broken.log" \
     || fail "badvcl: the message does not show the compiler's error"
 
-  [ "$(h sha256sum "$vcl")" = "$before_vcl" ] || fail "badvcl: the failed run changed $vcl"
-  [ "$(h varnishadm vcl.list)" = "$before_list" ] || fail "badvcl: the failed run changed the loaded VCLs"
-  h test ! -e "$vcl.new" || fail "badvcl: the failed run left $vcl.new"
+  echo "== badvcl: --check compiles the new VCL too, and changes nothing"
+  ANSIBLE_COLLECTIONS_PATH="$copy:$ANSIBLE_COLLECTIONS_PATH" run_fails badvcl-broken-check \
+    "varnish: the new VCL does not compile" converge.yml --check -e "@$out/badvcl-c-vars.json"
+  grep -qF "Symbol not found: 'noixdev_unknown_keyword'" "$out/badvcl-broken-check.log" \
+    || fail "badvcl: --check did not compile the new VCL"
+  run_ok badvcl-check converge.yml --check -e "@$out/badvcl-c-vars.json"
+  grep -q 'TASK \[noixdev.infra.varnish : Move the new VCL into place\]' "$out/badvcl-check.log" \
+    || fail "badvcl: --check with a changed VCL did not get to the move"
+
+  [ "$(h sha256sum "$vcl")" = "$before_vcl" ] || fail "badvcl: the failed and the --check runs changed $vcl"
+  [ "$(h varnishadm vcl.list)" = "$before_list" ] || fail "badvcl: the failed and the --check runs changed the loaded VCLs"
+  h test ! -e "$vcl.new" || fail "badvcl: the failed or the --check runs left $vcl.new"
   run_ok badvcl-verify verify.yml
+  no_key_in_logs
+}
+
+# req <site> <host> <path> [<curl option>...]: a request through Varnish with
+# the front key, X-Noix-Site <site> and Host <host> (GET unless the options
+# say otherwise). Sets status, cache (X-Noix-Cache), headers and body, and
+# checks what every answer must hold: X-Cache equals X-Noix-Cache on the
+# debug site (debug_site) and is absent elsewhere, and no internal header
+# (X-Noix-* but X-Noix-Cache, xkey, X-Cache-Tags) reaches the client.
+debug_site=
+req() {
+  local site="$1" vhost="$2" path="$3" answer xcache
+  shift 3
+  answer="$(h sh -c 'site="$1" vhost="$2" path="$3"; shift 3
+    exec curl -sS -i --max-time 10 -H "X-Noix-Front: $(cat '"$key"')" -H "X-Noix-Site: $site" -H "Host: $vhost" \
+      "$@" "http://127.0.0.1:6081$path"' sh "$site" "$vhost" "$path" "$@" | tr -d '\r')"
+  headers="${answer%%$'\n\n'*}"
+  body=
+  case "$answer" in *$'\n\n'*) body="${answer#*$'\n\n'}" ;; esac
+  status="$(printf '%s\n' "$headers" | sed -n '1s/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p')"
+  cache="$(printf '%s\n' "$headers" | sed -n 's/^[Xx]-[Nn]oix-[Cc]ache: //p')"
+  xcache="$(printf '%s\n' "$headers" | sed -n 's/^[Xx]-[Cc]ache: //p')"
+  if [ "$site" = "$debug_site" ]; then
+    [ "$xcache" = "$cache" ] || fail "$site $vhost$path: X-Cache is '$xcache', X-Noix-Cache '$cache'"
+  else
+    [ -z "$xcache" ] || fail "$site $vhost$path: X-Cache '$xcache' on a site without debug_header"
+  fi
+  if printf '%s\n' "$headers" | grep -Eiq '^(X-Noix-(Site|Url|Host|Front)|xkey|X-Cache-Tags):'; then
+    fail "$site $vhost$path: an internal header reached the client: $(printf '%s\n' "$headers" | grep -Ei '^(X-Noix|xkey|X-Cache-Tags)' | grep -vi '^X-Noix-Cache:' | cut -d: -f1 | tr '\n' ' ')"
+  fi
+}
+# expect <what> <status> <cache> [<body>]: the last answer of req.
+expect() {
+  [ "$status" = "$2" ] || fail "$1: status $status, expected $2"
+  [ "$cache" = "$3" ] || fail "$1: X-Noix-Cache '$cache', expected '$3'"
+  [ $# -lt 4 ] || [ "$body" = "$4" ] || fail "$1: body '$body', expected '$4'"
+}
+
+# The cache rules of the generic and typo3 profiles and of the microcache, in
+# front of tests/varnish/backend.py: its count=<n> shows how often a request
+# reached it.
+test_cache() {
+  local p gz plain
+  echo "== cache: what the app allows is cached, per site (ubuntu $1)"
+  use_host "$1" varnish
+  start_backend
+  printf '%s\n' '{"test_varnish": true, "varnish_sites": [
+    {"name": "a", "purge_token": "0123456789abcdef0123456789abcdef", "debug_header": true, "strip_cookies": ["consent"]},
+    {"name": "b", "profile": "typo3", "purge_token": "fedcba9876543210fedcba9876543210"},
+    {"name": "m", "purge_token": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm", "microcache": 5}]}' >"$out/cache-vars.json"
+  host_state=varnish
+  run_ok cache converge.yml -e "@$out/cache-vars.json"
+  debug_site=a
+
+  # Varnish sorts the query before the backend sees it; the paths here are
+  # sorted already, so the backend's path= is the path asked for.
+  p='/c/page?cc=public,max-age=60&tags=;p1;&xkey=t1'
+  req a a.test "$p"
+  expect "a page the app made cacheable" 200 MISS "count=1 host=a.test path=$p"
+  req a a.test "$p"
+  expect "the page again" 200 HIT "count=1 host=a.test path=$p"
+  req a A.TEST "$p"
+  expect "the page with the host in capitals" 200 HIT "count=1 host=a.test path=$p"
+  req a a.test:443 "$p"
+  expect "the page with a port in the host" 200 HIT "count=1 host=a.test path=$p"
+
+  echo "== cache: HEAD, gzip and Range on cached objects"
+  p='/c/head?cc=public,max-age=60'
+  req a a.test "$p" -I
+  expect "HEAD of a new page" 200 MISS ""
+  req a a.test "$p"
+  expect "GET after HEAD" 200 HIT "count=1 host=a.test path=$p"
+  p='/c/gz?cc=public,max-age=60&gzip=1'
+  gz="$(h sh -c 'curl -sS --max-time 10 -H "X-Noix-Front: $(cat '"$key"')" -H "X-Noix-Site: a" -H "Host: a.test" \
+    -H "Accept-Encoding: gzip" "http://127.0.0.1:6081$1" | gunzip' sh "$p")" || fail "the gzip client did not get gzip"
+  plain="$(h sh -c 'curl -sS --max-time 10 -H "X-Noix-Front: $(cat '"$key"')" -H "X-Noix-Site: a" -H "Host: a.test" \
+    "http://127.0.0.1:6081$1"' sh "$p")"
+  case "$gz" in "count="[0-9]*" host=a.test path=$p") ;; *) fail "the gzip client got '$gz'" ;; esac
+  case "$plain" in "count="[0-9]*" host=a.test path=$p") ;; *) fail "the plain client got '$plain'" ;; esac
+  p='/c/range?cc=public,max-age=60&size=1000'
+  req a a.test "$p"
+  expect "a page of 1000 bytes" 200 MISS
+  [ "${#body}" = 1000 ] || fail "the page of 1000 bytes has ${#body}"
+  req a a.test "$p" -H 'Range: bytes=0-9'
+  expect "bytes 0-9 of the cached page" 206 HIT "count=1 ho"
+  printf '%s\n' "$headers" | grep -qix 'Content-Range: bytes 0-9/1000' || fail "the range answer has no Content-Range bytes 0-9/1000"
+
+  echo "== cache: the backend never sees the front key"
+  req a a.test '/c/echo?cc=public,max-age=60&echo=X-Noix-Front'
+  expect "a cacheable page" 200 MISS
+  ! printf '%s\n' "$headers" | grep -qi '^X-Echo:' || fail "the backend got X-Noix-Front on a fetch"
+  req a a.test '/c/echo?echo=X-Noix-Front' -H 'Cookie: session=1'
+  expect "a page with a session cookie" 200 PASS
+  ! printf '%s\n' "$headers" | grep -qi '^X-Echo:' || fail "the backend got X-Noix-Front on a pass"
+  req a a.test '/c/echo?echo=X-Noix-Site' -H 'Cookie: session=1'
+  printf '%s\n' "$headers" | grep -qix 'X-Echo: a' || fail "the backend's echo does not work"
+
+  echo "== cache: cookies"
+  p='/c/cookie?cc=public,max-age=60'
+  req a a.test "$p"
+  expect "a cacheable page" 200 MISS "count=1 host=a.test path=$p"
+  req a a.test "$p" -H 'Cookie: session=1'
+  expect "with a session cookie" 200 PASS "count=2 host=a.test path=$p"
+  req a a.test "$p" -H 'Cookie: _ga=1; _pk_id.1=2'
+  expect "with tracking cookies" 200 HIT "count=1 host=a.test path=$p"
+  req a a.test "$p" -H 'Cookie: techaro.lol-anubis-auth-0a1b2c3d=x; techaro.lol-anubis-cookie-verification-0a1b2c3d=y'
+  expect "with Anubis's cookies" 200 HIT "count=1 host=a.test path=$p"
+  req a a.test "$p" -H 'Cookie: techaroXlol-anubis-auth=x'
+  expect "with a cookie that only looks like Anubis's" 200 PASS "count=3 host=a.test path=$p"
+  req a a.test "$p" -H 'Cookie: consent=yes'
+  expect "with the consent cookie the site strips" 200 HIT "count=1 host=a.test path=$p"
+  req a a.test "$p" -H 'Cookie: _ga=1; session=1'
+  expect "with a tracking and a session cookie" 200 PASS "count=4 host=a.test path=$p"
+  req b b.test "$p"
+  expect "a cacheable page of the typo3 site" 200 MISS "count=1 host=b.test path=$p"
+  req b b.test "$p" -H 'Cookie: _ga=1'
+  expect "typo3 with a tracking cookie" 200 HIT "count=1 host=b.test path=$p"
+  req b b.test "$p" -H 'Cookie: fe_typo_user=1'
+  expect "typo3 with fe_typo_user" 200 PASS "count=2 host=b.test path=$p"
+  req b b.test "$p" -H 'Cookie: be_typo_user=1; _ga=1'
+  expect "typo3 with be_typo_user" 200 PASS "count=3 host=b.test path=$p"
+  req b b.test "$p" -H 'Cookie: consent=yes'
+  expect "typo3 with a consent cookie it does not strip" 200 PASS "count=4 host=b.test path=$p"
+
+  echo "== cache: private, Set-Cookie, Authorization, POST, 5xx and other sites pass"
+  for p in '/c/private?cc=private' '/c/nocc-cookie?sc=s%3D1' '/c/vary?cc=public,max-age=60&vary=%2A' \
+    '/c/500?cc=public,max-age=60&status=500' '/c/sc?cc=public,max-age=60&sc=s%3D1'; do
+    req a a.test "$p"
+    [ "$cache" != HIT ] || fail "$p was a HIT on the first request"
+    req a a.test "$p"
+    [ "$cache" != HIT ] || fail "$p was a HIT"
+    case "$body" in "count=2 host=a.test path=$p") ;; *) fail "$p did not reach the backend twice: '$body'" ;; esac
+  done
+  p='/c/auth?cc=public,max-age=60'
+  req a a.test "$p" -H 'Authorization: Basic dXNlcjpwYXNz'
+  expect "with Authorization" 200 PASS "count=1 host=a.test path=$p"
+  req a a.test "$p" -H 'Authorization: Basic dXNlcjpwYXNz'
+  expect "with Authorization again" 200 PASS "count=2 host=a.test path=$p"
+  p='/c/post?cc=public,max-age=60'
+  req a a.test "$p" -X POST -d x=1
+  expect "a POST" 200 PASS "count=1 host=a.test path=$p"
+  req a a.test "$p" -X POST -d x=1
+  expect "a POST again" 200 PASS "count=2 host=a.test path=$p"
+  p='/c/zzz?cc=public,max-age=60'
+  req zzz a.test "$p"
+  expect "a site that is not in varnish_sites" 200 PASS "count=1 host=a.test path=$p"
+  req zzz a.test "$p"
+  expect "that site again" 200 PASS "count=2 host=a.test path=$p"
+
+  echo "== cache: tracking parameters and the order of the query do not count"
+  req a a.test '/c/q?a=1&b=2'
+  expect "a query" 200 MISS "count=1 host=a.test path=/c/q?a=1&b=2"
+  req a a.test '/c/q?utm_source=x&b=2&a=1&gclid=y'
+  expect "the query reordered, with tracking parameters" 200 HIT "count=1 host=a.test path=/c/q?a=1&b=2"
+  req a a.test '/c/q?xutm_source=x&a=1&b=2'
+  expect "a parameter that only ends like a tracking one" 200 MISS "count=1 host=a.test path=/c/q?a=1&b=2&xutm_source=x"
+
+  echo "== cache: the microcache keeps private pages for 5 s, and the app's TTL otherwise"
+  p='/c/micro?cc=private'
+  req m m.test "$p"
+  expect "a private page of the microcache site" 200 MISS "count=1 host=m.test path=$p"
+  req m m.test "$p"
+  expect "the private page within 5 s" 200 HIT "count=1 host=m.test path=$p"
+  req m m.test '/c/micro-long?cc=public,max-age=60'
+  expect "a page the app made cacheable" 200 MISS
+  req m m.test '/c/micro-cookie?cc=private&sc=s%3D1'
+  expect "a private page with Set-Cookie" 200 PASS "count=1 host=m.test path=/c/micro-cookie?cc=private&sc=s%3D1"
+  req m m.test '/c/micro-cookie?cc=private&sc=s%3D1'
+  expect "that page again" 200 PASS "count=2 host=m.test path=/c/micro-cookie?cc=private&sc=s%3D1"
+  req m m.test '/c/micro-500?cc=private&status=500'
+  req m m.test '/c/micro-500?cc=private&status=500'
+  expect "a private 500" 500 PASS "count=2 host=m.test path=/c/micro-500?cc=private&status=500"
+  req m m.test "$p" -H 'Cookie: session=1'
+  expect "the private page with a session cookie" 200 PASS "count=2 host=m.test path=$p"
+  sleep 6
+  req m m.test "$p"
+  expect "the private page after 6 s" 200 MISS "count=3 host=m.test path=$p"
+  req m m.test '/c/micro-long?cc=public,max-age=60'
+  expect "the cacheable page after 6 s" 200 HIT "count=1 host=m.test path=/c/micro-long?cc=public,max-age=60"
+  no_key_in_logs
+  debug_site=
+}
+
+# Grace: a stale object is served for 30 s while the site counts as healthy,
+# and for 6 h while its health probe says sick; a refresh that fails never
+# replaces it.
+test_grace() {
+  local t0 tries=0 p='/g/page?cc=public,max-age=2'
+  echo "== grace: stale pages while the backend fails (ubuntu $1)"
+  use_host "$1" varnish
+  start_backend
+  h rm -f /tmp/backend-sick
+  printf '%s\n' '{"test_varnish": true, "varnish_sites": [
+    {"name": "a", "purge_token": "0123456789abcdef0123456789abcdef"},
+    {"name": "g", "purge_token": "gggggggggggggggggggggggggggggggg", "health_path": "/health", "health_host": "g.test"}]}' >"$out/grace-vars.json"
+  host_state=varnish
+  run_ok grace converge.yml -e "@$out/grace-vars.json"
+  until h varnishadm backend.list site_g | grep -q healthy; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 30 ] || fail "grace: the backend site_g is not healthy: $(h varnishadm backend.list site_g)"
+    sleep 1
+  done
+  tries=0
+
+  t0="$(date +%s)"
+  req a a.test "$p"
+  expect "a's page, max-age 2" 200 MISS "count=1 host=a.test path=$p"
+  req g g.test "$p"
+  expect "g's page, max-age 2" 200 MISS "count=1 host=g.test path=$p"
+  sleep 3
+  h touch /tmp/backend-sick
+
+  echo "== grace: a site without a probe gets its stale page within 30 s"
+  req a a.test "$p"
+  expect "a's expired page, backend failing" 200 HIT+grace "count=1 host=a.test path=$p"
+  sleep 2
+  req a a.test "$p"
+  expect "a's page after the failed refresh" 200 HIT+grace "count=1 host=a.test path=$p"
+
+  echo "== grace: a site whose probe says sick gets its stale page well beyond 30 s"
+  until h varnishadm backend.list site_g | grep -q 'sick'; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 40 ] || fail "grace: the probe of g does not turn sick: $(h varnishadm backend.list site_g)"
+    sleep 1
+  done
+  while [ "$(date +%s)" -lt $((t0 + 62)) ]; do sleep 1; done
+  req g g.test "$p"
+  expect "g's page 60 s after it expired, probe sick" 200 HIT+grace "count=1 host=g.test path=$p"
+  req a a.test "$p"
+  [ "$cache" != HIT+grace ] || fail "a's page was served stale 60 s after it expired"
+  [ "$status" = 500 ] || fail "a's page 60 s after it expired: status $status, expected the backend's 500"
+
+  echo "== grace: with the backend stopped, a site without a probe gets its stale page within 30 s"
+  h rm -f /tmp/backend-sick
+  p='/g/stopped?cc=public,max-age=2'
+  req a a.test "$p"
+  expect "a's page, max-age 2" 200 MISS "count=1 host=a.test path=$p"
+  sleep 3
+  h systemctl stop noixdev-test-backend
+  req a a.test "$p"
+  expect "a's expired page, backend stopped" 200 HIT+grace "count=1 host=a.test path=$p"
+  sleep 2
+  req a a.test "$p"
+  expect "a's page after the failed refresh" 200 HIT+grace "count=1 host=a.test path=$p"
+  start_backend
   no_key_in_logs
 }
 
@@ -303,7 +565,7 @@ test_foreign() {
 }
 
 # All scenarios by default; "tests/varnish/run.sh invalid" runs only these.
-scenarios="${*:-invalid valid install badvcl foreign}"
+scenarios="${*:-invalid valid install badvcl cache grace foreign}"
 for ubuntu in $releases; do
   host_state=
   for scenario in $scenarios; do
@@ -312,8 +574,10 @@ for ubuntu in $releases; do
       valid) test_valid "$ubuntu" ;;
       install) test_install "$ubuntu" ;;
       badvcl) test_badvcl "$ubuntu" ;;
+      cache) test_cache "$ubuntu" ;;
+      grace) test_grace "$ubuntu" ;;
       foreign) test_foreign "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (invalid, valid, install, badvcl, foreign)" ;;
+      *) fail "unknown scenario $scenario (invalid, valid, install, badvcl, cache, grace, foreign)" ;;
     esac
   done
   cleanup

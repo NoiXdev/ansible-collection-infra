@@ -41,6 +41,39 @@
         fail_msg: "the installed varnish is not the repository's: {{ test_madison.stdout }}"
         quiet: true
 
+    # The pin: 9.1 is the candidate, every other version (Varnish Software's
+    # 9.0, Ubuntu's archive) is never installed, and the repository's origin
+    # is Varnish (what /etc/apt/apt.conf.d/52noixdev-varnish lets
+    # unattended-upgrades install from).
+    - name: Read the pin and the origins
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [apt-cache, policy, varnish]
+        - [apt-cache, policy]
+      register: test_policy
+      changed_when: false
+
+    - name: Check the pin and the origin
+      ansible.builtin.assert:
+        that:
+          - "test_policy.results[0].stdout is search('(?m)^  Candidate: 9[.]1[.]')"
+          - test_versions | selectattr(0, 'match', '9[.]1[.]') | map(attribute=1) | unique | list == ['990']
+          - test_versions | selectattr(0, 'match', '9[.]0[.]') | list | length > 0
+          - test_versions | selectattr(0, 'match', '9[.]0[.]') | map(attribute=1) | unique | list == ['-1']
+          - test_versions | selectattr(2, 'search', '[.]ubuntu[.]com/') | list | length > 0
+          - test_versions | selectattr(2, 'search', '[.]ubuntu[.]com/') | map(attribute=1) | unique | list == ['-1']
+          - >-
+            test_policy.results[1].stdout is search('(?m)^ +[0-9]+ https://packages[.]varnish-software[.]com/varnish/ubuntu
+            [a-z]+/main [a-z0-9]+ Packages\n +release (?:[^\n]*,)?o=Varnish,')
+        fail_msg: "the pin or the origin is not as the role sets them: {{ test_policy.results | map(attribute='stdout') | list }}"
+        quiet: true
+      vars:
+        # (version, pin priority, the lines of its sources) per version.
+        test_versions: >-
+          {{ test_policy.results[0].stdout
+             | regex_findall('(?m)^ (?:\*\*\*|   ) (\S+) (-?[0-9]+)\n((?:        .*(?:\n|$))*)') }}
+
     - name: Read the service state
       ansible.builtin.command:
         argv: [systemctl, is-active, varnish]
@@ -102,6 +135,8 @@
       register: test_answers
       changed_when: false
 
+    # Site a is in varnish_sites and / sends no Cache-Control: cached for
+    # Varnish's default TTL.
     - name: Check that only the request with the key reached the backend
       ansible.builtin.assert:
         that:
@@ -109,7 +144,7 @@
           - 'test_answers.results[0].stdout is search("(?mi)^X-Noix-Cache: SYNTH\r?$")'
           - test_answers.results[1].stdout is match('HTTP/1.1 403 ')
           - test_answers.results[2].stdout is match('HTTP/1.1 200 ')
-          - 'test_answers.results[2].stdout is search("(?mi)^X-Noix-Cache: PASS\r?$")'
+          - 'test_answers.results[2].stdout is search("(?mi)^X-Noix-Cache: (MISS|HIT)\r?$")'
           - test_answers.results[2].stdout is search('(?m)^count=[0-9]+ host=a[.]test path=/$')
           - 'test_answers.results | map(attribute="stdout") | select("search", "(?mi)^(Via|X-Varnish):") | list | length == 0'
         fail_msg: "{{ test_answers.results | map(attribute='stdout') | list }}"

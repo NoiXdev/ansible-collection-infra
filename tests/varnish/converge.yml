@@ -1,6 +1,7 @@
 ---
 # The test host. The varnish role runs only when run.sh passes
-# test_varnish=true; the settings are in the file test_varnish_vars names.
+# test_varnish=true; run.sh passes it with the settings in a JSON file
+# (-e @<file>).
 - name: Converge
   hosts: all
   vars_files: [vars.yml]

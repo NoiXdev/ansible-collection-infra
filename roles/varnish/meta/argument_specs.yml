@@ -76,8 +76,9 @@ argument_specs:
             purge_token (required), at least 32 characters of A-Z, a-z, 0-9, ., _, ~ and -; every
             site needs its own.
           - >-
-            microcache, seconds from 0 to 300 (default 0) a page without cache headers is kept;
-            not with the profile shopware.
+            microcache, seconds from 0 to 300 (default 0) a 200, 301 or 404 that the app does not
+            make cacheable (no TTL, private, no-cache, no-store) is kept, never one with
+            Set-Cookie; not with the profile shopware.
           - >-
             health_path, empty (the default) or a path starting with / that Varnish probes for the
             backend's health; health_host (required with health_path), the lower-case host name
@@ -91,4 +92,5 @@ argument_specs:
         elements: str
         description: >-
           Cookie names (a trailing * means prefix) removed from requests of every site, so that
-          analytics and tracking cookies do not make a page uncacheable. No consent cookies.
+          analytics, tracking and Anubis's cookies do not make a page uncacheable. No consent
+          cookies.

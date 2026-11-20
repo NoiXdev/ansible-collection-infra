@@ -49,17 +49,25 @@ varnish_between_bytes_timeout: 60
 #   - name: prod                       # the nginx site's name; ^[a-z0-9_-]+$, unique
 #     profile: generic                 # generic (the default), shopware or typo3
 #     purge_token: "..."               # required, at least 32 of A-Za-z0-9._~-, unique
-#     microcache: 0                    # seconds, 0..300; not with shopware
-#     health_path: ""                  # e.g. /health; probed for the backend health
+#     microcache: 0                    # seconds, 0..300; not with shopware: a 200, 301
+#                                      # or 404 the app does not make cacheable (no TTL,
+#                                      # private, no-cache, no-store) is kept that long,
+#                                      # never one with Set-Cookie
+#     health_path: ""                  # e.g. /health; probed every 5 s (200 = healthy, sick
+#                                      # after 3 failures of 5); while sick, stale pages
+#                                      # are served for varnish_grace_sick
 #     health_host: ""                  # the Host header of the probe; required with health_path
 #     debug_header: false              # X-Cache on the answers
 #     strip_cookies: []                # cookie names this site adds to varnish_strip_cookies;
 #                                      # a trailing * means prefix
 varnish_sites: []
 
-# Cookies that are removed from requests that carry nothing else of a session
-# (analytics and tracking; a trailing * means prefix). No consent cookies.
-# The Anubis cookie names are added with the Anubis support.
+# Cookies removed from every request before the cache decides (a trailing *
+# means prefix): analytics and tracking, and Anubis's own (Anubis checked the
+# request in nginx already). A request with any other cookie left passes
+# (generic, typo3). No consent cookies: stripping one is right only for an
+# app that reads consent in the browser, so a site that knows adds its own
+# to strip_cookies.
 varnish_strip_cookies:
   - _ga
   - _ga_*
@@ -75,3 +83,10 @@ varnish_strip_cookies:
   - _uetvid
   - _clck
   - _clsk
+  # Anubis v1.28.2 (anubis_image of the anubis role; lib/http.go and
+  # cmd/anubis/main.go at that tag): <prefix>-auth, -cookie-verification and
+  # -original-referer with the default prefix techaro.lol-anubis, and by
+  # default a suffix of "-" and 8 hex digits from the cookie settings.
+  - techaro.lol-anubis-auth*
+  - techaro.lol-anubis-cookie-verification*
+  - techaro.lol-anubis-original-referer*
