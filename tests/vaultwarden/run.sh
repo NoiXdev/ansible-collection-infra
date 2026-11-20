@@ -594,6 +594,12 @@ expect_untouched() {
   [ "$(h sh -c "sha256sum $app_dir/compose.yaml $secrets_dir/*; docker ps -aq --filter label=com.docker.compose.project=vaultwarden")" = "$untouched_before" ] \
     || fail "the refused run changed the compose file, a secret or the containers"
 }
+# Fails unless the image's check of the compose file waits <seconds> while
+# Vaultwarden starts: expect_start_period <seconds>.
+expect_start_period() {
+  h grep -qx "      start_period: $1s" "$app_dir/compose.yaml" \
+    || fail "the compose file has no start_period of $1s: $(h grep -n start_period "$app_dir/compose.yaml")"
+}
 # Fails when the compose file holds a test secret.
 expect_compose_clean() {
   h cat "$app_dir/compose.yaml" >"$out/compose.yaml"
@@ -645,6 +651,7 @@ test_install() {
   make_admin_hash
   vw_converge
   expect_compose_clean
+  expect_start_period 300
   verify -e verify_admin=true
   [ "$(h cat "$app_dir/database-target" | sed -n 's/^database: *//p')" = sqlite ] \
     || fail "database-target does not say sqlite: $(h cat "$app_dir/database-target")"
@@ -673,13 +680,16 @@ test_install() {
   # The official CLI logs in, stores an item and reads it back.
   expect_item create
 
+  # With another vaultwarden_health_timeout, which the image's start_period
+  # follows.
   echo "== install: the admin router (ubuntu $1)"
-  vw_converge -e '{"vaultwarden_traefik_admin_middlewares": ["deny@file"]}'
+  vw_converge -e '{"vaultwarden_traefik_admin_middlewares": ["deny@file"], "vaultwarden_health_timeout": 240}'
+  expect_start_period 240
   wait_denied /admin
   expect_denied /admin/users/overview
   expect_answer 200 '' /alive
   expect_answer 200 '"version"' /api/config
-  vw_converge_unchanged -e '{"vaultwarden_traefik_admin_middlewares": ["deny@file"]}'
+  vw_converge_unchanged -e '{"vaultwarden_traefik_admin_middlewares": ["deny@file"], "vaultwarden_health_timeout": 240}'
 
   echo "== install: the admin page off (ubuntu $1)"
   vw_converge -e vaultwarden_admin_token_hash=
@@ -1192,6 +1202,16 @@ test_target_changed() {
   expect_untouched
   # A database that is not empty is refused on install only: this is not one.
   ext_converge_unchanged
+  # A file that names no database: refused with words of its own.
+  h cp -p "$app_dir/database-target" /root/database-target.keep
+  h sed -i '/^name: /d' "$app_dir/database-target"
+  ext_converge_fails
+  expect_in_log "was made with a database that $app_dir/database-target does not name in full"
+  expect_in_log 'Set the three back to those of the database the installation was made with.'
+  expect_not_in_log 'the database a database'
+  expect_untouched
+  h mv /root/database-target.keep "$app_dir/database-target"
+  ext_converge_unchanged
   # The file removed, as the refusal says when the database really moved: the
   # run records the target the settings name (a change), the next one changes
   # nothing, and the guard is back.
@@ -1247,6 +1267,20 @@ m_converge_unchanged() { vw_converge_unchanged ${mode_args[@]+"${mode_args[@]}"}
 m_converge_fails() { vw_converge_fails ${mode_args[@]+"${mode_args[@]}"} "$@"; }
 m_verify() { verify -e verify_admin=true ${verify_args[@]+"${verify_args[@]}"} "$@"; }
 
+# A marker of a rollback that failed (rolled_back_to null) planted beside the
+# installation: the run is refused, changes nothing, and its message gives
+# the manual restore of the mode of set_mode, which must hold each text
+# (as Ansible prints it, " escaped): failed_rollback_refused <text>...
+failed_rollback_refused() {
+  local text
+  h sh -c "printf 'failed_version: $new_version\nrolled_back_to: null\nbackup: $backups/20260101T000000Z-$old_version-to-$new_version\ntime: \"2026-01-01T00:00:00Z\"\nrestore_error: noix test\n' >$marker"
+  note_untouched
+  m_converge_fails
+  expect_in_log "and rolling back failed too (noix test)"
+  for text in "$@"; do expect_in_log "$text"; done
+  expect_untouched
+  h rm "$marker"
+}
 # The image and state of the vaultwarden container.
 vw_service() { compose ps --all --format "'{{.Image}} {{.State}} {{.Health}}'" vaultwarden; }
 # The complete backups (not partial, not -failed), oldest first.
@@ -1526,6 +1560,13 @@ test_failed_update_postgres() {
   expect_no_progress "after the failed dump"
   h test ! -e "$marker" || fail "the failed dump wrote $marker: $(h cat "$marker")"
   expect_item read
+  # After a failed rollback: the manual restore of the own PostgreSQL, the
+  # identifiers quoted.
+  echo "== failed_update_postgres: after a failed rollback (ubuntu $1)"
+  failed_rollback_refused \
+    "-c 'DROP DATABASE IF EXISTS \\\"vaultwarden\\\" WITH (FORCE)' -c 'CREATE DATABASE \\\"vaultwarden\\\" OWNER \\\"vaultwarden\\\"'" \
+    'pg_restore --single-transaction --exit-on-error -U vaultwarden -d vaultwarden' \
+    "$backups/20260101T000000Z-$old_version-to-$new_version/vaultwarden.dump"
 }
 # With the external server the fault is a right revoked and a table the failed
 # release's migration made, which the rollback drops with the schema; then
@@ -1541,6 +1582,13 @@ test_failed_update_external() {
   h test ! -e "$marker" || fail "the next update left $marker"
   expect_item read
   expect_attachment read
+  # After a failed rollback: the manual restore of the external server, the
+  # SQL written to a file first and loaded in one transaction.
+  echo "== failed_update_postgres_external: after a failed rollback (ubuntu $1)"
+  failed_rollback_refused \
+    "pg_restore --no-owner --no-privileges --file=vaultwarden.sql $backups/20260101T000000Z-$old_version-to-$new_version/vaultwarden.dump" \
+    "load it into the database $pg_ip:$pg_port/vaultwarden as vaultwarden" \
+    "psql --single-transaction --set=ON_ERROR_STOP=1 --command='DROP SCHEMA public CASCADE' --command='CREATE SCHEMA public' --file=vaultwarden.sql"
 }
 
 # A converge stopped as a dropped SSH session or a reboot stops it: the role
