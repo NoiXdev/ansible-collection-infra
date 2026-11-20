@@ -233,7 +233,8 @@
 
 # Also refuses a config.json saved on the admin page, an install that did not
 # complete, a downgrade, the version of a failed update (every version after
-# a failed rollback) and an update that did not finish.
+# a failed rollback) and an update that did not finish (unless
+# vaultwarden_restore_interrupted asks to restore it).
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
 
@@ -255,6 +256,86 @@
 - name: Update Vaultwarden
   ansible.builtin.include_tasks: update.yml
   when: vaultwarden_state == 'update'
+
+# The run after an update that did not finish, with
+# vaultwarden_restore_interrupted: the compose file, the secrets, the data and
+# with PostgreSQL the database of its backup put back by restore.yml, as a
+# rollback puts them back, and nothing else of the update. Healthy, the
+# marker goes and the run ends; the next run without the variable tries the
+# update again. Not healthy, update-failed records a failed rollback
+# (rolled_back_to null), which refuses every version.
+- name: Restore the backup of the interrupted update
+  when: vaultwarden_state == 'restore_interrupted'
+  vars:
+    vaultwarden_interrupted_from: "{{ vaultwarden_update_in_progress.from_version | default('?') }}"
+    vaultwarden_interrupted_to: "{{ vaultwarden_update_in_progress.to_version }}"
+  block:
+    # restore.yml reads both; the compose file on disk may name either
+    # version.
+    - name: Note the backup and the version of the interrupted update
+      ansible.builtin.set_fact:
+        vaultwarden_backup: "{{ vaultwarden_update_in_progress.backup }}"
+        vaultwarden_installed_version: "{{ vaultwarden_interrupted_from }}"
+
+    - name: Roll back to the backup of the interrupted update
+      ansible.builtin.include_tasks: restore.yml
+
+    - name: Remove the marker of the restored update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ vaultwarden_update_marker_files }}"
+      when: vaultwarden_healthy
+
+    - name: Report the restore
+      ansible.builtin.debug:
+        msg: >-
+          Vaultwarden in {{ vaultwarden_dir }} runs
+          {{ vaultwarden_interrupted_from }} again: the interrupted update to
+          {{ vaultwarden_interrupted_to }} was rolled back to the backup
+          {{ vaultwarden_backup }} (the data found is in
+          {{ vaultwarden_backup }}-failed). Remove
+          vaultwarden_restore_interrupted; the next run with a newer
+          vaultwarden_version tries the update again.
+      when: vaultwarden_healthy
+
+    # As after a failed rollback: the data is in the backup, and no version
+    # may run over the database the restore left.
+    - name: Write the marker of the failed restore
+      ansible.builtin.copy:
+        dest: "{{ vaultwarden_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.vaultwarden role: the update to
+          # failed_version did not finish, and restoring the backup failed.
+          # The role refuses every version while this file exists.
+          {{ {'failed_version': vaultwarden_interrupted_to,
+              'rolled_back_to': none,
+              'backup': vaultwarden_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'restore_error': vaultwarden_restore_error}
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: not vaultwarden_healthy
+
+    - name: Remove the marker of the update whose restore failed
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ vaultwarden_update_marker_files }}"
+      when: not vaultwarden_healthy
+
+    - name: Fail with the failed restore
+      ansible.builtin.fail:
+        msg: >-
+          Restoring Vaultwarden {{ vaultwarden_interrupted_from }} in
+          {{ vaultwarden_dir }} from the backup {{ vaultwarden_backup }} after
+          the interrupted update to {{ vaultwarden_interrupted_to }} failed
+          ({{ vaultwarden_restore_error }}), so Vaultwarden may be down.
+          {{ vaultwarden_restore_hint }} {{ vaultwarden_marker_file }} refuses
+          every version; remove it once Vaultwarden runs again.
+      when: not vaultwarden_healthy
 
 - name: Reconfigure Vaultwarden
   ansible.builtin.include_tasks: reconfigure.yml

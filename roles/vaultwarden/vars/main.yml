@@ -37,6 +37,9 @@ vaultwarden_update_marker_files:
 # <UTC time>-<from version>-to-<to version>. Pruning takes only these, not
 # the <backup>-failed directories of rolled back updates.
 vaultwarden_backup_pattern: '^\d{8}T\d{6}Z-\d+\.\d+\.\d+-to-\d+\.\d+\.\d+$'
+# A backup being made (snapshot.yml), which only a run stopped during its
+# backup leaves; state.yml removes it.
+vaultwarden_backup_partial_pattern: '^\d{8}T\d{6}Z-\d+\.\d+\.\d+-to-\d+\.\d+\.\d+\.partial$'
 # Written by reconfigure.yml before it writes changed secrets and removed once
 # a run ends healthy; while it exists a run restarts Vaultwarden, which reads
 # its secrets on start only.
@@ -264,3 +267,15 @@ vaultwarden_restore_hint_database:
     public with everything in it and creates it again (psql
     --single-transaction --set=ON_ERROR_STOP=1 --command='DROP SCHEMA public
     CASCADE' --command='CREATE SCHEMA public' --file=vaultwarden.sql);
+
+# Added to the refusals of update-failed when vaultwarden_restore_interrupted
+# is set, which they come before: the variable does not apply while that
+# marker stands.
+vaultwarden_marker_restore_note: >-
+  {{ ('vaultwarden_restore_interrupted does not apply while ' ~ vaultwarden_marker_file ~ ' exists: '
+      ~ (('deal with it first as said, then run the role again with the variable to restore the'
+          ~ ' interrupted update that ' ~ vaultwarden_update_marker ~ ' records.')
+         if vaultwarden_update_in_progress.step | default(none) == 'update'
+         else ('no interrupted update is left to restore. Remove the variable, deal with '
+               ~ vaultwarden_marker_file ~ ' as said, then run the role again.')))
+     if vaultwarden_restore_interrupted | bool else '' }}

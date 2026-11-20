@@ -43,6 +43,18 @@
 #             still readable; a run stopped after it wrote a new admin token
 #             and before the restart (its docker compose up fails): the next
 #             run restarts Vaultwarden, which takes the new token
+#   interrupted
+#             from the release of the defaults with SQLite, updates to it
+#             tagged as newer releases: vaultwarden_restore_interrupted
+#             without an interrupted update and a marker the role did not
+#             write refused; beside update-failed of the same backup the
+#             marker of the update in progress removed; a run killed during
+#             its backup: the variable refused, the next run removes the
+#             partial backup and updates; a run killed once the compose file
+#             names the new version: refused naming both versions and the
+#             backup, with the variable restored (the previous version
+#             healthy with the item, a change after the backup undone, no
+#             marker, no update), then the next run without it updates
 #   install_postgres
 #             a fresh install with the own PostgreSQL (the cluster in
 #             <data>/postgres, a password with $, quotes, @, / and a space,
@@ -91,22 +103,29 @@
 #             broken right after the backup (a docker wrapper on the test host
 #             renames the users table, or for the external server revokes the
 #             right to read it and adds a table): Vaultwarden turns healthy,
-#             the database check fails, rolled back; for the external server
-#             the added table is gone and the next update succeeds; with
-#             SQLite a marker of a failed rollback refuses every version;
-#             with the own PostgreSQL a dump that fails: the partial backup
-#             and the markers removed, the installed version started again,
-#             no update-failed
+#             the database check fails, rolled back (the process list sampled
+#             during the dump and the restore); for the external server the
+#             added table is gone and the next update succeeds; with SQLite
+#             a marker of a failed rollback refuses every version; with the
+#             own PostgreSQL a dump that fails: the partial backup and the
+#             markers removed, the installed version started again, no
+#             update-failed
 #   update_sqlite, update_postgres, update_external
 #             that installation updated to the release of the defaults: the
 #             backup (root's 0700, the compose file, the secrets, the data
 #             without icon_cache, the SQLite database or a dump pg_restore
 #             reads), the item and the attachment read back, no marker,
-#             idempotent; a downgrade refused before any change; with SQLite
+#             idempotent, the process list sampled during the dump; a
+#             downgrade refused before any change; with SQLite
 #             vaultwarden_backups_keep 1 over a second update (the release of
 #             the defaults tagged 1.37.6) keeps only the newest backup
-# Every converge's output must not hold a test secret, and every successful
-# converge of a scenario is repeated and must change nothing.
+#   secrets   with the external PostgreSQL a reconfigure (a new push key) at
+#             -vvv with the process list sampled; what it adds to the scans
+#             of every other scenario (below)
+# Every converge runs at least at -v, and its output must not hold a test
+# secret (nor the process lists sampled during the external checks, the
+# dumps and the restores); every successful converge of a scenario is
+# repeated and must change nothing.
 #
 # VAULTWARDEN_UBUNTU selects the releases (default "24.04 26.04");
 # NOIXDEV_INFRA_VAULTWARDEN_TESTS selects scenarios (see the end of the file;
@@ -153,6 +172,7 @@ rotated_admin_token="$(openssl rand -hex 12)"' ro$t"ated adm'
 smtp_password="$(openssl rand -hex 12)"' sm$t"p pw'
 rotated_smtp_password="$(openssl rand -hex 12)"' ro$t"ated pw'
 push_key="$(openssl rand -hex 16)"
+rotated_push_key="$(openssl rand -hex 16)"
 push_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 user_password="$(openssl rand -hex 12)"' us$e"r pw'
 item_password="$(openssl rand -hex 12)"
@@ -160,17 +180,18 @@ item_password="$(openssl rand -hex 12)"
 # (make_admin_hash, rotate_admin_token).
 initial_admin_hash=
 rotated_admin_hash=
-# What install-vars.json holds; the reconfigure scenario changes them,
-# start_host sets them back for each test host.
+# What install-vars.json holds; the reconfigure and secrets scenarios change
+# them, start_host sets them back for each test host.
 admin_token="$initial_admin_token"
 admin_hash=
 org_name='Noix Test Org'
 current_smtp_password="$smtp_password"
+current_push_key="$push_key"
 # No converge's output and no process list may hold one of these; the hashes
 # of the admin tokens are added once made.
 pg_admin_password="$(openssl rand -hex 12)"
 secrets=("$db_password" "$new_db_password" "$initial_admin_token" "$rotated_admin_token" "$smtp_password"
-  "$rotated_smtp_password" "$push_key" "$user_password" "$pg_admin_password")
+  "$rotated_smtp_password" "$push_key" "$rotated_push_key" "$user_password" "$pg_admin_password")
 
 cleanup() {
   [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
@@ -204,11 +225,13 @@ expect_no_secrets() {
   done
 }
 
-# play [-e ...]: the test host's playbook; its output goes to converge.log,
-# which must hold no test secret, whether the run failed or not.
+# play [-e ...]: the test host's playbook, always at least at -v (task
+# results shown), so that every run of the suite shows that no task prints a
+# secret; its output goes to converge.log, which must hold no test secret,
+# whether the run failed or not.
 play() {
   local rc=0
-  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" "$@" >"$out/converge.log" 2>&1 || rc=$?
+  ansible-playbook -v -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" "$@" >"$out/converge.log" 2>&1 || rc=$?
   expect_no_secrets "$out/converge.log" "the converge output"
   return "$rc"
 }
@@ -263,7 +286,7 @@ write_install_vars() {
   (
     umask 077
     env "ADMIN_HASH=$admin_hash" "SMTP_PASSWORD=$current_smtp_password" "ORG=$org_name" \
-      "PUSH_ID=$push_id" "PUSH_KEY=$push_key" python3 -c '
+      "PUSH_ID=$push_id" "PUSH_KEY=$current_push_key" python3 -c '
 import json, os
 print(json.dumps({
     "vaultwarden_admin_token_hash": os.environ["ADMIN_HASH"],
@@ -336,6 +359,7 @@ start_host() {
   admin_hash="$initial_admin_hash"
   org_name='Noix Test Org'
   current_smtp_password="$smtp_password"
+  current_push_key="$push_key"
   set_mailpit_login
 
   echo "== test host (ubuntu $ubuntu)"
@@ -1112,14 +1136,9 @@ print("postgresql://vaultwarden:" + urllib.parse.quote(os.environ["DB_PASSWORD"]
 
   # A run without changes, while the process list is sampled: no password in
   # any command line, with the one-off client containers started.
-  h rm -f /root/ps.log /root/ps.stop
-  docker exec -d "$host" sh -c 'while [ ! -e /root/ps.stop ]; do ps -eo args >>/root/ps.log; sleep 0.1; done'
+  ps_start
   ext_converge_unchanged
-  h touch /root/ps.stop
-  sleep 1
-  h cat /root/ps.log >"$out/ps.log"
-  [ -s "$out/ps.log" ] || fail "the process list was not sampled"
-  expect_no_secrets "$out/ps.log" "the process list"
+  ps_check "a run without changes with the external PostgreSQL" psql
   # At -vvv too.
   ext_converge -vvv
 
@@ -1356,6 +1375,24 @@ remove_fault() {
   h rm -f /usr/local/sbin/docker /root/fault.fail
 }
 
+# Samples the process list of the test host every 0.1 seconds (as the docker
+# containers' processes show there too) until ps_check: ps_start.
+ps_start() {
+  h rm -f /root/ps.log /root/ps.stop
+  docker exec -d "$host" sh -c 'while [ ! -e /root/ps.stop ]; do ps -eo args >>/root/ps.log; sleep 0.1; done'
+}
+# Stops the sampling; fails when no command line was sampled, when one holds
+# a test secret, or when none holds <text> (what had to run meanwhile):
+# ps_check <what> [<text>].
+ps_check() {
+  h touch /root/ps.stop
+  sleep 1
+  h cat /root/ps.log >"$out/ps.log"
+  [ -s "$out/ps.log" ] || fail "the process list was not sampled ($1)"
+  expect_no_secrets "$out/ps.log" "the process list ($1)"
+  [ -z "${2:-}" ] || grep -qF -- "$2" "$out/ps.log" || fail "no process ran $2 while the process list was sampled ($1)"
+}
+
 # update_scenario <mode> <ubuntu>: from old_version with the item and the
 # attachment to new_version: the backup, the item and the attachment, no
 # marker; idempotent; a downgrade to old_version refused before any change.
@@ -1366,7 +1403,10 @@ update_scenario() {
   echo "== update_$1 (ubuntu $2)"
   ensure_old_installed "$1" "update_$1"
   put_icon
+  # The process list while the update and its dump run.
+  ps_start
   m_converge -e vaultwarden_backups_keep=1
+  ps_check "the update with $1" "$([ "$1" = sqlite ] || echo pg_dump)"
   grep -qF 'update.yml' "$out/converge.log" || fail "the new version was not an update"
   [ "$(vw_service)" = "$image running healthy" ] || fail "Vaultwarden after the update: $(vw_service)"
   expect_no_progress "after the update"
@@ -1432,7 +1472,10 @@ failed_update_scenario() {
 
   echo "== failed_update_$1: a broken database (ubuntu $2)"
   install_fault "$3"
+  # The process list while the dump and its restore run.
+  ps_start
   m_converge_fails -e vaultwarden_health_timeout=120 -e vaultwarden_rollback_timeout=300
+  ps_check "the rollback with $1" "$([ "$1" = sqlite ] || echo pg_restore)"
   remove_fault
   expect_in_log "vaultwarden running healthy"
   expect_in_log "the users and ciphers tables cannot be read"
@@ -1495,10 +1538,190 @@ test_failed_update_external() {
   expect_attachment read
 }
 
+# A converge stopped as a dropped SSH session or a reboot stops it: the role
+# with the settings of an installation, in the background in a process group
+# of its own, killed with SIGKILL (the whole group) once the shell condition
+# holds on the test host; then waits until no module of it runs there any
+# more. Its output (at -v) goes to converge.log, which must hold no test
+# secret: play_killed <condition> [-e ...].
+play_killed() {
+  local condition="$1" pid
+  shift
+  set -m
+  ansible-playbook -v -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" \
+    -e "@$out/role-vars.json" -e "@$out/install-vars.json" "$@" >"$out/converge.log" 2>&1 &
+  pid=$!
+  set +m
+  for _ in $(seq 900); do
+    if h sh -c "$condition" >/dev/null 2>&1; then
+      kill -9 -- "-$pid"
+      wait "$pid" || true
+      expect_no_secrets "$out/converge.log" "the output of the killed converge"
+      wait_modules
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      tail -n 40 "$out/converge.log" >&2
+      fail "the converge ended before it was killed at: $condition"
+    fi
+    sleep 0.5
+  done
+  kill -9 -- "-$pid" 2>/dev/null || true
+  wait "$pid" || true
+  fail "the converge did not reach within the wait: $condition"
+}
+# Waits until no Ansible module runs on the test host for five seconds.
+wait_modules() {
+  local quiet=0
+  for _ in $(seq 300); do
+    if h pgrep -f '[A]nsiballZ_' >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+    [ "$quiet" -lt 5 ] || return 0
+    sleep 1
+  done
+  fail "an Ansible module still runs on the test host after 300 seconds"
+}
+
+# The interrupted update, with SQLite from an installation of the release of
+# the defaults with the item: updates to that release tagged as newer ones
+# (next_version, then after_version, of test_repo). iv_converge <version>
+# [-e ...] and its variants: the role with that image and version.
+after_version=1.37.7
+iv_converge() { vw_converge -e "vaultwarden_image=$test_repo" -e "vaultwarden_version=$1" "${@:2}"; }
+iv_converge_unchanged() { vw_converge_unchanged -e "vaultwarden_image=$test_repo" -e "vaultwarden_version=$1" "${@:2}"; }
+iv_converge_fails() { vw_converge_fails -e "vaultwarden_image=$test_repo" -e "vaultwarden_version=$1" "${@:2}"; }
+# Whether the SQLite database holds the table noix_sentinel.
+sentinel_sql='import sqlite3, sys; db = sqlite3.connect(sys.argv[1])'
+has_sentinel() {
+  [ "$(h python3 -c "$sentinel_sql"'; print(db.execute("SELECT count(*) FROM sqlite_master WHERE name = ?", ("noix_sentinel",)).fetchone()[0])' \
+    "$data_dir/vaultwarden/db.sqlite3")" = 1 ]
+}
+test_interrupted() {
+  local backup
+  echo "== interrupted (ubuntu $1)"
+  if [ "$(h cat "$app_dir/database-target" 2>/dev/null | sed -n 's/^database: *//p')" != sqlite ] \
+    || ! h grep -qF "\"$image\"" "$app_dir/compose.yaml" 2>/dev/null \
+    || h sh -c "test -e $marker || test -e $progress || test -e $app_dir/restart-pending"; then
+    reset_installation
+  fi
+  ensure_installed interrupted
+  h docker tag "$image" "$test_repo:$next_version"
+  h docker tag "$image" "$test_repo:$after_version"
+
+  # The variable without a marker, and a marker the role did not write.
+  note_untouched
+  vw_converge_fails -e vaultwarden_restore_interrupted=true
+  expect_in_log "vaultwarden_restore_interrupted is set, but there is no interrupted update in $app_dir; remove the variable"
+  expect_untouched
+  h sh -c "echo 'not: [yaml' >$progress"
+  vw_converge_fails
+  expect_in_log "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched
+  h rm "$progress"
+
+  # Beside update-failed of the same backup (a rescue stopped after it wrote
+  # update-failed): the marker of the update in progress goes, update-failed
+  # refuses.
+  h sh -c "printf 'from_version: $new_version\nto_version: $next_version\nstep: update\nbackup: $backups/20260101T000000Z-$new_version-to-$next_version\ntime: \"2026-01-01T00:00:00Z\"\n' >$progress"
+  h sh -c "printf 'failed_version: $next_version\nrolled_back_to: $new_version\nbackup: $backups/20260101T000000Z-$new_version-to-$next_version\ntime: \"2026-01-01T00:00:00Z\"\n' >$marker"
+  iv_converge_fails "$next_version"
+  expect_in_log "$marker exists: the Vaultwarden update to $next_version failed"
+  expect_no_progress "beside update-failed of the same backup"
+  h test -e "$marker" || fail "the run removed $marker"
+  h rm "$marker"
+
+  echo "== interrupted: stopped during its backup (ubuntu $1)"
+  play_killed "ls -d $backups/*.partial" -e "vaultwarden_image=$test_repo" -e "vaultwarden_version=$next_version"
+  h grep -qx 'step: backup' "$progress" || fail "the marker does not record the step backup: $(h cat "$progress")"
+  # The variable is refused: nothing had changed to restore.
+  note_untouched
+  iv_converge_fails "$next_version" -e vaultwarden_restore_interrupted=true
+  expect_in_log "records an update that stopped during its backup, before anything changed"
+  expect_untouched
+  h sh -c "ls -d $backups/*.partial" >/dev/null || fail "the refused run removed the partial backup"
+  # The next run removes the partial backup and the marker and updates.
+  iv_converge "$next_version"
+  [ "$(vw_service)" = "$test_repo:$next_version running healthy" ] || fail "Vaultwarden after the update: $(vw_service)"
+  [ -z "$(h sh -c "ls -d $backups/*.partial 2>/dev/null || true")" ] || fail "the partial backup is left: $(h ls -A "$backups")"
+  newest_backup "$new_version" "$next_version" >/dev/null
+  expect_no_progress "after the update that followed the stopped backup"
+  iv_converge_unchanged "$next_version"
+  expect_item read
+
+  echo "== interrupted: stopped once the compose file names the new version (ubuntu $1)"
+  play_killed "grep -qF 'vaultwarden:$after_version\"' $app_dir/compose.yaml" \
+    -e "vaultwarden_image=$test_repo" -e "vaultwarden_version=$after_version"
+  h grep -qx 'step: update' "$progress" || fail "the marker does not record the step update: $(h cat "$progress")"
+  h grep -qx "from_version: $next_version" "$progress" || fail "the marker does not name $next_version: $(h cat "$progress")"
+  h grep -qx "to_version: $after_version" "$progress" || fail "the marker does not name $after_version: $(h cat "$progress")"
+  backup="$(h sed -n 's/^backup: //p' "$progress")"
+  h grep -qF "vaultwarden:$next_version\"" "$backup/compose.yaml" || fail "the backup $backup is not the one of $next_version"
+  for file in "$progress" "$progress.compose.yaml" "$progress.secrets"; do
+    [ "$(h stat -c '%a %U' "$file")" = "$([ "$file" = "$progress.secrets" ] && echo 700 || echo 600) root" ] \
+      || fail "$file is not root's only: $(h stat -c '%a %U' "$file")"
+  done
+  # A change after the backup, which the restore must undo.
+  h python3 -c "$sentinel_sql"'; db.execute("CREATE TABLE noix_sentinel (id integer)"); db.commit()' "$data_dir/vaultwarden/db.sqlite3"
+  note_untouched
+  iv_converge_fails "$after_version"
+  expect_in_log "$progress exists: the Vaultwarden update from $next_version to $after_version did not finish"
+  expect_in_log "the backup from before it is $backup"
+  expect_in_log "set vaultwarden_restore_interrupted: true for one run to restore it"
+  expect_in_log "or remove $progress to keep Vaultwarden as it is now"
+  expect_untouched
+
+  # Restored with the variable: the previous version with its data, and no
+  # update.
+  iv_converge "$after_version" -vvv -e vaultwarden_restore_interrupted=true
+  expect_in_log "Vaultwarden in $app_dir runs $next_version again"
+  if grep -qF 'Stop Vaultwarden for the update' "$out/converge.log"; then fail "the restore tried the update again"; fi
+  [ "$(vw_service)" = "$test_repo:$next_version running healthy" ] || fail "Vaultwarden after the restore: $(vw_service)"
+  expect_no_progress "after the restore"
+  h test ! -e "$marker" || fail "the restore wrote $marker: $(h cat "$marker")"
+  ! has_sentinel || fail "the restore kept the database changed after the backup"
+  h test -d "$backup-failed/vaultwarden" || fail "the restore did not set the data it found aside to $backup-failed"
+  expect_compose_clean
+  expect_item read
+  # The variable is refused once the update is restored.
+  note_untouched
+  iv_converge_fails "$after_version" -e vaultwarden_restore_interrupted=true
+  expect_in_log "vaultwarden_restore_interrupted is set, but there is no interrupted update"
+  expect_untouched
+
+  # Without the variable the next run updates.
+  iv_converge "$after_version"
+  [ "$(vw_service)" = "$test_repo:$after_version running healthy" ] || fail "Vaultwarden after the update: $(vw_service)"
+  expect_no_progress "after the update that followed the restore"
+  iv_converge_unchanged "$after_version"
+  expect_item read
+}
+
+# What the other scenarios leave out: every converge of the suite runs at -v
+# and is scanned (play), each install, reconfigure, update and rollback of
+# the three modes among them, and the process list is sampled during the
+# updates (the dumps) and the rollbacks (the restores); here a reconfigure
+# with the external PostgreSQL (a new push key) at -vvv while the process
+# list is sampled.
+test_secrets() {
+  echo "== secrets (ubuntu $1)"
+  ensure_external_installed secrets
+  current_push_key="$rotated_push_key"
+  write_install_vars
+  ps_start
+  ext_converge -vvv
+  ps_check "a reconfigure with the external PostgreSQL" psql
+  grep -qF 'as config file' "$out/converge.log" || grep -qF 'No config file found' "$out/converge.log" \
+    || fail "the converge did not run verbosely"
+  grep -qF 'reconfigure.yml' "$out/converge.log" || fail "the new push key was not a reconfigure"
+  [ "$(h cat "$secrets_dir/push_installation_key")" = "$rotated_push_key" ] || fail "the new push key was not written"
+  ext_converge_unchanged
+  expect_item read
+}
+
 # All scenarios by default; NOIXDEV_INFRA_VAULTWARDEN_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure failed_update_sqlite update_sqlite install_postgres mode_switch db_password failed_update_postgres update_postgres external_refusals install_external target_changed failed_update_external update_external"
+all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure interrupted failed_update_sqlite update_sqlite install_postgres mode_switch db_password failed_update_postgres update_postgres external_refusals install_external target_changed failed_update_external update_external secrets"
 scenarios="${NOIXDEV_INFRA_VAULTWARDEN_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -1523,6 +1746,8 @@ for ubuntu in $releases; do
       update_postgres) test_update_postgres "$ubuntu" ;;
       failed_update_external) test_failed_update_external "$ubuntu" ;;
       update_external) test_update_external "$ubuntu" ;;
+      interrupted) test_interrupted "$ubuntu" ;;
+      secrets) test_secrets "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

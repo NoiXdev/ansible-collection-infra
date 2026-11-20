@@ -6,31 +6,46 @@
 #                disk, a secrets file from what the role writes, or a
 #                restart is pending (vaultwarden_restart_marker)
 #   noop         everything as the role writes it
+#   restore_interrupted
+#                an update that did not finish (vaultwarden_update_marker,
+#                step update) and vaultwarden_restore_interrupted: main.yml
+#                restores its backup and does nothing else
 # Also sets vaultwarden_installed (a compose file exists),
 # vaultwarden_compose_before (the compose file on disk),
 # vaultwarden_compose_on_disk (it parsed), vaultwarden_installed_version,
 # vaultwarden_installed_database (from vaultwarden_target_file, empty
 # without it) and vaultwarden_installed_target (the external server and
-# database it records, empty when it names none), vaultwarden_secrets (file
-# name to content of the secrets the role writes), vaultwarden_secrets_changed,
+# database it records, empty when it names none), vaultwarden_marker_read
+# and vaultwarden_marker (the marker of a failed update),
+# vaultwarden_update_in_progress (the marker of an update that did not
+# finish parsed, empty without one), vaultwarden_secrets (file name to
+# content of the secrets the role writes), vaultwarden_secrets_changed,
 # vaultwarden_db_password_changed, vaultwarden_restart_pending and
-# vaultwarden_down (the services that are not running). Refuses, before
-# any change and in this order: a vaultwarden_data_dir that is not a
-# mountpoint (with vaultwarden_data_dir_mountpoint), an installation of
-# another database mode, an external installation of another server or
-# database, an installation without its data
-# subdirectories (an unmounted volume), after a failed update every version
-# when its rollback failed too, else the failed version (vaultwarden_marker_file,
-# read into vaultwarden_marker_read and vaultwarden_marker), an update that
-# did not finish (vaultwarden_update_marker), a config.json saved on the admin
-# page, a compose file that is not YAML, an install that did not complete
-# (its marker), a compose file without a Vaultwarden version, a downgrade,
-# with the own PostgreSQL a vaultwarden_db_password the database does not
-# take and a cluster of another major or more than one, and with the external
-# one a server the role cannot run its client for or log in to, older than
-# 15, whose database the user does not own, or (on install) that holds
-# tables (external.yml; it also sets vaultwarden_external_major and
-# vaultwarden_client_image). Changes nothing.
+# vaultwarden_down (the services that are not running). Refuses, before any
+# change and in this order: a vaultwarden_data_dir that is not a mountpoint
+# (with vaultwarden_data_dir_mountpoint), an installation of another
+# database mode, an external installation of another server or database, an
+# installation without its data subdirectories (an unmounted volume), after
+# a failed update every version when its rollback failed too, else the
+# failed version, a config.json saved on the admin page, a compose file that
+# is not YAML, an install that did not complete (its marker), a marker of an
+# update in progress the role did not write, an update that did not finish
+# (step update; without vaultwarden_restore_interrupted, or with it but
+# without what its backup must hold), vaultwarden_restore_interrupted
+# without an update to restore, a compose file without a Vaultwarden
+# version, a downgrade (not for a restore), with the own PostgreSQL a
+# vaultwarden_db_password the database does not take and a cluster of
+# another major or more than one, and with the external one a server the
+# role cannot run its client for or log in to, older than 15, whose
+# database the user does not own, or (on install) that holds tables
+# (external.yml; it also sets vaultwarden_external_major and
+# vaultwarden_client_image). The only changes it makes remove what an
+# interrupted update left that nothing needs: a marker of an update in
+# progress beside update-failed of the same backup (the rollback ran; before
+# the refusal of update-failed, else after every refusal), and, after every
+# refusal, the partial backup and the marker of an update stopped during its
+# backup (nothing else had changed), or the copies of a marker that was
+# removed by hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -171,6 +186,49 @@
   register: vaultwarden_marker_read
   failed_when: false
 
+# Left by a run that stopped during an update (update.yml). Not secret: the
+# versions, the step, the backup and the time.
+- name: Read the marker of an update in progress
+  ansible.builtin.slurp:
+    src: "{{ vaultwarden_update_marker }}"
+  register: vaultwarden_update_marker_read
+  failed_when: false
+
+# Whether it exists, which a read that failed does not tell.
+- name: Look for the marker of an update in progress
+  ansible.builtin.stat:
+    path: "{{ vaultwarden_update_marker }}"
+    get_checksum: false
+  register: vaultwarden_update_marker_stat
+
+- name: Note that no update is in progress
+  ansible.builtin.set_fact:
+    vaultwarden_update_in_progress: {}
+
+# A marker that is not YAML parses to nothing and is refused below, as is one
+# that exists but cannot be read (a directory). It holds no secret: the
+# copies of the compose file and the secrets are never read here.
+- name: Note a marker of an update in progress that cannot be read
+  ansible.builtin.set_fact:
+    vaultwarden_update_in_progress: {step: null}
+  when:
+    - vaultwarden_update_marker_stat.stat.exists
+    - vaultwarden_update_marker_read.content is not defined
+
+- name: Check the marker of an update in progress
+  when: vaultwarden_update_marker_read.content is defined
+  block:
+    - name: Parse the marker of the update in progress
+      ansible.builtin.set_fact:
+        vaultwarden_update_in_progress: >-
+          {{ vaultwarden_update_marker_yaml if vaultwarden_update_marker_yaml is mapping else {'step': none} }}
+      vars:
+        vaultwarden_update_marker_yaml: "{{ vaultwarden_update_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Note a marker of an update in progress that is not YAML
+      ansible.builtin.set_fact:
+        vaultwarden_update_in_progress: {step: null}
+
 # A marker that is not YAML cannot say which version failed.
 - name: Check the marker of a failed update
   when: vaultwarden_marker_read.content is defined
@@ -188,6 +246,43 @@
           cannot tell which Vaultwarden update failed and changes nothing.
           Check Vaultwarden, then remove the file (rm
           {{ vaultwarden_marker_file }}).
+
+# update-failed of the same backup (both take it from vaultwarden_backup) was
+# written by the rescue of this update, which was stopped before it removed
+# the marker of the update in progress: the rollback ran, and update-failed
+# decides below. An update-failed of another backup is left from an earlier
+# update that was rolled back (it stays through updates to other versions),
+# so this marker is checked as without one. So is a marker with step backup,
+# whoever wrote update-failed: the compose file is as before the update, and
+# it is cleaned up as without update-failed.
+- name: Compare the backups of the two markers
+  ansible.builtin.set_fact:
+    vaultwarden_update_rolled_back: >-
+      {{ vaultwarden_marker_read.content is defined
+         and vaultwarden_update_in_progress.step | default(none) == 'update'
+         and vaultwarden_update_in_progress.backup | default('', true) | string is match('^/')
+         and (vaultwarden_marker.backup | default('', true) | string) == (vaultwarden_update_in_progress.backup | string) }}
+
+# When update-failed refuses this run, the marker of the update in progress
+# it records goes first: nothing needs it (the rollback ran), and once
+# update-failed is removed as its refusal says, the next run would take it
+# for an update that did not finish. Every other refusal leaves both, and the
+# run that gets past them all removes it at the end.
+- name: Remove the marker of an update in progress beside the failed update that refuses this run
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ vaultwarden_update_marker_files }}"
+  when:
+    - vaultwarden_update_rolled_back | bool
+    - >-
+      not vaultwarden_marker.rolled_back_to | default(none)
+      or (vaultwarden_marker.failed_version | default(vaultwarden_version) | string) == vaultwarden_version | string
+
+- name: Note that the rolled back update is not in progress
+  ansible.builtin.set_fact:
+    vaultwarden_update_in_progress: {}
+  when: vaultwarden_update_rolled_back | bool
 
 # The rollback failed (or the marker does not say it worked): the database
 # may be empty or half restored, and the backup holds the data. Any version
@@ -207,7 +302,7 @@
       backup {{ vaultwarden_backup }}. The role refuses every version and
       changes nothing until Vaultwarden is restored. {{ vaultwarden_restore_hint }}
       Then check Vaultwarden (log in, open an item) and remove the marker (rm
-      {{ vaultwarden_marker_file }}).
+      {{ vaultwarden_marker_file }}). {{ vaultwarden_marker_restore_note }}
   vars:
     vaultwarden_backup: "{{ vaultwarden_marker.backup | default('?', true) }}"
   when:
@@ -225,32 +320,10 @@
       {{ vaultwarden_version }} again and changes nothing while the marker
       names it. To try again, remove it (rm {{ vaultwarden_marker_file }}); or
       set vaultwarden_version to another version, and the marker is removed
-      once a run with it succeeds.
+      once a run with it succeeds. {{ vaultwarden_marker_restore_note }}
   when:
     - vaultwarden_marker_read.content is defined
     - (vaultwarden_marker.failed_version | default(vaultwarden_version) | string) == vaultwarden_version | string
-
-# Left by a run that stopped during an update (update.yml): the compose
-# file, the secrets and the data may be the new version's, half migrated.
-# The role does not guess; the marker says how far the update got.
-- name: Look for the marker of an update in progress
-  ansible.builtin.stat:
-    path: "{{ vaultwarden_update_marker }}"
-    get_checksum: false
-  register: vaultwarden_update_marker_stat
-
-- name: Refuse an update that did not finish
-  ansible.builtin.fail:
-    msg: >-
-      {{ vaultwarden_update_marker }} exists: a Vaultwarden update in
-      {{ vaultwarden_dir }} did not finish (the run stopped during it), so the
-      role cannot tell what is installed and changes nothing. The marker
-      names both versions, the step it got to and, with step update, the
-      backup from before it. With step backup nothing had changed yet: remove
-      {{ vaultwarden_update_marker_files | join(' ') }} and run the role
-      again. With step update, put the backup back by hand (its compose.yaml,
-      secrets, vaultwarden and dump, as a rollback does), then remove them.
-  when: vaultwarden_update_marker_stat.stat.exists
 
 # The first save on the admin page writes config.json, and Vaultwarden takes
 # its values over every setting the role writes (the admin token, SMTP and
@@ -348,6 +421,93 @@
       {{ vaultwarden_install_hint }}
   when: vaultwarden_install_marker_stat.stat.exists
 
+- name: Refuse a marker of an update in progress the role did not write
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_update_marker }} exists, but it is not YAML or lacks
+      step or to_version (or, with step update, backup), so the role cannot
+      tell how far the Vaultwarden update in {{ vaultwarden_dir }} got and
+      changes nothing. Check Vaultwarden, then remove it with its copies (rm
+      -r {{ vaultwarden_update_marker_files | join(' ') }}).
+  when:
+    - vaultwarden_update_in_progress | length > 0
+    - >-
+      vaultwarden_update_in_progress.step | default(none) not in ['backup', 'update']
+      or not vaultwarden_update_in_progress.to_version | default('', true) | string is match('^\d+\.\d+\.\d+$')
+      or (vaultwarden_update_in_progress.step == 'update'
+          and not vaultwarden_update_in_progress.backup | default('', true) | string is match('^/'))
+
+# Step update: the compose file and the secrets may be the new version's, the
+# database may be migrated or half migrated, and Vaultwarden may run either
+# version or neither. Rolling back on its own would lose what changed since,
+# if the update had in fact finished and only the marker's removal was lost;
+# the operator decides.
+- name: Refuse to run after an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_update_marker }} exists: the Vaultwarden update from
+      {{ vaultwarden_update_in_progress.from_version | default('?') }} to
+      {{ vaultwarden_update_in_progress.to_version }} did not finish (the run
+      that started it on {{ vaultwarden_update_in_progress.time | default('?') }}
+      stopped after its backup), and the backup from before it is
+      {{ vaultwarden_update_in_progress.backup }}. Vaultwarden in
+      {{ vaultwarden_dir }} may run either version or neither, with a
+      database the new version may have migrated; the role changes nothing.
+      To go back to {{ vaultwarden_update_in_progress.from_version | default('?') }},
+      set vaultwarden_restore_interrupted: true for one run to restore it
+      (the compose file, the secrets, the data{{ ' and the database' if vaultwarden_database != 'sqlite' else '' }}
+      from the backup), or remove {{ vaultwarden_update_marker }} to keep
+      Vaultwarden as it is now, then check it and run the role again.
+  when:
+    - vaultwarden_update_in_progress.step | default(none) == 'update'
+    - not vaultwarden_restore_interrupted | bool
+
+- name: Look for what the restore of the interrupted update needs
+  ansible.builtin.stat:
+    path: "{{ vaultwarden_update_in_progress.backup }}/{{ item }}"
+    get_checksum: false
+  loop: "{{ ['compose.yaml', 'secrets', 'vaultwarden'] + (['vaultwarden.dump'] if vaultwarden_database != 'sqlite' else []) }}"
+  register: vaultwarden_restore_needs
+  when:
+    - vaultwarden_update_in_progress.step | default(none) == 'update'
+    - vaultwarden_restore_interrupted | bool
+
+- name: Refuse a restore without its backup
+  ansible.builtin.fail:
+    msg: >-
+      vaultwarden_restore_interrupted is set to restore the backup
+      {{ vaultwarden_update_in_progress.backup }} of the interrupted
+      Vaultwarden update from
+      {{ vaultwarden_update_in_progress.from_version | default('?') }} to
+      {{ vaultwarden_update_in_progress.to_version }}, but it lacks
+      {{ vaultwarden_restore_missing | join(', ') }}, so the role cannot
+      restore it and changes nothing. {{ vaultwarden_restore_hint }} Then
+      remove {{ vaultwarden_update_marker }} and run the role again without
+      the variable.
+  vars:
+    vaultwarden_backup: "{{ vaultwarden_update_in_progress.backup }}"
+    vaultwarden_restore_missing: >-
+      {{ vaultwarden_restore_needs.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+  when:
+    - vaultwarden_update_in_progress.step | default(none) == 'update'
+    - vaultwarden_restore_interrupted | bool
+    - vaultwarden_restore_missing | length > 0
+
+# A variable left set must never turn a later interruption into a rollback
+# of its own. An update stopped during its backup changed nothing to restore.
+- name: Refuse vaultwarden_restore_interrupted without an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      vaultwarden_restore_interrupted is set, but there is no interrupted
+      update in {{ vaultwarden_dir }}; remove the variable{{ (' (' ~ vaultwarden_update_marker
+      ~ ' records an update that stopped during its backup, before anything changed;'
+      ~ ' the next run without the variable cleans it up and updates)')
+      if vaultwarden_update_in_progress.step | default(none) == 'backup' else '' }}.
+      The role changes nothing.
+  when:
+    - vaultwarden_restore_interrupted | bool
+    - vaultwarden_update_in_progress.step | default(none) != 'update'
+
 - name: Note the installed version
   ansible.builtin.set_fact:
     vaultwarden_installed_version: >-
@@ -375,7 +535,11 @@
           {{ vaultwarden_dir }}; the role refuses to downgrade, as Vaultwarden
           cannot migrate its database down, and changes nothing. Set
           vaultwarden_version to {{ vaultwarden_installed_version }} or newer.
-      when: vaultwarden_version is version(vaultwarden_installed_version, '<')
+      # A restore puts the previous compose file back, whatever
+      # vaultwarden_version is.
+      when:
+        - vaultwarden_version is version(vaultwarden_installed_version, '<')
+        - vaultwarden_update_in_progress.step | default(none) != 'update'
 
 # What the secrets files hold (only those in use): the Argon2id hash of the
 # admin token, with PostgreSQL the database URL (the password
@@ -569,6 +733,47 @@
   ansible.builtin.include_tasks: external.yml
   when: vaultwarden_database == 'postgres_external'
 
+# After every refusal. Step backup: the compose file, the secrets and the
+# database are as before the update, and Vaultwarden stopped; the run goes on
+# as any other, which with the same vaultwarden_version tries the update
+# again and starts Vaultwarden (a run without changes fails on the stopped
+# container, as it does for any). A backup being made is below
+# <name>.partial, which only an interrupted backup leaves.
+- name: Find the partial backups of an update stopped during its backup
+  ansible.builtin.find:
+    paths: "{{ vaultwarden_backup_dir }}"
+    file_type: directory
+    patterns: ["{{ vaultwarden_backup_partial_pattern }}"]
+    use_regex: true
+  register: vaultwarden_partial_backups
+  when: vaultwarden_update_in_progress.step | default(none) == 'backup'
+
+- name: Remove what an update stopped during its backup left
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (vaultwarden_partial_backups.files | default([]) | map(attribute='path') | sort) + vaultwarden_update_marker_files }}"
+  when: vaultwarden_update_in_progress.step | default(none) == 'backup'
+
+# After every refusal, so that a refused run leaves both markers;
+# update-failed decides on the next run as on this one.
+- name: Remove the marker of an update in progress beside its failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ vaultwarden_update_marker_files }}"
+  when: vaultwarden_update_rolled_back | bool
+
+# They hold the secrets: left when the marker was removed by hand, as its
+# refusal offers, or by a run stopped while it removed the marker and them.
+# Only without a marker: one that exists but cannot be read is refused above.
+- name: Remove the copies of an update in progress without its marker
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ vaultwarden_update_marker_files | difference([vaultwarden_update_marker]) }}"
+  when: not vaultwarden_update_marker_stat.stat.exists
+
 # Written by reconfigure.yml before it writes changed secrets, and removed by
 # main.yml once a run ends healthy: a run stopped in between leaves secrets
 # files that equal the settings while the container still runs with the old
@@ -584,7 +789,8 @@
     vaultwarden_down: "{{ vaultwarden_services | difference(vaultwarden_ps.stdout_lines | default([])) }}"
     vaultwarden_restart_pending: "{{ vaultwarden_installed and vaultwarden_restart_marker_stat.stat.exists }}"
     vaultwarden_state: >-
-      {{ 'install' if not vaultwarden_installed
+      {{ 'restore_interrupted' if vaultwarden_update_in_progress.step | default(none) == 'update'
+         else 'install' if not vaultwarden_installed
          else 'update' if vaultwarden_version is version(vaultwarden_installed_version, '>')
          else 'reconfigure' if vaultwarden_compose_before != vaultwarden_compose or vaultwarden_secrets_changed | bool
                                or vaultwarden_restart_marker_stat.stat.exists

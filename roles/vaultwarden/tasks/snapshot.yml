@@ -32,15 +32,16 @@
     vaultwarden_backup_next: >-
       {{ vaultwarden_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ vaultwarden_installed_version }}-to-{{ vaultwarden_version }}
 
-# A leftover of a run stopped during its backup is made afresh.
+# The name holds the current second, so it is new; the leftover of a run
+# stopped during its backup has a name of its own, which state.yml removes
+# on the next run (vaultwarden_backup_partial_pattern).
 - name: Create the partial backup
-  ansible.builtin.shell:
-    cmd: |
-      set -eu
-      partial={{ (vaultwarden_backup_next ~ '.partial') | quote }}
-      rm -rf "$partial"
-      mkdir -m 0700 "$partial"
-  changed_when: true
+  ansible.builtin.file:
+    path: "{{ vaultwarden_backup_next }}.partial"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
 
 # Over the local socket of the database container, which needs no password.
 - name: Dump the own PostgreSQL
