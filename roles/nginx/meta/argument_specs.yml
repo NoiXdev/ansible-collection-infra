@@ -127,7 +127,27 @@ argument_specs:
             The run is refused before any change when nothing answers on 127.0.0.1:nginx_anubis_port,
             and a site cannot have both basic_auth and anubis (the challenge would replace Basic
             auth's 401).
-          - extra, raw config inside the site's server block.
+          - >-
+            waf (false by default): the WAF (the waf role in host mode, on
+            127.0.0.1:nginx_waf_port) inspects every request of the site. The site's public server
+            block keeps the TLS, rate limit, Basic auth, hardening, headers, Anubis and the error
+            pages for nginx's own answers, and logs each request once; then it sends the request
+            to the WAF (body streamed, WebSocket upgrades, Host, X-Real-IP and X-Forwarded-For,
+            -Proto, -Host and -Port), and the WAF's answers, its 403 too, pass unchanged. While the
+            WAF does not answer, the site answers 502, never its content. The WAF sends what it
+            lets through to the site's inner server block on the shared loopback listener
+            127.0.0.1:nginx_inner_port, which serves the content (PHP, proxy or static) and its
+            error pages: the client's address from X-Forwarded-For (127.0.0.1 trusted, recursive),
+            PHP's HTTPS and SERVER_PORT as the public block's, the public block's X-Forwarded-* to a
+            proxy backend unchanged, relative redirects. The port 80 blocks (ACME, the redirect to
+            HTTPS) and the redirect domains are not sent to the WAF. The run is refused before any
+            change when the WAF does not answer there, or answers 421 for the site's first domain
+            (no waf_sites entry lists it).
+          - extra, raw config inside the site's public server block; with waf, before the WAF (a
+            location here is not inspected).
+          - >-
+            inner_extra, raw config inside the site's inner server block, behind the WAF; only a
+            site with waf has one (refused otherwise).
       nginx_http_extra:
         type: str
         description: Raw config at http level.
@@ -187,6 +207,17 @@ argument_specs:
         description: >-
           The port on 127.0.0.1 Anubis answers on for the sites with anubis (the anubis role's
           anubis_host_port in host mode); 8923 by default.
+      nginx_waf_port:
+        type: int
+        description: >-
+          The port on 127.0.0.1 the WAF answers on for the sites with waf (the waf role's
+          waf_host_port in host mode); 8930 by default.
+      nginx_inner_port:
+        type: int
+        description: >-
+          The port on 127.0.0.1 of the inner server blocks of the sites with waf (the waf role's
+          default backend in host mode); 8931 by default. Neither 80 nor 443, and not
+          nginx_anubis_port or nginx_waf_port. A Host no such site lists answers 421 there.
       nginx_user_includes:
         type: bool
         description: >-

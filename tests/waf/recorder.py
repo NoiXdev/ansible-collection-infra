@@ -2,7 +2,8 @@
 unless --status says otherwise) and prints "<request line> | <User-Agent> |
 <body sha256> | <body bytes>" for each to stdout, so the suite can tell which
 requests got past the WAF and whether their bodies arrived whole. Bodies come
-with a Content-Length or chunked. It listens on port 8000 of every address
+with a Content-Length or chunked. --headers A,B appends " | A: <value> |
+B: <value>" (empty when absent). It listens on port 8000 of every address
 (the traefik scenario's container), or on --bind and --port (the host
 scenario's loopback)."""
 
@@ -14,7 +15,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--bind", default="")
 parser.add_argument("--port", type=int, default=8000)
 parser.add_argument("--status", type=int, default=200)
+parser.add_argument("--headers", default="")
 options = parser.parse_args()
+shown = [name for name in options.headers.split(",") if name]
 
 
 class Recorder(http.server.BaseHTTPRequestHandler):
@@ -47,7 +50,8 @@ class Recorder(http.server.BaseHTTPRequestHandler):
     def answer(self):
         digest = hashlib.sha256()
         length = self.read_body(digest)
-        print(f"{self.requestline} | {self.headers.get('User-Agent', '')} | {digest.hexdigest()} | {length}",
+        extra = "".join(f" | {name}: {self.headers.get(name, '')}" for name in shown)
+        print(f"{self.requestline} | {self.headers.get('User-Agent', '')} | {digest.hexdigest()} | {length}{extra}",
               flush=True)
         body = b"recorded\n"
         self.send_response(options.status)

@@ -1,0 +1,121 @@
+---
+# Renders the nginx role's site.conf.j2 on this machine (no host, no facts)
+# for each variant below into render_dir (-e render_dir=<dir>), one
+# <name>.conf per variant, and its default server (00-default.conf, with
+# IPv6 00-default-ipv6.conf). The variants are the sites of
+# tests/services/nginx/converge.yml in each shape its runs give them (PHP,
+# proxy, static, TLS off, a certificate still missing, Basic auth, Anubis,
+# extra, hardening and headers), plus IPv6 listeners, the error pages off,
+# and the host scenario's plain site. fixtures/nginx-before/ holds what the
+# role rendered for them before sites could have a front hop (waf): the host
+# scenario renders them again and expects no difference.
+- name: Render the nginx site variants
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/nginx/defaults/main.yml
+    - ../../roles/nginx/vars/main.yml
+    - nginx.yml
+  vars:
+    render_tls:
+      cert: /etc/ssl/noixdev-test/example.test.crt
+      key: /etc/ssl/noixdev-test/example.test.key
+    render_letsencrypt:
+      cert: /etc/letsencrypt/live/prod/fullchain.pem
+      key: /etc/letsencrypt/live/prod/privkey.pem
+    render_prod:
+      name: prod
+      domains: [prod.example.test]
+      redirect_domains: [www.prod.example.test]
+      user: app_prod
+      php_pool: production
+      root: /srv/prod/public
+      php_scripts: [setup/install.php]
+      tls: letsencrypt
+    render_node:
+      name: node
+      domains: [node.example.test]
+      user: app_node
+      proxy: http://127.0.0.1:3000
+      tls: "{{ render_tls }}"
+    render_static:
+      name: static
+      domains: [static.example.test]
+      user: app_static
+      root: /srv/static
+      tls: "{{ render_tls }}"
+    # An empty value removes a header; quotes and a backslash are escaped.
+    render_headers:
+      X-Frame-Options: ""
+      X-Quoted: 'a "b" \c'
+    # extra over several lines, with an empty line, indentation and a final
+    # line break.
+    render_extra_lines: |
+      location /extra/ {
+          return 204;
+
+      }
+    # name: the file; site: the entry;
+    # tls_files: what tasks/sites.yml gives the template; ipv6 and
+    # error_pages: nginx_ipv6 and nginx_error_pages.
+    render_variants:
+      - {name: prod, site: "{{ render_prod }}", tls_files: "{{ render_letsencrypt }}"}
+      - {name: prod-pending, site: "{{ render_prod }}"}
+      - name: prod-auth
+        site: "{{ render_prod | combine({'basic_auth': {'users': [{'name': 'alice', 'password': 'test-only'}], 'allow': ['192.0.2.10']}}) }}"
+        tls_files: "{{ render_letsencrypt }}"
+      - name: prod-auth-no-allow
+        site: "{{ render_prod | combine({'basic_auth': {'users': [{'name': 'alice', 'password': 'test-only'}]}}) }}"
+        tls_files: "{{ render_letsencrypt }}"
+      - {name: prod-anubis, site: "{{ render_prod | combine({'anubis': true}) }}", tls_files: "{{ render_letsencrypt }}"}
+      - name: prod-anubis-no-error-pages
+        site: "{{ render_prod | combine({'anubis': true}) }}"
+        tls_files: "{{ render_letsencrypt }}"
+        error_pages: false
+      - name: prod-extra
+        site: "{{ render_prod | combine({'extra': 'add_header X-Noix-Test $noix_test_host always;'}) }}"
+        tls_files: "{{ render_letsencrypt }}"
+      - name: prod-off
+        site: "{{ render_prod | combine({'tls': 'off', 'php_front_controller': 'app.php', 'client_max_body_size': '1g'}) }}"
+      - {name: node, site: "{{ render_node }}", tls_files: "{{ render_tls }}"}
+      - {name: node-ipv6, site: "{{ render_node }}", tls_files: "{{ render_tls }}", ipv6: true}
+      - {name: node-no-error-pages, site: "{{ render_node }}", tls_files: "{{ render_tls }}", error_pages: false}
+      - {name: static, site: "{{ render_static }}", tls_files: "{{ render_tls }}"}
+      - {name: static-no-hardening, site: "{{ render_static | combine({'hardening': false}) }}", tls_files: "{{ render_tls }}"}
+      - {name: static-no-hsts, site: "{{ render_static | combine({'hsts': false}) }}", tls_files: "{{ render_tls }}"}
+      - name: static-headers
+        site: "{{ render_static | combine({'headers': render_headers}) }}"
+        tls_files: "{{ render_tls }}"
+      - {name: static-rate, site: "{{ render_static | combine({'rate_limit': 'default'}) }}", tls_files: "{{ render_tls }}"}
+      - {name: static-off, site: "{{ render_static | combine({'tls': 'off'}) }}"}
+      - {name: static-extra-lines, site: "{{ render_static | combine({'extra': render_extra_lines}) }}", tls_files: "{{ render_tls }}"}
+      - {name: plain, site: "{{ test_nginx_plain }}"}
+      - {name: plain-ipv6, site: "{{ test_nginx_plain }}", ipv6: true}
+  tasks:
+    - name: Render the variants
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../roles/nginx/templates/site.conf.j2"
+        dest: "{{ render_dir }}/{{ item.name }}.conf"
+        mode: "0644"
+      vars:
+        nginx_sites: "{{ render_variants | map(attribute='site') | list }}"
+        nginx_site: "{{ nginx_sites_public[render_index] | combine({'tls_files': item.tls_files | default({})}) }}"
+        nginx_ipv6: "{{ item.ipv6 | default(false) }}"
+        nginx_error_pages: "{{ item.error_pages | default(true) }}"
+        nginx_error_pages_lang: en
+      loop: "{{ render_variants }}"
+      loop_control:
+        index_var: render_index
+        label: "{{ item.name }}"
+
+    # The default server, with and without IPv6 listeners.
+    - name: Render the default server
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../roles/nginx/templates/default-server.conf.j2"
+        dest: "{{ render_dir }}/00-default{{ '-ipv6' if item else '' }}.conf"
+        mode: "0644"
+      vars:
+        nginx_sites: "{{ render_variants | map(attribute='site') | list }}"
+        nginx_ipv6: "{{ item }}"
+      loop: [false, true]

@@ -79,6 +79,51 @@
     - nginx_anubis_sites | length > 0
     - nginx_anubis_probe.status | default(-1) | int <= 0
 
+# The WAF (the waf role in host mode) answers for a site it knows, and 421
+# for a Host no waf_sites entry lists. The probe reaches the site's inner
+# block through the WAF, or nothing there yet on a first run (502): either
+# answer will do. No redirect is followed (the site's own answer).
+- name: Ask the WAF
+  ansible.builtin.uri:
+    url: "{{ nginx_waf_url }}/"
+    headers:
+      Host: "{{ item.domains[0] }}"
+    follow_redirects: none
+    timeout: 5
+  loop: "{{ nginx_waf_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: nginx_waf_probe
+  failed_when: false
+  check_mode: false
+
+- name: Refuse waf without the WAF on the host
+  ansible.builtin.fail:
+    msg: "{{ nginx_waf_silent_msg if nginx_waf_silent | length > 0 else nginx_waf_unknown_msg }}"
+  vars:
+    nginx_waf_answers: "{{ nginx_waf_probe.results | map(attribute='status', default=-1) | map('int') | list }}"
+    nginx_waf_silent: >-
+      {{ nginx_waf_sites | map(attribute='name') | zip(nginx_waf_answers)
+         | selectattr(1, 'le', 0) | map(attribute=0) | list }}
+    nginx_waf_unknown: >-
+      {{ nginx_waf_sites | zip(nginx_waf_answers) | selectattr(1, 'eq', 421) | map(attribute=0) | list }}
+    nginx_waf_silent_msg: >-
+      nginx: nginx_sites {{ 'entry' if nginx_waf_silent | length == 1 else 'entries' }}
+      {{ nginx_waf_silent | join(', ') }} {{ 'sets' if nginx_waf_silent | length == 1 else 'set' }}
+      waf, but the WAF does not answer on {{ nginx_waf_url }}/; run the waf role with waf_mode
+      host (waf_host_port {{ nginx_waf_port }}) first
+    nginx_waf_unknown_msg: >-
+      nginx: nginx_sites {{ 'entry' if nginx_waf_unknown | length == 1 else 'entries' }}
+      {{ nginx_waf_unknown | map(attribute='name') | join(', ') }}
+      {{ 'sets' if nginx_waf_unknown | length == 1 else 'set' }} waf, but the WAF on
+      {{ nginx_waf_url }}/ answers 421 for
+      {{ nginx_waf_unknown | map(attribute='domains') | map('first') | join(', ') }}: no waf_sites
+      entry lists {{ 'it' if nginx_waf_unknown | length == 1 else 'them' }}; add
+      {{ 'the site' if nginx_waf_unknown | length == 1 else 'the sites' }} to waf_sites
+  when:
+    - nginx_waf_sites | length > 0
+    - nginx_waf_silent | length > 0 or nginx_waf_unknown | length > 0
+
 # A task that fails after an earlier one notified the reload: the reload runs
 # first, so nginx does not stay on its old config while the next run, seeing
 # no change, would leave it there.

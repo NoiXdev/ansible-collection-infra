@@ -1,0 +1,68 @@
+---
+# The host scenario's nginx half (run.sh passes -e @nginx.yml with
+# test_nginx=true), test-only values. The WAF in host mode, then the php and
+# nginx roles on the same host: app and secure (PHP, one pool) and proxied (a
+# recorder on 127.0.0.1:8940) go through the WAF, plain does not. secure and
+# proxied use a self-signed certificate (converge.yml creates it).
+waf_mode: host
+# run.sh removes WAF sites (-e '{"test_without": ["app"]}').
+test_without: []
+waf_sites: "{{ test_waf_sites | rejectattr('name', 'in', test_without) | list }}"
+test_waf_sites:
+  - name: app
+    domains: [app.test]
+    mode: block
+  - name: secure
+    domains: [secure.test]
+    mode: block
+  - name: proxied
+    domains: [proxied.test]
+    mode: detect
+
+php_versions:
+  - version: "8.3"
+php_pools:
+  - name: app
+    version: "8.3"
+    user: app_waf
+
+test_nginx_tls:
+  cert: /etc/ssl/noixdev-waf/test.crt
+  key: /etc/ssl/noixdev-waf/test.key
+# Also a fixture variant (nginx-render.yml): its config on the host must be
+# the one the role wrote before sites could have a front hop.
+test_nginx_plain:
+  name: plain
+  domains: [plain.test]
+  user: app_plain
+  root: /srv/plain
+  tls: "off"
+nginx_sites:
+  - name: app
+    domains: [app.test]
+    user: app_waf
+    php_pool: app
+    root: /srv/app
+    tls: "off"
+    waf: true
+  - name: secure
+    domains: [secure.test]
+    user: app_waf
+    php_pool: app
+    root: /srv/app
+    tls: "{{ test_nginx_tls }}"
+    waf: true
+  - "{{ test_nginx_plain }}"
+  # inner_extra is server-level config of the inner block: a location of its
+  # own, which sets a request header the recorder prints.
+  - name: proxied
+    domains: [proxied.test]
+    user: app_waf
+    proxy: http://127.0.0.1:8940
+    tls: "{{ test_nginx_tls }}"
+    waf: true
+    inner_extra: |-
+      location = /inner-extra {
+          proxy_pass http://127.0.0.1:8940;
+          proxy_set_header X-Noix-Inner-Extra seen;
+      }

@@ -2,7 +2,10 @@
 # The test host's playbook. The setup (the packages the tests call, and
 # Docker) runs unless run.sh passes test_setup=false; the waf role runs only
 # with test_waf=true. test_traefik=true (with -e @traefik.yml) adds Traefik,
-# Anubis and the backends of the traefik scenario. test_environment is the
+# Anubis and the backends of the traefik scenario. test_nginx=true (with -e
+# @nginx.yml) adds the php and nginx roles after the WAF, with the site users,
+# web roots and certificate first; test_nginx_prepare=false runs the nginx
+# role alone (the refusals). test_environment is the
 # environment of every task: the refusal run without Docker hides the docker
 # CLI from PATH with it, as tests/dns_invalid_peer_no_tailscale.yml does.
 - name: Converge
@@ -19,6 +22,83 @@
         update_cache: true
         cache_valid_time: 3600
       when: test_setup | default(true) | bool
+
+    - name: Prepare the nginx sites
+      when:
+        - test_nginx | default(false) | bool
+        - test_nginx_prepare | default(true) | bool
+      block:
+        - name: Install openssl
+          ansible.builtin.apt:
+            name: openssl
+            state: present
+
+        - name: Create the site users
+          ansible.builtin.user:
+            name: "{{ item }}"
+            shell: /bin/bash
+          loop: [app_waf, app_plain]
+
+        # Group-readable only: nginx reads them through the site's group. sub
+        # is a directory nginx redirects to sub/.
+        - name: Create the web roots
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: directory
+            owner: "{{ item.user }}"
+            group: "{{ item.user }}"
+            mode: "0750"
+          loop:
+            - {path: /srv/app, user: app_waf}
+            - {path: /srv/app/sub, user: app_waf}
+            - {path: /srv/plain, user: app_plain}
+          loop_control:
+            label: "{{ item.path }}"
+
+        - name: Install the front controller
+          ansible.builtin.copy:
+            src: app.php
+            dest: /srv/app/index.php
+            owner: app_waf
+            group: app_waf
+            mode: "0640"
+
+        - name: Install plain's index
+          ansible.builtin.copy:
+            content: "plain index\n"
+            dest: /srv/plain/index.html
+            owner: app_plain
+            group: app_plain
+            mode: "0640"
+
+        - name: Create the certificate directory
+          ansible.builtin.file:
+            path: /etc/ssl/noixdev-waf
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Create a self-signed certificate for secure.test and proxied.test
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - req
+              - -x509
+              - -newkey
+              - rsa:2048
+              - -nodes
+              - -days
+              - "30"
+              - -subj
+              - /CN=secure.test
+              - -addext
+              - subjectAltName=DNS:secure.test,DNS:proxied.test
+              - -keyout
+              - /etc/ssl/noixdev-waf/test.key
+              - -out
+              - /etc/ssl/noixdev-waf/test.crt
+            creates: /etc/ssl/noixdev-waf/test.crt
   roles:
     - role: noixdev.infra.docker
       when: test_setup | default(true) | bool
@@ -28,6 +108,12 @@
       when: test_traefik | default(false) | bool
     - role: noixdev.infra.waf
       when: test_waf | default(false) | bool
+    - role: noixdev.infra.php
+      when:
+        - test_nginx | default(false) | bool
+        - test_nginx_prepare | default(true) | bool
+    - role: noixdev.infra.nginx
+      when: test_nginx | default(false) | bool
   # The WAF resolves its backends per request, so they may come after it.
   post_tasks:
     - name: Start the traefik scenario's backends

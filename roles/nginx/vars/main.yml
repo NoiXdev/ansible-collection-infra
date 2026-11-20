@@ -104,7 +104,9 @@ nginx_site_keys:
   - basic_auth
   - anubis
   - user_includes
+  - waf
   - extra
+  - inner_extra
 
 nginx_site_defaults:
   redirect_domains: []
@@ -117,14 +119,20 @@ nginx_site_defaults:
   client_max_body_size: 64m
   anubis: false
   user_includes: false
+  waf: false
   extra: ""
+  inner_extra: ""
 
 # The sites with their defaults and only the keys the role knows, without
 # basic_auth (it holds passwords): every loop and template uses these. A loop
 # prints its items with -v, also with a label. Instead of basic_auth an entry
 # has basic_auth_on and basic_auth_allow (the allowlist, no passwords); the
 # htpasswd template alone reads the users, in a no_log task. The key names of
-# each entry, in list order, are nginx_sites_key_names.
+# each entry, in list order, are nginx_sites_key_names. Each entry also has
+# front, the URL its public server block sends the requests to after its
+# checks (the front hop): the WAF's for waf, empty without a front hop (the
+# public block serves the content itself). A site with a front hop serves its
+# content from its inner server block on nginx_inner_port.
 nginx_sites_key_names: "{{ nginx_sites | map('dict2items') | map('map', attribute='key') | map('list') | list }}"
 # YAML reads an unquoted tls: off as false; both mean off here.
 nginx_sites_public: >-
@@ -134,6 +142,7 @@ nginx_sites_public: >-
   {%- set auth = {'basic_auth_on': 'basic_auth' in site,
                   'basic_auth_allow': (site.basic_auth.allow | default([])) if site.get('basic_auth') is mapping else []} -%}
   {%- set entry = nginx_site_defaults | combine(known, auth) -%}
+  {%- set entry = entry | combine({'front': nginx_waf_url if entry.waf is sameas true else ''}) -%}
   {%- set _ = sites.append(entry | combine({'tls': 'off'}) if entry.tls is sameas false else entry) -%}
   {%- endfor -%}
   {{ sites }}
@@ -199,6 +208,9 @@ nginx_error_pages_export_env: >-
 # The sites Anubis checks.
 nginx_anubis_sites: "{{ nginx_sites_public | selectattr('anubis') | list }}"
 nginx_anubis_url: "http://127.0.0.1:{{ nginx_anubis_port }}"
+# The sites the WAF inspects.
+nginx_waf_sites: "{{ nginx_sites_public | selectattr('waf', 'sameas', true) | list }}"
+nginx_waf_url: "http://127.0.0.1:{{ nginx_waf_port }}"
 
 # IPv6 listeners only where the host has IPv6 beyond link-local addresses:
 # Docker's bridge gets one when its first container starts (the error pages

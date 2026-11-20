@@ -209,7 +209,8 @@ waf_audit_relevant_status: "^(?:5|4(?!04))"
 waf_site_rule_id: 9599906
 # Request headers and cookies whose (lower-cased) names contain one of these
 # carry credentials: no rule of the Core Rule Set looks at their values, so
-# none can copy them into the log. Lower case, regex-safe.
-waf_secret_names: [auth, cookie, sess, sid, token, secret, key, pass, jwt, csrf, xsrf, remember, sign, cred]
+# none can copy them into the log. Lower case, regex-safe. front: the
+# host-wide key a cache in front of the WAF sends (X-Noix-Front).
+waf_secret_names: [auth, cookie, sess, sid, token, secret, key, pass, jwt, csrf, xsrf, remember, sign, cred, front]
 # The read-only report of the audit log's events per site.
 waf_report: /usr/local/sbin/noix-waf-report

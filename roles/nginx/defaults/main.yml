@@ -33,7 +33,13 @@ nginx_apt_key_fingerprint: 8540A6F18833A80E9C1653A42FD21310B49F6B46
 #     rate_limit: default              # a zone of nginx_rate_limit_zones
 #     client_max_body_size: 64m
 #     anubis: false                    # Anubis checks every request first
+#     waf: false                       # the WAF inspects every request after
+#                                      # the checks above (nginx_waf_port)
 #     extra: ""                        # raw config inside the server block
+#                                      # (the public one: a location here is
+#                                      # not behind the WAF)
+#     inner_extra: ""                  # raw config inside the inner server
+#                                      # block (waf only), behind the WAF
 nginx_sites: []
 
 # Raw config at http level.
@@ -81,6 +87,18 @@ nginx_error_pages_export_script: /usr/local/sbin/noix-error-pages-export
 # host, published on 127.0.0.1:nginx_anubis_port (its anubis_host_port). A run
 # with such a site is refused before any change while nothing answers there.
 nginx_anubis_port: 8923
+
+# The WAF for the sites with waf: true: the waf role in host mode on this
+# host, on 127.0.0.1:nginx_waf_port (its waf_host_port). Such a site's public
+# server block runs its checks (TLS, rate limit, Basic auth, hardening,
+# headers, Anubis), then sends every request to the WAF; the WAF sends what
+# it lets through to the site's inner server block on the shared loopback
+# listener 127.0.0.1:nginx_inner_port (the waf role's default backend), which
+# serves the site's content (PHP, proxy or static files). A run with such a
+# site is refused before any change while the WAF does not answer there, or
+# answers 421 (no waf_sites entry lists the site's first domain).
+nginx_waf_port: 8930
+nginx_inner_port: 8931
 
 # Deploy snippets (per site in ~<user>/.config/nginx/<name>/, and at http
 # level in ~<nginx_include_user>/.config/nginx/global/) are not supported yet

@@ -18,3 +18,13 @@ server {
     server_name _;
     ssl_reject_handshake on;
 }
+{% if nginx_waf_sites | length > 0 %}
+
+# The inner listener of the waf sites: a Host none of them lists (a waf_sites
+# entry no nginx site matches) gets no site's content.
+server {
+    listen 127.0.0.1:{{ nginx_inner_port }} default_server;
+    server_name _;
+    return 421;
+}
+{% endif %}

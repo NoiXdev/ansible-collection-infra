@@ -599,11 +599,12 @@ host_args=(-e test_waf=true -e '{"waf_mode": "host", "waf_sites": [
    "backend": "http://127.0.0.1:8939", "backend_fallback": "http://127.0.0.1:8931"}]}')
 waf_marker='# Written by the noixdev.infra.waf role (traefik mode).'
 
-# start_recorder <name> <port> [status]: recorder.py on the test host's
-# loopback, answering status (200); its lines go to /tmp/recorder-<name>.log.
+# start_recorder <name> <port> [status] [headers]: recorder.py on the test
+# host's loopback, answering status (200) and printing the headers (a comma
+# list); its lines go to /tmp/recorder-<name>.log.
 start_recorder() {
   docker exec -d "$host" sh -c "echo \$\$ >/tmp/recorder-$1.pid
-    exec python3 -u /opt/waf-host/recorder.py --bind 127.0.0.1 --port $2 --status ${3:-200} >>/tmp/recorder-$1.log 2>&1"
+    exec python3 -u /opt/waf-host/recorder.py --bind 127.0.0.1 --port $2 --status ${3:-200} --headers '${4:-}' >>/tmp/recorder-$1.log 2>&1"
   for _ in $(seq 30); do
     [ -n "$(h ss -Hltn "sport = :$2")" ] && return 0
     sleep 1
@@ -631,6 +632,186 @@ no_request() {
     host_recorded "$1" >&2
     fail "the recorder $1 got a request with $2"
   fi
+}
+
+# The host scenario's nginx half: the php and nginx roles after the WAF
+# (nginx.yml). app (PHP, block), secure (PHP with TLS, block) and proxied (a
+# recorder on 8940 with TLS, detect) go through the WAF to nginx's inner
+# block on 127.0.0.1:8931; plain does not.
+nginx_args=(-e test_waf=true -e test_nginx=true -e "@$here/nginx.yml")
+# The nginx role alone, for the refusals: no setup, no WAF, no php role.
+nginx_alone=(-e test_setup=false -e test_waf=false -e test_nginx_prepare=false)
+# The headers the proxied recorder prints, in this order.
+proxied_headers=X-Forwarded-Proto,X-Forwarded-Port,X-Forwarded-Host,X-Forwarded-For,X-Real-IP,X-Noix-Inner-Extra,X-Noix-Site,X-Noix-Front
+# Test-only values of the headers the Varnish work will add in front of the
+# WAF: a host-wide key (64 hex digits) and a purge token.
+front_key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+purge_token=noix-test-purge-token-4711
+# A client address of the test host's own (RFC 5737): requests from it are
+# not from the loopback, which the inner block trusts.
+client=192.0.2.10
+
+# site <host> <path> [curl args...]: the body, an empty line and the
+# status of a request to nginx on the test host from the client address,
+# over HTTPS for secure.test and proxied.test.
+site() {
+  local name="$1" path="$2" url
+  shift 2
+  case "$name" in
+    secure.test | proxied.test) url="https://$name$path" ;;
+    *) url="http://$name$path" ;;
+  esac
+  h curl -sk --max-time 30 --interface "$client" --resolve "$name:80:127.0.0.1" --resolve "$name:443:127.0.0.1" \
+    -w '\n%{http_code}' "$@" "$url" || true
+}
+# site_expect <want> <host> <path> [curl args...]: site's status must be want.
+site_expect() {
+  local want="$1" got
+  shift
+  got="$(site "$@" | tail -n 1)"
+  [ "$got" = "$want" ] || fail "nginx site $*: got $got, expected $want"
+}
+# php_log: the PHP pool's log of app and secure (one noix-app line per
+# request that reached PHP).
+php_log() { h cat /var/log/php/app.log 2>/dev/null || true; }
+# log_lines <file>: the number of lines of a log on the test host.
+log_lines() { h sh -c "wc -l <$1" | tr -d ' '; }
+# nginx_state: the nginx role's files and www-data's groups, to show that a
+# refused run changed nothing.
+nginx_state() { h sh -c 'find /etc/nginx -type f -exec md5sum {} + | sort; id -nG www-data'; }
+# nginx_refused <log name> <text> [-e ...]: the nginx role alone must fail
+# with the text in its log.
+nginx_refused() {
+  local name="$1" text="$2"
+  shift 2
+  if play "$name" "${nginx_args[@]}" "${nginx_alone[@]}" "$@"; then
+    cat "$out/$name.log" >&2
+    fail "the nginx run $name succeeded but must fail"
+  fi
+  expect_in_log "$name" "$text"
+}
+# proxied_line <path>: the proxied recorder's line of GET <path>.
+proxied_line() { host_recorded proxied | grep -F "GET $1 HTTP/1.1 | " || { host_recorded proxied >&2; fail "the proxied recorder did not get $1"; }; }
+
+host_nginx() {
+  local got before fixture state app proxied global
+  echo "-- the nginx sites without waf render as before"
+  rm -rf "$out/nginx-after"
+  mkdir -p "$out/nginx-after"
+  ansible-playbook "$here/nginx-render.yml" -e "render_dir=$out/nginx-after" >"$out/nginx-render.log" 2>&1 \
+    || { cat "$out/nginx-render.log" >&2; fail "the nginx site variants did not render"; }
+  diff -r "$here/fixtures/nginx-before" "$out/nginx-after" || fail "a site without waf renders otherwise than before"
+
+  echo "-- nginx in front of the WAF"
+  # The traefik scenario's Traefik holds 127.0.0.1:80.
+  if h test -e /opt/traefik/compose.yaml; then
+    h docker compose -f /opt/traefik/compose.yaml rm -s -f traefik >/dev/null 2>&1
+  fi
+  [ -z "$(h ss -Hltn 'sport = :80')" ] || fail "port 80 is taken before nginx: $(h ss -Hltn 'sport = :80')"
+  h ip addr replace "$client/32" dev lo
+  start_recorder proxied 8940 200 "$proxied_headers"
+  converge "${nginx_args[@]}"
+  converge_unchanged "${nginx_args[@]}"
+
+  echo "-- app: PHP behind the WAF sees the client, not the loopback, and an attack never reaches it"
+  got="$(site app.test / -H 'X-Forwarded-For: 203.0.113.9')"
+  [ "$got" = "$(printf '{"remote_addr":"%s","https":"","server_port":"80"}\n\n200' "$client")" ] || fail "app answered: $got"
+  got="$(site secure.test /)"
+  [ "$got" = "$(printf '{"remote_addr":"%s","https":"on","server_port":"443"}\n\n200' "$client")" ] || fail "secure answered: $got"
+  site_expect 403 app.test '/?exec=/bin/bash'
+  site_expect 403 secure.test '/?exec=/bin/bash'
+  php_log | grep -qF 'noix-app /' || { php_log >&2; fail "the PHP log lacks app's requests"; }
+  if php_log | grep -qF 'exec='; then php_log >&2; fail "an attack reached PHP"; fi
+  reported app 932160 --since 10m
+
+  echo "-- plain: served by nginx without the WAF, its config as before"
+  before="$(audit_lines)"
+  got="$(site plain.test '/?exec=/bin/bash')"
+  [ "$got" = "$(printf 'plain index\n\n200')" ] || fail "plain answered: $got"
+  [ "$(audit_lines)" = "$before" ] || { audit >&2; fail "plain's request went through the WAF"; }
+  fixture=plain.conf
+  [ -z "$(h ip -6 addr show scope global)" ] || fixture=plain-ipv6.conf
+  h cat /etc/nginx/sites/plain.conf | diff "$here/fixtures/nginx-before/$fixture" - || fail "plain.conf is not as before"
+
+  echo "-- proxied: detect lets an attack pass and logs it; the backend gets the public block's X-Forwarded-*"
+  site_expect 200 proxied.test '/?exec=/bin/bash'
+  reported proxied 932160 --since 10m
+  site_expect 200 proxied.test /forwarded -H 'X-Forwarded-For: 203.0.113.9'
+  got="$(proxied_line /forwarded)"
+  case "$got" in
+    *" | X-Forwarded-Proto: https | X-Forwarded-Port: 443 | X-Forwarded-Host: proxied.test | X-Forwarded-For: 203.0.113.9, $client | X-Real-IP: $client | "*) ;;
+    *) fail "the proxied backend got: $got" ;;
+  esac
+  site_expect 200 proxied.test /inner-extra
+  case "$(proxied_line /inner-extra)" in
+    *" | X-Noix-Inner-Extra: seen | "*) ;;
+    *) fail "inner_extra did not set its header: $(proxied_line /inner-extra)" ;;
+  esac
+
+  echo "-- the Varnish headers pass the WAF unchanged and never reach its log"
+  site_expect 200 proxied.test /varnish -H 'X-Noix-Site: proxied' -H "X-Noix-Front: $front_key" -H "X-Purge-Token: $purge_token"
+  # A header value that starts with a function definition matches a CRS
+  # rule (932170) for any header the WAF inspects, and the log would then
+  # hold the value.
+  site_expect 200 proxied.test /varnish-attack -H 'X-Noix-Site: proxied' -H "X-Noix-Front: () { :; }; echo $front_key" \
+    -H "X-Purge-Token: () { :; }; echo $purge_token"
+  case "$(proxied_line /varnish)" in
+    *" | X-Noix-Site: proxied | X-Noix-Front: $front_key") ;;
+    *) fail "the Varnish headers did not arrive unchanged: $(proxied_line /varnish)" ;;
+  esac
+  case "$(proxied_line /varnish-attack)" in
+    *" | X-Noix-Site: proxied | X-Noix-Front: () { :; }; echo $front_key") ;;
+    *) fail "the Varnish headers did not arrive unchanged: $(proxied_line /varnish-attack)" ;;
+  esac
+  if h docker logs "$waf" 2>&1 | grep -F -e "$front_key" -e "$purge_token"; then
+    fail "the WAF's log holds the front key or the purge token"
+  fi
+
+  echo "-- redirects name no inner port, and each request is logged once"
+  got="$(site app.test /sub -o /dev/null -D - | tr -d '\r')"
+  grep -q '^HTTP/1.1 301 ' <<<"$got" || fail "app.test/sub did not redirect: $got"
+  grep -qi '^Location: ' <<<"$got" || fail "app.test/sub has no Location: $got"
+  if grep -i '^Location: ' <<<"$got" | grep -qF 8931; then fail "the redirect names the inner port: $got"; fi
+  before="$(log_lines /var/log/nginx/app.access.log) $(log_lines /var/log/nginx/proxied.access.log) $(log_lines /var/log/nginx/access.log)"
+  site_expect 200 app.test /once
+  site_expect 403 app.test '/once?exec=/bin/bash'
+  site_expect 301 app.test /sub
+  site_expect 200 proxied.test /once
+  read -r app proxied global <<<"$before"
+  got="$(log_lines /var/log/nginx/app.access.log) $(log_lines /var/log/nginx/proxied.access.log) $(log_lines /var/log/nginx/access.log)"
+  [ "$got" = "$((app + 3)) $((proxied + 1)) $global" ] || fail "the access logs grew from $before to $got, expected 3 and 1 lines"
+
+  echo "-- invalid waf settings of nginx are refused before any change"
+  state="$(nginx_state)"
+  nginx_refused nginx-inner-extra 'nginx: nginx_sites entry plain sets inner_extra, but has no inner server block (only a site with waf has one)' \
+    -e '{"nginx_sites": [{"name": "plain", "domains": ["plain.test"], "user": "app_plain", "root": "/srv/plain", "tls": "off", "inner_extra": "return 204;"}]}'
+  nginx_refused nginx-waf-string 'nginx: nginx_sites entry plain has an invalid hardening, hsts, user_includes, anubis, waf,' \
+    -e '{"nginx_sites": [{"name": "plain", "domains": ["plain.test"], "user": "app_plain", "root": "/srv/plain", "tls": "off", "waf": "yes"}]}'
+  nginx_refused nginx-inner-port 'nginx: nginx_anubis_port (8923), nginx_waf_port (8930) and nginx_inner_port (443) must be three different ports' \
+    -e nginx_inner_port=443
+  [ "$(nginx_state)" = "$state" ] || fail "a refused nginx run changed nginx's files"
+
+  echo "-- the WAF stopped: 502 from nginx, never PHP, and nginx runs are refused before any change"
+  h docker stop "$waf" >/dev/null
+  site_expect 502 app.test /while-down
+  if php_log | grep -qF /while-down; then fail "app reached PHP without the WAF"; fi
+  nginx_refused nginx-no-waf 'nginx: nginx_sites entries app, secure, proxied set waf, but the WAF does not answer on http://127.0.0.1:8930/'
+  [ "$(nginx_state)" = "$state" ] || fail "the refused nginx run changed nginx's files"
+  converge "${nginx_args[@]}"
+  site_expect 200 app.test /
+
+  echo "-- a waf site the WAF does not know is refused, naming it"
+  state="$(nginx_state)"
+  if play nginx-421 "${nginx_args[@]}" -e test_setup=false -e test_nginx_prepare=false -e '{"test_without": ["app"]}'; then
+    cat "$out/nginx-421.log" >&2
+    fail "the nginx run with app missing from waf_sites succeeded"
+  fi
+  expect_in_log nginx-421 'nginx: nginx_sites entry app sets waf, but the WAF on http://127.0.0.1:8930/ answers 421 for app.test'
+  [ "$(nginx_state)" = "$state" ] || fail "the refused nginx run changed nginx's files"
+  converge "${nginx_args[@]}"
+  site_expect 200 app.test /
+  converge_unchanged "${nginx_args[@]}"
+  stop_recorder proxied 8940
 }
 
 # The host scenario, on the host of the others (it removes the waf.yml of
@@ -693,6 +874,7 @@ test_host() {
   no_request inner /unavailable
   stop_recorder unavailable 8939
   stop_recorder inner 8931
+  host_nginx
 
   h docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$waf" | tee "$out/memory-host-$1.txt"
 }
