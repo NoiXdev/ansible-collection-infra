@@ -774,10 +774,11 @@
   loop: "{{ vaultwarden_update_marker_files | difference([vaultwarden_update_marker]) }}"
   when: not vaultwarden_update_marker_stat.stat.exists
 
-# Written by reconfigure.yml before it writes changed secrets, and removed by
-# main.yml once a run ends healthy: a run stopped in between leaves secrets
-# files that equal the settings while the container still runs with the old
-# ones (it reads them on start only), so the next run restarts it.
+# Written by reconfigure.yml before it writes the secrets and the compose
+# file, and removed by main.yml once a run ends healthy: a run stopped in
+# between leaves files that equal the settings while the container still runs
+# with the old ones (it reads them on start only), so the next run restarts
+# it.
 - name: Look for a pending restart
   ansible.builtin.stat:
     path: "{{ vaultwarden_restart_marker }}"

@@ -44,7 +44,9 @@
 #             mail (sent with the new SMTP password) names it; the item is
 #             still readable; a run stopped after it wrote a new admin token
 #             and before the restart (its docker compose up fails): the next
-#             run restarts Vaultwarden, which takes the new token
+#             run restarts Vaultwarden, which takes the new token; the same
+#             with a change of the compose file alone (the organization
+#             name): the next run recreates Vaultwarden with it
 #   interrupted
 #             from the release of the defaults with SQLite, updates to it
 #             tagged as newer releases: vaultwarden_restore_interrupted
@@ -854,6 +856,29 @@ test_reconfigure() {
   vw_converge
   [ "$(container_id)" != "$id" ] || fail "the run after the stopped reconfigure did not restart Vaultwarden"
   [ "$(admin_login "$admin_token")" = 200 ] || fail "Vaultwarden does not take the new admin token after the restart"
+  h test ! -e "$app_dir/restart-pending" || fail "the healthy run kept $app_dir/restart-pending"
+  vw_converge_unchanged
+
+  # A run stopped after it wrote a change of the compose file alone (another
+  # organization name, no secret) and before Vaultwarden was recreated on it:
+  # the next run, whose settings equal the compose file, still recreates
+  # Vaultwarden, which then runs with the new value.
+  echo "== reconfigure: a restart stopped after the compose file (ubuntu $1)"
+  org_name='Noix Stopped Org'
+  write_install_vars
+  install_fault 'touch /root/fault.fail' "*\" --project-directory $app_dir \"*\"up \"*" 'services:'
+  vw_converge_fails
+  remove_fault
+  expect_in_log 'Start Vaultwarden with the new configuration'
+  h test -e "$app_dir/restart-pending" || fail "the stopped reconfigure left no $app_dir/restart-pending"
+  h grep -qF "$org_name" "$app_dir/compose.yaml" || fail "the stopped reconfigure did not write the compose file"
+  [ "$(compose exec -T vaultwarden printenv INVITATION_ORG_NAME)" != "$org_name" ] \
+    || fail "Vaultwarden runs with the new organization name before it was recreated"
+  id="$(container_id)"
+  vw_converge
+  [ "$(container_id)" != "$id" ] || fail "the run after the stopped reconfigure did not recreate Vaultwarden"
+  [ "$(compose exec -T vaultwarden printenv INVITATION_ORG_NAME)" = "$org_name" ] \
+    || fail "Vaultwarden does not run with the new organization name after the recreate"
   h test ! -e "$app_dir/restart-pending" || fail "the healthy run kept $app_dir/restart-pending"
   vw_converge_unchanged
 }

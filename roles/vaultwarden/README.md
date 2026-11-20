@@ -72,10 +72,12 @@ not write it.
 
 ## Secrets
 
-The admin token's hash, the database URL, the SMTP password and the push key
-live in files of mode 0600 in `<vaultwarden_dir>/secrets`, never in the compose
-file or the run's output. A changed secret restarts Vaultwarden; a run stopped
-before that restart leaves `restart-pending`, and the next run restarts it.
+The admin token's hash, the database URL, the database password (own
+PostgreSQL), the SMTP password and the push key live in files of mode 0600 in
+`<vaultwarden_dir>/secrets`, never in the compose file or the run's output. A
+changed setting restarts Vaultwarden, also a changed secret alone, which leaves
+the compose file as it is; a run stopped before that restart leaves
+`restart-pending`, and the next run restarts it.
 
 ## Updates, backups and rollbacks
 

@@ -40,9 +40,9 @@ vaultwarden_backup_pattern: '^\d{8}T\d{6}Z-\d+\.\d+\.\d+-to-\d+\.\d+\.\d+$'
 # A backup being made (snapshot.yml), which only a run stopped during its
 # backup leaves; state.yml removes it.
 vaultwarden_backup_partial_pattern: '^\d{8}T\d{6}Z-\d+\.\d+\.\d+-to-\d+\.\d+\.\d+\.partial$'
-# Written by reconfigure.yml before it writes changed secrets and removed once
-# a run ends healthy; while it exists a run restarts Vaultwarden, which reads
-# its secrets on start only.
+# Written by reconfigure.yml before it writes the secrets and the compose file
+# and removed once a run ends healthy; while it exists a run restarts
+# Vaultwarden, which reads its settings on start only.
 vaultwarden_restart_marker: "{{ vaultwarden_dir }}/restart-pending"
 
 # The oldest release the role runs.
