@@ -1,0 +1,127 @@
+---
+# The checks of an external PostgreSQL, before any change of a run (state.yml
+# calls it for postgres_external, in every state): the role logs in as
+# Vaultwarden will, refuses a server older than vaultwarden_external_min_major,
+# a database the user does not own (from PostgreSQL 15 on the owner owns the
+# schema public too, which the rollback needs) and, on install, one that holds
+# tables (no adoption of another installation's data). Sets
+# vaultwarden_external_major (the server's, from server_version_num) and
+# vaultwarden_client_image (the repository of vaultwarden_postgres_image with
+# that major), which later tasks run pg_dump and pg_restore with, so that they
+# carry no setting the server does not know.
+#
+# psql runs in a one-off container on Docker's default bridge, which reaches a
+# server by its address as the role's host does. The password goes through
+# stdin into the environment of psql, on no command line (not even the shell
+# command Ansible builds for an environment keyword); every task that holds
+# it is no_log and the refusals quote no value. The TLS mode is the one of the
+# URL.
+
+# The first connection uses the image of vaultwarden_postgres_image as it is:
+# its psql talks to every server from 15 on, and the server's major is not
+# known yet.
+- name: Ask the external PostgreSQL for its version
+  ansible.builtin.command:
+    argv: "{{ vaultwarden_external_psql + ['SELECT current_setting($$server_version_num$$)'] }}"
+    stdin: "{{ vaultwarden_db_password }}"
+    stdin_add_newline: false
+  vars:
+    vaultwarden_external_image: "{{ vaultwarden_postgres_image }}"
+  register: vaultwarden_external_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Refuse an external PostgreSQL the role cannot log in to
+  ansible.builtin.fail:
+    msg: >-
+      The role cannot log in to the external PostgreSQL {{ vaultwarden_external_target }}
+      as {{ vaultwarden_db_user }} with sslmode {{ vaultwarden_db_sslmode }}:
+      {{ vaultwarden_external_error }}. Check vaultwarden_db_host,
+      vaultwarden_db_port, vaultwarden_db_name, vaultwarden_db_user,
+      vaultwarden_db_password and vaultwarden_db_sslmode, that the database
+      and the user exist and that the server takes the host's connections.
+      The role changes nothing.
+  vars:
+    vaultwarden_external_result: "{{ vaultwarden_external_probe }}"
+  when: vaultwarden_external_probe.rc != 0 or vaultwarden_external_probe.stdout | trim is not match('^[0-9]+$')
+
+- name: Note the major of the external PostgreSQL
+  ansible.builtin.set_fact:
+    vaultwarden_external_major: "{{ vaultwarden_external_probe.stdout | trim | int // 10000 }}"
+    vaultwarden_client_image: "{{ vaultwarden_postgres_repository }}:{{ vaultwarden_external_probe.stdout | trim | int // 10000 }}"
+  no_log: true
+
+- name: Refuse an external PostgreSQL that is too old
+  ansible.builtin.fail:
+    msg: >-
+      The external PostgreSQL {{ vaultwarden_external_target }} is PostgreSQL
+      {{ vaultwarden_external_major }}, older than
+      {{ vaultwarden_external_min_major }}: the role needs
+      {{ vaultwarden_external_min_major }} or newer (from 15 on the owner of a
+      database owns its schema public too, which a rollback needs). The role
+      changes nothing. Upgrade the server, or use another one.
+  when: vaultwarden_external_major | int < vaultwarden_external_min_major
+
+# With the client of the server's major, as dump and restore will run. One
+# row: whether the user owns the database, and how many tables it holds.
+- name: Ask the external PostgreSQL who owns the database and what it holds
+  ansible.builtin.command:
+    argv: "{{ vaultwarden_external_psql + [vaultwarden_external_sql] }}"
+    stdin: "{{ vaultwarden_db_password }}"
+    stdin_add_newline: false
+  vars:
+    vaultwarden_external_image: "{{ vaultwarden_client_image }}"
+    vaultwarden_external_sql: >-
+      SELECT d.datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user),
+      (SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ($$pg_catalog$$, $$information_schema$$))
+      FROM pg_database d WHERE d.datname = current_database()
+  register: vaultwarden_external_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Refuse an external PostgreSQL the role cannot check
+  ansible.builtin.fail:
+    msg: >-
+      The check of the external PostgreSQL {{ vaultwarden_external_target }}
+      with the client image {{ vaultwarden_client_image }} failed:
+      {{ vaultwarden_external_error }}. The role changes nothing. Check that
+      the host can pull the image (the repository of vaultwarden_postgres_image
+      with the server's major, {{ vaultwarden_external_major }}).
+  vars:
+    vaultwarden_external_result: "{{ vaultwarden_external_check }}"
+  when: vaultwarden_external_check.rc != 0 or vaultwarden_external_check.stdout | trim is not match('^[tf]\|[0-9]+$')
+
+- name: Note what the external database is
+  ansible.builtin.set_fact:
+    vaultwarden_external_owned: "{{ (vaultwarden_external_check.stdout | trim).split('|')[0] == 't' }}"
+    vaultwarden_external_tables: "{{ (vaultwarden_external_check.stdout | trim).split('|')[1] | int }}"
+
+- name: Refuse a database the user does not own
+  ansible.builtin.fail:
+    msg: >-
+      {{ vaultwarden_db_user }} does not own the database
+      {{ vaultwarden_db_name }} on {{ vaultwarden_db_host }}:{{ vaultwarden_db_port }}.
+      The role needs the owner: from PostgreSQL 15 on it owns the schema
+      public too, which a rollback needs. The role changes nothing. Make it
+      the owner (ALTER DATABASE {{ vaultwarden_db_name }} OWNER TO
+      {{ vaultwarden_db_user }}), or create the database with
+      CREATE DATABASE {{ vaultwarden_db_name }} OWNER {{ vaultwarden_db_user }}.
+  when: not vaultwarden_external_owned
+
+- name: Refuse a database that already holds tables
+  ansible.builtin.fail:
+    msg: >-
+      The database {{ vaultwarden_db_name }} on {{ vaultwarden_db_host }}:{{ vaultwarden_db_port }}
+      already holds {{ vaultwarden_external_tables }}
+      {{ 'table' if vaultwarden_external_tables == 1 else 'tables' }}, and the
+      role installs Vaultwarden only into an empty database: it does not
+      adopt the data of another installation. The role changes nothing. Use
+      an empty database (CREATE DATABASE {{ vaultwarden_db_name }} OWNER
+      {{ vaultwarden_db_user }}), or if the tables are of no use, drop them.
+  when:
+    - not vaultwarden_installed
+    - vaultwarden_external_tables | int > 0

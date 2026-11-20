@@ -11,6 +11,9 @@
 # (the pinned PostgreSQL image, healthy, no published port, the password only
 # as POSTGRES_PASSWORD_FILE, its cluster bind and its password file mounted
 # read-only), the database_url and db_password files and the target postgres.
+# With verify_database postgres_external the project has no db container, the
+# secrets are database_url alone, and the target names verify_db_host and
+# verify_db_port with the database vaultwarden.
 # Extra variables: verify_admin (the admin page is on), verify_org_name,
 # verify_push_id, verify_database.
 - name: Verify
@@ -22,6 +25,9 @@
     verify_image: "{{ verify_defaults.vaultwarden_image }}:{{ verify_defaults.vaultwarden_version }}"
     verify_database: sqlite
     verify_postgres: "{{ verify_database == 'postgres' }}"
+    verify_external: "{{ verify_database == 'postgres_external' }}"
+    verify_db_host: ""
+    verify_db_port: 5432
     verify_all: "{{ verify_inspect.stdout | from_json }}"
     # The containers are named <project>-<service>-1.
     verify_container: "{{ verify_all | selectattr('Name', 'eq', '/vaultwarden-vaultwarden-1') | first }}"
@@ -31,6 +37,7 @@
     verify_secret_files: >-
       {{ (['admin_token'] if verify_admin | bool else [])
          + (['database_url', 'db_password'] if verify_postgres | bool else [])
+         + (['database_url'] if verify_external | bool else [])
          + ['push_installation_key', 'smtp_password'] }}
     verify_expected_env:
       - DOMAIN=https://vaultwarden.test
@@ -136,7 +143,7 @@
           # No secret as a value, and the client address left to Vaultwarden's
           # default header (X-Real-IP, which Traefik sets).
           - verify_env | select('match', '^(ADMIN_TOKEN|SMTP_PASSWORD|PUSH_INSTALLATION_KEY|DATABASE_URL|IP_HEADER)=') | list | length == 0
-          - ('DATABASE_URL_FILE=/run/secrets-vw/database_url' in verify_env) == (verify_postgres | bool)
+          - ('DATABASE_URL_FILE=/run/secrets-vw/database_url' in verify_env) == (verify_postgres | bool or verify_external | bool)
         fail_msg: >-
           The environment lacks {{ verify_expected_env | difference(verify_env) }},
           or ADMIN_TOKEN_FILE does not follow the admin page
@@ -200,5 +207,9 @@
 
     - name: Check the database target
       ansible.builtin.assert:
-        that: "(verify_target.content | b64decode | from_yaml) == {'database': verify_database}"
-        fail_msg: "The database target is not {{ verify_database }}: {{ verify_target.content | b64decode }}"
+        that: "(verify_target.content | b64decode | from_yaml) == verify_target_expected"
+        fail_msg: "The database target is not {{ verify_target_expected }}: {{ verify_target.content | b64decode }}"
+      vars:
+        verify_target_expected: >-
+          {{ {'database': verify_database}
+             | combine({'host': verify_db_host, 'port': verify_db_port | int, 'name': 'vaultwarden'} if verify_external | bool else {}) }}

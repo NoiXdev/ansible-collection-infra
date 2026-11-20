@@ -9,17 +9,23 @@
 # vaultwarden_compose_before (the compose file on disk),
 # vaultwarden_compose_on_disk (it parsed), vaultwarden_installed_version,
 # vaultwarden_installed_database (from vaultwarden_target_file, empty
-# without it), vaultwarden_secrets (file name to content of the secrets the
-# role writes), vaultwarden_secrets_changed, vaultwarden_db_password_changed
+# without it) and vaultwarden_installed_target (the external server and
+# database it records), vaultwarden_secrets (file name to content of the
+# secrets the role writes), vaultwarden_secrets_changed, vaultwarden_db_password_changed
 # and vaultwarden_down (the services that are not running). Refuses, before
 # any change and in this order: a vaultwarden_data_dir that is not a
 # mountpoint (with vaultwarden_data_dir_mountpoint), an installation of
-# another database mode, an installation without its data
+# another database mode, an external installation of another server or
+# database, an installation without its data
 # subdirectories (an unmounted volume), a config.json saved on the admin
 # page, a compose file that is not YAML, an install that did not complete
 # (its marker), a compose file without a Vaultwarden version, a downgrade,
 # with the own PostgreSQL a vaultwarden_db_password the database does not
-# take and a cluster of another major or more than one. Changes nothing.
+# take and a cluster of another major or more than one, and with the external
+# one a server the role cannot log in to, older than 15, whose database the
+# user does not own, or (on install) that holds tables (external.yml; it also
+# sets vaultwarden_external_major and vaultwarden_client_image). Changes
+# nothing.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -77,9 +83,16 @@
 
 - name: Note the installed database
   ansible.builtin.set_fact:
-    vaultwarden_installed_database: "{{ (vaultwarden_target_parsed if vaultwarden_target_parsed is mapping else {}).database | default('') }}"
+    vaultwarden_installed_database: "{{ vaultwarden_target_recorded.database | default('') }}"
+    vaultwarden_installed_target: >-
+      {{ (vaultwarden_target_recorded.host | string ~ ':' ~ vaultwarden_target_recorded.port | string
+          ~ '/' ~ vaultwarden_target_recorded.name | string)
+         if vaultwarden_target_recorded.host is defined and vaultwarden_target_recorded.port is defined
+            and vaultwarden_target_recorded.name is defined
+         else 'a database the file does not name' }}
   vars:
     vaultwarden_target_parsed: "{{ (vaultwarden_target_read.content | default('') | b64decode or '{}') | from_yaml }}"
+    vaultwarden_target_recorded: "{{ vaultwarden_target_parsed if vaultwarden_target_parsed is mapping else {} }}"
 
 # Vaultwarden cannot move between database backends, and with another one it
 # would make an empty vault: refused before the data check, which would take
@@ -100,6 +113,28 @@
     - vaultwarden_installed
     - vaultwarden_installed_database | length > 0
     - vaultwarden_installed_database != vaultwarden_database
+
+# The same mode, another server or database: Vaultwarden would build its
+# schema in an empty database there and the team would see an empty vault.
+# User and password may change (the login check of external.yml catches a
+# wrong pair).
+- name: Refuse an installation of another external database
+  ansible.builtin.fail:
+    msg: >-
+      The settings name the external database {{ vaultwarden_external_target }}
+      (vaultwarden_db_host, vaultwarden_db_port, vaultwarden_db_name), but the
+      installation in {{ vaultwarden_dir }} was made with the database
+      {{ vaultwarden_installed_target }} ({{ vaultwarden_target_file }}).
+      Vaultwarden would build an empty schema in the other database and
+      start an empty vault; the role changes nothing. Set the three back to
+      {{ vaultwarden_installed_target }}. If the database really moved (a dump
+      restored elsewhere), remove {{ vaultwarden_target_file }} and run the
+      role again.
+  when:
+    - vaultwarden_installed
+    - vaultwarden_database == 'postgres_external'
+    - vaultwarden_installed_database == 'postgres_external'
+    - vaultwarden_installed_target != vaultwarden_external_target
 
 # Only install creates the subdirectories, and compose does not create a
 # missing one (create_host_path: false), so their absence beside a compose
@@ -246,9 +281,9 @@
       when: vaultwarden_version is version(vaultwarden_installed_version, '<')
 
 # What the secrets files hold (only those in use): the Argon2id hash of the
-# admin token, with the own PostgreSQL the database URL (the password
-# percent-encoded) and the password itself for the db service, the SMTP
-# password (with a login) and the push installation key.
+# admin token, with PostgreSQL the database URL (the password
+# percent-encoded) and with the own one the password itself for the db
+# service, the SMTP password (with a login) and the push installation key.
 - name: Note the secrets the role writes
   ansible.builtin.set_fact:
     vaultwarden_secrets: >-
@@ -256,6 +291,8 @@
           if vaultwarden_admin_token_hash | string | length > 0 else {})
          | combine({'database_url': vaultwarden_postgres_url | string, 'db_password': vaultwarden_db_password | string}
                    if vaultwarden_database == 'postgres' else {})
+         | combine({'database_url': vaultwarden_external_url | string}
+                   if vaultwarden_database == 'postgres_external' else {})
          | combine({'smtp_password': vaultwarden_smtp_settings.password | string}
                    if vaultwarden_smtp_settings.host | string | length > 0
                       and vaultwarden_smtp_settings.username | string | length > 0 else {})
@@ -279,24 +316,27 @@
   failed_when: false
   no_log: true
 
+# What the files hold, by name (a file that cannot be read as none), computed
+# once for the two comparisons below.
+- name: Note the secrets files
+  ansible.builtin.set_fact:
+    vaultwarden_secrets_disk: >-
+      {%- set found = {} -%}
+      {%- for read in vaultwarden_secrets_read.results | default([]) -%}
+      {%-   set _ = found.update({read.item | basename: (read.content | b64decode) if read.content is defined else none}) -%}
+      {%- endfor -%}
+      {{ found }}
+  no_log: true
+
 # A file that cannot be read compares as changed, so a reconfigure writes it.
 # vaultwarden_db_password_changed: the password file of the db service (the
 # one the database was made with, or last given) is not the password given.
 - name: Compare the secrets files with what the role writes
   ansible.builtin.set_fact:
-    vaultwarden_secrets_changed: >-
-      {%- set found = {} -%}
-      {%- for read in vaultwarden_secrets_read.results | default([]) -%}
-      {%-   set _ = found.update({read.item | basename: (read.content | b64decode) if read.content is defined else none}) -%}
-      {%- endfor -%}
-      {{ found != vaultwarden_secrets }}
+    vaultwarden_secrets_changed: "{{ vaultwarden_secrets_disk != vaultwarden_secrets }}"
     vaultwarden_db_password_changed: >-
-      {%- set found = {} -%}
-      {%- for read in vaultwarden_secrets_read.results | default([]) -%}
-      {%-   set _ = found.update({read.item | basename: (read.content | b64decode) if read.content is defined else none}) -%}
-      {%- endfor -%}
       {{ vaultwarden_installed and vaultwarden_database == 'postgres'
-         and found.db_password | default(none) != vaultwarden_secrets.db_password }}
+         and vaultwarden_secrets_disk.db_password | default(none) != vaultwarden_secrets.db_password }}
   no_log: true
 
 - name: Read the services that run
@@ -426,6 +466,11 @@
   when:
     - vaultwarden_pg_version_read.results | length == 1
     - vaultwarden_postgres_major != vaultwarden_pg_major
+
+# Last of the refusals: it needs the network, the rest only the host.
+- name: Check the external PostgreSQL
+  ansible.builtin.include_tasks: external.yml
+  when: vaultwarden_database == 'postgres_external'
 
 - name: Decide what to do
   ansible.builtin.set_fact:

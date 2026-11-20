@@ -54,6 +54,26 @@
 #             a new vaultwarden_db_password the database does not have refused
 #             before any change; taken once ALTER USER set it, with Vaultwarden
 #             restarted on it and the item still readable
+#   external_refusals
+#             a fresh install against a PostgreSQL server of the test host
+#             refused before anything is created: a wrong password, a
+#             server without TLS with sslmode require, a user who does not own
+#             the database, a PostgreSQL 14 server, a database that holds a
+#             table
+#   install_external
+#             a fresh install with a PostgreSQL 16 server (a container of the
+#             test host, published on its own address) as the external
+#             database: verify.yml with the one container, database_url
+#             (percent-encoded, with ?sslmode) as the only database secret,
+#             a database-target of host, port and database without
+#             credentials, the version-matched client image pulled, no
+#             password in the process list during a run, an idempotent second
+#             run, a registration and the CLI reading an item back
+#   target_changed
+#             on that installation another database name, host or port
+#             refused before any change, naming both targets and the file; a
+#             wrong password and a user who does not own the database refused
+#             too; the item is still readable
 # Every converge's output must not hold a test secret, and every successful
 # converge of a scenario is repeated and must change nothing.
 #
@@ -110,7 +130,8 @@ admin_hash=
 org_name='Noix Test Org'
 current_smtp_password="$smtp_password"
 # No converge's output may hold one of these; make_admin_hash adds the hash.
-secrets=("$db_password" "$new_db_password" "$admin_token" "$smtp_password" "$rotated_smtp_password" "$push_key" "$user_password")
+pg_admin_password="$(openssl rand -hex 12)"
+secrets=("$db_password" "$new_db_password" "$admin_token" "$smtp_password" "$rotated_smtp_password" "$push_key" "$user_password" "$pg_admin_password")
 
 cleanup() {
   [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
@@ -177,7 +198,8 @@ expect_not_in_log() {
 
 # The variables the vaultwarden role needs in every scenario; the secrets of
 # this run in files of mode 0600. db-vars.json holds the database password, so
-# that a scenario can run with or without it (new-db-vars.json: the new one).
+# that a scenario can run with or without it (new-db-vars.json: the new one;
+# wrong-db-vars.json: one no database has).
 write_db_vars() {
   (
     umask 077
@@ -193,6 +215,7 @@ write_role_vars() {
   )
   write_db_vars db-vars.json "$db_password"
   write_db_vars new-db-vars.json "$new_db_password"
+  write_db_vars wrong-db-vars.json "${db_password}-wrong"
 }
 # The settings of an installation: the admin page (the hash of admin_token),
 # SMTP to Mailpit with a login, push of the eu region with a dummy pair, and
@@ -772,10 +795,198 @@ print("ALTER USER vaultwarden PASSWORD \x27" + os.environ["DB_PASSWORD"].replace
   expect_item read
 }
 
+# The external PostgreSQL scenarios: servers of the test host's own Docker,
+# published on the test host's primary address (not 127.0.0.1), which both the
+# one-off client container on Docker's default bridge and Vaultwarden on its
+# project network reach as an external server. They run after the scenarios
+# above and reset the installation like install_postgres.
+pg_ip=
+pg_port=55432
+old_pg_port=55414
+# A PostgreSQL server container on the test host, once: pg_server <name>
+# <major> <port>. The user vaultwarden (the password of the run) owns the
+# databases vaultwarden (empty), vwtables (holds a table) and vwmoved (empty);
+# vwother, with the same password, owns none.
+pg_server() {
+  local name="$1" major="$2" port="$3"
+  h docker inspect "$name" >/dev/null 2>&1 && return 0
+  printf 'POSTGRES_PASSWORD=%s\n' "$pg_admin_password" | hi sh -c 'umask 077; cat >/root/pg.env'
+  h docker run --detach --name "$name" --env-file /root/pg.env --publish "$pg_ip:$port:5432" "docker.io/library/postgres:$major" >/dev/null
+  # Over TCP: the init server of the image listens on its socket only.
+  until h docker exec "$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; do sleep 1; done
+  env "DB_PASSWORD=$db_password" python3 -c '
+import os
+pw = os.environ["DB_PASSWORD"].replace("\x27", "\x27\x27")
+print("CREATE ROLE vaultwarden LOGIN PASSWORD \x27" + pw + "\x27;")
+print("CREATE ROLE vwother LOGIN PASSWORD \x27" + pw + "\x27;")
+for name in ("vaultwarden", "vwtables", "vwmoved"):
+    print("CREATE DATABASE " + name + " OWNER vaultwarden;")' \
+    | hi docker exec -i "$name" psql --username=postgres --no-psqlrc --set=ON_ERROR_STOP=1 >/dev/null
+  h docker exec "$name" psql --username=vaultwarden --dbname=vwtables --no-psqlrc --set=ON_ERROR_STOP=1 \
+    --command='CREATE TABLE leftover (id integer)' >/dev/null
+}
+ensure_pg_servers() {
+  [ -n "$pg_ip" ] || pg_ip="$(h hostname -I | awk '{print $1}')"
+  [ -n "$pg_ip" ] || fail "the test host has no address"
+  pg_server noixdev-vaultwarden-pg 16 "$pg_port"
+  pg_server noixdev-vaultwarden-pg14 14 "$old_pg_port"
+}
+# The same as the settings of an installation with PostgreSQL 16 as the
+# external database.
+ext_converge() {
+  vw_converge -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
+    -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" "$@"
+}
+ext_converge_unchanged() {
+  vw_converge_unchanged -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
+    -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" "$@"
+}
+ext_converge_fails() {
+  vw_converge_fails -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
+    -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" "$@"
+}
+# A statement of the vaultwarden database on the PostgreSQL 16 server as its
+# owner over the local socket: ext_sql <statement>.
+ext_sql() {
+  h docker exec noixdev-vaultwarden-pg psql --username=vaultwarden --dbname=vaultwarden --no-psqlrc \
+    --tuples-only --no-align --command="$1"
+}
+# An installation with the external PostgreSQL, the user and the item.
+ensure_external_installed() {
+  ensure_pg_servers
+  [ "$(h cat "$app_dir/database-target" 2>/dev/null | sed -n 's/^database: *//p')" = postgres_external ] && return 0
+  echo "== install with an external PostgreSQL for $1"
+  reset_installation
+  make_admin_hash
+  ext_converge
+  [ "$(admin_login "$admin_token")" = 200 ] || fail "the admin login failed"
+  invite "$user_email"
+  register "$user_email" "$(invite_link "$user_email" "$org_name")" || fail "the invited address could not register"
+  expect_item create
+}
+
+test_external_refusals() {
+  echo "== external_refusals (ubuntu $1)"
+  ensure_pg_servers
+  reset_installation
+  # Each leaves no /opt/vaultwarden (refused checks that).
+  refused 'cannot log in' -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
+    -e "vaultwarden_db_port=$pg_port" -e "@$out/wrong-db-vars.json"
+  # The server speaks no TLS.
+  refused 'cannot log in' -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
+    -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" -e vaultwarden_db_sslmode=require
+  refused 'cannot log in' -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
+    -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" -e vaultwarden_db_name=nonexistent
+  refused 'does not own the database vaultwarden' -e vaultwarden_database=postgres_external \
+    -e "vaultwarden_db_host=$pg_ip" -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" -e vaultwarden_db_user=vwother
+  refused 'PostgreSQL 14, older than 15' -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
+    -e "vaultwarden_db_port=$old_pg_port" -e "$(db_vars)"
+  refused 'already holds 1 table' -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
+    -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" -e vaultwarden_db_name=vwtables
+  # The 14 server and the table are what the messages say, and no refusal
+  # touched them.
+  [ "$(h docker exec noixdev-vaultwarden-pg psql --username=vaultwarden --dbname=vaultwarden --no-psqlrc \
+    --tuples-only --no-align --command='SELECT count(*) FROM pg_tables WHERE schemaname = $$public$$')" = 0 ] \
+    || fail "a refused run made tables in the external database"
+}
+
+test_install_external() {
+  local expected_url
+  echo "== install_external (ubuntu $1)"
+  ensure_pg_servers
+  reset_installation
+  make_admin_hash
+  ext_converge
+  expect_compose_clean
+  verify -e verify_admin=true -e verify_database=postgres_external -e "verify_db_host=$pg_ip" -e "verify_db_port=$pg_port"
+  # The target names host, port and database and no credentials.
+  h cat "$app_dir/database-target" >"$out/database-target"
+  expect_no_secrets "$out/database-target" "$app_dir/database-target"
+  grep -qxF "host: $pg_ip" "$out/database-target" || fail "database-target lacks the host: $(cat "$out/database-target")"
+  grep -qxF "port: $pg_port" "$out/database-target" || fail "database-target lacks the port: $(cat "$out/database-target")"
+  grep -qxF "name: vaultwarden" "$out/database-target" || fail "database-target lacks the database: $(cat "$out/database-target")"
+  if grep -qiE 'user|password' "$out/database-target"; then fail "database-target names a credential: $(cat "$out/database-target")"; fi
+  # database_url: the percent-encoded URL with the TLS mode; no password file
+  # and no db service, since the database is not the role's.
+  expected_url="$(env "DB_PASSWORD=$db_password" "HOST=$pg_ip" "PORT=$pg_port" python3 -c '
+import os, urllib.parse
+print("postgresql://vaultwarden:" + urllib.parse.quote(os.environ["DB_PASSWORD"], safe="") + "@" + os.environ["HOST"]
+      + ":" + os.environ["PORT"] + "/vaultwarden?sslmode=prefer", end="")')"
+  [ "$(h cat "$secrets_dir/database_url")" = "$expected_url" ] || fail "database_url is not the percent-encoded URL"
+  [ "$(compose exec -T vaultwarden cat /run/secrets-vw/database_url)" = "$expected_url" ] \
+    || fail "the Vaultwarden container does not read the database URL as written"
+  h test ! -e "$secrets_dir/db_password" || fail "$secrets_dir/db_password exists with an external database"
+  if h grep -q '^  db:' "$app_dir/compose.yaml"; then fail "the compose file has a db service with an external database"; fi
+  # The version-matched client (the repository of the PostgreSQL image, the
+  # server's major) ran the checks.
+  h docker image inspect docker.io/library/postgres:16 >/dev/null 2>&1 || fail "the client image of the server's major was not used"
+  ext_sql 'SELECT count(*) FROM users' >/dev/null || fail "no users table in the external database"
+
+  # A run without changes, while the process list is sampled: no password in
+  # any command line, with the one-off client containers started.
+  h rm -f /root/ps.log /root/ps.stop
+  docker exec -d "$host" sh -c 'while [ ! -e /root/ps.stop ]; do ps -eo args >>/root/ps.log; sleep 0.1; done'
+  ext_converge_unchanged
+  h touch /root/ps.stop
+  sleep 1
+  h cat /root/ps.log >"$out/ps.log"
+  [ -s "$out/ps.log" ] || fail "the process list was not sampled"
+  expect_no_secrets "$out/ps.log" "the process list"
+  # At -vvv too.
+  ext_converge -vvv
+
+  [ "$(admin_login "$admin_token")" = 200 ] || fail "the admin login failed"
+  invite "$user_email"
+  register "$user_email" "$(invite_link "$user_email" "$org_name")" || fail "the invited address could not register"
+  expect_item create
+  [ "$(ext_sql 'SELECT count(*) FROM users')" -ge 1 ] || fail "the external PostgreSQL holds no user"
+  expect_answer 200 '"kdfIterations"' /identity/accounts/prelogin -X POST \
+    -H 'Content-Type: application/json' --data '{"email": "nobody@example.test"}'
+}
+
+test_target_changed() {
+  echo "== target_changed (ubuntu $1)"
+  ensure_external_installed target_changed
+  note_untouched
+  # Another database name: an empty one on the same server, which Vaultwarden
+  # would fill with an empty vault.
+  ext_converge_fails -e vaultwarden_db_name=vwmoved
+  expect_in_log "$pg_ip:$pg_port/vwmoved"
+  expect_in_log "$pg_ip:$pg_port/vaultwarden"
+  expect_in_log 'remove'
+  expect_in_log "$app_dir/database-target"
+  expect_untouched
+  # Another host and another port.
+  ext_converge_fails -e vaultwarden_db_host=db.example.test
+  expect_in_log 'db.example.test'
+  expect_untouched
+  ext_converge_fails -e "vaultwarden_db_port=$old_pg_port"
+  expect_in_log "$pg_ip:$old_pg_port/vaultwarden"
+  expect_untouched
+  # The target of a SQLite or PostgreSQL install is another mode, refused by
+  # its own message.
+  ext_converge_fails -e vaultwarden_database=postgres
+  expect_in_log 'with the database postgres_external'
+  expect_untouched
+
+  # The same target with a wrong password, and with a user who does not own
+  # the database: refused in a state that reconfigures, before any change.
+  role_converge_fails -e "@$out/install-vars.json" -e vaultwarden_database=postgres_external \
+    -e "vaultwarden_db_host=$pg_ip" -e "vaultwarden_db_port=$pg_port" -e "@$out/wrong-db-vars.json"
+  expect_in_log 'cannot log in'
+  expect_untouched
+  ext_converge_fails -e vaultwarden_db_user=vwother
+  expect_in_log 'does not own the database vaultwarden'
+  expect_untouched
+  # A database that is not empty is refused on install only: this is not one.
+  ext_converge_unchanged
+  expect_item read
+}
+
 # All scenarios by default; NOIXDEV_INFRA_VAULTWARDEN_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure install_postgres mode_switch db_password"
+all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure install_postgres mode_switch db_password external_refusals install_external target_changed"
 scenarios="${NOIXDEV_INFRA_VAULTWARDEN_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -791,6 +1002,9 @@ for ubuntu in $releases; do
       install_postgres) test_install_postgres "$ubuntu" ;;
       mode_switch) test_mode_switch "$ubuntu" ;;
       db_password) test_db_password "$ubuntu" ;;
+      external_refusals) test_external_refusals "$ubuntu" ;;
+      install_external) test_install_external "$ubuntu" ;;
+      target_changed) test_target_changed "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

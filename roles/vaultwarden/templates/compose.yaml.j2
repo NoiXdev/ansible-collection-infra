@@ -78,7 +78,9 @@ services:
       POSTGRES_USER: {{ q(vaultwarden_db_user) }}
       POSTGRES_PASSWORD_FILE: {{ q(secrets ~ '/db_password') }}
     healthcheck:
-      test: {{ ['CMD', 'pg_isready', '-U', vaultwarden_db_user, '-d', vaultwarden_db_name] | to_json }}
+      # Over TCP (-h): the image's init server listens on its socket only,
+      # which pg_isready would call ready.
+      test: {{ ['CMD', 'pg_isready', '-h', '127.0.0.1', '-U', vaultwarden_db_user, '-d', vaultwarden_db_name] | to_json }}
       interval: 10s
       timeout: 5s
       retries: 6
