@@ -369,12 +369,16 @@
       when: not vaultwarden_healthy
 
 # Reached only by a run that succeeded, so the marker names another version
-# and records a rollback that worked.
+# and records a rollback that worked. Not after the restore of an interrupted
+# update: that run ran only the version it had, not one that succeeded in
+# place of the failed one, so the marker stays until such a run.
 - name: Remove the marker of a failed update of another version
   ansible.builtin.file:
     path: "{{ vaultwarden_marker_file }}"
     state: absent
-  when: vaultwarden_marker_read.content is defined
+  when:
+    - vaultwarden_marker_read.content is defined
+    - vaultwarden_state != 'restore_interrupted'
 
 # Reached only by a run that ended healthy, which (re)started Vaultwarden on
 # the compose file and the secrets files as they are: the restart a stopped

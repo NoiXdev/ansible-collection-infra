@@ -58,7 +58,8 @@
 #             names the new version: refused naming both versions and the
 #             backup, with the variable restored (the previous version
 #             healthy with the item, a change after the backup undone, no
-#             marker, no update), then the next run without it updates
+#             marker, no update, update-failed of another version kept),
+#             then the next run without it updates
 #   install_postgres
 #             a fresh install with the own PostgreSQL (the cluster in
 #             <data>/postgres, a password with $, quotes, @, / and a space,
@@ -1696,7 +1697,7 @@ has_sentinel() {
     "$data_dir/vaultwarden/db.sqlite3")" = 1 ]
 }
 test_interrupted() {
-  local backup
+  local backup failed_other
   echo "== interrupted (ubuntu $1)"
   if [ "$(h cat "$app_dir/database-target" 2>/dev/null | sed -n 's/^database: *//p')" != sqlite ] \
     || ! h grep -qF "\"$image\"" "$app_dir/compose.yaml" 2>/dev/null \
@@ -1770,13 +1771,18 @@ test_interrupted() {
   expect_untouched
 
   # Restored with the variable: the previous version with its data, and no
-  # update.
+  # update. update-failed of an earlier update to another version, rolled
+  # back, stays: the restore ran no version but the one it had.
+  failed_other="$(printf 'failed_version: 1.37.9\nrolled_back_to: %s\nbackup: %s\ntime: "2026-01-01T00:00:00Z"' \
+    "$next_version" "$backups/20260101T000000Z-$next_version-to-1.37.9")"
+  printf '%s\n' "$failed_other" | hi sh -c "cat >$marker"
   iv_converge "$after_version" -vvv -e vaultwarden_restore_interrupted=true
   expect_in_log "Vaultwarden in $app_dir runs $next_version again"
   if grep -qF 'Stop Vaultwarden for the update' "$out/converge.log"; then fail "the restore tried the update again"; fi
   [ "$(vw_service)" = "$test_repo:$next_version running healthy" ] || fail "Vaultwarden after the restore: $(vw_service)"
   expect_no_progress "after the restore"
-  h test ! -e "$marker" || fail "the restore wrote $marker: $(h cat "$marker")"
+  [ "$(h cat "$marker" 2>&1)" = "$failed_other" ] || fail "the restore did not keep $marker of 1.37.9 as it was: $(h cat "$marker" 2>&1)"
+  h rm "$marker"
   ! has_sentinel || fail "the restore kept the database changed after the backup"
   h test -d "$backup-failed/vaultwarden" || fail "the restore did not set the data it found aside to $backup-failed"
   expect_compose_clean
