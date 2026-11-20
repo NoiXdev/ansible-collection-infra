@@ -222,6 +222,8 @@ test_install() {
   host_state=varnish
   run_ok install converge.yml -e "@$out/install-vars.json"
   run_ok install-verify verify.yml
+  # For the record: the modes in Varnish's working directory.
+  h sh -c 'ls -la /var/lib/varnish /var/lib/varnish/varnishd /var/lib/varnish/varnishd/vcl_*' >"$out/install-workdir-$1.txt"
 
   echo "== install: a second run changes nothing and keeps the key"
   before="$(h sha256sum "$key")"
@@ -700,6 +702,10 @@ test_purge() {
   echo "== purge: a site taken out of varnish_sites loses its token, and its requests pass"
   sites_vars purge-a-vars.json a
   run_ok purge-a converge.yml -e "@$out/purge-a-vars.json"
+  # The run reloaded the new VCL, and a reload of the service compiles one
+  # more: each compiled VCL (with the tokens) stays closed to other users.
+  h systemctl reload varnish
+  run_ok purge-verify verify.yml
   inv PURGE "$p1" -u "b:$tb"
   inv_expect "PURGE as the removed site b" 401
   inv BAN / -H 'X-Noix-Site: b' -H "X-Purge-Token: $tb"

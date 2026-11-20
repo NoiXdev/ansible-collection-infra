@@ -20,7 +20,10 @@ varnish_apt_key_fingerprint: 694566269779DFAC975ED9BDD0525EAE838B3344
 #   load);
 # - /etc/systemd/system/varnish.service.d/noixdev.conf, the listeners and the
 #   storage; a change restarts Varnish (the cache is lost), a VCL change alone
-#   reloads it.
+#   reloads it;
+# - /var/lib/varnish (varnishd's working directory, with every compiled VCL)
+#   root:varnish 0750, and varnishd runs with umask 027: other users cannot
+#   read the key or the purge tokens there.
 varnish_port: 6081
 varnish_admin_port: 6082
 

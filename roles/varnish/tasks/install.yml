@@ -8,3 +8,18 @@
     state: present
     update_cache: true
     cache_valid_time: 3600
+
+# varnishd's working directory (created by varnishd, owned by no package)
+# holds every VCL it compiles, with the front key and the purge tokens, and
+# the shared memory log with the request headers. varnishd gives some of its
+# files to everyone (the pid file, its copies of the vmods), so the directory
+# above them is closed to other users: root and the varnish group (varnishd's
+# users, varnishlog, varnishstat) keep their access. varnishd never changes
+# this directory's mode, restart and reload included.
+- name: Close Varnish's working directory to other users
+  ansible.builtin.file:
+    path: "{{ varnish_state_dir }}"
+    state: directory
+    owner: root
+    group: varnish
+    mode: "0750"

@@ -120,6 +120,63 @@
           - test_files.results[1].stat.mode == '0640'
         quiet: true
 
+    # varnishd compiles every VCL it loads (the start, each reload) into a
+    # vcl_* directory of its working directory, /var/lib/varnish/varnishd: the
+    # compiled VCL holds the front key and the purge tokens, the shared memory
+    # log the request headers. /var/lib/varnish is closed to others (root and
+    # the varnish group keep their access); what varnishd creates in it
+    # (UMask) gives others nothing, but for its copies of the packaged vmods
+    # (0444, varnishd's own mode) and the package's empty
+    # /var/lib/varnish/<hostname>, behind the closed directory.
+    - name: Read /var/lib/varnish and what under it grants others any access
+      ansible.builtin.command:
+        argv: [find, /var/lib/varnish, -perm, /o=rwx, -printf, '%M %u:%g %p\n']
+      register: test_workdir_open
+      changed_when: false
+
+    - name: Read /var/lib/varnish
+      ansible.builtin.stat:
+        path: /var/lib/varnish
+      register: test_state_dir
+
+    - name: Find the compiled VCLs
+      ansible.builtin.find:
+        paths: /var/lib/varnish
+        recurse: true
+        patterns: ['vgc.*']
+      register: test_compiled
+
+    # As a user outside the varnish group (another site's PHP, say).
+    - name: Read what an unprivileged user reaches under /var/lib/varnish
+      ansible.builtin.command:
+        argv: "{{ ['runuser', '-u', 'nobody', '--', 'sh', '-c', test_probe, 'sh'] + (test_compiled.files | map(attribute='path') | list) }}"
+      vars:
+        test_probe: >-
+          ls -A /var/lib/varnish /var/lib/varnish/varnishd 2>/dev/null;
+          for f do if [ -r "$f" ] || [ -x "${f%/*}" ]; then echo "$f"; fi; done
+      register: test_unprivileged
+      changed_when: false
+      failed_when: false
+
+    - name: Check that the compiled VCLs and the working directory are closed to others
+      ansible.builtin.assert:
+        that:
+          - test_state_dir.stat.pw_name == 'root' and test_state_dir.stat.gr_name == 'varnish'
+          - test_state_dir.stat.mode == '0750'
+          - test_compiled.files | map(attribute='path') | select('search', '/varnishd/vcl_[^/]+/vgc[.]so$') | list | length > 0
+          - test_workdir_open.stdout_lines | select('search', '/(vcl_[^/]*|vgc[.][^/]*)$') | list | length == 0
+          - >-
+            test_workdir_open.stdout_lines | map('regex_replace', '^\S+ \S+ ', '')
+            | reject('match', '^/var/lib/varnish/varnishd/vmod_cache/_vmod_[a-z0-9_]+[.][0-9a-f]+$')
+            | reject('match', '^/var/lib/varnish/(?!varnishd$)[^/]+$') | list | length == 0
+          - test_unprivileged.stdout == ''
+        fail_msg: >-
+          /var/lib/varnish {{ test_state_dir.stat.pw_name | default('') }}:{{ test_state_dir.stat.gr_name | default('') }}
+          {{ test_state_dir.stat.mode | default('missing') }}; open to others: {{ test_workdir_open.stdout_lines }};
+          compiled VCLs: {{ test_compiled.files | map(attribute='path') | list }};
+          reached by nobody: {{ test_unprivileged.stdout_lines }}
+        quiet: true
+
     - name: Check that the key is 64 hex digits
       ansible.builtin.command:
         argv: [grep, -Eqx, '[0-9a-f]{64}', "{{ test_key }}"]

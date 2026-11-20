@@ -53,6 +53,8 @@ varnish_tracking_parameters_shopware: [
 # The role's files (see defaults/main.yml for their owners and modes).
 varnish_vcl: /etc/varnish/noixdev.vcl
 varnish_front_key_file: /etc/varnish/noixdev-front.key
+# Above varnishd's working directory (varnishd: /var/lib/varnish/varnishd).
+varnish_state_dir: /var/lib/varnish
 varnish_dropin: /etc/systemd/system/varnish.service.d/noixdev.conf
 # The front key as tasks/vcl.yml reads it (no_log).
 varnish_front_key: "{{ varnish_front_key_read.content | b64decode | trim }}"
