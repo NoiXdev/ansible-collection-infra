@@ -758,6 +758,12 @@ test_mode_switch() {
   h sed -i 's/^database: sqlite/database: postgres/' "$app_dir/database-target"
   h mv "$data_dir/postgres.aside" "$data_dir/postgres"
   pg_converge_unchanged
+  # A removed target file comes back with the next run.
+  h rm "$app_dir/database-target"
+  pg_converge
+  grep -Eq 'changed=[1-9]' "$out/converge.log" || fail "the run did not record the database target"
+  [ "$(h cat "$app_dir/database-target" | sed -n 's/^database: *//p')" = postgres ] || fail "the database target was not recorded"
+  pg_converge_unchanged
   expect_item read
 }
 
@@ -811,7 +817,7 @@ pg_server() {
   local name="$1" major="$2" port="$3"
   h docker inspect "$name" >/dev/null 2>&1 && return 0
   printf 'POSTGRES_PASSWORD=%s\n' "$pg_admin_password" | hi sh -c 'umask 077; cat >/root/pg.env'
-  h docker run --detach --name "$name" --env-file /root/pg.env --publish "$pg_ip:$port:5432" "docker.io/library/postgres:$major" >/dev/null
+  h docker run --detach --name "$name" --env-file /root/pg.env --publish "$pg_ip:$port:5432" "docker.io/library/postgres:$major-bookworm" >/dev/null
   # Over TCP: the init server of the image listens on its socket only.
   until h docker exec "$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; do sleep 1; done
   env "DB_PASSWORD=$db_password" python3 -c '
@@ -883,6 +889,8 @@ test_external_refusals() {
     -e "vaultwarden_db_port=$old_pg_port" -e "$(db_vars)"
   refused 'already holds 1 table' -e vaultwarden_database=postgres_external -e "vaultwarden_db_host=$pg_ip" \
     -e "vaultwarden_db_port=$pg_port" -e "$(db_vars)" -e vaultwarden_db_name=vwtables
+  # The 14 server was refused before its client image was needed.
+  if h docker image inspect docker.io/library/postgres:14 >/dev/null 2>&1; then fail "the client image of a refused server was pulled"; fi
   # The 14 server and the table are what the messages say, and no refusal
   # touched them.
   [ "$(h docker exec noixdev-vaultwarden-pg psql --username=vaultwarden --dbname=vaultwarden --no-psqlrc \
@@ -918,7 +926,8 @@ print("postgresql://vaultwarden:" + urllib.parse.quote(os.environ["DB_PASSWORD"]
   h test ! -e "$secrets_dir/db_password" || fail "$secrets_dir/db_password exists with an external database"
   if h grep -q '^  db:' "$app_dir/compose.yaml"; then fail "the compose file has a db service with an external database"; fi
   # The version-matched client (the repository of the PostgreSQL image, the
-  # server's major) ran the checks.
+  # server's major) ran the checks: the servers run from -bookworm tags, so
+  # postgres:16 is there only because the role pulled it.
   h docker image inspect docker.io/library/postgres:16 >/dev/null 2>&1 || fail "the client image of the server's major was not used"
   ext_sql 'SELECT count(*) FROM users' >/dev/null || fail "no users table in the external database"
 
@@ -980,6 +989,17 @@ test_target_changed() {
   expect_untouched
   # A database that is not empty is refused on install only: this is not one.
   ext_converge_unchanged
+  # The file removed, as the refusal says when the database really moved: the
+  # run records the target the settings name (a change), the next one changes
+  # nothing, and the guard is back.
+  h rm "$app_dir/database-target"
+  ext_converge
+  grep -Eq 'changed=[1-9]' "$out/converge.log" || fail "the run did not record the database target"
+  h cat "$app_dir/database-target" >"$out/database-target"
+  grep -qxF "name: vaultwarden" "$out/database-target" || fail "the target was not recorded: $(cat "$out/database-target")"
+  ext_converge_unchanged
+  ext_converge_fails -e vaultwarden_db_name=vwmoved
+  expect_in_log "$pg_ip:$pg_port/vaultwarden"
   expect_item read
 }
 

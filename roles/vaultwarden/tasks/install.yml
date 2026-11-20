@@ -65,16 +65,7 @@
     # A later run with settings that name another database refuses: there
     # Vaultwarden would make an empty vault.
     - name: Write the database target
-      ansible.builtin.copy:
-        dest: "{{ vaultwarden_target_file }}"
-        content: |
-          # Written by the noixdev.infra.vaultwarden role on install: the
-          # database this installation keeps its vault in. Remove it only when
-          # the database really moved (a dump restored elsewhere).
-          {{ vaultwarden_database_target | to_nice_yaml(sort_keys=false) }}
-        owner: root
-        group: root
-        mode: "0644"
+      ansible.builtin.include_tasks: target.yml
 
     - name: Start Vaultwarden
       community.docker.docker_compose_v2:

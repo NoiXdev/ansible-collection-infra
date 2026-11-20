@@ -240,6 +240,15 @@
       {{ vaultwarden_installed_version }}.
   when: vaultwarden_state == 'update'
 
+# An installation without a usable database-target (the operator removed it
+# because the database moved, or it never had one): the settings are now the
+# target, recorded after every refusal and check above.
+- name: Record the database target
+  ansible.builtin.include_tasks: target.yml
+  when:
+    - vaultwarden_installed
+    - vaultwarden_installed_database | length == 0
+
 - name: Reconfigure Vaultwarden
   ansible.builtin.include_tasks: reconfigure.yml
   when: vaultwarden_state == 'reconfigure'
