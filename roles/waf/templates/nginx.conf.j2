@@ -31,7 +31,8 @@ http {
   access_log off;
   server_tokens off;
   # What a site accepts at all stays with the proxy in front and the app;
-  # ModSecurity inspects up to the site's request_body_limit.
+  # ModSecurity inspects up to the site's request_body_limit. Only a site in
+  # mode block sets a limit (its server block).
   client_max_body_size 0;
   # The root file system is read-only; /tmp is the container's tmpfs.
   client_body_temp_path /tmp/client_body;
@@ -104,6 +105,11 @@ http {
       return 400;
     }
     set $waf_backend "{{ site.backend }}";
+{% if site.mode == 'block' %}
+    # A body larger than ModSecurity inspects answers 413 (with a length or
+    # chunked alike), so nothing passes uninspected. Exclusions keep it.
+    client_max_body_size {{ site.request_body_limit }};
+{% endif %}
 {% if site.mode == 'off' %}
     modsecurity off;
 {% else %}
@@ -119,9 +125,10 @@ http {
     }
 {% for path in site.bypass_paths %}
 
-    # Not inspected.
+    # Not inspected, so not limited either.
     location ^~ {{ path }} {
       modsecurity off;
+      client_max_body_size 0;
       proxy_pass $waf_backend;
     }
 {% endfor %}

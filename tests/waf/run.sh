@@ -488,6 +488,95 @@ test_traefik() {
   h docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$waf" | tee "$out/memory-$1.txt"
 }
 
+# report [args...]: the report helper on the test host.
+report() { h /usr/local/sbin/noix-waf-report "$@"; }
+# report_site <site> [args...]: the report's section of one site, from its
+# "site <name>" line up to the next site's.
+report_site() {
+  local site="$1"
+  shift
+  report "$@" | awk -v head="site $site " 'index($0, "site ") == 1 { on = index($0, head) == 1 } on'
+}
+# reported <site> <rule id> [args...]: the site's section lists the rule.
+reported() {
+  local site="$1" id="$2"
+  shift 2
+  report_site "$site" "$@" | grep -Eq "^  $id [0-9]+ " || { report "$@" >&2; fail "the report lacks rule $id for site $site"; }
+}
+
+# The report scenario: the traefik scenario's sites (detect in mode detect
+# again), attacks and bodies over the inspection limit sent with
+# credentials, then the report and the log. Runs after traefik or alone.
+test_report() {
+  local creds rc
+  echo "== report (ubuntu $1)"
+  converge "${traefik_args[@]}"
+  await 200 detect.test /
+  await 200 block.test /
+  await 200 hooks.test /
+  creds=(-H 'Authorization: Basic c2VjcmV0OnNlY3JldA==' -H 'Cookie: session=topsecret' -H 'X-N8N-API-KEY: apikeyvalue')
+
+  echo "-- attacks with credentials"
+  expect 200 detect.test '/?exec=/bin/bash' "${creds[@]}"
+  expect 200 detect.test '/search?exec=/bin/bash' "${creds[@]}"
+  expect 403 block.test '/?exec=/bin/bash' "${creds[@]}"
+  # Credential headers and cookies are never inspected, so no rule copies
+  # their values into the log; other headers still are.
+  expect 200 block.test /in-credentials -H 'Authorization: Basic c2VjcmV0OnNlY3JldA==() { :; };' \
+    -H 'Cookie: session=topsecret/bin/bash' -H 'X-N8N-API-KEY: apikeyvalue() { :; };'
+  expect 403 block.test /in-header -H 'X-Probe: () { :; }; echo'
+
+  echo "-- bodies over the inspection limit: logged in detect, 413 in block"
+  # 14 MiB (the limit is 12.5 MiB) in a form type the Core Rule Set allows,
+  # without Expect (CRS refuses it, 920450).
+  h sh -c 'head -c 14680064 /dev/zero | tr "\0" a >/tmp/heavy'
+  expect 200 detect.test /upload -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
+    --data-binary @/tmp/heavy "${creds[@]}"
+  expect 413 block.test /upload -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
+    --data-binary @/tmp/heavy "${creds[@]}"
+  expect 413 block.test /upload-chunked -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
+    -H 'Transfer-Encoding: chunked' --data-binary @/tmp/heavy "${creds[@]}"
+  # An exclusion's path keeps the site's limit; a bypassed path has none.
+  expect 413 hooks.test /webhook/upload -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
+    --data-binary @/tmp/heavy
+  expect 200 registry.test /v2/x/blobs/uploads/2 -X PATCH -H 'Content-Type: application/octet-stream' \
+    --data-binary @/tmp/heavy
+  if recorded | grep -Eq '^POST /upload|/in-header'; then
+    recorded >&2
+    fail "the backend of block.test got a refused request"
+  fi
+
+  echo "-- the report per site"
+  reported detect 932160 --since 10m detect
+  reported detect 9599903 --since 10m detect
+  if report --since 10m detect | grep -q '^site block '; then
+    report --since 10m detect >&2
+    fail "the report for site detect lists site block"
+  fi
+  report_site detect --since 10m detect | grep -qF 'GET /search?exec=/bin/bash' \
+    || { report --since 10m detect >&2; fail "the report lacks an example URI"; }
+  reported detect 932160 --since 10m
+  reported block 949110 --since 10m
+  reported block 932170 --since 10m
+  [ "$(report --since 10m nothing)" = 'no events' ] || fail "the report of a site without events is not: no events"
+  reported detect 932160
+  rc=0
+  report --bogus >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "the report exited $rc on --bogus, expected 2"
+  rc=0
+  report --since soon >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "the report exited $rc on --since soon, expected 2"
+
+  echo "-- the log: JSON audit lines, no credentials"
+  audit | python3 -c 'import json, sys; [json.loads(line) for line in sys.stdin]' \
+    || { audit >&2; fail "an audit line is not JSON"; }
+  if h docker logs "$waf" 2>&1 | grep -E 'c2VjcmV0|topsecret|apikeyvalue'; then
+    fail "the WAF's log holds a credential"
+  fi
+
+  h docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$waf" | tee "$out/memory-report-$1.txt"
+}
+
 # All scenarios by default; NOIXDEV_INFRA_WAF_TESTS="refusals" runs only these.
 scenarios="${NOIXDEV_INFRA_WAF_TESTS:-refusals traefik report host}"
 for ubuntu in $releases; do
@@ -496,7 +585,8 @@ for ubuntu in $releases; do
     case "$scenario" in
       refusals) test_refusals "$ubuntu" ;;
       traefik) test_traefik "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (refusals traefik)" ;;
+      report) test_report "$ubuntu" ;;
+      *) fail "unknown scenario $scenario (refusals traefik report)" ;;
     esac
   done
   cleanup

@@ -233,3 +233,11 @@
     group: root
     mode: "0644"
   when: waf_mode == 'traefik'
+
+- name: Install the report of the WAF's events
+  ansible.builtin.template:
+    src: noix-waf-report.j2
+    dest: "{{ waf_report }}"
+    owner: root
+    group: root
+    mode: "0755"

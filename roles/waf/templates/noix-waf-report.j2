@@ -1,0 +1,137 @@
+#!/usr/bin/python3
+# {{ ansible_managed }}
+"""noix-waf-report [--since DURATION] [SITE]
+
+The WAF's events per site, read from its audit log (docker logs of the
+container {{ waf_name }}): for each site the matched rules with their count
+(events) and message, and up to three example requests of each. Use it to see
+whether a site in mode detect is clean before switching it to block. It only
+reads the log.
+
+Exit codes: 0 with the report, or "no events"; 1 when the log cannot be
+read; 2 on bad arguments.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+
+CONTAINER = "{{ waf_name }}"
+# The role's rule whose message names the site of each event (in its data).
+SITE_RULE = "{{ waf_site_rule_id }}"
+EXAMPLES = 3
+NO_SITE = "(none)"
+UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+
+
+def duration(text):
+    """A duration such as 24h, 30m, 7d or 1h30m, in seconds."""
+    parts = re.findall("([0-9]+)([dhms])", text)
+    seconds = sum(int(number) * UNITS[unit] for number, unit in parts)
+    if "".join(number + unit for number, unit in parts) != text or seconds == 0:
+        raise argparse.ArgumentTypeError(f"invalid duration {text!r} (such as 24h, 30m, 7d or 1h30m)")
+    return seconds
+
+
+def site_name(text):
+    if not re.fullmatch("[A-Za-z0-9_-]+", text):
+        raise argparse.ArgumentTypeError(f"invalid site name {text!r}")
+    return text
+
+
+def transactions(seconds):
+    """The audit log's events of the last seconds, oldest first. Lines that
+    are not audit events (or cut off) are skipped; the container's stderr
+    (nginx's error log) is not read."""
+    command = ["docker", "logs", "--since", f"{seconds}s", CONTAINER]
+    try:
+        logs = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, errors="replace")
+    except OSError as error:
+        sys.exit(f"noix-waf-report: cannot run docker: {error}")
+    with logs:
+        for line in logs.stdout:
+            try:
+                transaction = json.loads(line)["transaction"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if isinstance(transaction, dict):
+                yield transaction
+    if logs.returncode != 0:
+        # docker's own message (no container output with --tail 0).
+        error = subprocess.run(["docker", "logs", "--tail", "0", CONTAINER], capture_output=True,
+                               text=True, errors="replace").stderr.strip()
+        sys.exit(f"noix-waf-report: cannot read the log of {CONTAINER}: {error or logs.returncode}")
+
+
+def field(mapping, key):
+    value = mapping.get(key) if isinstance(mapping, dict) else None
+    return "" if value is None else str(value)
+
+
+def collect(seconds, wanted):
+    """{site: {"events": n, "rules": {key: [rule id, message, count, examples]}}}"""
+    sites = {}
+    for transaction in transactions(seconds):
+        request = transaction.get("request")
+        messages = transaction.get("messages")
+        messages = [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
+        hits = {}
+        site = ""
+        for message in messages:
+            details = message.get("details")
+            rule = field(details, "ruleId")
+            if rule == SITE_RULE:
+                site = field(details, "data")
+            elif rule:
+                hits.setdefault(rule, field(message, "message"))
+        site = site or NO_SITE
+        if wanted is not None and site != wanted:
+            continue
+        status = field(transaction.get("response"), "http_code")
+        if not hits:
+            hits = {"-": f"answered {status or '?'}, no rule matched"}
+        example = field(request, "method") + " "
+        if site == NO_SITE:
+            example += field(request, "hostname")
+        example += field(request, "uri")
+        entry = sites.setdefault(site, {"events": 0, "rules": {}})
+        entry["events"] += 1
+        for rule, text in hits.items():
+            key = rule if rule != "-" else "-" + status
+            hit = entry["rules"].setdefault(key, [rule, text, 0, []])
+            hit[2] += 1
+            if example not in hit[3] and len(hit[3]) < EXAMPLES:
+                hit[3].append(example)
+    return sites
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="noix-waf-report",
+        description="The WAF's events per site: matched rules with count, message and example requests.")
+    parser.add_argument("--since", type=duration, default="24h",
+                        help="how far back to read, such as 24h (the default), 30m, 7d or 1h30m")
+    parser.add_argument("site", nargs="?", type=site_name, help="only this site (its name in waf_sites)")
+    arguments = parser.parse_args()
+    sites = collect(arguments.since, arguments.site)
+    if not sites:
+        print("no events")
+        return
+    for site in sorted(sites, key=lambda name: (name == NO_SITE, name)):
+        entry = sites[site]
+        events = entry["events"]
+        print(f"site {site} ({events} event{'' if events == 1 else 's'})")
+        for rule, text, count, examples in sorted(entry["rules"].values(), key=lambda hit: (-hit[2], hit[0])):
+            print(f"  {rule} {count} {text}")
+            for example in examples:
+                print(f"    {example}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BrokenPipeError:
+        sys.stderr.close()

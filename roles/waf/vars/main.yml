@@ -185,3 +185,16 @@ waf_crs_content_types:
   - application/xml
   - application/soap+xml
   - application/json
+
+# The audit log's events: a request that answered one of these statuses
+# (5xx, 4xx without 404), or that matched a logging rule.
+waf_audit_relevant_status: "^(?:5|4(?!04))"
+# The role's rule that names the site of each event (its logdata is the
+# site's name), which noix-waf-report groups by.
+waf_site_rule_id: 9599906
+# Request headers and cookies whose (lower-cased) names contain one of these
+# carry credentials: no rule of the Core Rule Set looks at their values, so
+# none can copy them into the log. Lower case, regex-safe.
+waf_secret_names: [auth, cookie, sess, sid, token, secret, key, pass, jwt, csrf, xsrf, remember, sign, cred]
+# The read-only report of the audit log's events per site.
+waf_report: /usr/local/sbin/noix-waf-report

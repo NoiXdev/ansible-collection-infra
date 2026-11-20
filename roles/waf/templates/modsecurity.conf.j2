@@ -1,12 +1,15 @@
 # {{ ansible_managed }}
 # ModSecurity for every site of the WAF, loaded once (nginx's http level), in
 # this order: the engine settings, the role's own rules, waf_rules_before,
-# the sites' Host-keyed rules, the Core Rule Set, waf_rules_after. Each site's
+# the sites' Host-keyed rules and the role's rules that use them, the Core
+# Rule Set, the credentials kept out of it, waf_rules_after. Each site's
 # server block (nginx.conf) sets the engine mode, so it follows nginx's own
 # choice of server block.
 
-# The engine. A body over the inspection limit answers 413 where the engine
-# blocks (DetectionOnly always passes it).
+# The engine. In mode block nginx answers 413 to a body over the site's
+# inspection limit before ModSecurity reads it (the site's
+# client_max_body_size); Reject is only the backstop and answers 403.
+# DetectionOnly always passes such a body, inspecting up to the limit.
 SecRuleEngine On
 SecRequestBodyAccess On
 SecRequestBodyLimit {{ waf_request_body_limit }}
@@ -26,9 +29,10 @@ SecStatusEngine Off
 # The audit log: one JSON line per event on the container's stdout (docker
 # logs), with the client address, the request line, the status and the
 # matched rules, never request headers or bodies (parts A, H and Z), which
-# would put credentials into the log.
+# would put credentials into the log. An event is a request that matched a
+# logging rule or answered an error (not 404).
 SecAuditEngine RelevantOnly
-SecAuditLogRelevantStatus "^(?:5|4(?!04))"
+SecAuditLogRelevantStatus "{{ waf_audit_relevant_status }}"
 SecAuditLogParts AHZ
 SecAuditLogType Serial
 SecAuditLogFormat JSON
@@ -51,10 +55,11 @@ SecRule REQBODY_ERROR "!@eq 0" "id:9599901,phase:2,t:none,log,deny,status:400,ms
 {% endif %}
 
 # The sites' settings, keyed by the Host header the proxy in front routed by
-# (lower-cased, with or without a port), before the Core Rule Set reads them.
+# (lower-cased, with or without a port), before the Core Rule Set reads them,
+# and the site's name and inspection limit for the role's rules below.
 {% for site in waf_sites_public %}
 # Site {{ site.name }}
-SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * site.index }},phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.blocking_paranoia_level={{ site.paranoia }},setvar:tx.detection_paranoia_level={{ site.detection_paranoia }},setvar:tx.inbound_anomaly_score_threshold={{ site.anomaly_inbound }},setvar:tx.outbound_anomaly_score_threshold={{ site.anomaly_outbound }}
+SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * site.index }},phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.noix_waf_site={{ site.name }},setvar:tx.noix_waf_body_limit={{ site.request_body_limit }},setvar:tx.blocking_paranoia_level={{ site.paranoia }},setvar:tx.detection_paranoia_level={{ site.detection_paranoia }},setvar:tx.inbound_anomaly_score_threshold={{ site.anomaly_inbound }},setvar:tx.outbound_anomaly_score_threshold={{ site.anomaly_outbound }}
 {%- if site.allowed_methods | length > 0 -%}
 ,setvar:'tx.allowed_methods={{ (waf_crs_methods + site.allowed_methods) | unique | join(' ') }}'
 {%- endif -%}
@@ -68,9 +73,31 @@ SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * 
 "
 {% endfor %}
 
+# A body over the site's inspection limit, as an event of its own: mode
+# block answers 413 to it, so noix-waf-report shows which detect sites would.
+SecRule TX:noix_waf_body_limit "@gt 0" "id:9599903,phase:1,pass,t:none,log,severity:'NOTICE',msg:'Request body over the inspection limit (mode block answers 413)',logdata:'Content-Length %{MATCHED_VAR}, limit %{tx.noix_waf_body_limit}',tag:'noix-waf/body-limit',chain"
+  SecRule REQUEST_HEADERS:Content-Length "@gt %{tx.noix_waf_body_limit}" "t:none"
+# Every event names its site: when the audit log writes the request (an
+# error status, or a matched rule with a severity, which every logging rule
+# of the Core Rule Set has), one more message carries the site's name. Other
+# requests get no such message, which would make each of them an event.
+SecRule RESPONSE_STATUS "@rx {{ waf_audit_relevant_status }}" "id:9599904,phase:5,pass,nolog,t:none,setvar:tx.noix_waf_event=1"
+SecRule HIGHEST_SEVERITY "@lt 255" "id:9599905,phase:5,pass,nolog,t:none,setvar:tx.noix_waf_event=1"
+SecRule TX:noix_waf_event "@eq 1" "id:{{ waf_site_rule_id }},phase:5,pass,t:none,log,msg:'Site',logdata:'%{tx.noix_waf_site}',tag:'noix-waf/site',chain"
+  SecRule TX:noix_waf_site "@rx ." "t:none"
+
 # The Core Rule Set of the image.
 Include {{ waf_crs_dir }}/crs-setup.conf
 Include {{ waf_crs_dir }}/rules/*.conf
+
+# Credentials are never inspected: a matching rule would copy the value into
+# the log (ModSecurity cannot mask it). Request headers and cookies whose
+# names contain one of waf_secret_names (in any case), such as
+# Authorization, Cookie, X-Api-Key and session cookies, are left out of every
+# rule; their names are still inspected.
+{% for collection in ['REQUEST_HEADERS', 'REQUEST_COOKIES'] %}
+SecRuleUpdateTargetByTag OWASP_CRS "{% for name in waf_secret_names %}!{{ collection }}:/{{ name }}/{{ '' if loop.last else '|' }}{% endfor %}"
+{% endfor %}
 {% if waf_rules_after | length > 0 %}
 
 # waf_rules_after
