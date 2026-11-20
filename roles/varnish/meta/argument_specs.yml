@@ -74,7 +74,9 @@ argument_specs:
           - profile, generic (the default), shopware or typo3.
           - >-
             purge_token (required), at least 32 characters of A-Z, a-z, 0-9, ., _, ~ and -; every
-            site needs its own.
+            site needs its own. PURGE and BAN straight to Varnish (never through nginx) need it, as
+            Basic auth with the site's name or in X-Purge-Token with X-Noix-Site, and act on that
+            site's objects only.
           - >-
             microcache, seconds from 0 to 300 (default 0) a 200, 301 or 404 that the app does not
             make cacheable (no max-age, s-maxage or Expires; private, no-cache, no-store) is kept,

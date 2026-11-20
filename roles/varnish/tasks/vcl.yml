@@ -74,12 +74,24 @@
       check_mode: false
       no_log: true
 
+    # The message shows the compiler's error without the front key, the
+    # purge tokens and the Basic credentials made of them.
     - name: Stop on a VCL that does not compile
       ansible.builtin.fail:
         msg: >-
           varnish: the new VCL does not compile; Varnish runs the one it has, and {{ varnish_vcl }} is
-          unchanged: {{ varnish_vcl_compiled.stderr | replace(varnish_front_key, '<front key>') | trim }}
+          unchanged: {{ varnish_vcl_error | trim }}
       when: varnish_vcl_compiled.rc != 0
+      vars:
+        varnish_vcl_tokens: "{{ varnish_sites_normalized | map(attribute='purge_token') | list }}"
+        varnish_vcl_secrets: >-
+          {{ varnish_vcl_tokens
+             + (varnish_sites_normalized | map(attribute='name') | zip(varnish_vcl_tokens) | map('join', ':')
+                | map('b64encode') | list) }}
+        varnish_vcl_error_keyless: "{{ varnish_vcl_compiled.stderr | replace(varnish_front_key, '<front key>') }}"
+        varnish_vcl_error: >-
+          {{ varnish_vcl_error_keyless | regex_replace(varnish_vcl_secrets | map('regex_escape') | join('|'), '<purge token>')
+             if varnish_vcl_secrets | length > 0 else varnish_vcl_error_keyless }}
 
     - name: Move the new VCL into place
       ansible.builtin.command:

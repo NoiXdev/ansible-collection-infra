@@ -1,7 +1,8 @@
 ---
-# Every message names the entry. The site checks read varnish_sites_normalized
-# (the entries with their defaults); the key check alone reads the keys of the
-# entries as given. Each check relies on the ones before it.
+# Every message names the entry. The site checks loop over varnish_sites_shown
+# (the entries with their defaults, without their tokens: a failed check
+# prints its item); the key check alone reads the keys of the entries as
+# given. Each check relies on the ones before it.
 - name: Check the series and the repository
   ansible.builtin.assert:
     that:
@@ -107,7 +108,7 @@
   vars:
     varnish_entry: "{{ item.name | default('#' ~ (varnish_index + 1)) }}"
     varnish_unknown: "{{ item.keys() | list | difference(varnish_site_keys) | sort }}"
-  loop: "{{ varnish_sites }}"
+  loop: "{{ varnish_sites | map('combine', {'purge_token': '(not shown)'}) | list }}"
   loop_control:
     index_var: varnish_index
     label: "{{ varnish_entry }}"
@@ -121,7 +122,7 @@
       varnish: varnish_sites entry '{{ item.name | default('#' ~ (varnish_index + 1)) }}' has an
       invalid name; it must match ^[a-z0-9_-]+$ and be at most 64 characters long
     quiet: true
-  loop: "{{ varnish_sites_normalized }}"
+  loop: "{{ varnish_sites_shown }}"
   loop_control:
     index_var: varnish_index
     label: "{{ item.name | default('#' ~ (varnish_index + 1)) }}"
@@ -131,7 +132,7 @@
     that: varnish_sites_normalized | map(attribute='name') | select('eq', item.name) | list | length == 1
     fail_msg: "varnish: varnish_sites has more than one entry named {{ item.name }}"
     quiet: true
-  loop: "{{ varnish_sites_normalized }}"
+  loop: "{{ varnish_sites_shown }}"
   loop_control:
     label: "{{ item.name }}"
 
@@ -142,32 +143,37 @@
       varnish: varnish_sites entry {{ item.name }} has the profile {{ item.profile }}; the profiles
       are generic, shopware and typo3
     quiet: true
-  loop: "{{ varnish_sites_normalized }}"
+  loop: "{{ varnish_sites_shown }}"
   loop_control:
     label: "{{ item.name }}"
 
 - name: Check the purge tokens
   ansible.builtin.assert:
     that:
-      - item.purge_token is defined and item.purge_token is string
-      - item.purge_token is match('^[A-Za-z0-9._~-]{32,}\Z')
+      - varnish_sites_normalized[varnish_index].purge_token is defined
+      - varnish_sites_normalized[varnish_index].purge_token is string
+      - varnish_sites_normalized[varnish_index].purge_token is match('^[A-Za-z0-9._~-]{32,}\Z')
     fail_msg: >-
       varnish: varnish_sites entry {{ item.name }} needs a purge_token of at least 32 characters
       (A-Z, a-z, 0-9, ., _, ~ and -)
     quiet: true
-  loop: "{{ varnish_sites_normalized }}"
+  loop: "{{ varnish_sites_shown }}"
   loop_control:
+    index_var: varnish_index
     label: "{{ item.name }}"
 
 - name: Check that every purge token is used once
   ansible.builtin.assert:
-    that: varnish_sites_normalized | map(attribute='purge_token') | select('eq', item.purge_token) | list | length == 1
+    that: >-
+      varnish_sites_normalized | map(attribute='purge_token') | select('eq', varnish_sites_normalized[varnish_index].purge_token)
+      | list | length == 1
     fail_msg: >-
       varnish: varnish_sites entry {{ item.name }} has a purge_token that another entry has too;
       every site needs its own
     quiet: true
-  loop: "{{ varnish_sites_normalized }}"
+  loop: "{{ varnish_sites_shown }}"
   loop_control:
+    index_var: varnish_index
     label: "{{ item.name }}"
 
 - name: Check the microcache
@@ -181,7 +187,7 @@
       number of seconds from 0 to 300, and 0 with the profile shopware (a shop must not serve
       stale carts or prices)
     quiet: true
-  loop: "{{ varnish_sites_normalized }}"
+  loop: "{{ varnish_sites_shown }}"
   loop_control:
     label: "{{ item.name }}"
 
@@ -201,7 +207,7 @@
     quiet: true
   vars:
     varnish_hostname: '^(?=.{1,253}\Z)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\Z'
-  loop: "{{ varnish_sites_normalized }}"
+  loop: "{{ varnish_sites_shown }}"
   loop_control:
     label: "{{ item.name }}"
 
@@ -216,6 +222,6 @@
       varnish: varnish_sites entry {{ item.name }} needs debug_header true or false and
       strip_cookies a list of cookie names (letters, digits, _, . and -; a trailing * means prefix)
     quiet: true
-  loop: "{{ varnish_sites_normalized }}"
+  loop: "{{ varnish_sites_shown }}"
   loop_control:
     label: "{{ item.name }}"

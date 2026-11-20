@@ -75,3 +75,6 @@ varnish_sites_normalized: >-
   {%- set _ = sites.append(varnish_site_defaults | combine(site)) -%}
   {%- endfor -%}
   {{ sites }}
+# The same entries without their purge tokens: what the checks loop over, as
+# a failed check prints its item. The token checks read the token by index.
+varnish_sites_shown: "{{ varnish_sites_normalized | map('combine', {'purge_token': '(not shown)'}) | list }}"

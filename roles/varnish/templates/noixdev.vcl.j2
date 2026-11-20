@@ -76,6 +76,15 @@ sub vcl_recv {
     if (client.ip !~ noixdev_local) {
         return (synth(403, "Forbidden"));
     }
+    # Invalidation comes from an app or a deploy on the host, straight to this
+    # port, never through nginx or the WAF (whatever sends the front key):
+    # 403 with it, 401 without the site's token, 400 on invalid input.
+    if (req.method == "PURGE" || req.method == "BAN") {
+        if (req.http.X-Noix-Front) {
+            return (synth(403, "Forbidden"));
+        }
+        call noixdev_invalidate;
+    }
     # nginx's public servers send the front key and the site (X-Noix-Site),
     # overwriting what the client sent; any other process on the host gets
     # 403. The backend never sees the key.
@@ -105,6 +114,77 @@ sub noixdev_normalize {
 # (varnish_tracking_parameters_shopware); the query stays sorted.
 sub noixdev_shopware_normalize {
 {{ strip_parameters(varnish_tracking_parameters_shopware) }}
+}
+{% endif %}
+
+# The site whose token an invalidation carries: Basic auth with the site's
+# name and token, or X-Noix-Site and X-Purge-Token. Anything else (a site that
+# is not in varnish_sites, too) gets 401. The comparisons log nothing, and no
+# answer holds a token.
+sub noixdev_invalidate {
+{% for site in varnish_sites_normalized %}
+    if (req.http.Authorization == "Basic {{ (site.name ~ ':' ~ site.purge_token) | b64encode }}"
+        || (req.http.X-Noix-Site == "{{ site.name }}" && req.http.X-Purge-Token == "{{ site.purge_token }}")) {
+        set req.http.X-Noix-Site = "{{ site.name }}";
+        # A URL to purge is normalized as the stored ones are (X-Noix-Url).
+        if (req.method == "PURGE") {
+            call noixdev_normalize;
+{% if site.profile == 'shopware' %}
+            call noixdev_shopware_normalize;
+{% endif %}
+        }
+        call noixdev_invalidate_site;
+    }
+{% endfor %}
+    return (synth(401, "Unauthorized"));
+}
+{% if varnish_sites_normalized | length > 0 %}
+
+# The invalidation of the site in X-Noix-Site (noixdev_invalidate), on that
+# site's objects only: every ban starts with its X-Noix-Site, and xkey tags
+# are stored and purged as <site>:<tag>. A ban from VCL takes no quotes (its
+# words are split at whitespace), so the input is checked before it goes into
+# a ban, and 400 answers what fails the check or what Varnish refuses: a URL
+# has no quote, backslash, space or control character; a regular expression
+# (BAN, X-Cache-Tags) takes A-Za-z0-9_.:;,|/*+?^$()[]{}\- only, at most 1024
+# of them; xkey takes tags of A-Za-z0-9_.:- (at most 256 each), one space
+# apart. (Only with sites: an unused sub does not compile.)
+sub noixdev_invalidate_site {
+    if (req.method == "PURGE") {
+        # An empty header counts: it is invalid input, not a URL purge.
+        if (req.http.xkey || req.http.xkey == "") {
+            if (req.http.xkey !~ "^[A-Za-z0-9_.:-]{1,256}(?: [A-Za-z0-9_.:-]{1,256})*$") {
+                return (synth(400, "Bad Request"));
+            }
+            # The number of objects purged, for varnishlog.
+            set req.http.X-Noix-Purged = xkey.purge(regsuball(req.http.xkey, "([^ ]+)", req.http.X-Noix-Site + ":\1"));
+            return (synth(200, "Purged"));
+        }
+        # The URL on every host of the site.
+        if (req.url !~ "^/[!#-\[\]-~]*$") {
+            return (synth(400, "Bad Request"));
+        }
+        if (!std.ban("obj.http.X-Noix-Site == " + req.http.X-Noix-Site + " && obj.http.X-Noix-Url == " + req.url)) {
+            return (synth(400, "Bad Request"));
+        }
+        return (synth(200, "Purged"));
+    }
+    if (req.http.X-Cache-Tags || req.http.X-Cache-Tags == "") {
+        if (req.http.X-Cache-Tags !~ "^[A-Za-z0-9_.:;,|/*+?^$()\[\]{}\\-]{1,1024}$") {
+            return (synth(400, "Bad Request"));
+        }
+        if (!std.ban("obj.http.X-Noix-Site == " + req.http.X-Noix-Site + " && obj.http.X-Cache-Tags ~ " + req.http.X-Cache-Tags)) {
+            return (synth(400, "Bad Request"));
+        }
+        return (synth(200, "Banned"));
+    }
+    if (req.url !~ "^[A-Za-z0-9_.:;,|/*+?^$()\[\]{}\\-]{1,1024}$") {
+        return (synth(400, "Bad Request"));
+    }
+    if (!std.ban("obj.http.X-Noix-Site == " + req.http.X-Noix-Site + " && obj.http.X-Noix-Url ~ " + req.url)) {
+        return (synth(400, "Bad Request"));
+    }
+    return (synth(200, "Banned"));
 }
 {% endif %}
 
@@ -180,6 +260,18 @@ sub vcl_backend_response {
     set beresp.http.X-Noix-Site = bereq.http.X-Noix-Site;
     set beresp.http.X-Noix-Host = bereq.http.host;
     set beresp.http.X-Noix-Url = bereq.url;
+    # The xkey tags are the site's own (<site>:<tag>), so no other site can
+    # purge them; xkey's other header is not taken from the app.
+    unset beresp.http.X-HashTwo;
+    if (beresp.http.xkey) {
+        std.collect(beresp.http.xkey);
+        set beresp.http.xkey = regsuball(beresp.http.xkey, "([^\s,]+)", bereq.http.X-Noix-Site + ":\1");
+    }
+    # Every object has X-Cache-Tags (empty without tags): the ban of the tags
+    # .* takes every object of the site.
+    if (!beresp.http.X-Cache-Tags) {
+        set beresp.http.X-Cache-Tags = "";
+    }
     if (bereq.uncacheable) {
         return (deliver);
     }
@@ -270,6 +362,9 @@ sub vcl_deliver {
 
 sub vcl_synth {
     set resp.http.X-Noix-Cache = "SYNTH";
+    if (resp.status == 401) {
+        set resp.http.WWW-Authenticate = {"Basic realm="invalidation""};
+    }
     call noixdev_debug_header;
     unset resp.http.Via;
     unset resp.http.X-Varnish;

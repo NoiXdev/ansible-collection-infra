@@ -125,18 +125,22 @@
         argv: [grep, -Eqx, '[0-9a-f]{64}', "{{ test_key }}"]
       changed_when: false
 
-    - name: Ask Varnish without the key, with a wrong one and with the key
+    - name: Ask Varnish without the key, with a wrong one and with the key, and PURGE without a token and with the key
       ansible.builtin.command:
         argv: [sh, -c, "{{ item }}"]
       loop:
         - "{{ test_curl }} http://127.0.0.1:6081/"
         - "{{ test_curl }} -H 'X-Noix-Front: 0000000000000000000000000000000000000000000000000000000000000000' http://127.0.0.1:6081/"
         - "{{ test_curl }} -H \"X-Noix-Front: $(cat {{ test_key }})\" http://127.0.0.1:6081/"
+        - "{{ test_curl }} -X PURGE http://127.0.0.1:6081/"
+        - "{{ test_curl }} -X PURGE -H \"X-Noix-Front: $(cat {{ test_key }})\" http://127.0.0.1:6081/"
       register: test_answers
       changed_when: false
 
     # / sends no cache headers: never cached, whether site a is in
-    # varnish_sites or not.
+    # varnish_sites or not. A PURGE needs the site's token (401 without),
+    # and never comes with the key (403), whether site a is in varnish_sites
+    # or not.
     - name: Check that only the request with the key reached the backend
       ansible.builtin.assert:
         that:
@@ -146,6 +150,9 @@
           - test_answers.results[2].stdout is match('HTTP/1.1 200 ')
           - 'test_answers.results[2].stdout is search("(?mi)^X-Noix-Cache: PASS\r?$")'
           - test_answers.results[2].stdout is search('(?m)^count=[0-9]+ host=a[.]test path=/$')
+          - test_answers.results[3].stdout is match('HTTP/1.1 401 ')
+          - test_answers.results[4].stdout is match('HTTP/1.1 403 ')
+          - test_answers.results[3:] | map(attribute="stdout") | select("search", "(?m)^count=") | list | length == 0
           - 'test_answers.results | map(attribute="stdout") | select("search", "(?mi)^(Via|X-Varnish):") | list | length == 0'
         fail_msg: "{{ test_answers.results | map(attribute='stdout') | list }}"
         quiet: true

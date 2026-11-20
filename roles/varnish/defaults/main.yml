@@ -61,6 +61,23 @@ varnish_between_bytes_timeout: 60
 #     debug_header: false              # X-Cache on the answers
 #     strip_cookies: []                # cookie names this site adds to varnish_strip_cookies;
 #                                      # a trailing * means prefix
+#
+# Invalidation goes straight to Varnish (127.0.0.1, varnish_port) from the
+# host, never through nginx (a request with the front key gets 403), with the
+# site's name and purge_token: Basic auth (http://<name>:<token>@127.0.0.1:6081)
+# or the headers X-Noix-Site: <name> and X-Purge-Token: <token>. Without them
+# (or for a site that is not listed) 401, on invalid input 400. Each request
+# acts on the objects of that site only:
+#   PURGE <url>                     the URL, on every host of the site
+#   PURGE with xkey: <tag> <tag>    the objects tagged with any of the tags (the
+#                                   app's xkey header); tags of A-Za-z0-9_.:-,
+#                                   at most 256 each, one space apart
+#   BAN <regex>                     the objects whose URL matches; BAN / is the
+#                                   whole site
+#   BAN with X-Cache-Tags: <regex>  the objects whose X-Cache-Tags match; .* is
+#                                   the whole site
+# The regular expressions take A-Za-z0-9_.:;,|/*+?^$()[]{}\- only, at most
+# 1024 characters; a URL to purge has no quote, backslash or space.
 varnish_sites: []
 
 # Cookies removed from every request before the cache decides (a trailing *

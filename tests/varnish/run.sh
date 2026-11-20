@@ -26,6 +26,12 @@
 # fails: 30 s for a site without a health probe, well beyond for a site whose
 # probe says sick.
 #
+# The scenario "purge" checks the invalidation requests (PURGE of a URL or of
+# xkey tags, BAN of a URL regex or of X-Cache-Tags): only with the site's
+# token and never with the front key, only on that site's objects, never
+# with input that could change the ban, and no longer for a site taken out
+# of varnish_sites.
+#
 # The scenario "foreign" installs Ubuntu's varnish, and on a second host
 # Varnish Software's 9.0, and checks that the role refuses both before any
 # change.
@@ -254,15 +260,16 @@ test_badvcl() {
   before_vcl="$(h sha256sum "$vcl")"
   before_list="$(h varnishadm vcl.list)"
 
-  # A copy of the collection whose VCL has an unknown word, run with a third
-  # site so that the VCL would change.
+  # A copy of the collection whose VCL has an unknown word on the line with
+  # the purge tokens (the compiler's message shows that line), run with a
+  # third site so that the VCL would change.
   copy="$out/badvcl-collection"
   rm -rf "$copy"
   mkdir -p "$copy/ansible_collections/noixdev/infra/roles"
   cp -R "$root/galaxy.yml" "$root/meta" "$root/plugins" "$copy/ansible_collections/noixdev/infra/"
   cp -R "$root/roles/varnish" "$copy/ansible_collections/noixdev/infra/roles/"
   template="$copy/ansible_collections/noixdev/infra/roles/varnish/templates/noixdev.vcl.j2"
-  sed 's/^\(sub vcl_recv {\)$/\1 noixdev_unknown_keyword;/' "$template" >"$template.new"
+  sed 's/\(req.http.X-Purge-Token == "{{ site.purge_token }}"\)/\1 \&\& noixdev_unknown_keyword/' "$template" >"$template.new"
   mv "$template.new" "$template"
   grep -q noixdev_unknown_keyword "$template" || fail "badvcl: the copy's VCL template was not broken"
   sites_vars badvcl-c-vars.json a b c
@@ -285,6 +292,9 @@ test_badvcl() {
   h test ! -e "$vcl.new" || fail "badvcl: the failed or the --check runs left $vcl.new"
   run_ok badvcl-verify verify.yml
   no_key_in_logs
+  grep -qF '<purge token>' "$out/badvcl-broken.log" || fail "badvcl: the message does not show the line of the tokens"
+  no_token_in_logs 0123456789abcdef0123456789abcdef fedcba9876543210fedcba9876543210 cccccccccccccccccccccccccccccccc \
+    "$(printf 'a:%s' 0123456789abcdef0123456789abcdef | base64)"
 }
 
 # req <site> <host> <path> [<curl option>...]: a request through Varnish with
@@ -488,6 +498,224 @@ test_cache() {
   debug_site=
 }
 
+# inv <method> <path> [<curl option>...]: an invalidation request straight to
+# Varnish, as an app on the host sends it (no front key; the option --front
+# adds it, read inside the test host). Sets status and answer (headers and
+# body), and checks that the answer holds none of the secrets in inv_secrets
+# (the tokens, their Basic credentials, the front key).
+inv_secrets=()
+inv() {
+  local method="$1" path="$2" secret
+  shift 2
+  answer="$(h sh -c 'method="$1" path="$2"; shift 2
+    for a do
+      shift
+      if [ "$a" = --front ]; then set -- "$@" -H "X-Noix-Front: $(cat '"$key"')"; else set -- "$@" "$a"; fi
+    done
+    exec curl -sS -i --max-time 10 -X "$method" "$@" "http://127.0.0.1:6081$path"' sh "$method" "$path" "$@" | tr -d '\r')"
+  status="$(printf '%s\n' "$answer" | sed -n '1s/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p')"
+  for secret in ${inv_secrets[@]+"${inv_secrets[@]}"}; do
+    case "$answer" in *"$secret"*) fail "$method $path: the answer holds a secret" ;; esac
+  done
+}
+# inv_expect <what> <status>: the last answer of inv.
+inv_expect() {
+  [ "$status" = "$2" ] || fail "$1: status $status, expected $2"
+}
+# seen <cache> <site> <host> <path>...: each path of the site is a 200 with
+# X-Noix-Cache <cache>.
+seen() {
+  local want="$1" site="$2" vhost="$3" p
+  shift 3
+  for p in "$@"; do
+    req "$site" "$vhost" "$p"
+    expect "$site $vhost$p" 200 "$want"
+  done
+}
+
+# no_token_in_logs <secret...>: no purge token (nor a Basic credential made of
+# one) is in the logs of this suite, the test host's journal (varnishd's
+# messages included) or Varnish's ban list. Never printed.
+no_token_in_logs() {
+  local secret logs
+  for secret in "$@"; do
+    logs="$(grep -lF -- "$secret" "$out"/*.log || true)"
+    [ -z "$logs" ] || fail "a purge token is in the logs: $logs"
+    if h sh -c 'journalctl --no-pager -o verbose | grep -qF -- "$1"' sh "$secret"; then
+      fail "a purge token is in the journal of the test host"
+    fi
+    if h varnishadm ban.list | grep -qF -- "$secret"; then
+      fail "a purge token is in Varnish's ban list"
+    fi
+  done
+}
+
+# Invalidation: PURGE of a URL or of xkey tags, BAN of a URL regex or of
+# X-Cache-Tags, each with the site's token (Basic auth, or X-Noix-Site and
+# X-Purge-Token), straight to Varnish and never with the front key; each acts
+# on the objects of that site only, also where both sites use the same paths
+# and tags.
+test_purge() {
+  local ta=0123456789abcdef0123456789abcdef tb=fedcba9876543210fedcba9876543210 c='cc=public,max-age=300'
+  local s vhost p1 x1 x2 x3 cat other t1 t2 t3 all
+  echo "== purge: invalidation needs the site's token and acts on that site only (ubuntu $1)"
+  use_host "$1" varnish
+  start_backend
+  sites_vars purge-vars.json a b
+  host_state=varnish
+  run_ok purge converge.yml -e "@$out/purge-vars.json"
+  inv_secrets=("$ta" "$tb" "$(printf 'a:%s' "$ta" | base64)" "$(printf 'b:%s' "$tb" | base64)" "$(h cat "$key")")
+
+  # The same paths and tags on both sites (sorted queries, see test_cache).
+  p1="/pu/p1?$c"
+  x1="/pu/x1?$c&xkey=t1"
+  x2="/pu/x2?$c&xkey=t2%20t9"
+  x3="/pu/x3?$c&xkey=t3"
+  cat="/pu/cat/x?$c"
+  other="/pu/other?$c"
+  t1="/pu/t1?$c&tags=;pages_12;"
+  t2="/pu/t2?$c&tags=;pages_13;"
+  t3="/pu/t3?$c&tags=;pages_12;pages_14;"
+  all=("$p1" "$x1" "$x2" "$x3" "$cat" "$other" "$t1" "$t2" "$t3")
+  for s in a b; do
+    seen MISS "$s" "$s.test" "${all[@]}"
+    seen HIT "$s" "$s.test" "${all[@]}"
+  done
+  seen MISS a www.a.test "$p1"
+  seen HIT a www.a.test "$p1"
+
+  echo "== purge: without the site's token 401, with the front key 403"
+  inv PURGE "$p1"
+  inv_expect "PURGE without credentials" 401
+  printf '%s\n' "$answer" | grep -qi '^WWW-Authenticate: Basic ' || fail "the 401 has no WWW-Authenticate: Basic"
+  inv BAN /
+  inv_expect "BAN without credentials" 401
+  inv PURGE "$p1" -u "b:$ta"
+  inv_expect "PURGE with a's token as user b" 401
+  inv BAN / -u "b:$ta"
+  inv_expect "BAN with a's token as user b" 401
+  inv PURGE "$p1" -u "zzz:$ta"
+  inv_expect "PURGE as a site that is not in varnish_sites" 401
+  inv PURGE "$p1" -u "a:${ta%?}"
+  inv_expect "PURGE with a's token one character short" 401
+  inv PURGE "$p1" -H 'X-Noix-Site: b' -H "X-Purge-Token: $ta"
+  inv_expect "PURGE with X-Noix-Site b and a's token" 401
+  inv BAN / -H 'X-Noix-Site: a' -H 'X-Purge-Token;'
+  inv_expect "BAN with an empty X-Purge-Token" 401
+  inv BAN / -H "X-Purge-Token: $ta"
+  inv_expect "BAN with a's token and no site" 401
+  # The front key: the request came through nginx (or the WAF).
+  inv PURGE "$p1" -u "a:$ta" --front
+  inv_expect "PURGE with a's token and the front key" 403
+  inv BAN / -H 'X-Noix-Site: a' -H "X-Purge-Token: $ta" --front
+  inv_expect "BAN with a's token and the front key" 403
+  inv BAN / -u "a:$ta" -H 'X-Noix-Front: x'
+  inv_expect "BAN with a's token and some X-Noix-Front" 403
+  inv PURGE "$p1" --front
+  inv_expect "PURGE with the front key and no credentials" 403
+  seen HIT a a.test "${all[@]}"
+  seen HIT b b.test "${all[@]}"
+
+  echo "== purge: PURGE of a URL takes it out for every host of the site"
+  # The URL is normalized as the stored one: tracking parameters out, sorted.
+  inv PURGE "/pu/p1?utm_source=x&$c" -u "a:$ta"
+  inv_expect "PURGE of p1 as a" 200
+  seen MISS a A.TEST:443 "$p1"
+  seen HIT a a.test "$p1"
+  seen MISS a www.a.test "$p1"
+  seen HIT b b.test "$p1"
+  inv PURGE "$p1" -H 'Host: A.TEST:443' -H 'X-Noix-Site: a' -H "X-Purge-Token: $ta"
+  inv_expect "PURGE of p1 as a, by header" 200
+  seen MISS a a.test "$p1"
+  seen HIT a A.TEST:443 "$p1"
+  seen HIT a a.test "$x1" "$cat"
+  seen HIT b b.test "$p1"
+  inv PURGE / -u "a:$ta" --request-target '/pu/p1"x'
+  inv_expect "PURGE of a URL with a quote" 400
+
+  echo "== purge: PURGE of xkey tags takes out the site's objects with them"
+  inv PURGE / -u "a:$ta" -H 'xkey: t1 t2'
+  inv_expect "PURGE of t1 t2 as a" 200
+  seen MISS a a.test "$x1" "$x2"
+  seen HIT a a.test "$x3" "$p1"
+  seen HIT b b.test "$x1" "$x2" "$x3"
+  # a cannot name b's tags.
+  inv PURGE / -u "a:$ta" -H 'xkey: b:t3'
+  inv_expect "PURGE of b:t3 as a" 200
+  seen HIT b b.test "$x3"
+  seen HIT a a.test "$x3"
+  for s in 'xkey: t1  t2' 'xkey: t1,t2' 'xkey: t1"' 'xkey;'; do
+    inv PURGE / -u "a:$ta" -H "$s"
+    inv_expect "PURGE with '$s'" 400
+  done
+  seen HIT a a.test "$x1" "$x2"
+
+  echo "== purge: BAN of a URL regex"
+  inv BAN /cat/ -u "a:$ta"
+  inv_expect "BAN /cat/ as a" 200
+  seen MISS a a.test "$cat"
+  seen HIT a a.test "$other"
+  seen HIT b b.test "$cat"
+  inv BAN / -u "a:$ta"
+  inv_expect "BAN / as a" 200
+  seen MISS a a.test "${all[@]}"
+  seen MISS a www.a.test "$p1"
+  seen HIT b b.test "${all[@]}"
+
+  echo "== purge: BAN of X-Cache-Tags"
+  inv BAN / -H 'X-Noix-Site: b' -H "X-Purge-Token: $tb" -H 'X-Cache-Tags: ;pages_12;'
+  inv_expect "BAN of ;pages_12; as b" 200
+  seen MISS b b.test "$t1" "$t3"
+  seen HIT b b.test "$t2" "$p1"
+  seen HIT a a.test "$t1" "$t3"
+
+  echo "== purge: invalid ban input is refused with 400, and bans nothing"
+  inv BAN / -H 'X-Noix-Site: b' -H "X-Purge-Token: $tb" -H 'X-Cache-Tags: x" || true'
+  inv_expect "BAN with a quote in X-Cache-Tags" 400
+  inv BAN / -u "b:$tb" -H 'X-Cache-Tags;'
+  inv_expect "BAN with an empty X-Cache-Tags" 400
+  inv BAN '/pu/(' -u "b:$tb"
+  inv_expect "BAN of a regex that does not compile" 400
+  inv BAN '/pu/a%20b' -u "b:$tb"
+  inv_expect "BAN of a URL regex with %" 400
+  ! h varnishadm ban.list | grep -Eq '[|][|] true|/pu/[(]|a%20b' || fail "a refused ban is in the ban list"
+  seen HIT b b.test "${all[@]}"
+  seen HIT a a.test "${all[@]}"
+  # A backslash is the regular expression's own.
+  inv BAN / -u "b:$tb" -H "X-Cache-Tags: x\\"
+  inv_expect "BAN of the tags x\\ (a regex that does not compile)" 400
+  inv BAN / -u "b:$tb" -H 'X-Cache-Tags: ;pages_1\d;'
+  inv_expect "BAN of the tags ;pages_1\\d; as b" 200
+  seen MISS b b.test "$t1" "$t2" "$t3"
+  seen HIT b b.test "$p1"
+  seen HIT a a.test "$t1" "$t2" "$t3"
+  # .* is every object of the site, with tags or without.
+  inv BAN / -u "b:$tb" -H 'X-Cache-Tags: .*'
+  inv_expect "BAN of the tags .* as b" 200
+  seen MISS b b.test "${all[@]}"
+  seen HIT a a.test "${all[@]}"
+  no_key_in_logs
+  no_token_in_logs "${inv_secrets[@]:0:4}"
+
+  echo "== purge: a site taken out of varnish_sites loses its token, and its requests pass"
+  sites_vars purge-a-vars.json a
+  run_ok purge-a converge.yml -e "@$out/purge-a-vars.json"
+  inv PURGE "$p1" -u "b:$tb"
+  inv_expect "PURGE as the removed site b" 401
+  inv BAN / -H 'X-Noix-Site: b' -H "X-Purge-Token: $tb"
+  inv_expect "BAN as the removed site b, by header" 401
+  for vhost in b.test B.TEST; do
+    req b "$vhost" "$p1"
+    expect "the removed site's cached page ($vhost)" 200 PASS
+  done
+  inv PURGE "$p1" -u "a:$ta"
+  inv_expect "PURGE of p1 as a, the site that stays" 200
+  seen MISS a a.test "$p1"
+  no_key_in_logs
+  no_token_in_logs "${inv_secrets[@]:0:4}"
+  inv_secrets=()
+}
+
 # Grace: a stale object is served for 30 s while the site counts as healthy,
 # and for 6 h while its health probe says sick; a refresh that fails never
 # replaces it.
@@ -592,7 +820,7 @@ test_foreign() {
 }
 
 # All scenarios by default; "tests/varnish/run.sh invalid" runs only these.
-scenarios="${*:-invalid valid install badvcl cache grace foreign}"
+scenarios="${*:-invalid valid install badvcl cache purge grace foreign}"
 for ubuntu in $releases; do
   host_state=
   for scenario in $scenarios; do
@@ -602,9 +830,10 @@ for ubuntu in $releases; do
       install) test_install "$ubuntu" ;;
       badvcl) test_badvcl "$ubuntu" ;;
       cache) test_cache "$ubuntu" ;;
+      purge) test_purge "$ubuntu" ;;
       grace) test_grace "$ubuntu" ;;
       foreign) test_foreign "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (invalid, valid, install, badvcl, cache, grace, foreign)" ;;
+      *) fail "unknown scenario $scenario (invalid, valid, install, badvcl, cache, purge, grace, foreign)" ;;
     esac
   done
   cleanup
