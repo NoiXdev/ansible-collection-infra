@@ -80,14 +80,16 @@ vaultwarden_push_region: us
 
 # More settings for the Vaultwarden container (SENDS_ALLOWED, LOG_LEVEL,
 # ...). The settings the role sets itself are refused, and every PUSH_*,
-# SMTP_*, ROCKET_* and *_FILE key; true and false become true and false.
+# SMTP_*, ROCKET_* and *_FILE key; YAML booleans become the strings true and
+# false.
 vaultwarden_env: {}
 
 # Backups taken before every update (a dump of the database, a copy of the
 # data and the compose file), in vaultwarden_data_dir/backups; the newest
 # vaultwarden_backups_keep are kept.
 vaultwarden_backups_keep: 3
-# Seconds to wait for Vaultwarden (and its database) to become healthy.
+# Seconds to wait for Vaultwarden (and its database) to become healthy; also
+# the start period of its health check in the compose file.
 vaultwarden_health_timeout: 300
 # Seconds a rollback after a failed update waits for the previous version.
 vaultwarden_rollback_timeout: "{{ vaultwarden_health_timeout }}"

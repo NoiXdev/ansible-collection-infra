@@ -128,14 +128,16 @@
   there. Signups are off (`vaultwarden_signups_allowed`); users join by invitation, with
   `vaultwarden_invitation_org_name` and mail through `vaultwarden_smtp`. The admin page is on only
   with `vaultwarden_admin_token_hash`, an Argon2id hash (a plain token is refused), behind a
-  router of its own with `vaultwarden_traefik_admin_entrypoints` and
-  `vaultwarden_traefik_admin_middlewares`. Push notifications through Bitwarden's relay take
-  `vaultwarden_push_installation_id` and `_key` (both or neither) and `vaultwarden_push_region`
-  (`us` or `eu`). More settings go through `vaultwarden_env`; the ones the role sets itself, every
-  `PUSH_*`, `SMTP_*`, `ROCKET_*` and `*_FILE` key, and keys without a value are refused. The
+  router of its own (the vault's router leaves `/admin` to it) with
+  `vaultwarden_traefik_admin_entrypoints` and `vaultwarden_traefik_admin_middlewares`. Push
+  notifications through Bitwarden's relay take `vaultwarden_push_installation_id` and `_key`
+  (both or neither) and `vaultwarden_push_region` (`us` or `eu`). More settings go through
+  `vaultwarden_env`; the ones the role sets itself, every `PUSH_*`, `SMTP_*`, `ROCKET_*` and
+  `*_FILE` key, and keys without a value are refused. The
   secrets (the admin hash, the database URL with the password percent-encoded, the SMTP password,
   the push key) live in `0600` files, not in the compose file, the output or a process list; a
-  changed secret restarts Vaultwarden, also on the run after one that stopped before the restart.
+  changed setting, a secret among them, restarts Vaultwarden, also on the run after one that
+  stopped before the restart.
   A `config.json` written by a save on the admin page, which would override the role's settings,
   makes every run refuse and name its keys (not its values). The data lives in
   `vaultwarden_data_dir`, which can be a `base_mounts` volume (`vaultwarden_data_dir_mountpoint`;

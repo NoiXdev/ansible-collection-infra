@@ -45,7 +45,7 @@ defaults in `defaults/main.yml`.
 | `vaultwarden_push_region` | `us` | The relay's region, `us` or `eu` |
 | `vaultwarden_env` | `{}` | More settings of Vaultwarden; the ones the role sets itself are refused |
 | `vaultwarden_backups_keep` | `3` | Backups before updates that are kept |
-| `vaultwarden_health_timeout` | `300` | Seconds to wait until Vaultwarden is healthy |
+| `vaultwarden_health_timeout` | `300` | Seconds to wait until Vaultwarden is healthy; also the start period of its health check, so a change recreates Vaultwarden |
 | `vaultwarden_rollback_timeout` | the health timeout | Seconds a rollback waits for the previous version |
 | `vaultwarden_restore_interrupted` | `false` | For one run: restore the backup of an update that did not finish |
 

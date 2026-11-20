@@ -166,7 +166,10 @@ argument_specs:
           vaultwarden_data_dir/backups.
       vaultwarden_health_timeout:
         type: int
-        description: Seconds to wait for Vaultwarden and its database to become healthy.
+        description: >-
+          Seconds to wait for Vaultwarden and its database to become healthy;
+          also the start period of its health check, so a change recreates
+          Vaultwarden.
       vaultwarden_rollback_timeout:
         type: int
         description: >-
