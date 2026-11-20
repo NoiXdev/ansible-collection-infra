@@ -316,7 +316,8 @@ expect() {
   [ $# -lt 4 ] || [ "$body" = "$4" ] || fail "$1: body '$body', expected '$4'"
 }
 
-# The cache rules of the generic and typo3 profiles and of the microcache, in
+# The cache rules of the generic and typo3 profiles and of the microcache (and
+# the shopware profile's tracking parameters), in
 # front of tests/varnish/backend.py: its count=<n> shows how often a request
 # reached it.
 test_cache() {
@@ -327,7 +328,8 @@ test_cache() {
   printf '%s\n' '{"test_varnish": true, "varnish_sites": [
     {"name": "a", "purge_token": "0123456789abcdef0123456789abcdef", "debug_header": true, "strip_cookies": ["consent"]},
     {"name": "b", "profile": "typo3", "purge_token": "fedcba9876543210fedcba9876543210"},
-    {"name": "m", "purge_token": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm", "microcache": 5}]}' >"$out/cache-vars.json"
+    {"name": "m", "purge_token": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm", "microcache": 5},
+    {"name": "s", "profile": "shopware", "purge_token": "ssssssssssssssssssssssssssssssss"}]}' >"$out/cache-vars.json"
   host_state=varnish
   run_ok cache converge.yml -e "@$out/cache-vars.json"
   debug_site=a
@@ -434,6 +436,18 @@ test_cache() {
   expect "the query reordered, with tracking parameters" 200 HIT "count=1 host=a.test path=/c/q?a=1&b=2"
   req a a.test '/c/q?xutm_source=x&a=1&b=2'
   expect "a parameter that only ends like a tracking one" 200 MISS "count=1 host=a.test path=/c/q?a=1&b=2&xutm_source=x"
+  # Shopware's short names (kw, pa, pp ...) may be content elsewhere: only the
+  # shopware profile removes them.
+  req a a.test '/c/kw?kw=x'
+  expect "a search for x" 200 MISS "count=1 host=a.test path=/c/kw?kw=x"
+  req a a.test '/c/kw?kw=y'
+  expect "a search for y" 200 MISS "count=1 host=a.test path=/c/kw?kw=y"
+  req a a.test '/c/kw?kw=x'
+  expect "the search for x again" 200 HIT "count=1 host=a.test path=/c/kw?kw=x"
+  req s s.test '/c/kw?a=1'
+  expect "a page of the shopware site" 200 MISS "count=1 host=s.test path=/c/kw?a=1"
+  req s s.test '/c/kw?kw=x&a=1&pa=2'
+  expect "the page with Shopware-only tracking parameters" 200 HIT "count=1 host=s.test path=/c/kw?a=1"
 
   echo "== cache: the microcache keeps private pages for 5 s, and the app's TTL otherwise"
   p='/c/micro?cc=private'

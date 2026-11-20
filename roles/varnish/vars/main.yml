@@ -18,24 +18,36 @@ varnish_packages: [varnish, varnish-modules]
 varnish_apt_packages: varnish varnish-dev varnish-modules
 
 # Query parameters that only the browser's JavaScript reads (analytics, ad
-# click ids): removed from the URL before the cache lookup, for every
-# profile. Shopware 6.7's list, verbatim (shopware/varnish-shopware,
-# 6.7/rootfs/etc/varnish/default.vcl at 518efcf, read 2026-11-20); only
-# whole parameter names match.
-varnish_tracking_parameters: [
+# click ids) are removed from the URL before the cache lookup; only whole
+# parameter names match. Both lists together are Shopware 6.7's list,
+# verbatim (shopware/varnish-shopware, 6.7/rootfs/etc/varnish/default.vcl at
+# 518efcf, read 2026-11-20), split in two:
+#
+# every profile: the names no app plausibly uses for its content (the
+# utm_*, mtm_*/matomo_*, pk_*/piwik_*, hsa_*, klar_* and trk_* names and the
+# click and analytics ids).
+varnish_tracking_parameters_common: [
   pk_campaign, piwik_campaign, pk_kwd, piwik_kwd, pk_keyword, piwik_keyword, mtm_campaign,
   matomo_campaign, mtm_cid, matomo_cid, mtm_kwd, matomo_kwd, mtm_keyword, matomo_keyword,
   mtm_source, matomo_source, mtm_medium, matomo_medium, mtm_content, matomo_content, mtm_group,
-  matomo_group, mtm_placement, matomo_placement, pixelId, kwid, kw, chl, dv, nk, pa, camid, adgid,
-  yclid, utm_term, utm_source, utm_medium, utm_campaign, utm_content, cx, ie, cof, siteurl, _ga,
-  adgroupid, campaignid, adid, utm_id, utm_source_platform, utm_creative_format,
-  utm_marketing_tactic, _gl, gclsrc, gPromoCode, gQT, gclid, srsltid, dclid, gbraid, wbraid,
-  gad_source, gad_campaignid, fbclid, fb_action_ids, fb_action_types, fb_source, mc_cid, mc_eid,
-  _bta_tid, _bta_c, trk_contact, trk_msg, trk_module, trk_sid, gdfms, gdftrk, gdffi, _ke, _kx,
-  redirect_log_mongo_id, redirect_mongo_id, sb_referer_host, mkwid, pcrid, ef_id, s_kwcid,
-  msclkid, dm_i, epik, pp, twclid, hsa_cam, hsa_grp, hsa_mt, hsa_src, hsa_ad, hsa_acc, hsa_net,
-  hsa_kw, hsa_tgt, hsa_ver, _branch_match_id, mkevt, mkcid, mkrid, campid, toolid, customid,
-  igshid, si, ttclid, ScCid, rtid, irclickid, klar_source, klar_cpid, klar_adid
+  matomo_group, mtm_placement, matomo_placement, yclid, utm_term, utm_source, utm_medium,
+  utm_campaign, utm_content, _ga, utm_id, utm_source_platform, utm_creative_format,
+  utm_marketing_tactic, _gl, gclsrc, gclid, srsltid, dclid, gbraid, wbraid, gad_source,
+  gad_campaignid, fbclid, fb_action_ids, fb_action_types, fb_source, mc_cid, mc_eid, _bta_tid,
+  _bta_c, trk_contact, trk_msg, trk_module, trk_sid, _ke, _kx, mkwid, pcrid, ef_id, s_kwcid,
+  msclkid, dm_i, epik, twclid, hsa_cam, hsa_grp, hsa_mt, hsa_src, hsa_ad, hsa_acc, hsa_net,
+  hsa_kw, hsa_tgt, hsa_ver, _branch_match_id, igshid, ttclid, ScCid, irclickid, klar_source,
+  klar_cpid, klar_adid
+]
+
+# The shopware profile only, on top of the common ones: short or generic
+# names (kw, pa, pp, si, cx, campaignid ...) that another app may use for a
+# search term, a page or content; removing them there would serve one page
+# for another.
+varnish_tracking_parameters_shopware: [
+  pixelId, kwid, kw, chl, dv, nk, pa, camid, adgid, cx, ie, cof, siteurl, adgroupid, campaignid,
+  adid, gPromoCode, gQT, gdfms, gdftrk, gdffi, redirect_log_mongo_id, redirect_mongo_id,
+  sb_referer_host, pp, mkevt, mkcid, mkrid, campid, toolid, customid, si, rtid
 ]
 
 # The role's files (see defaults/main.yml for their owners and modes).

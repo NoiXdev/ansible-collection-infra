@@ -12,6 +12,19 @@ vcl 4.1;
 {%- endfor -%}
 ^(?:{{ parts | join('|') }})$
 {%- endmacro %}
+{#
+  Removes the query parameters of a list (whole names, with or without a
+  value) and the separators they leave.
+#}
+{% macro strip_parameters(names) -%}
+{%- set alternatives = names | map('regex_escape') | join('|') %}
+    if (req.url ~ "[?&](?:{{ alternatives }})(?:=|&|$)") {
+        set req.url = regsuball(req.url, "([?&])(?:{{ alternatives }})(?:=[^&]*)?(?=&|$)", "\1");
+        set req.url = regsuball(req.url, "&{2,}", "&");
+        set req.url = regsub(req.url, "\?&", "?");
+        set req.url = regsub(req.url, "[?&]$", "");
+    }
+{%- endmacro %}
 
 import std;
 import cookie;
@@ -77,19 +90,23 @@ sub vcl_recv {
 }
 
 # One cache key per page: the host in lower case without a port, the query
-# without tracking parameters (Shopware 6.7's list) and sorted.
+# without the tracking parameters of every profile
+# (varnish_tracking_parameters_common) and sorted.
 sub noixdev_normalize {
     if (req.http.host) {
         set req.http.host = std.tolower(regsub(req.http.host, ":[0-9]+$", ""));
     }
-    if (req.url ~ "[?&](?:{{ varnish_tracking_parameters | map('regex_escape') | join('|') }})(?:=|&|$)") {
-        set req.url = regsuball(req.url, "([?&])(?:{{ varnish_tracking_parameters | map('regex_escape') | join('|') }})(?:=[^&]*)?(?=&|$)", "\1");
-        set req.url = regsuball(req.url, "&{2,}", "&");
-        set req.url = regsub(req.url, "\?&", "?");
-        set req.url = regsub(req.url, "[?&]$", "");
-    }
+{{ strip_parameters(varnish_tracking_parameters_common) }}
     set req.url = std.querysort(req.url);
 }
+{% if varnish_sites_normalized | selectattr('profile', 'eq', 'shopware') | list | length > 0 %}
+
+# The shopware profile also removes the rest of Shopware's list
+# (varnish_tracking_parameters_shopware); the query stays sorted.
+sub noixdev_shopware_normalize {
+{{ strip_parameters(varnish_tracking_parameters_shopware) }}
+}
+{% endif %}
 
 # One block per site of varnish_sites; a request for another site passes
 # (vcl_recv). Each block ends in noixdev_lookup, which passes or looks up.
@@ -100,6 +117,9 @@ sub noixdev_site_recv {
         # {{ site.name }}: {{ site.profile }}
 {% if site.health_path != '' %}
         set req.backend_hint = site_{{ site.name }};
+{% endif %}
+{% if site.profile == 'shopware' %}
+        call noixdev_shopware_normalize;
 {% endif %}
 {% if site.profile == 'typo3' %}
         # TYPO3's sessions (frontend and backend user) always pass, even if
