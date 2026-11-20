@@ -1,0 +1,88 @@
+---
+- name: Install what the repository needs
+  ansible.builtin.apt:
+    name: [ca-certificates, gnupg, python3-debian]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install Varnish Software's apt key
+  ansible.builtin.get_url:
+    url: "{{ varnish_apt_key_url }}"
+    dest: "{{ varnish_apt_keyring }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the key fingerprints
+  ansible.builtin.command:
+    argv: [gpg, --batch, --show-keys, --with-colons, "{{ varnish_apt_keyring }}"]
+  register: varnish_apt_key
+  changed_when: false
+  check_mode: false
+
+- name: Reject an unexpected key
+  when: varnish_apt_key.stdout is not search('^fpr:+' ~ varnish_apt_key_fingerprint | upper ~ ':', multiline=True)
+  block:
+    - name: Remove the key
+      ansible.builtin.file:
+        path: "{{ varnish_apt_keyring }}"
+        state: absent
+
+    - name: Stop
+      ansible.builtin.fail:
+        msg: >-
+          varnish: {{ varnish_apt_key_url }} does not carry the key
+          {{ varnish_apt_key_fingerprint }}; the key file was removed.
+
+- name: Add Varnish Software's apt repository
+  ansible.builtin.deb822_repository:
+    name: varnish
+    types: [deb]
+    uris: "{{ varnish_apt_url }}"
+    suites: ["{{ varnish_apt_suite }}"]
+    components: ["{{ varnish_apt_component }}"]
+    signed_by: "{{ varnish_apt_keyring }}"
+  register: varnish_apt_repository
+
+# The pin goes in before any refresh, so a failed refresh never leaves
+# Ubuntu's varnish as the candidate.
+- name: Pin the series
+  ansible.builtin.template:
+    src: preferences.j2
+    dest: /etc/apt/preferences.d/varnish
+    owner: root
+    group: root
+    mode: "0644"
+
+# A refresh that failed in an earlier run leaves the source in place but its
+# packages out of the lists; the next run refreshes then too.
+- name: Read where varnish can come from
+  ansible.builtin.command:
+    cmd: apt-cache policy varnish
+  register: varnish_apt_policy
+  changed_when: false
+  check_mode: false
+
+- name: Refresh the package lists for the repository
+  ansible.builtin.apt:
+    update_cache: true
+  when: >-
+    varnish_apt_repository is changed
+    or (varnish_apt_url | regex_replace('/+$', '')) not in varnish_apt_policy.stdout
+
+- name: Let unattended-upgrades install Varnish Software's updates
+  ansible.builtin.template:
+    src: unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/52noixdev-varnish
+    owner: root
+    group: root
+    mode: "0644"

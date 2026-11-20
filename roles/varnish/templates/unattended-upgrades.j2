@@ -1,0 +1,6 @@
+// managed by noixdev.infra (varnish role). Changes here are overwritten.
+// unattended-upgrades installs Varnish Software's updates too; the apt pin
+// keeps them within the series varnish_version.
+Unattended-Upgrade::Origins-Pattern {
+    "origin={{ varnish_apt_origin }},codename={{ varnish_apt_suite }}";
+};

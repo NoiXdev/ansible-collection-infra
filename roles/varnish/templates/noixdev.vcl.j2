@@ -1,0 +1,69 @@
+vcl 4.1;
+# managed by noixdev.infra (varnish role). Changes here are overwritten.
+# It holds the front key: root:varnish 0640, as varnishd reads it as varnish.
+
+import std;
+import cookie;
+import xkey;
+
+# Varnish listens on 127.0.0.1 only; nothing else is answered.
+acl noixdev_local {
+    "127.0.0.1";
+    "::1";
+}
+
+# nginx's inner server.
+backend default {
+    .host = "{{ varnish_backend_host }}";
+    .port = "{{ varnish_backend_port }}";
+    .connect_timeout = {{ varnish_connect_timeout }}s;
+    .first_byte_timeout = {{ varnish_first_byte_timeout }}s;
+    .between_bytes_timeout = {{ varnish_between_bytes_timeout }}s;
+}
+
+sub vcl_recv {
+    if (client.ip !~ noixdev_local) {
+        return (synth(403, "Forbidden"));
+    }
+    # nginx's public servers send the front key and the site (X-Noix-Site),
+    # overwriting what the client sent; any other process on the host gets
+    # 403. The backend never sees the key.
+    if (req.http.X-Noix-Front != "{{ varnish_front_key }}") {
+        return (synth(403, "Forbidden"));
+    }
+    unset req.http.X-Noix-Front;
+    call noixdev_site_recv;
+    return (pass);
+}
+
+# One block per site of varnish_sites; a request for another site passes.
+sub noixdev_site_recv {
+{% for site in varnish_sites_normalized %}
+    if (req.http.X-Noix-Site == "{{ site.name }}") {
+        # {{ site.name }}: {{ site.profile }}
+    }
+{% endfor %}
+}
+
+# The builtin rules decide; nothing is cached (every request passes).
+sub vcl_backend_response {
+}
+
+# X-Noix-Cache tells nginx the cache status (for its log); nginx removes it.
+sub vcl_deliver {
+    if (obj.uncacheable) {
+        set resp.http.X-Noix-Cache = "PASS";
+    } elsif (obj.hits > 0) {
+        set resp.http.X-Noix-Cache = "HIT";
+    } else {
+        set resp.http.X-Noix-Cache = "MISS";
+    }
+    unset resp.http.Via;
+    unset resp.http.X-Varnish;
+}
+
+sub vcl_synth {
+    set resp.http.X-Noix-Cache = "SYNTH";
+    unset resp.http.Via;
+    unset resp.http.X-Varnish;
+}

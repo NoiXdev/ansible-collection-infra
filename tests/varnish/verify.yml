@@ -1,0 +1,116 @@
+---
+# What a converge leaves on the test host: Varnish Software's packages of the
+# series, the service with the role's listeners, the front key, and the front
+# key gate in front of the backend (tests/varnish/backend.py, started by
+# run.sh). The probes read the key inside the host; it never appears here.
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars:
+    test_key: /etc/varnish/noixdev-front.key
+    # curl -i through Varnish, with the right key, a wrong one or none.
+    test_curl: >-
+      curl -sS -i --max-time 10 -H 'Host: a.test' -H 'X-Noix-Site: a'
+  tasks:
+    - name: Read the installed packages
+      ansible.builtin.command:
+        argv: [dpkg-query, -W, -f, '${db:Status-Abbrev}|${Package}|${Version}|${Maintainer}\n', varnish, varnish-modules]
+      register: test_packages
+      changed_when: false
+
+    - name: Check the packages
+      ansible.builtin.assert:
+        that:
+          - test_packages.stdout_lines | length == 2
+          - item is match('^ii *[|](varnish|varnish-modules)[|]9[.]1[.][^|]*[|]Varnish Software <')
+        fail_msg: "not Varnish Software's 9.1: {{ item }}"
+        quiet: true
+      loop: "{{ test_packages.stdout_lines }}"
+
+    - name: Read where the installed varnish comes from
+      ansible.builtin.command:
+        argv: [apt-cache, madison, varnish]
+      register: test_madison
+      changed_when: false
+
+    - name: Check that it comes from the repository
+      ansible.builtin.assert:
+        that: >-
+          test_madison.stdout is search('(?m)^ *varnish [|] ' ~ (test_packages.stdout_lines[0].split('|')[2] | regex_escape)
+          ~ ' [|] https://packages[.]varnish-software[.]com/varnish/ubuntu ')
+        fail_msg: "the installed varnish is not the repository's: {{ test_madison.stdout }}"
+        quiet: true
+
+    - name: Read the service state
+      ansible.builtin.command:
+        argv: [systemctl, is-active, varnish]
+      register: test_active
+      changed_when: false
+      failed_when: false
+
+    - name: Check that varnish runs
+      ansible.builtin.assert:
+        that: test_active.stdout == 'active'
+        fail_msg: "varnish is {{ test_active.stdout }}"
+        quiet: true
+
+    - name: Read the listeners
+      ansible.builtin.command:
+        argv: [ss, -ltunpH]
+      register: test_ss
+      changed_when: false
+
+    - name: Check that varnishd listens on the loopback ports only
+      ansible.builtin.assert:
+        that: test_varnish_listeners == ['127.0.0.1:6081', '127.0.0.1:6082']
+        fail_msg: "varnishd listens on {{ test_varnish_listeners }}: {{ test_ss.stdout }}"
+        quiet: true
+      vars:
+        test_varnish_listeners: >-
+          {{ test_ss.stdout_lines | select('search', '"(varnishd|cache-main)"') | map('split') | map(attribute=4)
+             | unique | sort }}
+
+    - name: Read the front key and the VCL
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: [/etc/varnish/noixdev-front.key, /etc/varnish/noixdev.vcl]
+      register: test_files
+
+    - name: Check their owners and modes
+      ansible.builtin.assert:
+        that:
+          - test_files.results[0].stat.exists
+          - test_files.results[0].stat.pw_name == 'root' and test_files.results[0].stat.gr_name == 'root'
+          - test_files.results[0].stat.mode == '0600'
+          - test_files.results[1].stat.exists
+          - test_files.results[1].stat.pw_name == 'root' and test_files.results[1].stat.gr_name == 'varnish'
+          - test_files.results[1].stat.mode == '0640'
+        quiet: true
+
+    - name: Check that the key is 64 hex digits
+      ansible.builtin.command:
+        argv: [grep, -Eqx, '[0-9a-f]{64}', "{{ test_key }}"]
+      changed_when: false
+
+    - name: Ask Varnish without the key, with a wrong one and with the key
+      ansible.builtin.command:
+        argv: [sh, -c, "{{ item }}"]
+      loop:
+        - "{{ test_curl }} http://127.0.0.1:6081/"
+        - "{{ test_curl }} -H 'X-Noix-Front: 0000000000000000000000000000000000000000000000000000000000000000' http://127.0.0.1:6081/"
+        - "{{ test_curl }} -H \"X-Noix-Front: $(cat {{ test_key }})\" http://127.0.0.1:6081/"
+      register: test_answers
+      changed_when: false
+
+    - name: Check that only the request with the key reached the backend
+      ansible.builtin.assert:
+        that:
+          - test_answers.results[0].stdout is match('HTTP/1.1 403 ')
+          - 'test_answers.results[0].stdout is search("(?mi)^X-Noix-Cache: SYNTH\r?$")'
+          - test_answers.results[1].stdout is match('HTTP/1.1 403 ')
+          - test_answers.results[2].stdout is match('HTTP/1.1 200 ')
+          - 'test_answers.results[2].stdout is search("(?mi)^X-Noix-Cache: PASS\r?$")'
+          - test_answers.results[2].stdout is search('(?m)^count=[0-9]+ host=a[.]test path=/$')
+          - 'test_answers.results | map(attribute="stdout") | select("search", "(?mi)^(Via|X-Varnish):") | list | length == 0'
+        fail_msg: "{{ test_answers.results | map(attribute='stdout') | list }}"
+        quiet: true

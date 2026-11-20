@@ -1,0 +1,19 @@
+# managed by noixdev.infra (varnish role). Changes here are overwritten.
+# The listener and the admin port on the loopback address only, the role's
+# VCL, and bounded storage (Transient holds what is not cached and short-lived
+# objects). The admin port's secret is the one varnishd writes into its
+# working directory, readable by root only. The VCL holds the front key: the
+# admin traffic (vcl.show among it) stays out of syslog, and a reload names
+# the file instead of asking varnishd for it.
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/varnishd \
+	  -a 127.0.0.1:{{ varnish_port }} \
+	  -T 127.0.0.1:{{ varnish_admin_port }} \
+	  -f {{ varnish_vcl }} \
+	  -P %t/%N/varnishd.pid \
+	  -p syslog_cli_traffic=off \
+	  -s malloc,{{ varnish_memory }} \
+	  -s Transient=malloc,{{ varnish_transient_memory }}
+ExecReload=
+ExecReload=/usr/sbin/varnishreload {{ varnish_vcl }}

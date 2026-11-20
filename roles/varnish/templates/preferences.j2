@@ -1,0 +1,20 @@
+{#
+  apt takes the first stanza that matches a version:
+  - Ubuntu's varnish packages are never installed;
+  - Varnish Software's versions of the series win (with or without an epoch);
+  - any other version (another series) is never installed.
+  Without Varnish Software's package lists there is no candidate, and the
+  install fails instead of falling back to Ubuntu's varnish.
+#}
+Explanation: managed by noixdev.infra (varnish role). Changes here are overwritten.
+Package: {{ varnish_apt_packages }}
+Pin: release o=Ubuntu
+Pin-Priority: -1
+
+Package: {{ varnish_apt_packages }}
+Pin: version /^([0-9]+:)?{{ varnish_version | regex_escape }}\./
+Pin-Priority: 990
+
+Package: {{ varnish_apt_packages }}
+Pin: version *
+Pin-Priority: -1

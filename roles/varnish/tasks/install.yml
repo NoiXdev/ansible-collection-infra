@@ -1,0 +1,10 @@
+---
+# The pin picks the series; varnish-modules (xkey) depends on the exact
+# version of varnish. Updates within the series come through
+# unattended-upgrades.
+- name: Install varnish and varnish-modules
+  ansible.builtin.apt:
+    name: "{{ varnish_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600

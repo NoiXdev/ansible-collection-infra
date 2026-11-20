@@ -1,0 +1,88 @@
+---
+# The front key: 64 hex digits, created once (a deleted key is created anew,
+# and the VCL with it). Nothing prints it: the VCL tasks are no_log too.
+- name: Create the front key
+  ansible.builtin.shell:
+    cmd: umask 077 && openssl rand -hex 32 >{{ varnish_front_key_file }}.new && mv -f {{ varnish_front_key_file }}.new {{ varnish_front_key_file }}
+    creates: "{{ varnish_front_key_file }}"
+  no_log: true
+
+- name: Keep the front key root's
+  ansible.builtin.file:
+    path: "{{ varnish_front_key_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Read the front key
+  ansible.builtin.slurp:
+    src: "{{ varnish_front_key_file }}"
+  register: varnish_front_key_read
+  no_log: true
+
+- name: Check the front key
+  ansible.builtin.assert:
+    that: varnish_front_key is match('^[0-9a-f]{64}\Z')
+    fail_msg: >-
+      varnish: {{ varnish_front_key_file }} is not 64 hex digits; remove it, and the next run
+      creates a new one
+    quiet: true
+
+# The VCL is compared first; a new one is written next to it, compiled, and
+# only then moved into place and loaded (Reload varnish). One that does not
+# compile fails the run: the running VCL and the file stay as they were.
+- name: Compare the VCL
+  ansible.builtin.template:
+    src: noixdev.vcl.j2
+    dest: "{{ varnish_vcl }}"
+    owner: root
+    group: varnish
+    mode: "0640"
+  check_mode: true
+  diff: false
+  no_log: true
+  register: varnish_vcl_compared
+
+# Not a handler: the new VCL is compiled and in place before Varnish starts.
+- name: Write, compile and load the new VCL
+  when: varnish_vcl_differs
+  vars:
+    varnish_vcl_differs: "{{ varnish_vcl_compared is changed }}"
+  block:
+    - name: Write the new VCL
+      ansible.builtin.template:
+        src: noixdev.vcl.j2
+        dest: "{{ varnish_vcl }}.new"
+        owner: root
+        group: varnish
+        mode: "0640"
+      diff: false
+      no_log: true
+
+    # varnishd -C prints the compiled VCL (with the key) on success and the
+    # VCC's error (with the line, which may be the key's) on failure.
+    - name: Compile the new VCL
+      ansible.builtin.command:
+        argv: [varnishd, -C, -f, "{{ varnish_vcl }}.new"]
+      register: varnish_vcl_compiled
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Stop on a VCL that does not compile
+      ansible.builtin.fail:
+        msg: >-
+          varnish: the new VCL does not compile; Varnish runs the one it has, and {{ varnish_vcl }} is
+          unchanged: {{ varnish_vcl_compiled.stderr | replace(varnish_front_key, '<front key>') | trim }}
+      when: varnish_vcl_compiled.rc != 0
+
+    - name: Move the new VCL into place
+      ansible.builtin.command:
+        argv: [mv, -f, --, "{{ varnish_vcl }}.new", "{{ varnish_vcl }}"]
+      changed_when: true
+      notify: Reload varnish
+  always:
+    - name: Remove the new VCL that was not moved into place
+      ansible.builtin.file:
+        path: "{{ varnish_vcl }}.new"
+        state: absent

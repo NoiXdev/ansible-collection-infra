@@ -1,0 +1,22 @@
+---
+# Before the package: dpkg starts Varnish right after installing it, and with
+# the drop-in in place that start has the role's listeners, never the
+# package's port 80 on every address. It fails then, as the role's VCL is not
+# there yet (dpkg goes on); the role starts Varnish once it is.
+- name: Create the directory of the service's drop-in
+  ansible.builtin.file:
+    path: "{{ varnish_dropin | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the service's drop-in
+  ansible.builtin.template:
+    src: noixdev.conf.j2
+    dest: "{{ varnish_dropin }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: varnish_dropin_result
+  notify: Restart varnish

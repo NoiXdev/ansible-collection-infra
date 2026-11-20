@@ -5,11 +5,11 @@
 - name: Check the series and the repository
   ansible.builtin.assert:
     that:
-      - varnish_version is string and varnish_version is match('^[0-9]+[.][0-9]+$')
-      - varnish_apt_url is string and varnish_apt_url is match('^https://\S+$')
-      - varnish_apt_suite is string and varnish_apt_suite is match('^[a-z]+$')
-      - varnish_apt_key_url is string and varnish_apt_key_url is match('^https://\S+$')
-      - varnish_apt_key_fingerprint is string and varnish_apt_key_fingerprint is match('^[0-9A-F]{40}$')
+      - varnish_version is string and varnish_version is match('^[0-9]+[.][0-9]+\Z')
+      - varnish_apt_url is string and varnish_apt_url is match('^https://\S+\Z')
+      - varnish_apt_suite is string and varnish_apt_suite is match('^[a-z]+\Z')
+      - varnish_apt_key_url is string and varnish_apt_key_url is match('^https://\S+\Z')
+      - varnish_apt_key_fingerprint is string and varnish_apt_key_fingerprint is match('^[0-9A-F]{40}\Z')
     fail_msg: >-
       varnish: varnish_version must be a major.minor series such as "9.1", varnish_apt_url and
       varnish_apt_key_url https URLs, varnish_apt_suite a release name and
@@ -18,7 +18,7 @@
 - name: Check the ports and the backend
   ansible.builtin.assert:
     that:
-      - item.value | string is match('^[0-9]+$')
+      - item.value | string is match('^[0-9]+\Z')
       - item.value | int >= 1 and item.value | int <= 65535
     fail_msg: "varnish: {{ item.key }} is {{ item.value }}, which is not a port number"
     quiet: true
@@ -44,14 +44,14 @@
   ansible.builtin.assert:
     that:
       - varnish_backend_host is string
-      - varnish_backend_host is match('^([0-9.]+|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)$')
+      - varnish_backend_host is match('^([0-9.]+|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)\Z')
     fail_msg: "varnish: varnish_backend_host is {{ varnish_backend_host }}, which is not an IPv4 address or host name"
     quiet: true
 
 # What varnishd -s malloc takes.
 - name: Check the memory sizes
   ansible.builtin.assert:
-    that: item.value is string and item.value is match('^[0-9]+[kKmMgG]$')
+    that: item.value is string and item.value is match('^[0-9]+[kKmMgG]\Z')
     fail_msg: "varnish: {{ item.key }} is {{ item.value }}, which is not a size such as 512M (a number and k, m or g)"
     quiet: true
   loop:
@@ -63,7 +63,7 @@
 - name: Check the grace and the timeouts
   ansible.builtin.assert:
     that:
-      - item.value | string is match('^[0-9]+$')
+      - item.value | string is match('^[0-9]+\Z')
       - item.value | int >= item.min
     fail_msg: "varnish: {{ item.key }} is {{ item.value }}, which is not a whole number of seconds of at least {{ item.min }}"
     quiet: true
@@ -83,7 +83,7 @@
     that:
       - varnish_strip_cookies is sequence and varnish_strip_cookies is not string and varnish_strip_cookies is not mapping
       - varnish_strip_cookies | reject('string') | list | length == 0
-      - varnish_strip_cookies | reject('match', '^[A-Za-z0-9_.-]+[*]?$') | list | length == 0
+      - varnish_strip_cookies | reject('match', '^[A-Za-z0-9_.-]+[*]?\Z') | list | length == 0
     fail_msg: >-
       varnish: varnish_strip_cookies must be a list of cookie names (letters, digits, _, . and -;
       a trailing * means prefix)
@@ -116,7 +116,7 @@
   ansible.builtin.assert:
     that:
       - item.name is defined and item.name is string
-      - item.name is match('^[a-z0-9_-]+$') and item.name | length <= 64
+      - item.name is match('^[a-z0-9_-]+\Z') and item.name | length <= 64
     fail_msg: >-
       varnish: varnish_sites entry '{{ item.name | default('#' ~ (varnish_index + 1)) }}' has an
       invalid name; it must match ^[a-z0-9_-]+$ and be at most 64 characters long
@@ -150,7 +150,7 @@
   ansible.builtin.assert:
     that:
       - item.purge_token is defined and item.purge_token is string
-      - item.purge_token is match('^[A-Za-z0-9._~-]{32,}$')
+      - item.purge_token is match('^[A-Za-z0-9._~-]{32,}\Z')
     fail_msg: >-
       varnish: varnish_sites entry {{ item.name }} needs a purge_token of at least 32 characters
       (A-Z, a-z, 0-9, ., _, ~ and -)
@@ -173,7 +173,7 @@
 - name: Check the microcache
   ansible.builtin.assert:
     that:
-      - item.microcache | string is match('^[0-9]+$')
+      - item.microcache | string is match('^[0-9]+\Z')
       - item.microcache | int <= 300
       - item.microcache | int == 0 or item.profile != 'shopware'
     fail_msg: >-
@@ -191,7 +191,7 @@
   ansible.builtin.assert:
     that:
       - item.health_path is string and item.health_host is string
-      - item.health_path == '' or item.health_path is match('^/[^\s"\\x5c]*$')
+      - item.health_path == '' or item.health_path is match('^/[^\s"\\x5c]*\Z')
       - item.health_path == '' or item.health_host is match(varnish_hostname)
       - item.health_path != '' or item.health_host == ''
     fail_msg: >-
@@ -200,7 +200,7 @@
       a lower-case host name such as shop.example.test (and empty without health_path)
     quiet: true
   vars:
-    varnish_hostname: '^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+    varnish_hostname: '^(?=.{1,253}\Z)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\Z'
   loop: "{{ varnish_sites_normalized }}"
   loop_control:
     label: "{{ item.name }}"
@@ -211,7 +211,7 @@
       - item.debug_header is boolean
       - item.strip_cookies is sequence and item.strip_cookies is not string and item.strip_cookies is not mapping
       - item.strip_cookies | reject('string') | list | length == 0
-      - item.strip_cookies | reject('match', '^[A-Za-z0-9_.-]+[*]?$') | list | length == 0
+      - item.strip_cookies | reject('match', '^[A-Za-z0-9_.-]+[*]?\Z') | list | length == 0
     fail_msg: >-
       varnish: varnish_sites entry {{ item.name }} needs debug_header true or false and
       strip_cookies a list of cookie names (letters, digits, _, . and -; a trailing * means prefix)

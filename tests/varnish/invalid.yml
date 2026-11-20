@@ -36,13 +36,18 @@
                   | selectattr('failed') | map(attribute='msg') | first)
                  | default(ansible_failed_result.msg | default('')) }}
       always:
-        - name: Read the repository file
+        - name: Read the files the role writes first
           ansible.builtin.stat:
-            path: /etc/apt/sources.list.d/varnish.sources
-          register: varnish_sources
+            path: "{{ item }}"
+          loop:
+            - /etc/apt/keyrings/varnish.asc
+            - /etc/apt/sources.list.d/varnish.sources
+            - /etc/apt/preferences.d/varnish
+          register: varnish_files
         - name: Check that nothing was changed
           ansible.builtin.assert:
-            that: not varnish_sources.stat.exists
+            that: varnish_files.results | selectattr('stat.exists') | list | length == 0
+            fail_msg: "the refused run left {{ varnish_files.results | selectattr('stat.exists') | map(attribute='item') | list }}"
             quiet: true
 
 - name: A site name with a capital
@@ -93,6 +98,16 @@
     expect: "entry a needs a purge_token"
     varnish_sites:
       - {name: a, purge_token: "0123456789abcdef0123456789abcde/"}
+  tasks: *refused
+
+- name: A token that ends in a newline
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a needs a purge_token"
+    varnish_sites:
+      - {name: a, purge_token: "0123456789abcdef0123456789abcdef\n"}
   tasks: *refused
 
 - name: One token on two sites
@@ -154,6 +169,16 @@
     expect: "entry a has an invalid health probe"
     varnish_sites:
       - {name: a, purge_token: "{{ test_token_a }}", health_path: '/he"alth', health_host: a.test}
+  tasks: *refused
+
+- name: A health host that ends in a newline
+  hosts: all
+  gather_facts: true
+  vars_files: [vars.yml]
+  vars:
+    expect: "entry a has an invalid health probe"
+    varnish_sites:
+      - {name: a, purge_token: "{{ test_token_a }}", health_path: /health, health_host: "a.test\n"}
   tasks: *refused
 
 - name: A cache size that is not a size

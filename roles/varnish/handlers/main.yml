@@ -1,0 +1,15 @@
+---
+# varnishd reads the drop-in (listener, admin port, storage) when it starts: a
+# change restarts it, which empties the cache and loads the VCL too. A VCL
+# change alone reloads (varnishreload: the cache stays).
+- name: Restart varnish
+  ansible.builtin.systemd_service:
+    name: varnish
+    state: restarted
+    daemon_reload: true
+
+- name: Reload varnish
+  ansible.builtin.systemd_service:
+    name: varnish
+    state: reloaded
+  when: varnish_dropin_result | default({}) is not changed

@@ -15,6 +15,17 @@ varnish_apt_keyring: /etc/apt/keyrings/varnish.asc
 # Installed packages of these names that are not the repository's are refused.
 varnish_distro_packages: [varnish, varnish-modules]
 
+# The packages the role installs, and the ones the apt pin covers.
+varnish_packages: [varnish, varnish-modules]
+varnish_apt_packages: varnish varnish-dev varnish-modules
+
+# The role's files (see defaults/main.yml for their owners and modes).
+varnish_vcl: /etc/varnish/noixdev.vcl
+varnish_front_key_file: /etc/varnish/noixdev-front.key
+varnish_dropin: /etc/systemd/system/varnish.service.d/noixdev.conf
+# The front key as tasks/vcl.yml reads it (no_log).
+varnish_front_key: "{{ varnish_front_key_read.content | b64decode | trim }}"
+
 # What a site entry leaves out.
 varnish_site_defaults:
   profile: generic

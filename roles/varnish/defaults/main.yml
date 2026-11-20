@@ -10,7 +10,17 @@ varnish_apt_key_url: https://packages.varnish-software.com/varnish/varnish.pub.a
 # The key that signs the repository.
 varnish_apt_key_fingerprint: 694566269779DFAC975ED9BDD0525EAE838B3344
 
-# Where Varnish listens for nginx (loopback only), and its admin port.
+# Where Varnish listens for nginx (loopback only), and its admin port. The
+# role writes:
+# - /etc/varnish/noixdev-front.key, the front key (64 hex digits, root 0600,
+#   created once; delete it and the next run creates a new one): Varnish
+#   answers only requests that carry it in X-Noix-Front;
+# - /etc/varnish/noixdev.vcl, which holds the key: root:varnish 0640, as
+#   varnishd reads its VCL as the user varnish (a root 0600 file does not
+#   load);
+# - /etc/systemd/system/varnish.service.d/noixdev.conf, the listeners and the
+#   storage; a change restarts Varnish (the cache is lost), a VCL change alone
+#   reloads it.
 varnish_port: 6081
 varnish_admin_port: 6082
 

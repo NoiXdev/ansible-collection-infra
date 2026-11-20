@@ -10,3 +10,72 @@
 
 - name: Check the settings and the sites
   ansible.builtin.include_tasks: validate.yml
+
+# "ii " or "hi " (held): the second letter is the installed state.
+- name: Read the installed varnish packages
+  ansible.builtin.command:
+    argv: "{{ ['dpkg-query', '-W', '-f', '${db:Status-Abbrev}|${Package}|${Version}|${Maintainer}\n'] + varnish_distro_packages }}"
+  register: varnish_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# dpkg keeps the Maintainer field of what is installed, whatever the package
+# lists say. Varnish Software's varnish would replace Ubuntu's (an older
+# series) and the settings it runs with.
+- name: Refuse Ubuntu's varnish
+  ansible.builtin.fail:
+    msg: >-
+      varnish: installed {{ varnish_foreign[0][1] }} {{ varnish_foreign[0][2] }} is not from
+      {{ varnish_apt_url | urlsplit('hostname') }}; the role manages Varnish Software's packages only
+  vars:
+    varnish_foreign: >-
+      {{ varnish_installed.stdout_lines | select('match', '^.i') | map('split', '|')
+         | rejectattr(3, 'match', varnish_vendor_maintainer | regex_escape) | list }}
+  when: varnish_foreign | length > 0
+
+- name: Refuse another series
+  ansible.builtin.fail:
+    msg: >-
+      varnish: installed varnish {{ varnish_installed_version }} is series {{ varnish_installed_series }},
+      varnish_version is {{ varnish_version }}; a series change is a separate, deliberate step
+  vars:
+    varnish_installed_varnish: >-
+      {{ varnish_installed.stdout_lines | select('match', '^.i *[|]varnish[|]') | map('split', '|') | first | default([]) }}
+    varnish_installed_version: "{{ varnish_installed_varnish[2] }}"
+    varnish_installed_series: "{{ varnish_installed_version | regex_replace('^([0-9]+:)?([0-9]+[.][0-9]+)[.].*$', '\\2') }}"
+  when:
+    - varnish_installed_varnish | length > 0
+    - varnish_installed_series != varnish_version
+
+# A task that fails after an earlier one notified the restart or the reload:
+# that runs first, so Varnish does not stay on its old settings while the
+# next run, seeing no change, would leave it there.
+- name: Install and configure Varnish
+  block:
+    - name: Add Varnish Software's repository
+      ansible.builtin.include_tasks: repository.yml
+
+    - name: Configure the service
+      ansible.builtin.include_tasks: service.yml
+
+    - name: Install Varnish
+      ansible.builtin.include_tasks: install.yml
+
+    - name: Write the VCL
+      ansible.builtin.include_tasks: vcl.yml
+
+    # The daemon reload reads a new drop-in; the restart it notified follows.
+    - name: Start Varnish
+      ansible.builtin.systemd_service:
+        name: varnish
+        state: started
+        enabled: true
+        daemon_reload: true
+  rescue:
+    - name: Run the restart and the reload notified before the failure
+      ansible.builtin.meta: flush_handlers
+
+    - name: Fail as the task did
+      ansible.builtin.fail:
+        msg: "{{ ansible_failed_result.msg | default('varnish: \"' ~ ansible_failed_task.name ~ '\" failed') }}"
