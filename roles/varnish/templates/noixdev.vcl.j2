@@ -465,12 +465,14 @@ sub noixdev_shopware_backend_response {
 
 # The microcache: a 200, 301 or 404 the app did not make cacheable (private,
 # no-cache, no-store, no TTL) is kept for the site's microcache seconds, and
-# not served stale beyond them.
+# not served stale beyond them. Surrogate-Control no-store, meant for the
+# cache itself, keeps a response out of it.
 sub noixdev_site_backend_response {
 {% for site in varnish_sites_normalized if site.microcache | int > 0 %}
     if (bereq.http.X-Noix-Site == "{{ site.name }}"
         && (beresp.status == 200 || beresp.status == 301 || beresp.status == 404)
-        && (beresp.ttl <= 0s || beresp.http.Cache-Control ~ "(?i)(?:private|no-cache|no-store)")) {
+        && (beresp.ttl <= 0s || beresp.http.Cache-Control ~ "(?i)(?:private|no-cache|no-store)")
+        && beresp.http.Surrogate-Control !~ "(?i)no-store") {
         set beresp.ttl = {{ site.microcache | int }}s;
         set beresp.grace = 0s;
         return (deliver);

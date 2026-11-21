@@ -21,6 +21,7 @@ host and path, from 1). Query parameters set the answer:
              (no X-Echo when the request has no such header)
     inv=     sw-invalidation-states (Shopware's states that make a hit pass)
     bypass=  sw-dynamic-cache-bypass (Shopware's "do not store this")
+    surrogate=  Surrogate-Control (esi=1 adds its own)
     esi=1    Surrogate-Control: content="ESI/1.0", and the body is
              "<p><line></p>", a newline and <esi:include src="/frag"/>
 
@@ -52,6 +53,7 @@ HEADERS = {
     "vary": "Vary",
     "inv": "sw-invalidation-states",
     "bypass": "sw-dynamic-cache-bypass",
+    "surrogate": "Surrogate-Control",
 }
 
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"

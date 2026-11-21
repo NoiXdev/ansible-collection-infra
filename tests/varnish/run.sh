@@ -405,7 +405,7 @@ expect() {
 # front of tests/varnish/backend.py: its count=<n> shows how often a request
 # reached it.
 test_cache() {
-  local p c site gz plain answer
+  local p c q site gz plain answer
   echo "== cache: what the app allows is cached, per site (ubuntu $1)"
   use_host "$1" varnish
   start_backend
@@ -573,6 +573,18 @@ test_cache() {
   expect "a page without cache headers" 200 MISS "count=1 host=m.test path=/c/micro-nocc"
   req m m.test /c/micro-nocc
   expect "the page without cache headers within 5 s" 200 HIT "count=1 host=m.test path=/c/micro-nocc"
+  # Surrogate-Control is meant for the cache: its no-store outranks the
+  # microcache. The app's Cache-Control does not.
+  for q in 'cc=private&surrogate=no-store' 'surrogate=no-store'; do
+    req m m.test "/c/micro-sc?$q"
+    expect "a page with Surrogate-Control no-store ($q)" 200 PASS "count=1 host=m.test path=/c/micro-sc?$q"
+    req m m.test "/c/micro-sc?$q"
+    expect "that page again ($q)" 200 PASS "count=2 host=m.test path=/c/micro-sc?$q"
+  done
+  req m m.test /c/micro-nostore?cc=no-store
+  expect "a no-store page of the microcache site" 200 MISS "count=1 host=m.test path=/c/micro-nostore?cc=no-store"
+  req m m.test /c/micro-nostore?cc=no-store
+  expect "the no-store page within 5 s" 200 HIT "count=1 host=m.test path=/c/micro-nostore?cc=no-store"
   sleep 6
   req m m.test "$p"
   expect "the private page after 6 s" 200 MISS "count=3 host=m.test path=$p"
