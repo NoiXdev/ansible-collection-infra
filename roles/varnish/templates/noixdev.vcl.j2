@@ -488,7 +488,7 @@ sub vcl_backend_error {
 
 # X-Noix-Cache tells nginx the cache status (for its log); nginx removes it.
 # "+grace": a stale object was served. The headers bans and tags use stay in
-# the cache.
+# the cache, and so do Shopware's invalidation states on every profile.
 sub vcl_deliver {
     if (obj.uncacheable) {
         set resp.http.X-Noix-Cache = "PASS";
@@ -509,14 +509,15 @@ sub vcl_deliver {
     unset resp.http.X-Noix-Url;
     unset resp.http.xkey;
     unset resp.http.X-Cache-Tags;
+    unset resp.http.sw-invalidation-states;
     unset resp.http.Via;
     unset resp.http.X-Varnish;
 }
 {% if shopware_sites | length > 0 %}
 
 # The shopware profile (Shopware 6.7's VCL): browsers keep no page, only the
-# assets and store-api answers, as the app sent them; Shopware's
-# invalidation states and its Link header stay inside.
+# assets and store-api answers, as the app sent them; Shopware's Link header
+# stays inside.
 sub noixdev_shopware_deliver {
     if ({{ for_sites('req', shopware_sites) }}) {
         if (resp.http.Cache-Control !~ "private" && req.url !~ "^/(?:theme|media|thumbnail|bundles|store-api)/") {
@@ -524,7 +525,6 @@ sub noixdev_shopware_deliver {
             set resp.http.Expires = "-1";
             set resp.http.Cache-Control = "no-store, no-cache, must-revalidate, max-age=0";
         }
-        unset resp.http.sw-invalidation-states;
         unset resp.http.Link;
     }
 }

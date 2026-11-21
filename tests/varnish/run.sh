@@ -369,7 +369,8 @@ test_badvcl() {
 # say otherwise). Sets status, cache (X-Noix-Cache), headers and body, and
 # checks what every answer must hold: X-Cache equals X-Noix-Cache on the
 # debug site (debug_site) and is absent elsewhere, and no internal header
-# (X-Noix-* but X-Noix-Cache, xkey, X-Cache-Tags) reaches the client.
+# (X-Noix-* but X-Noix-Cache, xkey, X-Cache-Tags, sw-invalidation-states)
+# reaches the client.
 debug_site=
 req() {
   local site="$1" vhost="$2" path="$3" answer xcache
@@ -388,8 +389,8 @@ req() {
   else
     [ -z "$xcache" ] || fail "$site $vhost$path: X-Cache '$xcache' on a site without debug_header"
   fi
-  if printf '%s\n' "$headers" | grep -Eiq '^(X-Noix-(Site|Url|Host|Front)|xkey|X-Cache-Tags):'; then
-    fail "$site $vhost$path: an internal header reached the client: $(printf '%s\n' "$headers" | grep -Ei '^(X-Noix|xkey|X-Cache-Tags)' | grep -vi '^X-Noix-Cache:' | cut -d: -f1 | tr '\n' ' ')"
+  if printf '%s\n' "$headers" | grep -Eiq '^(X-Noix-(Site|Url|Host|Front)|xkey|X-Cache-Tags|sw-invalidation-states):'; then
+    fail "$site $vhost$path: an internal header reached the client: $(printf '%s\n' "$headers" | grep -Ei '^(X-Noix|xkey|X-Cache-Tags|sw-invalidation-states)' | grep -vi '^X-Noix-Cache:' | cut -d: -f1 | tr '\n' ' ')"
   fi
 }
 # expect <what> <status> <cache> [<body>]: the last answer of req.
@@ -404,7 +405,7 @@ expect() {
 # front of tests/varnish/backend.py: its count=<n> shows how often a request
 # reached it.
 test_cache() {
-  local p c gz plain answer
+  local p c site gz plain answer
   echo "== cache: what the app allows is cached, per site (ubuntu $1)"
   use_host "$1" varnish
   start_backend
@@ -428,6 +429,15 @@ test_cache() {
   expect "the page with the host in capitals" 200 HIT "count=1 host=a.test path=$p"
   req a a.test:443 "$p"
   expect "the page with a port in the host" 200 HIT "count=1 host=a.test path=$p"
+
+  echo "== cache: Shopware's invalidation states stay inside on every profile"
+  for site in a b; do
+    p='/c/inv?cc=public,max-age=60&inv=logged-in'
+    req "$site" "$site.test" "$p"
+    expect "a page with sw-invalidation-states on $site" 200 MISS "count=1 host=$site.test path=$p"
+    req "$site" "$site.test" "$p"
+    expect "that page again on $site" 200 HIT "count=1 host=$site.test path=$p"
+  done
 
   echo "== cache: HEAD, gzip and Range on cached objects"
   p='/c/head?cc=public,max-age=60'
