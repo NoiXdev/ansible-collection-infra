@@ -15,6 +15,15 @@ http {
     log_format main '$remote_addr - $remote_user [$time_local] "$request" '
                     '$status $body_bytes_sent "$http_referer" '
                     '"$http_user_agent" "$http_x_forwarded_for"';
+{% if nginx_varnish_sites | length > 0 %}
+    # The sites with varnish: main and the cache status Varnish answered
+    # (HIT, MISS, PASS, SYNTH, with +grace for a stale page; - when Varnish
+    # did not answer).
+    log_format varnish '$remote_addr - $remote_user [$time_local] "$request" '
+                       '$status $body_bytes_sent "$http_referer" '
+                       '"$http_user_agent" "$http_x_forwarded_for" '
+                       'cache=$upstream_http_x_noix_cache';
+{% endif %}
     access_log /var/log/nginx/access.log main;
 
     sendfile on;
@@ -36,6 +45,17 @@ http {
         default upgrade;
         '' close;
     }
+{% if nginx_varnish_sites | length > 0 %}
+
+    # The varnish sites without waf: Varnish, and while it does not answer
+    # (refused or timed out, never on a status it answers) the inner
+    # listener, uncached. A Varnish that did not answer is tried again after
+    # 5 s.
+    upstream {{ nginx_varnish_upstream }} {
+        server 127.0.0.1:{{ nginx_varnish_port }} max_fails=1 fail_timeout=5s;
+        server 127.0.0.1:{{ nginx_inner_port }} backup;
+    }
+{% endif %}
 
 {% for zone in nginx_rate_limit_zones %}
     limit_req_zone $binary_remote_addr zone={{ zone.name }}:10m rate={{ zone.rate }};

@@ -92,6 +92,35 @@
       {{ files }}
   when: nginx_sites_public | selectattr('basic_auth_on') | list | length > 0
 
+# Varnish's front key for the varnish sites: read from the varnish role's
+# file, and written into a root-only include (nginx's master reads it as
+# root) before the site configs that include it; it leaves after the last
+# varnish site's config stopped including it. Never shown: the read, the
+# check and the write log nothing of it.
+- name: Read Varnish's front key
+  ansible.builtin.slurp:
+    src: "{{ nginx_varnish_key_file }}"
+  register: nginx_varnish_key_read
+  when: nginx_varnish_sites | length > 0
+  no_log: true
+
+- name: Check Varnish's front key
+  ansible.builtin.fail:
+    msg: >-
+      nginx: the front key in {{ nginx_varnish_key_file }} is not 64 hexadecimal digits; delete
+      the file and run the varnish role, which creates a new one
+  when:
+    - nginx_varnish_sites | length > 0
+    - nginx_varnish_front_key is not match('^[0-9a-f]{64}$')
+
+- name: Write Varnish's front key for nginx
+  ansible.builtin.include_tasks: apply.yml
+  vars:
+    nginx_apply_no_log: true
+    nginx_apply_files:
+      - {src: varnish-front.conf.j2, dest: "{{ nginx_varnish_front_conf }}", mode: "0600"}
+  when: nginx_varnish_sites | length > 0
+
 # The global config (nginx_global_files) and the site configs in one call,
 # one nginx -t: a rate limit zone or an nginx_http_extra definition leaves
 # in the same run as the site that stops using it, and comes in with the
@@ -120,6 +149,22 @@
       {{ nginx_global_remove + (nginx_site_files.files | map(attribute='path')
          | reject('in', nginx_site_names | map('regex_replace', '^(.*)$', nginx_sites_dir ~ '/\1.conf') | list)
          | sort) }}
+
+- name: Look for Varnish's front key of nginx
+  ansible.builtin.stat:
+    path: "{{ nginx_varnish_front_conf }}"
+    get_checksum: false
+  register: nginx_varnish_front_stat
+  when: nginx_varnish_sites | length == 0
+
+- name: Remove Varnish's front key of nginx without varnish sites
+  ansible.builtin.include_tasks: apply.yml
+  vars:
+    nginx_apply_files: []
+    nginx_apply_remove: ["{{ nginx_varnish_front_conf }}"]
+  when:
+    - nginx_varnish_sites | length == 0
+    - nginx_varnish_front_stat.stat.exists
 
 - name: Remove the Basic auth users of the sites without basic_auth
   ansible.builtin.include_tasks: apply.yml

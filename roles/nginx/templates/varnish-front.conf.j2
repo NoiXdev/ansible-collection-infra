@@ -1,0 +1,5 @@
+# managed by noixdev.infra (nginx role). Changes here are overwritten.
+# Varnish's front key (the varnish role's {{ nginx_varnish_key_file }}), sent
+# by the public server blocks of the varnish sites: Varnish answers only
+# requests that carry it. Root's alone.
+proxy_set_header X-Noix-Front "{{ nginx_varnish_front_key }}";

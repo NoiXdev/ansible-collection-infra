@@ -3,9 +3,10 @@
   certificate and key of its TLS block, or {} while it has none). Without a
   front hop (site.front empty) the public server block serves the content
   itself (content(site, false)). With one, the public block runs the checks
-  and sends every request to site.front (the WAF); an inner server block on
-  127.0.0.1:nginx_inner_port, which only the front hop reaches, serves the
-  content (content(site, true)).
+  and sends every request to site.front (the WAF, else Varnish: with the
+  inner block as the backup while Varnish does not answer); an inner server
+  block on 127.0.0.1:nginx_inner_port, which only the front hop reaches,
+  serves the content (content(site, true)).
 #}
 {% set site = nginx_site %}
 {% set https = site.tls_files | length > 0 %}
@@ -59,8 +60,9 @@ location ^~ /.well-known/acme-challenge/ {
     try_files $uri =404;
 }
 {% endmacro %}
+{# A varnish site's lines have Varnish's cache status too (cache=). #}
 {% macro logs() %}
-access_log /var/log/nginx/{{ site.name }}.access.log main;
+access_log /var/log/nginx/{{ site.name }}.access.log {{ 'varnish' if site.varnish else 'main' }};
 error_log /var/log/nginx/{{ site.name }}.error.log;
 {% endmacro %}
 {% macro root(site) %}
@@ -217,6 +219,9 @@ location = /{{ script }} {
     fastcgi_param DOCUMENT_ROOT $realpath_root;
     fastcgi_param HTTP_PROXY "";
 {% if inner %}
+    # The front key (here when Varnish was skipped: the backup, the WAF's
+    # fallback) never reaches the app.
+    fastcgi_param HTTP_X_NOIX_FRONT "";
     # The public block's port (and HTTPS), not this hop's.
     fastcgi_param SERVER_PORT {{ 443 if https else 80 }};
 {% if https %}
@@ -246,6 +251,9 @@ location / {
     proxy_set_header Connection $connection_upgrade;
     proxy_set_header X-Real-IP $remote_addr;
 {% if inner %}
+    # The front key (here when Varnish was skipped: the backup, the WAF's
+    # fallback) never reaches the app.
+    proxy_set_header X-Noix-Front "";
     # The public block's, unchanged.
     proxy_set_header X-Forwarded-For $http_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
@@ -330,6 +338,13 @@ server {
     include {{ nginx_role_dir }}/hardening.conf;
 {% endif %}
 {% if site.front %}
+{% if site.varnish %}
+
+    # Invalidation goes to Varnish from the host, never through here.
+    if ($request_method ~ ^(PURGE|BAN)$) {
+        return 405;
+    }
+{% endif %}
 {% if nginx_error_pages %}
 
     {{ error_pages(site, false) | trim | indent(4) }}
@@ -344,11 +359,21 @@ server {
     {{ site.extra | indent(4) }}
 {% endif %}
 
+{% if site.varnish and not site.waf %}
+    # The front hop (Varnish, {{ site.front }}): every request the checks
+    # above let through, its body and answer streamed. Its answers pass
+    # unchanged; while it does not answer, the inner block answers, uncached
+    # (the upstream {{ nginx_varnish_upstream }}).
+    location / {
+        proxy_pass http://{{ nginx_varnish_upstream }};
+        proxy_next_upstream error timeout;
+{% else %}
     # The front hop ({{ site.front }}): every request the checks above let
     # through, its body and answer streamed. Its answers, the WAF's own 403 too, pass
     # unchanged; while it does not answer, nginx answers 502.
     location / {
         proxy_pass {{ site.front }};
+{% endif %}
         proxy_http_version 1.1;
         proxy_request_buffering off;
         # The inner block buffers unless the app says X-Accel-Buffering: no
@@ -362,6 +387,14 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-Port $server_port;
+{% if site.varnish %}
+        # For Varnish (through the WAF with waf): the site's name and the
+        # host's front key, both in place of the client's. Its cache status
+        # goes to the access log, not to the client.
+        proxy_set_header X-Noix-Site {{ site.name }};
+        include {{ nginx_varnish_front_conf }};
+        proxy_hide_header X-Noix-Cache;
+{% endif %}
     }
 {% else %}
 
@@ -371,9 +404,9 @@ server {
 {% if site.front %}
 
 # The inner block: the content, for the front hop only (on the loopback,
-# where the WAF sends what it lets through). The public block above did the
-# TLS, rate limit, Basic auth, hardening, headers and Anubis, and logged the
-# request.
+# where the WAF sends what it lets through, and Varnish what it does not
+# have). The public block above did the TLS, rate limit, Basic auth,
+# hardening, headers and Anubis, and logged the request.
 server {
     listen 127.0.0.1:{{ nginx_inner_port }};
     server_name {{ site.domains | join(' ') }};

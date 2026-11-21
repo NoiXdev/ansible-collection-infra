@@ -56,6 +56,9 @@ varnish_front_key_file: /etc/varnish/noixdev-front.key
 # Above varnishd's working directory (varnishd: /var/lib/varnish/varnishd).
 varnish_state_dir: /var/lib/varnish
 varnish_dropin: /etc/systemd/system/varnish.service.d/noixdev.conf
+# The nginx role's probe of its front hop (its nginx_waf_probe_path): GET or
+# HEAD of exactly this path is answered with 204 without the front key.
+varnish_front_probe_path: /.noix-front-probe
 # The front key as tasks/vcl.yml reads it (no_log).
 varnish_front_key: "{{ varnish_front_key_read.content | b64decode | trim }}"
 

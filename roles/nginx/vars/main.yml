@@ -105,6 +105,7 @@ nginx_site_keys:
   - anubis
   - user_includes
   - waf
+  - varnish
   - extra
   - inner_extra
 
@@ -120,6 +121,7 @@ nginx_site_defaults:
   anubis: false
   user_includes: false
   waf: false
+  varnish: false
   extra: ""
   inner_extra: ""
 
@@ -130,9 +132,10 @@ nginx_site_defaults:
 # htpasswd template alone reads the users, in a no_log task. The key names of
 # each entry, in list order, are nginx_sites_key_names. Each entry also has
 # front, the URL its public server block sends the requests to after its
-# checks (the front hop): the WAF's for waf, empty without a front hop (the
-# public block serves the content itself). A site with a front hop serves its
-# content from its inner server block on nginx_inner_port.
+# checks (the front hop): the WAF's for waf, else Varnish's for varnish,
+# empty without a front hop (the public block serves the content itself). A
+# site with a front hop serves its content from its inner server block on
+# nginx_inner_port.
 nginx_sites_key_names: "{{ nginx_sites | map('dict2items') | map('map', attribute='key') | map('list') | list }}"
 # YAML reads an unquoted tls: off as false; both mean off here.
 nginx_sites_public: >-
@@ -142,7 +145,8 @@ nginx_sites_public: >-
   {%- set auth = {'basic_auth_on': 'basic_auth' in site,
                   'basic_auth_allow': (site.basic_auth.allow | default([])) if site.get('basic_auth') is mapping else []} -%}
   {%- set entry = nginx_site_defaults | combine(known, auth) -%}
-  {%- set entry = entry | combine({'front': nginx_waf_url if entry.waf is sameas true else ''}) -%}
+  {%- set entry = entry | combine({'front': nginx_waf_url if entry.waf is sameas true
+                                    else nginx_varnish_url if entry.varnish is sameas true else ''}) -%}
   {%- set _ = sites.append(entry | combine({'tls': 'off'}) if entry.tls is sameas false else entry) -%}
   {%- endfor -%}
   {{ sites }}
@@ -219,6 +223,21 @@ nginx_waf_url: "http://127.0.0.1:{{ nginx_waf_port }}"
 nginx_waf_probe_path: /.noix-front-probe
 nginx_waf_unknown_header: X-Noix-Waf
 nginx_waf_unknown_value: unknown-site
+# The sites with a front hop (waf or varnish): they have an inner server
+# block, and the inner listener has its default server.
+nginx_front_sites: "{{ nginx_sites_public | rejectattr('front', 'eq', '') | list }}"
+# The sites Varnish caches, and where Varnish answers. The varnish role's
+# front key (its varnish_front_key_file): nginx reads it (no_log) into
+# nginx_varnish_front_conf, root's alone (nginx's master reads it as root),
+# which sets X-Noix-Front towards Varnish. The upstream of the sites without
+# waf: Varnish, and the inner listener while Varnish does not answer.
+nginx_varnish_sites: "{{ nginx_sites_public | selectattr('varnish', 'sameas', true) | list }}"
+nginx_varnish_url: "http://127.0.0.1:{{ nginx_varnish_port }}"
+nginx_varnish_key_file: /etc/varnish/noixdev-front.key
+nginx_varnish_front_conf: "{{ nginx_role_dir }}/varnish-front.conf"
+nginx_varnish_upstream: noixdev_varnish
+# The front key as tasks/sites.yml reads it (no_log): 64 hex digits.
+nginx_varnish_front_key: "{{ nginx_varnish_key_read.content | b64decode | trim }}"
 
 # IPv6 listeners only where the host has IPv6 beyond link-local addresses:
 # Docker's bridge gets one when its first container starts (the error pages

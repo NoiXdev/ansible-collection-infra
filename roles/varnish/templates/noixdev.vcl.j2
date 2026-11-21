@@ -83,6 +83,12 @@ sub vcl_recv {
     if (client.ip !~ noixdev_local) {
         return (synth(403, "Forbidden"));
     }
+    # The nginx role's probe of its front hop: through the WAF it reaches
+    # Varnish without the front key. Answered here, without the key: never
+    # the backend's, never cached.
+    if ((req.method == "GET" || req.method == "HEAD") && req.url == "{{ varnish_front_probe_path }}") {
+        return (synth(204, ""));
+    }
     # Invalidation comes from an app or a deploy on the host, straight to this
     # port, never through nginx or the WAF (whatever sends the front key):
     # 403 with it, 401 without the site's token, 400 on invalid input.

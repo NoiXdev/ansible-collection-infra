@@ -35,11 +35,15 @@ nginx_apt_key_fingerprint: 8540A6F18833A80E9C1653A42FD21310B49F6B46
 #     anubis: false                    # Anubis checks every request first
 #     waf: false                       # the WAF inspects every request after
 #                                      # the checks above (nginx_waf_port)
+#     varnish: false                   # Varnish caches the site, after the
+#                                      # checks above and the WAF
+#                                      # (nginx_varnish_port)
 #     extra: ""                        # raw config inside the server block
 #                                      # (the public one: a location here is
-#                                      # not behind the WAF)
+#                                      # not behind the WAF or Varnish)
 #     inner_extra: ""                  # raw config inside the inner server
-#                                      # block (waf only), behind the WAF
+#                                      # block (waf or varnish only), behind
+#                                      # the WAF and Varnish
 nginx_sites: []
 
 # Raw config at http level.
@@ -99,6 +103,23 @@ nginx_anubis_port: 8923
 # answers 421 (no waf_sites entry lists the site's first domain).
 nginx_waf_port: 8930
 nginx_inner_port: 8931
+
+# Varnish for the sites with varnish: true: the varnish role on this host, on
+# 127.0.0.1:nginx_varnish_port (keep it equal to its varnish_port; its
+# backend is nginx_inner_port). Such a site's public server block runs its
+# checks, then sends every request to Varnish with the site's name and the
+# host's front key (/etc/varnish/noixdev-front.key, which the varnish role
+# creates; nginx keeps it in a root-only include), and logs Varnish's cache
+# status (cache= in the site's access log); Varnish asks the site's inner
+# server block for what it does not have. While Varnish does not answer, the
+# public block asks the inner block itself (uncached). With waf too, the
+# public block sends to the WAF, whose waf_sites entry has the backend
+# http://127.0.0.1:<nginx_varnish_port> and the backend_fallback
+# http://127.0.0.1:<nginx_inner_port>. PURGE and BAN through the public
+# block answer 405 (they go to Varnish from the host). A run with such a
+# site is refused before any change while Varnish does not answer there, or
+# the front key is missing: run the varnish role first.
+nginx_varnish_port: 6081
 
 # Deploy snippets (per site in ~<user>/.config/nginx/<name>/, and at http
 # level in ~<nginx_include_user>/.config/nginx/global/) are not supported yet

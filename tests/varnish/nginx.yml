@@ -1,0 +1,46 @@
+---
+# The nginx and waf scenarios (run.sh passes -e @nginx.yml with
+# test_nginx=true), test-only values; the tokens guard nothing. php, varnish
+# and nginx on one host: a (PHP, tls off) and b (PHP, a self-signed
+# certificate, a second tenant) go through Varnish, p (PHP) does not. The
+# waf scenario (test_waf=true) adds w (PHP, tls off) through the WAF, whose
+# backend is Varnish and its fallback nginx's inner listener. Each site has
+# its own user (app_<site>), web root (/srv/<site>, tests/varnish/index.php)
+# and pool; converge.yml creates the users, web roots and the certificate
+# first.
+test_varnish: true
+test_site_names: [a, b, p, w]
+
+php_versions:
+  - version: "8.3"
+php_pools:
+  - {name: a, version: "8.3", user: app_a}
+  - {name: b, version: "8.3", user: app_b}
+  - {name: p, version: "8.3", user: app_p}
+  - {name: w, version: "8.3", user: app_w}
+
+varnish_sites:
+  - {name: a, purge_token: "{{ test_token_a }}"}
+  - {name: b, purge_token: "{{ test_token_b }}"}
+  - {name: w, purge_token: wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww}
+
+waf_mode: host
+waf_sites:
+  - name: w
+    domains: [w.test]
+    mode: block
+    backend: http://127.0.0.1:6081
+    backend_fallback: http://127.0.0.1:8931
+
+test_nginx_tls:
+  cert: /etc/ssl/noixdev-varnish/test.crt
+  key: /etc/ssl/noixdev-varnish/test.key
+# p: also tests/varnish/fixtures/nginx-before/p*.conf, what the role wrote
+# for it before sites could have varnish.
+nginx_sites: "{{ test_nginx_sites + (test_nginx_waf_sites if test_waf | default(false) | bool else []) }}"
+test_nginx_sites:
+  - {name: a, domains: [a.test], user: app_a, php_pool: a, root: /srv/a, tls: "off", varnish: true}
+  - {name: b, domains: [b.test], user: app_b, php_pool: b, root: /srv/b, tls: "{{ test_nginx_tls }}", varnish: true}
+  - {name: p, domains: [p.test], user: app_p, php_pool: p, root: /srv/p, tls: "off"}
+test_nginx_waf_sites:
+  - {name: w, domains: [w.test], user: app_w, php_pool: w, root: /srv/w, tls: "off", waf: true, varnish: true}

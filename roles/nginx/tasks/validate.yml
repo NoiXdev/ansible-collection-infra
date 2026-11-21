@@ -20,11 +20,13 @@
       - nginx_waf_port | int >= 1 and nginx_waf_port | int <= 65535
       - nginx_inner_port | string is match('^[0-9]+$')
       - nginx_inner_port | int >= 1 and nginx_inner_port | int <= 65535
+      - nginx_varnish_port | string is match('^[0-9]+$')
+      - nginx_varnish_port | int >= 1 and nginx_varnish_port | int <= 65535
     fail_msg: >-
       nginx: nginx_version must be a major.minor series such as "1.30", nginx_http_extra a
       string, nginx_acme_email empty or an address, nginx_acme_server an https URL,
       nginx_error_pages and nginx_user_includes true or false, nginx_include_user a user name,
-      nginx_anubis_port, nginx_waf_port and nginx_inner_port port numbers
+      nginx_anubis_port, nginx_waf_port, nginx_inner_port and nginx_varnish_port port numbers
     quiet: true
 
 # The paths go into the site configs and the export script as they are.
@@ -363,7 +365,7 @@
     that:
       - item.hardening is boolean and item.hsts is boolean
       - item.user_includes is boolean and item.anubis is boolean
-      - item.waf is boolean
+      - item.waf is boolean and item.varnish is boolean
       - item.headers is mapping
       - nginx_headers | rejectattr('key', 'match', '^[A-Za-z0-9-]+$') | list | length == 0
       - nginx_headers | rejectattr('value', 'string') | list | length == 0
@@ -373,7 +375,7 @@
       - item.inner_extra is string
     fail_msg: >-
       nginx: nginx_sites entry {{ item.name }} has an invalid hardening, hsts, user_includes,
-      anubis, waf, headers, client_max_body_size, extra or inner_extra; the switches are true
+      anubis, waf, varnish, headers, client_max_body_size, extra or inner_extra; the switches are true
       or false, headers names (^[A-Za-z0-9-]+$) with one-line string values,
       client_max_body_size a size such as 64m, and extra and inner_extra strings
     quiet: true
@@ -389,16 +391,16 @@
     that: item.inner_extra | length == 0 or item.front | length > 0
     fail_msg: >-
       nginx: nginx_sites entry {{ item.name }} sets inner_extra, but has no inner server block
-      (only a site with waf has one); put its config in extra
+      (only a site with waf or varnish has one); put its config in extra
     quiet: true
   loop: "{{ nginx_sites_public }}"
   loop_control:
     label: "{{ item.name }}"
 
-# The inner listener serves the content of the waf sites unchecked: on 80 or
-# 443 (where the public blocks listen) nginx would serve it to the clients
-# past the WAF, and on Anubis's or the WAF's port neither would start. Only
-# with a waf site: without one there is no inner listener.
+# The inner listener serves the content of the waf and varnish sites
+# unchecked: on 80 or 443 (where the public blocks listen) nginx would serve
+# it to the clients past the WAF, and on Anubis's or the WAF's port neither
+# would start. Only with such a site: without one there is no inner listener.
 - name: Check the loopback ports
   ansible.builtin.assert:
     that:
@@ -409,7 +411,20 @@
       and nginx_inner_port ({{ nginx_inner_port }}) must be three different ports, and
       nginx_inner_port neither 80 nor 443
     quiet: true
-  when: nginx_waf_sites | length > 0
+  when: nginx_front_sites | length > 0
+
+# nginx sends the varnish sites there, past the inner listener, the WAF and
+# Anubis, and the public blocks listen on 80 and 443.
+- name: Check Varnish's port
+  ansible.builtin.assert:
+    that: nginx_varnish_port | int not in [80, 443, nginx_anubis_port | int, nginx_waf_port | int, nginx_inner_port | int]
+    fail_msg: >-
+      nginx: nginx_varnish_port ({{ nginx_varnish_port }}) must be a port number other than
+      80, 443, nginx_anubis_port ({{ nginx_anubis_port }}), nginx_waf_port ({{ nginx_waf_port }})
+      and nginx_inner_port ({{ nginx_inner_port }}); keep it equal to the varnish role's
+      varnish_port
+    quiet: true
+  when: nginx_varnish_sites | length > 0
 
 - name: Check the rate limits
   ansible.builtin.assert:

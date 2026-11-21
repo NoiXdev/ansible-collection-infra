@@ -39,6 +39,18 @@
 # bypass header, the Cache-Control clients get, and PURGE of xkey tags and of
 # a URL on that site only.
 #
+# The scenario "nginx" runs php, varnish and nginx on one host
+# (tests/varnish/nginx.yml): two PHP sites with varnish: true and one
+# without. It checks hits through nginx (in its access log, never at the
+# client), the client's address and scheme in PHP, that the front key never
+# reaches PHP, 405 for PURGE and BAN through nginx, stale pages while the
+# site's pool is stopped, uncached pages while Varnish is stopped, the site
+# without varnish as before, 403 after a new front key until nginx runs, and
+# the refusals while Varnish does not answer or its key is missing.
+#
+# The scenario "waf" (it needs the waf role) adds a site with waf and
+# varnish: the WAF in front of Varnish, nginx's inner block its fallback.
+#
 # The scenario "foreign" installs Ubuntu's varnish, and on a second host
 # Varnish Software's 9.0, and checks that the role refuses both before any
 # change.
@@ -58,7 +70,8 @@ out="$tests/output/varnish"
 releases="${VARNISH_UBUNTU:-24.04 26.04}"
 host=
 # What the test host has: clean (nothing of the role), varnish (runs of the
-# role) or foreign (a varnish the role refuses).
+# role), nginx (the nginx scenario's php, varnish and nginx) or foreign (a
+# varnish the role refuses).
 host_state=
 
 key=/etc/varnish/noixdev-front.key
@@ -116,8 +129,12 @@ start_host() {
   host="noixdev-infra-varnish-$ubuntu"
   docker build -q --build-arg "UBUNTU=$ubuntu" -t "noixdev-infra-host:$ubuntu" "$tests/host" >/dev/null
   docker rm -f -v "$host" >/dev/null 2>&1 || true
+  # The anonymous volumes give Docker inside (the nginx scenario's error
+  # pages, the WAF) a file system it can mount overlays on; "docker rm -v"
+  # removes them with the host.
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-    --tmpfs /run --tmpfs /run/lock --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
+    --tmpfs /run --tmpfs /run/lock -v /var/lib/docker -v /var/lib/containerd \
+    --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
   until (h systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
   # The image's policy-rc.d (exit 101) keeps package scripts from starting
   # services; servers have none.
@@ -221,7 +238,7 @@ test_valid() {
 }
 
 test_install() {
-  local before after answer
+  local before after answer target
   echo "== install: Varnish Software's 9.1 on the loopback address, behind the front key (ubuntu $1)"
   use_host "$1" varnish
   start_backend
@@ -231,6 +248,22 @@ test_install() {
   run_ok install-verify verify.yml
   # For the record: the modes in Varnish's working directory.
   h sh -c 'ls -la /var/lib/varnish /var/lib/varnish/varnishd /var/lib/varnish/varnishd/vcl_*' >"$out/install-workdir-$1.txt"
+
+  echo "== install: the nginx role's probe of a front hop is answered without the key, nothing else is"
+  # GET or HEAD of /.noix-front-probe exactly: 204 from Varnish itself, never
+  # the backend's, without the WAF's header.
+  answer="$(h curl -sS -i --max-time 10 -H 'Host: a.test' http://127.0.0.1:6081/.noix-front-probe | tr -d '\r')"
+  case "$answer" in "HTTP/1.1 204 "*) ;; *) fail "install: GET of the probe got: $answer" ;; esac
+  ! printf '%s\n' "$answer" | grep -qi '^X-Noix-Waf:' || fail "install: the probe's answer has X-Noix-Waf"
+  answer="$(h curl -sS -I -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:6081/.noix-front-probe)"
+  [ "$answer" = 204 ] || fail "install: HEAD of the probe got $answer, not 204"
+  for target in '/.noix-front-probe?x=1' /.noix-front-probe/ /other; do
+    answer="$(h curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -H 'Host: a.test' "http://127.0.0.1:6081$target")"
+    [ "$answer" = 403 ] || fail "install: GET $target without the key got $answer, not 403"
+  done
+  answer="$(h curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST http://127.0.0.1:6081/.noix-front-probe)"
+  [ "$answer" = 403 ] || fail "install: POST of the probe without the key got $answer, not 403"
+  [ -z "$(h varnishlog -d -g request -q 'BereqURL ~ "noix-front-probe"')" ] || fail "install: the probe reached the backend"
 
   echo "== install: a second run changes nothing and keeps the key"
   before="$(h sha256sum "$key")"
@@ -271,12 +304,12 @@ test_badvcl() {
 
   # A copy of the collection whose VCL has an unknown word on the line with
   # the purge tokens (the compiler's message shows that line), run with a
-  # third site so that the VCL would change.
+  # third site so that the VCL would change. Every role: converge.yml names
+  # the nginx scenario's too.
   copy="$out/badvcl-collection"
   rm -rf "$copy"
-  mkdir -p "$copy/ansible_collections/noixdev/infra/roles"
-  cp -R "$root/galaxy.yml" "$root/meta" "$root/plugins" "$copy/ansible_collections/noixdev/infra/"
-  cp -R "$root/roles/varnish" "$copy/ansible_collections/noixdev/infra/roles/"
+  mkdir -p "$copy/ansible_collections/noixdev/infra"
+  cp -R "$root/galaxy.yml" "$root/meta" "$root/plugins" "$root/roles" "$copy/ansible_collections/noixdev/infra/"
   template="$copy/ansible_collections/noixdev/infra/roles/varnish/templates/noixdev.vcl.j2"
   sed 's/\(req.http.X-Purge-Token == "{{ site.purge_token }}"\)/\1 \&\& noixdev_unknown_keyword/' "$template" >"$template.new"
   mv "$template.new" "$template"
@@ -985,6 +1018,270 @@ test_grace() {
   no_key_in_logs
 }
 
+# The nginx and waf scenarios: tests/varnish/nginx.yml with the setup, and
+# the nginx role alone (no setup, no docker, php or varnish role) for the
+# refusals.
+nginx_args=(-e "@$here/nginx.yml" -e test_nginx=true)
+nginx_alone=(-e test_nginx_prepare=false -e test_varnish=false)
+front_conf=/etc/nginx/noixdev/varnish-front.conf
+# A client address of the test host's own (RFC 5737): requests from it are
+# not from the loopback, which the inner block trusts.
+client=192.0.2.10
+
+# site <host> <path> [<curl option>...]: a request to nginx on the test host
+# from the client address (HTTPS for b.test). Sets status, headers and body.
+site() {
+  local name="$1" path="$2" url answer
+  shift 2
+  case "$name" in
+    b.test) url="https://$name$path" ;;
+    *) url="http://$name$path" ;;
+  esac
+  answer="$(h curl -sSk -i --max-time 30 --interface "$client" --resolve "$name:80:127.0.0.1" \
+    --resolve "$name:443:127.0.0.1" "$@" "$url" | tr -d '\r')" || fail "$name$path: no answer from nginx"
+  headers="${answer%%$'\n\n'*}"
+  body=
+  case "$answer" in *$'\n\n'*) body="${answer#*$'\n\n'}" ;; esac
+  status="$(printf '%s\n' "$headers" | sed -n '1s/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p')"
+}
+# site_expect <what> <status> [<body>]: the last answer of site, which never
+# shows the cache status or another internal header.
+site_expect() {
+  [ "$status" = "$2" ] || fail "$1: status $status, expected $2"
+  [ $# -lt 3 ] || [ "$body" = "$3" ] || fail "$1: body '$body', expected '$3'"
+  if printf '%s\n' "$headers" | grep -Eiq '^(X-Noix-[A-Za-z-]+|X-Cache|xkey|X-Cache-Tags|X-Varnish|Via):'; then
+    fail "$1: an internal header reached the client: $(printf '%s\n' "$headers" | grep -Ei '^(X-Noix|X-Cache|xkey|X-Varnish|Via)' | cut -d: -f1 | tr '\n' ' ')"
+  fi
+}
+# php_answer <count> [<https>]: the body tests/varnish/index.php gives the
+# client (front=unset: the front key never reached PHP).
+php_answer() { printf 'count=%s remote_addr=%s https=%s front=unset' "$1" "$client" "${2:-}"; }
+# logged <site> <cache>: the last line of the site's access log ends with
+# cache=<cache> (- when Varnish did not answer).
+logged() {
+  local line
+  line="$(h tail -n 1 "/var/log/nginx/$1.access.log")"
+  case "$line" in *" cache=$2") ;; *) fail "$1's last access log line is not cache=$2: $line" ;; esac
+}
+# nginx_state: nginx's files and www-data's groups, to show that a refused
+# run changed nothing.
+nginx_state() { h sh -c 'find /etc/nginx -type f -exec md5sum {} + | sort; id -nG www-data'; }
+# nginx_refused <log> <message> [-e ...]: the nginx role alone must fail with
+# the message, and change nothing.
+nginx_refused() {
+  local log="$1" message="$2" state
+  shift 2
+  state="$(nginx_state)"
+  run_fails "$log" "$message" converge.yml "${nginx_args[@]}" "${nginx_alone[@]}" "$@"
+  unchanged_refused "$log"
+  [ "$(nginx_state)" = "$state" ] || fail "$log: the refused run changed nginx's files"
+}
+# nginx_host <ubuntu>: the nginx scenario's host, converged (a new one unless
+# the host has it already).
+nginx_host() {
+  [ "$host_state" != nginx ] || return 0
+  start_host "$1"
+  host_state=nginx
+  h ip addr replace "$client/32" dev lo
+  run_ok nginx converge.yml "${nginx_args[@]}"
+  run_ok nginx-again converge.yml "${nginx_args[@]}"
+  unchanged nginx-again
+}
+# varnish_back: Varnish started again, and nginx sends to it again (after
+# the 5 s an upstream that did not answer is left alone).
+varnish_back() {
+  h systemctl start varnish
+  sleep 6
+}
+
+test_nginx() {
+  local fixture line
+  echo "== nginx: sites with varnish: true are served through Varnish (ubuntu $1)"
+  nginx_host "$1"
+
+  echo "== nginx: a cacheable page is a MISS, then a HIT, in the access log only"
+  site a.test /page
+  site_expect "a.test/page" 200 "$(php_answer 1)"
+  logged a MISS
+  site a.test /page
+  site_expect "a.test/page again" 200 "$(php_answer 1)"
+  logged a HIT
+  # The client's own X-Noix-Site and X-Noix-Front are replaced by nginx's.
+  site a.test /page -H 'X-Noix-Site: b' -H 'X-Noix-Front: forged'
+  site_expect "a.test/page with the client's X-Noix-Site and X-Noix-Front" 200 "$(php_answer 1)"
+  logged a HIT
+  site b.test /page
+  site_expect "b.test/page (another tenant, HTTPS)" 200 "$(php_answer 1 on)"
+  logged b MISS
+  site b.test /page
+  site_expect "b.test/page again" 200 "$(php_answer 1 on)"
+  logged b HIT
+  site a.test '/private?private=1'
+  site_expect "a private page" 200 "$(php_answer 1)"
+  site a.test '/private?private=1'
+  site_expect "the private page again" 200 "$(php_answer 2)"
+  logged a PASS
+  # nginx passes the client's Authorization on, so Varnish passes the request.
+  site a.test /auth -H 'Authorization: Basic dXNlcjpwYXNz'
+  site_expect "a page with Authorization" 200 "$(php_answer 1)"
+  site a.test /auth -H 'Authorization: Basic dXNlcjpwYXNz'
+  site_expect "the page with Authorization again" 200 "$(php_answer 2)"
+  logged a PASS
+
+  echo "== nginx: PURGE and BAN through nginx answer 405"
+  for line in a.test b.test; do
+    site "$line" /page -X PURGE
+    site_expect "PURGE $line/page" 405
+    site "$line" / -X BAN
+    site_expect "BAN $line/" 405
+  done
+  site a.test /page
+  site_expect "a.test/page after them" 200 "$(php_answer 1)"
+  logged a HIT
+
+  echo "== nginx: with a's pool stopped, its stale page is still served"
+  site a.test '/grace?max_age=2'
+  site_expect "a page for 2 s" 200 "$(php_answer 1)"
+  sleep 3
+  h systemctl stop php-fpm@a
+  site a.test '/grace?max_age=2'
+  site_expect "the expired page, the pool stopped" 200 "$(php_answer 1)"
+  logged a HIT+grace
+  site a.test /uncached
+  site_expect "a page that is not in the cache, the pool stopped" 502
+  h systemctl start php-fpm@a
+
+  echo "== nginx: with Varnish stopped, the sites are served uncached by nginx"
+  h systemctl stop varnish
+  site a.test /page
+  site_expect "a.test/page, Varnish stopped" 200 "$(php_answer 2)"
+  logged a -
+  site a.test /page
+  site_expect "a.test/page again, Varnish stopped" 200 "$(php_answer 3)"
+  site b.test /page
+  site_expect "b.test/page, Varnish stopped" 200 "$(php_answer 2 on)"
+  logged b -
+  site a.test / -X PURGE
+  site_expect "PURGE a.test/, Varnish stopped" 405
+  varnish_back
+  site a.test /page
+  site_expect "a.test/page, Varnish started again" 200 "$(php_answer 4)"
+  logged a MISS
+  site a.test /page
+  site_expect "a.test/page again" 200 "$(php_answer 4)"
+  logged a HIT
+
+  echo "== nginx: p, without varnish, as before"
+  fixture=p.conf
+  [ -z "$(h ip -6 addr show scope global)" ] || fixture="p-ipv6.conf"
+  h cat /etc/nginx/sites/p.conf | diff "$here/fixtures/nginx-before/$fixture" - || fail "p.conf is not as before"
+  site p.test /page
+  site_expect "p.test/page" 200 "$(php_answer 1)"
+  site p.test /page
+  site_expect "p.test/page again (never cached)" 200 "$(php_answer 2)"
+  line="$(h tail -n 1 /var/log/nginx/p.access.log)"
+  case "$line" in *cache=*) fail "p's access log has a cache field: $line" ;; esac
+  # p's PURGE goes to its app, as before.
+  site p.test /purge -X PURGE
+  site_expect "PURGE p.test/purge (a site without varnish)" 200 "$(php_answer 1)"
+
+  echo "== nginx: the front key is root's alone and in no output"
+  [ "$(h stat -c '%a %U %G' "$front_conf")" = "600 root root" ] \
+    || fail "$front_conf is $(h stat -c '%a %U %G' "$front_conf"), not 600 root root"
+  h grep -qF -f "$key" "$front_conf" || fail "$front_conf does not hold the front key"
+  no_key_in_logs
+
+  echo "== nginx: after a new front key, the varnish sites answer 403 until nginx runs"
+  h cp -p "$key" /root/old-front.key
+  h rm "$key"
+  run_ok nginx-new-key converge.yml -e "@$here/nginx.yml"
+  site a.test /page
+  site_expect "a.test/page with the old key" 403
+  site p.test /page
+  site_expect "p.test/page with the old key" 200 "$(php_answer 3)"
+  run_ok nginx-new-key-nginx converge.yml "${nginx_args[@]}" "${nginx_alone[@]}"
+  site a.test /page
+  site_expect "a.test/page after the nginx run" 200 "$(php_answer 4)"
+  no_key_in_logs /root/old-front.key
+  h rm /root/old-front.key
+
+  echo "== nginx: varnish: true without Varnish or its key is refused before any change"
+  h systemctl stop varnish
+  nginx_refused nginx-stopped \
+    'nginx: nginx_sites entries a, b set varnish, but Varnish does not answer on http://127.0.0.1:6081/; run the varnish role (varnish_port 6081) first'
+  h mv "$key" /root/front.key
+  nginx_refused nginx-stopped-no-key \
+    'nginx: nginx_sites entries a, b set varnish, but Varnish does not answer on http://127.0.0.1:6081/ and the front key /etc/varnish/noixdev-front.key is missing; run the varnish role (varnish_port 6081) first'
+  varnish_back
+  nginx_refused nginx-no-key \
+    'nginx: nginx_sites entries a, b set varnish, but the front key /etc/varnish/noixdev-front.key is missing; run the varnish role (varnish_port 6081) first'
+  h mv /root/front.key "$key"
+  nginx_refused nginx-varnish-string 'nginx: nginx_sites entry a has an invalid hardening, hsts, user_includes, anubis, waf, varnish,' \
+    -e '{"test_nginx_sites": [{"name": "a", "domains": ["a.test"], "user": "app_a", "php_pool": "a", "root": "/srv/a", "tls": "off", "varnish": "yes"}]}'
+  nginx_refused nginx-varnish-port 'nginx: nginx_varnish_port (8931) must be a port number other than' \
+    -e nginx_varnish_port=8931
+  run_ok nginx-last converge.yml "${nginx_args[@]}"
+  unchanged nginx-last
+  site a.test /page
+  site_expect "a.test/page at the end (Varnish restarted, the cache empty)" 200 "$(php_answer 5)"
+  # For the record: the cache status in the access logs.
+  h cat /var/log/nginx/a.access.log >"$out/nginx-a-access-$1.txt"
+  h cat /var/log/nginx/p.access.log >"$out/nginx-p-access-$1.txt"
+  no_key_in_logs
+}
+
+# The WAF in front of Varnish: w goes nginx -> WAF -> Varnish -> nginx's inner
+# block, the inner block the WAF's fallback.
+test_waf() {
+  local secret
+  echo "== waf: a site with waf and varnish, the WAF in front of Varnish (ubuntu $1)"
+  nginx_host "$1"
+  run_ok waf converge.yml "${nginx_args[@]}" -e test_waf=true
+  run_ok waf-again converge.yml "${nginx_args[@]}" -e test_waf=true
+  unchanged waf-again
+  # The nginx role's probe of the WAF (/.noix-front-probe, without the front
+  # key) is answered by Varnish: it passes, reaches no app and leaves nothing
+  # in the WAF's log or report.
+  ! h grep -qF noix-front-probe /var/log/php/w.log || fail "the WAF probe reached PHP"
+  ! h sh -c 'docker logs noixdev-waf 2>&1 | grep -qF noix-front-probe' || fail "the WAF logged its probe"
+  ! h sh -c '/usr/local/sbin/noix-waf-report --since 1h | grep -qF noix-front-probe' || fail "the WAF report lists its probe"
+
+  echo "== waf: a HIT through the WAF"
+  site w.test /page
+  site_expect "w.test/page" 200 "$(php_answer 1)"
+  logged w MISS
+  site w.test /page
+  site_expect "w.test/page again" 200 "$(php_answer 1)"
+  logged w HIT
+
+  echo "== waf: a blocked request reaches neither Varnish nor PHP"
+  site w.test '/page?exec=/bin/bash'
+  site_expect "an attack on w.test" 403
+  logged w -
+  ! h grep -qF 'exec=' /var/log/php/w.log || fail "the attack reached PHP"
+  [ -z "$(h varnishlog -d -g request -q 'ReqURL ~ "exec="')" ] || fail "the attack reached Varnish"
+
+  echo "== waf: with Varnish stopped, the WAF falls back to nginx's inner block"
+  h systemctl stop varnish
+  site w.test /page
+  site_expect "w.test/page, Varnish stopped" 200 "$(php_answer 2)"
+  logged w -
+  varnish_back
+  site w.test /page
+  site_expect "w.test/page, Varnish started again" 200 "$(php_answer 3)"
+  logged w MISS
+  site w.test /page
+  site_expect "w.test/page again" 200 "$(php_answer 3)"
+  logged w HIT
+
+  h cat /var/log/nginx/w.access.log >"$out/waf-w-access-$1.txt"
+
+  echo "== waf: the front key is not in the WAF's log"
+  secret="$(h cat "$key")"
+  ! h docker logs noixdev-waf 2>&1 | grep -qF -- "$secret" || fail "the WAF's log holds the front key"
+  no_key_in_logs
+}
+
 test_foreign() {
   local version
   echo "== foreign: Ubuntu's varnish is refused before any change (ubuntu $1)"
@@ -1024,7 +1321,7 @@ test_foreign() {
 }
 
 # All scenarios by default; "tests/varnish/run.sh invalid" runs only these.
-scenarios="${*:-invalid valid install badvcl cache purge shopware grace foreign}"
+scenarios="${*:-invalid valid install badvcl cache purge shopware grace nginx waf foreign}"
 for ubuntu in $releases; do
   host_state=
   for scenario in $scenarios; do
@@ -1037,8 +1334,10 @@ for ubuntu in $releases; do
       purge) test_purge "$ubuntu" ;;
       shopware) test_shopware "$ubuntu" ;;
       grace) test_grace "$ubuntu" ;;
+      nginx) test_nginx "$ubuntu" ;;
+      waf) test_waf "$ubuntu" ;;
       foreign) test_foreign "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (invalid, valid, install, badvcl, cache, purge, shopware, grace, foreign)" ;;
+      *) fail "unknown scenario $scenario (invalid, valid, install, badvcl, cache, purge, shopware, grace, nginx, waf, foreign)" ;;
     esac
   done
   cleanup

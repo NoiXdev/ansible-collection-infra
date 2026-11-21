@@ -1,10 +1,98 @@
 ---
 # The test host. The varnish role runs only when run.sh passes
 # test_varnish=true; run.sh passes it with the settings in a JSON file
-# (-e @<file>).
+# (-e @<file>). The nginx and waf scenarios pass -e @nginx.yml with
+# test_nginx=true: the site users, web roots and certificate, then the
+# docker (the error pages export), php, varnish, waf (test_waf=true) and
+# nginx roles in the run order of a host; test_nginx_prepare=false runs the
+# roles of the flags alone (no setup, no docker or php role).
 - name: Converge
   hosts: all
   vars_files: [vars.yml]
+  pre_tasks:
+    - name: Prepare the nginx sites
+      when:
+        - test_nginx | default(false) | bool
+        - test_nginx_prepare | default(true) | bool
+      block:
+        # The base role installs ca-certificates and curl on the servers; the
+        # test image has neither.
+        - name: Install the packages the tests call
+          ansible.builtin.apt:
+            name: [ca-certificates, curl, openssl]
+            state: present
+            update_cache: true
+            cache_valid_time: 3600
+
+        # Site <x>: user app_<x>, web root /srv/<x>.
+        - name: Create the site users
+          ansible.builtin.user:
+            name: "app_{{ item }}"
+            shell: /bin/bash
+          loop: "{{ test_site_names }}"
+
+        # Group-readable only: nginx reads them through the site's group;
+        # var/ holds the request counters, the site user's alone.
+        - name: Create the web roots
+          ansible.builtin.file:
+            path: "/srv/{{ item.0 }}{{ item.1 }}"
+            state: directory
+            owner: "app_{{ item.0 }}"
+            group: "app_{{ item.0 }}"
+            mode: "{{ '0700' if item.1 else '0750' }}"
+          loop: "{{ test_site_names | product(['', '/var']) | list }}"
+          loop_control:
+            label: "/srv/{{ item.0 }}{{ item.1 }}"
+
+        - name: Install the front controllers
+          ansible.builtin.copy:
+            src: index.php
+            dest: "/srv/{{ item }}/index.php"
+            owner: "app_{{ item }}"
+            group: "app_{{ item }}"
+            mode: "0640"
+          loop: "{{ test_site_names }}"
+
+        - name: Create the certificate directory
+          ansible.builtin.file:
+            path: /etc/ssl/noixdev-varnish
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Create a self-signed certificate for b.test
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - req
+              - -x509
+              - -newkey
+              - rsa:2048
+              - -nodes
+              - -days
+              - "30"
+              - -subj
+              - /CN=b.test
+              - -addext
+              - subjectAltName=DNS:b.test
+              - -keyout
+              - /etc/ssl/noixdev-varnish/test.key
+              - -out
+              - /etc/ssl/noixdev-varnish/test.crt
+            creates: /etc/ssl/noixdev-varnish/test.crt
   roles:
+    - role: noixdev.infra.docker
+      when:
+        - test_nginx | default(false) | bool
+        - test_nginx_prepare | default(true) | bool
+    - role: noixdev.infra.php
+      when:
+        - test_nginx | default(false) | bool
+        - test_nginx_prepare | default(true) | bool
     - role: noixdev.infra.varnish
       when: test_varnish | default(false) | bool
+    - role: noixdev.infra.waf
+      when: test_waf | default(false) | bool
+    - role: noixdev.infra.nginx
+      when: test_nginx | default(false) | bool

@@ -18,11 +18,12 @@ server {
     server_name _;
     ssl_reject_handshake on;
 }
-{% if nginx_waf_sites | length > 0 %}
+{% if nginx_front_sites | length > 0 %}
 
-# The inner listener of the waf sites: a Host none of them lists (a waf_sites
-# entry no nginx site matches) gets no site's content. The role's probe
-# through the WAF gets its 204 here while its site has no inner block yet.
+# The inner listener of the waf and varnish sites: a Host none of them lists
+# (a waf_sites entry no nginx site matches, a varnish health_host that is no
+# site's domain) gets no site's content. The role's probe through the WAF
+# gets its 204 here while its site has no inner block yet.
 server {
     listen 127.0.0.1:{{ nginx_inner_port }} default_server;
     server_name _;

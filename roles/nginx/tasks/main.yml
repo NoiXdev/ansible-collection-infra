@@ -131,6 +131,44 @@
     - nginx_waf_sites | length > 0
     - nginx_waf_silent | length > 0 or nginx_waf_unknown | length > 0
 
+# Any answer will do (Varnish answers a request without the front key with
+# 403): the check is that something listens there. The front key is the
+# varnish role's; tasks/sites.yml reads it.
+- name: Ask Varnish
+  ansible.builtin.uri:
+    url: "{{ nginx_varnish_url }}/"
+    follow_redirects: none
+    timeout: 5
+  register: nginx_varnish_probe
+  failed_when: false
+  check_mode: false
+  when: nginx_varnish_sites | length > 0
+
+- name: Look for Varnish's front key
+  ansible.builtin.stat:
+    path: "{{ nginx_varnish_key_file }}"
+    get_checksum: false
+  register: nginx_varnish_key_stat
+  when: nginx_varnish_sites | length > 0
+
+- name: Refuse varnish without Varnish on the host
+  ansible.builtin.fail:
+    msg: >-
+      nginx: nginx_sites {{ 'entry' if nginx_varnish_names | length == 1 else 'entries' }}
+      {{ nginx_varnish_names | join(', ') }} {{ 'sets' if nginx_varnish_names | length == 1 else 'set' }}
+      varnish, but {{ nginx_varnish_missing | join(' and ') }}; run the varnish role
+      (varnish_port {{ nginx_varnish_port }}) first
+  vars:
+    nginx_varnish_names: "{{ nginx_varnish_sites | map(attribute='name') | list }}"
+    nginx_varnish_missing: >-
+      {{ (['Varnish does not answer on ' ~ nginx_varnish_url ~ '/']
+          if nginx_varnish_probe.status | default(-1) | int <= 0 else [])
+         + (['the front key ' ~ nginx_varnish_key_file ~ ' is missing']
+            if not nginx_varnish_key_stat.stat.exists else []) }}
+  when:
+    - nginx_varnish_sites | length > 0
+    - nginx_varnish_missing | length > 0
+
 # A task that fails after an earlier one notified the reload: the reload runs
 # first, so nginx does not stay on its old config while the next run, seeing
 # no change, would leave it there.

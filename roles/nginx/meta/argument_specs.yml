@@ -143,11 +143,29 @@ argument_specs:
             HTTPS) and the redirect domains are not sent to the WAF. The run is refused before any
             change when the WAF does not answer there, or answers 421 for the site's first domain
             (no waf_sites entry lists it).
-          - extra, raw config inside the site's public server block; with waf, before the WAF (a
-            location here is not inspected).
           - >-
-            inner_extra, raw config inside the site's inner server block, behind the WAF; only a
-            site with waf has one (refused otherwise).
+            varnish (false by default): Varnish (the varnish role, on 127.0.0.1:nginx_varnish_port)
+            caches the site; varnish_sites of the varnish role says what and how. The site's
+            public server block keeps its checks as with waf and sends every request to Varnish
+            (with waf: to the WAF, whose waf_sites entry has the backend
+            http://127.0.0.1:<nginx_varnish_port> and the backend_fallback
+            http://127.0.0.1:<nginx_inner_port>), with X-Noix-Site (the site's name) and
+            X-Noix-Front (the host's front key from the varnish role's
+            /etc/varnish/noixdev-front.key, in the root-only include
+            /etc/nginx/noixdev/varnish-front.conf) in place of the client's. Varnish asks the
+            site's inner server block (as with waf; the front key never reaches the app) for what
+            it does not have. Varnish's cache status (X-Noix-Cache) is logged as cache= at the end
+            of each line of the site's access log (log format varnish: HIT, MISS, PASS, SYNTH,
+            +grace for a stale page, - when Varnish did not answer) and never reaches the client.
+            Without waf, while Varnish does not answer, the inner block serves the site uncached;
+            with waf the WAF falls back to it. PURGE and BAN through the site answer 405. The run
+            is refused before any change when nothing answers on 127.0.0.1:nginx_varnish_port or
+            the front key file is missing (run the varnish role first).
+          - extra, raw config inside the site's public server block; with waf or varnish, before
+            the WAF and Varnish (a location here is not inspected or cached).
+          - >-
+            inner_extra, raw config inside the site's inner server block, behind the WAF and
+            Varnish; only a site with waf or varnish has one (refused otherwise).
       nginx_http_extra:
         type: str
         description: Raw config at http level.
@@ -215,9 +233,16 @@ argument_specs:
       nginx_inner_port:
         type: int
         description: >-
-          The port on 127.0.0.1 of the inner server blocks of the sites with waf (the waf role's
-          default backend in host mode); 8931 by default. Neither 80 nor 443, and not
-          nginx_anubis_port or nginx_waf_port. A Host no such site lists answers 421 there.
+          The port on 127.0.0.1 of the inner server blocks of the sites with waf or varnish (the
+          waf role's default backend in host mode, the varnish role's varnish_backend_port);
+          8931 by default. Neither 80 nor 443, and not nginx_anubis_port or nginx_waf_port. A
+          Host no such site lists answers 421 there.
+      nginx_varnish_port:
+        type: int
+        description: >-
+          The port on 127.0.0.1 Varnish answers on for the sites with varnish (the varnish
+          role's varnish_port); 6081 by default. Not 80, 443, nginx_anubis_port, nginx_waf_port or
+          nginx_inner_port.
       nginx_user_includes:
         type: bool
         description: >-

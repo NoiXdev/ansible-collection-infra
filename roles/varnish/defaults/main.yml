@@ -14,7 +14,8 @@ varnish_apt_key_fingerprint: 694566269779DFAC975ED9BDD0525EAE838B3344
 # role writes:
 # - /etc/varnish/noixdev-front.key, the front key (64 hex digits, root 0600,
 #   created once; delete it and the next run creates a new one): Varnish
-#   answers only requests that carry it in X-Noix-Front;
+#   answers only requests that carry it in X-Noix-Front (and GET or HEAD of
+#   /.noix-front-probe, the nginx role's probe through the WAF, with 204);
 # - /etc/varnish/noixdev.vcl, which holds the key: root:varnish 0640, as
 #   varnishd reads its VCL as the user varnish (a root 0600 file does not
 #   load);

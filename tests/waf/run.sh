@@ -885,20 +885,24 @@ host_nginx() {
     *) fail "inner_extra did not set its header: $(proxied_line /inner-extra)" ;;
   esac
 
-  echo "-- the Varnish headers pass the WAF unchanged and never reach its log"
+  echo "-- the Varnish headers pass the WAF and never reach its log; the inner block keeps the key from the app"
   site_expect 200 proxied.test /varnish -H 'X-Noix-Site: proxied' -H "X-Noix-Front: $front_key" -H "X-Purge-Token: $purge_token"
   # A header value that starts with a function definition matches a CRS
   # rule (932170) for any header the WAF inspects, and the log would then
   # hold the value.
   site_expect 200 proxied.test /varnish-attack -H 'X-Noix-Site: proxied' -H "X-Noix-Front: () { :; }; echo $front_key" \
     -H "X-Purge-Token: () { :; }; echo $purge_token"
+  # The WAF passed both requests (200). The inner block removes X-Noix-Front
+  # before the app (a request reaches it with the key when the WAF falls
+  # back past Varnish); the varnish suite's waf scenario shows the key
+  # reaching Varnish through the WAF.
   case "$(proxied_line /varnish)" in
-    *" | X-Noix-Site: proxied | X-Noix-Front: $front_key") ;;
-    *) fail "the Varnish headers did not arrive unchanged: $(proxied_line /varnish)" ;;
+    *" | X-Noix-Site: proxied | X-Noix-Front: ") ;;
+    *) fail "the Varnish headers did not arrive as expected: $(proxied_line /varnish)" ;;
   esac
   case "$(proxied_line /varnish-attack)" in
-    *" | X-Noix-Site: proxied | X-Noix-Front: () { :; }; echo $front_key") ;;
-    *) fail "the Varnish headers did not arrive unchanged: $(proxied_line /varnish-attack)" ;;
+    *" | X-Noix-Site: proxied | X-Noix-Front: ") ;;
+    *) fail "the Varnish headers did not arrive as expected: $(proxied_line /varnish-attack)" ;;
   esac
   if h docker logs "$waf" 2>&1 | grep -F -e "$front_key" -e "$purge_token"; then
     fail "the WAF's log holds the front key or the purge token"
@@ -920,7 +924,7 @@ host_nginx() {
 
   echo "-- invalid waf settings of nginx are refused before any change"
   state="$(nginx_state)"
-  nginx_refused nginx-inner-extra 'nginx: nginx_sites entry plain sets inner_extra, but has no inner server block (only a site with waf has one)' \
+  nginx_refused nginx-inner-extra 'nginx: nginx_sites entry plain sets inner_extra, but has no inner server block (only a site with waf or varnish has one)' \
     -e '{"nginx_sites": [{"name": "plain", "domains": ["plain.test"], "user": "app_plain", "root": "/srv/plain", "tls": "off", "inner_extra": "return 204;"}]}'
   nginx_refused nginx-waf-string 'nginx: nginx_sites entry plain has an invalid hardening, hsts, user_includes, anubis, waf,' \
     -e '{"nginx_sites": [{"name": "plain", "domains": ["plain.test"], "user": "app_plain", "root": "/srv/plain", "tls": "off", "waf": "yes"}]}'
