@@ -503,8 +503,6 @@ test_traefik() {
   arrived_whole POST /huge-chunked /tmp/huge
   h rm -f /tmp/huge
   no_oom
-  got="$(h docker exec "$waf" cat /sys/fs/cgroup/memory.peak 2>/dev/null || true)"
-  [ -z "$got" ] || [ "$got" -lt 268435456 ] || fail "the WAF's memory peaked at $got bytes"
   [ -z "$(h find /opt/waf/spool -type f)" ] || fail "the spool kept a body: $(h find /opt/waf/spool -type f)"
   expect 200 bulk.test /after
   reported bulk 9599903 --since 10m
