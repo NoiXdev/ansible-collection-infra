@@ -598,6 +598,7 @@
       register: waf_network_inspect
       changed_when: false
       failed_when: false
+      check_mode: false
 
     - name: Check Traefik's network
       ansible.builtin.assert:

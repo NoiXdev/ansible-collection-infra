@@ -46,6 +46,7 @@
     group: root
     mode: "0644"
   loop: "{{ waf_files }}"
+  register: waf_render
 
 - name: Read the new settings' checksums
   ansible.builtin.stat:
@@ -63,11 +64,14 @@
   loop: "{{ waf_files }}"
   register: waf_running_stat
 
+# In check mode the new settings are not written: a rendering that would
+# change them is the change.
 - name: Note whether the settings change
   ansible.builtin.set_fact:
     waf_settings_change: >-
-      {{ waf_staged_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list
-         != waf_running_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}
+      {{ (waf_render is changed) if ansible_check_mode else
+         (waf_staged_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list
+          != waf_running_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list) }}
 
 - name: Try the new settings in a check container
   when: waf_settings_change
@@ -129,6 +133,7 @@
       {{ (waf_check.stderr ~ ' ' ~ waf_check.stdout) | trim }}
   when:
     - waf_settings_change
+    - not ansible_check_mode
     - waf_check.rc != 0
 
 # Removed once the running nginx has loaded the new files, so a run that
@@ -186,7 +191,8 @@
     waf_health_start: "{{ now().timestamp() }}"
 
 # retries is an upper bound; the deadline ends the wait after
-# waf_health_timeout seconds.
+# waf_health_timeout seconds. In check mode nothing was started or reloaded,
+# so nothing is waited for.
 - name: Wait until the WAF is healthy
   ansible.builtin.command:
     argv: [docker, inspect, --format, "{{ '{{.State.Status}} {{.State.Health.Status}}' }}", "{{ waf_name }}"]
@@ -198,6 +204,7 @@
     or now().timestamp() - waf_health_start | float >= waf_health_timeout | int
   retries: "{{ waf_health_timeout | int + 1 }}"
   delay: 1
+  when: not ansible_check_mode
 
 - name: Fail when the WAF is not healthy
   ansible.builtin.fail:
@@ -205,7 +212,9 @@
       waf: the WAF is not healthy after {{ waf_health_timeout }} seconds (container state:
       {{ waf_health.stdout | default('') or waf_health.stderr | default('unknown') }}). Every
       site behind it answers 502 until it is. See docker logs {{ waf_name }}.
-  when: waf_health.stdout != 'running healthy'
+  when:
+    - not ansible_check_mode
+    - waf_health.stdout != 'running healthy'
 
 # nginx parses the new files after the reload signal while the old workers
 # still serve; the health check answers the id of the files it serves.
@@ -220,6 +229,7 @@
     or now().timestamp() - waf_health_start | float >= waf_health_timeout | int
   retries: "{{ waf_health_timeout | int + 1 }}"
   delay: 1
+  when: not ansible_check_mode
 
 - name: Fail when the WAF does not serve the new settings
   ansible.builtin.fail:
@@ -227,7 +237,9 @@
       waf: the WAF does not serve the new settings after {{ waf_health_timeout }} seconds (it
       answers {{ waf_served.stdout | default('') | trim or waf_served.stderr | default('') | trim }}).
       See docker logs {{ waf_name }}.
-  when: waf_served.stdout | trim != waf_config_id
+  when:
+    - not ansible_check_mode
+    - waf_served.stdout | trim != waf_config_id
 
 - name: Remove the note of the reload
   ansible.builtin.file:
@@ -293,6 +305,7 @@
   register: waf_traefik_own
   changed_when: false
   failed_when: false
+  check_mode: false
   when: waf_mode == 'host'
 
 - name: Remove the role's Traefik objects in host mode

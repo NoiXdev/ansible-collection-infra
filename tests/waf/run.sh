@@ -62,6 +62,16 @@ converge_unchanged() {
   grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/converge.log" \
     || { cat "$out/converge.log" >&2; fail "the repeated converge changed something"; }
 }
+# checks_unchanged <name> [-e ...]: the waf role alone (no setup) in check
+# mode, which must pass and change nothing on the host.
+checks_unchanged() {
+  local name="$1" sum
+  shift
+  sum="$(h sh -c 'sha256sum /opt/waf/*.* /opt/waf/staged/*.*')"
+  play "$name" --check "$@" -e test_setup=false -e test_traefik=false -e test_waf=true \
+    || { cat "$out/$name.log" >&2; fail "the check mode run $name failed"; }
+  [ "$(h sh -c 'sha256sum /opt/waf/*.* /opt/waf/staged/*.*')" = "$sum" ] || fail "the check mode run $name changed the WAF's files"
+}
 # role_fails <name> [-e ...]: the waf role alone (no setup), which must fail;
 # its output goes to $out/<name>.log.
 role_fails() {
@@ -349,6 +359,16 @@ test_traefik() {
   echo "== traefik (ubuntu $1)"
   converge "${traefik_args[@]}"
   converge_unchanged "${traefik_args[@]}"
+
+  echo "-- check mode: nothing to change; a change is shown, not made"
+  checks_unchanged check "${traefik_args[@]}"
+  grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/check.log" || { cat "$out/check.log" >&2; fail "check mode found a change"; }
+  expect_in_log check 'has the Core Rule Set 4.25.2 and ModSecurity 3.0.17'
+  checks_unchanged check-change "${traefik_args[@]}" -e test_detect_mode=block
+  if grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/check-change.log"; then
+    cat "$out/check-change.log" >&2
+    fail "check mode did not show the change of a site's mode"
+  fi
 
   echo "-- the container and the Traefik objects"
   got="$(h docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.Config.User}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{len .HostConfig.PortBindings}}' "$waf" || true)"
@@ -938,6 +958,8 @@ test_host() {
   h grep -qxF -- "$waf_marker" /opt/traefik/dynamic/waf.yml || fail "the waf.yml before host mode is not the role's"
   converge "${host_args[@]}"
   converge_unchanged "${host_args[@]}"
+  checks_unchanged check-host "${host_args[@]}"
+  grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/check-host.log" || { cat "$out/check-host.log" >&2; fail "check mode found a change"; }
 
   echo "-- the container on the host's loopback, no Traefik objects"
   got="$(h docker inspect -f '{{.HostConfig.NetworkMode}} {{.HostConfig.ReadonlyRootfs}} {{.Config.User}} {{.HostConfig.CapDrop}} {{len .HostConfig.PortBindings}}' "$waf" || true)"
