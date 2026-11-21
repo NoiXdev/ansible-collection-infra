@@ -153,6 +153,55 @@
   restores the backup for one run (refused when there is no such update) or the marker is
   removed. A downgrade is refused, and a failed install leaves `install-incomplete`, which makes
   every later run refuse.
+- `waf`: new role, a web application firewall in front of web apps. One container
+  (`noixdev-waf`, compose project `waf` in `waf_dir`) knows each site of `waf_sites` by its
+  `domains` and forwards its requests to the site's `backend` after the checks. Two modes, one per
+  host: `waf_mode: traefik` (the default) joins Traefik's network at the fixed address
+  `waf_traefik_address` (`172.31.255.253`), publishes no port and writes the service `waf` and a
+  router `waf-<site>-<n>` per entry of a site's `routers` (priority 1000 by default, its
+  `middlewares` such as `anubis@file` run before the WAF) to `waf.yml` in Traefik's file provider
+  directory; a router of your own can use the service `waf@file` instead. `waf_mode: host` listens
+  on `127.0.0.1:waf_host_port` (8930) only, for the `nginx` role's sites with `waf: true`, with
+  nginx's inner listener `127.0.0.1:8931` as the default backend and an optional
+  `backend_fallback` (another loopback URL, used only while the backend refuses or times out).
+  Per site: `mode` (`detect`, the default, logs only; `block` answers 403 over the anomaly
+  threshold; `off` forwards without inspection), `paranoia` and `detection_paranoia` (1 to 4,
+  default `waf_paranoia` 1), `anomaly_inbound` and `anomaly_outbound` (5 and 4),
+  `allowed_methods` and `allowed_content_types` (added to the defaults), `request_body_limit`
+  (`waf_request_body_limit`, 12.5 MiB: in `block` a larger body answers 413, in `detect` a body
+  whose length is over it is logged), `bypass_paths` (path prefixes without inspection) and
+  `exclusions` (`remove_tags`, `remove_ids` and `remove_targets` for a path prefix, `/` for the
+  whole site). Paths are matched on the normalized path, so `/v2/../admin` never gets the bypass
+  of `/v2/`. Raw rules go into `waf_rules_before` and `waf_rules_after`. The log (`docker logs
+  noixdev-waf`) has one JSON line per event with the client address, the request line, the status
+  and the matched rules, never request headers or bodies; headers and cookies whose names mark
+  credentials (such as `Authorization`, `Cookie`, API keys and session cookies) are not inspected,
+  so no rule copies them into the log. `noix-waf-report [--since 24h] [site]` lists per site the
+  matched rules with count, message and example requests, to see whether a site in `detect` is
+  clean before it switches to `block`. Every setting is checked before any change, and each
+  refusal names the variable and the site; new settings are tested in a throwaway container
+  before they replace the running ones, and a failed test leaves the running WAF as it was. While the WAF is down its sites answer 504 behind Traefik and 502 on the host's nginx,
+  never the backend; the next run starts it again. Response bodies are not inspected, and there
+  is no entrypoint-wide mode. Needs Docker. Covered by the new test suite `waf` (Ubuntu 24.04 and
+  26.04). The `traefik` role is unchanged: without the `waf` role, Traefik's files stay as they
+  were.
+- `nginx`: a site with `waf: true` (default `false`) is inspected by the `waf` role in host mode
+  on the same host (`nginx_waf_port`, default 8930, the `waf` role's `waf_host_port`). Its public
+  server block keeps TLS, the rate limit, Basic auth, the hardening, the headers, Anubis and the
+  error pages for nginx's own answers, logs each request once and sends every request to the WAF;
+  the WAF's answers, its 403 too, pass unchanged. The WAF sends what it lets through to the site's
+  inner server block on the shared loopback listener `127.0.0.1:nginx_inner_port` (default 8931),
+  which serves the content (PHP, proxy or static files) with the client's address, and PHP's
+  `HTTPS` and `SERVER_PORT` of the public block. While the WAF does not answer, the site answers
+  502, never its content. The new site key `inner_extra` is raw config inside that inner block
+  (refused on a site without `waf`); `extra` stays in the public block, where a `location` is not
+  behind the WAF and the site's `root` is not set, so directives for the content (such as
+  `fastcgi_read_timeout`) belong in `inner_extra`. The run is refused before any change while the
+  WAF does not answer on `127.0.0.1:nginx_waf_port`, or answers that no `waf_sites` entry lists a
+  site's first domain, and when `nginx_anubis_port`, `nginx_waf_port` and `nginx_inner_port` are
+  not three different ports or `nginx_inner_port` is 80 or 443. Waf sites answer
+  `/.noix-front-probe` with 204 (the role's check through the WAF). Existing setups are unchanged:
+  without a site with `waf: true` the rendered config is the same as before and nothing reloads.
 
 ## 0.6.0 — 2026-11-17
 
