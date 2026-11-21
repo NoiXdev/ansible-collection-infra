@@ -28,10 +28,12 @@ waf_router_priority: 1000
 # key of the same name in waf_sites:
 #   index       the entry's place in waf_sites, from 0 (the base of the
 #               site's rule IDs, 9500000 + 100 * index)
-#   host_regex  ^(?:d1|d2)[.]?(?::[0-9]+)?$ of the domains, dots escaped:
+#   host_regex  ^(?:d1|d2)[.]?(?::.*)?$ of the domains, dots escaped:
 #               the Host header (lower-cased first) of a request for the
-#               site, with or without a trailing dot (which nginx also
-#               ignores when it picks the server block) and a port
+#               site, with or without a trailing dot and anything after a
+#               colon, as nginx picks the server block: it cuts the Host at
+#               its first colon, so tuned.test: and tuned.test:8443 reach
+#               the site's server block and must get its settings too
 #   routers     each with its name waf-<site>-<n> (n from 1), and the
 #               defaults of middlewares, rule (Host() of each domain, joined
 #               with ||) and priority
@@ -77,7 +79,7 @@ waf_sites_public: >-
         'routers': routers if entry.routers is sequence and entry.routers is not string
                    and entry.routers is not mapping else entry.routers,
         'index': loop.index0,
-        'host_regex': '^(?:' ~ domains | map('string') | map('replace', '.', waf_escaped_dot) | join('|') ~ ')[.]?(?::[0-9]+)?$'})) -%}
+        'host_regex': '^(?:' ~ domains | map('string') | map('replace', '.', waf_escaped_dot) | join('|') ~ ')[.]?(?::.*)?$'})) -%}
   {%- endfor -%}
   {{ sites }}
 

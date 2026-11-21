@@ -440,6 +440,13 @@ test_traefik() {
   expect 403 TUNED.test '/?q=a%27b%27c%28%29'
   [ "$(direct tuned.test. '/?q=a%27b%27c%28%29')" = 403 ] || fail "tuned.test. lost its settings"
   [ "$(direct TUNED.test:8080 '/?q=a%27b%27c%28%29')" = 403 ] || fail "TUNED.test:8080 lost its settings"
+  # nginx cuts the Host at its first colon: tuned.test: is tuned.test's server
+  # block, and must get its settings too (nginx itself refuses tuned.test:x).
+  [ "$(direct tuned.test: '/?q=a%27b%27c%28%29')" = 403 ] || fail "tuned.test: lost its settings"
+  case "$(direct tuned.test:x '/?q=a%27b%27c%28%29')" in
+    400 | 403) ;;
+    *) fail "tuned.test:x lost its settings" ;;
+  esac
 
   echo "-- a detect site: attacks pass and are logged"
   before="$(audit_lines)"
