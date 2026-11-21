@@ -47,7 +47,7 @@ are on the documentation site.
 | `nodejs` | Node.js from NodeSource, one pinned major series, with global npm packages at exact versions |
 | `php` | PHP versions from packages.sury.org (Ubuntu 24.04 and 26.04) with one PHP-FPM master per pool on a socket without a version in its path, an optional classic mode, and a rolling restart of the pools after security updates |
 | `composer` | Composer from the official phar at a pinned version and SHA-256, Composer 1 on request, and per-user `auth.json` (0600, written as the user) |
-| `nginx` | nginx from nginx.org, pinned to a stable series, with PHP-pool, proxy and static sites, Let's Encrypt, hardening, Basic auth, rate limits, error pages, optional Anubis and an optional WAF per site (`waf: true`) |
+| `nginx` | nginx from nginx.org, pinned to a stable series, with PHP-pool, proxy and static sites, Let's Encrypt, hardening, Basic auth, rate limits, error pages, optional Anubis, an optional WAF per site (`waf: true`) and optional caching through the `varnish` role per site (`varnish: true`) |
 | `redis` | Redis from packages.redis.io, pinned to a series, as the default instance or one instance per environment on a port or a unix socket |
 | `varnish` | Varnish Cache from Varnish Software's repository, pinned to a series, as a cache in front of the `nginx` role's sites (`varnish: true`): only what the app marks cacheable is stored, unless a site sets a short microcache; per-site profiles for Shopware 6.7 and TYPO3, stale pages while the app is down, and PURGE and BAN from the host with each site's own token, acting on that site only |
 | `mariadb` | MariaDB from mariadb.org, pinned to a series, with databases and users whose password and exact privileges are enforced |
