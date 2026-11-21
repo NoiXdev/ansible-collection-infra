@@ -103,13 +103,13 @@ waf_sites_max: 999
 # braces or semicolons (they would end the location).
 waf_hostname_re: '^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
 waf_path_re: '^(?!.*//)(?!(.*/)?[.]{1,2}(/|$))/[A-Za-z0-9._~!$&()*+,=:@/-]*$'
-# A .. segment in the request's raw path, also encoded (%2e, %2f, %5c) or
-# with a backslash or ;parameters (nginx matches no path that still has
+# A .. segment in the request's raw path, also encoded (%2e, %2f, %3b, %5c)
+# or with a backslash or ;parameters (nginx matches no path that still has
 # one, but a backend may resolve it): a bypass or exclusion location refuses
 # it (case-insensitive match), as it refuses a raw path that does not start
 # with its prefix. \x5c (a backslash) keeps backslashes out of nginx's
 # string escapes.
-waf_raw_dots_re: '^[^?]*(/|%2f|\x5c|%5c)([.]|%2e){2}([/;?\x5c]|%2f|%5c|$)'
+waf_raw_dots_re: '^[^?]*(/|%2f|\x5c|%5c)([.]|%2e){2}([/;?\x5c]|%2f|%3b|%5c|$)'
 # An http(s) URL without a path: scheme, host (a name, an IPv4 address or an
 # [IPv6] address) and an optional port, the groups 1, 2 and 5.
 waf_url_re: '^(https?)://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?)(:([0-9]{1,5}))?$'

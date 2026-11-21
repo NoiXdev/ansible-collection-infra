@@ -521,11 +521,11 @@ test_traefik() {
   # The backend gets the raw path: one that only nginx's normalized form puts
   # under /v2/ is refused there, never sent on uninspected.
   for path in '/a/%2e%2e/v2/x?exec=/bin/bash' '/a/../v2/x?exec=/bin/bash' '/v2/..;/a?exec=/bin/bash' \
-    '/%76%32/x?exec=/bin/bash' '//v2/x?exec=/bin/bash'; do
+    '/v2/..%3b/a?exec=/bin/bash' '/%76%32/x?exec=/bin/bash' '//v2/x?exec=/bin/bash'; do
     [ "$(direct registry.test "$path" --path-as-is)" = 400 ] || fail "$path got the bypass of /v2/"
     probe registry.test "$path" --path-as-is >/dev/null
   done
-  if recorded | grep -E '^GET (/a/|/v2/\.\.;|/%76|//)'; then fail "a crafted path reached the registry's backend"; fi
+  if recorded | grep -E '^GET (/a/|/v2/\.\.(;|%3b)|/%76|//)'; then fail "a crafted path reached the registry's backend"; fi
 
   echo "-- an exclusion for one path"
   expect 200 hooks.test '/webhook/a?exec=/bin/bash'
