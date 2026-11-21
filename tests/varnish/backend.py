@@ -24,12 +24,19 @@ host and path, from 1). Query parameters set the answer:
     esi=1    Surrogate-Control: content="ESI/1.0", and the body is
              "<p><line></p>", a newline and <esi:include src="/frag"/>
 
+A GET with Upgrade: websocket gets the WebSocket handshake (101, with
+X-Echo for echo= as above) and then every frame back as it came, until the
+client closes.
+
 While the file /tmp/backend-sick exists every request answers 500 "sick"
 (counted like the others), GET /health included; otherwise GET /health
 answers 200 and is not counted.
 """
 
+import base64
 import gzip
+import hashlib
+import struct
 import sys
 import threading
 import time
@@ -46,6 +53,8 @@ HEADERS = {
     "inv": "sw-invalidation-states",
     "bypass": "sw-dynamic-cache-bypass",
 }
+
+WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 counts = {}
 counts_lock = threading.Lock()
@@ -81,6 +90,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, b"ok\n", [])
             return
         params = parse_qs(url.query, keep_blank_values=True)
+        if self.command == "GET" and "websocket" in self.headers.get("Upgrade", "").lower():
+            self.websocket(params)
+            return
         line = f"count={count(host, self.path)} host={host} path={self.path}"
         if "sleep" in params:
             time.sleep(float(params["sleep"][-1]))
@@ -100,6 +112,34 @@ class Handler(BaseHTTPRequestHandler):
                 headers.append(("Content-Encoding", "gzip"))
         self.send(status, body, headers)
 
+    def websocket(self, params):
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        accept = base64.b64encode(hashlib.sha1((key + WEBSOCKET_GUID).encode()).digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        if "echo" in params and params["echo"][-1] in self.headers:
+            self.send_header("X-Echo", self.headers[params["echo"][-1]])
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        while True:
+            head = self.rfile.read(2)
+            if len(head) < 2:
+                return
+            opcode, length = head[0] & 0x0F, head[1] & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", self.rfile.read(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", self.rfile.read(8))[0]
+            mask = self.rfile.read(4) if head[1] & 0x80 else b"\0\0\0\0"
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(self.rfile.read(length)))
+            self.wfile.write(frame(opcode, payload))
+            self.wfile.flush()
+            if opcode == 8:
+                return
+
     def send(self, status, body, headers):
         self.send_response(status)
         self.send_header("Content-Type", "text/plain")
@@ -115,6 +155,17 @@ class Handler(BaseHTTPRequestHandler):
         if name.startswith("do_"):
             return self.answer
         raise AttributeError(name)
+
+
+def frame(opcode, payload):
+    """One unmasked WebSocket frame (a server's)."""
+    if len(payload) < 126:
+        head = bytes([0x80 | opcode, len(payload)])
+    elif len(payload) < 65536:
+        head = bytes([0x80 | opcode, 126]) + struct.pack("!H", len(payload))
+    else:
+        head = bytes([0x80 | opcode, 127]) + struct.pack("!Q", len(payload))
+    return head + payload
 
 
 def main(argv):

@@ -105,6 +105,12 @@ sub vcl_recv {
         return (synth(403, "Forbidden"));
     }
     unset req.http.X-Noix-Front;
+    # A WebSocket upgrade goes to the backend as a pipe (a pass would drop
+    # its Upgrade): only behind the front key, never cached. The pipe ends
+    # with the connection, which nginx and the WAF never reuse.
+    if (req.http.Upgrade ~ "(?i)websocket") {
+        return (pipe);
+    }
     call noixdev_normalize;
     call noixdev_site_recv;
     # A site that is not in varnish_sites: never cached.
@@ -313,6 +319,15 @@ sub noixdev_hash {
     return (hash);
 }
 {% endif %}
+
+# The pipe of a WebSocket upgrade keeps the hop-by-hop headers the backend
+# needs (Varnish would close the connection after one answer otherwise).
+sub vcl_pipe {
+    if (req.http.Upgrade) {
+        set bereq.http.Upgrade = req.http.Upgrade;
+        set bereq.http.Connection = req.http.Connection;
+    }
+}
 
 # The site is part of the key: two sites never share an object.
 sub vcl_hash {
