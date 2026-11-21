@@ -496,12 +496,21 @@ test_traefik() {
   expect 403 registry.test '/v2/../?exec=/bin/bash' --path-as-is
   [ "$(direct registry.test '/v2/../?exec=/bin/bash' --path-as-is)" = 403 ] || fail "/v2/../ carried the bypass"
   expect 403 registry.test /api/x -X PUT
+  # The backend gets the raw path: one that only nginx's normalized form puts
+  # under /v2/ is refused there, never sent on uninspected.
+  for path in '/a/%2e%2e/v2/x?exec=/bin/bash' '/a/../v2/x?exec=/bin/bash' '/v2/..;/a?exec=/bin/bash' \
+    '/%76%32/x?exec=/bin/bash' '//v2/x?exec=/bin/bash'; do
+    [ "$(direct registry.test "$path" --path-as-is)" = 400 ] || fail "$path got the bypass of /v2/"
+    probe registry.test "$path" --path-as-is >/dev/null
+  done
+  if recorded | grep -E '^GET (/a/|/v2/\.\.;|/%76|//)'; then fail "a crafted path reached the registry's backend"; fi
 
   echo "-- an exclusion for one path"
   expect 200 hooks.test '/webhook/a?exec=/bin/bash'
   expect 403 hooks.test '/a?exec=/bin/bash'
   expect 403 hooks.test '/webhook/../a?exec=/bin/bash' --path-as-is
   [ "$(direct hooks.test '/webhook/../a?exec=/bin/bash' --path-as-is)" = 403 ] || fail "/webhook/../ carried the exclusion"
+  [ "$(direct hooks.test '/a/%2e%2e/webhook/a?exec=/bin/bash')" = 400 ] || fail "/a/%2e%2e/webhook/ got the exclusion"
 
   echo "-- Anubis before the WAF"
   got="$(h curl -s --max-time 30 -H 'Host: guarded.test' -A "$browser" -w '\n%{http_code}' 'http://127.0.0.1/?exec=/bin/bash' || true)"
@@ -674,7 +683,7 @@ test_report() {
 # default backend, nginx's inner listener 127.0.0.1:8931; cached has a
 # backend (a cache, say) on 8939 and the inner listener as its fallback.
 host_args=(-e test_waf=true -e '{"waf_mode": "host", "waf_sites": [
-  {"name": "static", "domains": ["static.test"], "mode": "block"},
+  {"name": "static", "domains": ["static.test"], "mode": "block", "bypass_paths": ["/v2/"]},
   {"name": "cached", "domains": ["cached.test"], "mode": "block",
    "backend": "http://127.0.0.1:8939", "backend_fallback": "http://127.0.0.1:8931"}]}')
 waf_marker='# Written by the noixdev.infra.waf role (traefik mode).'
@@ -970,6 +979,13 @@ test_host() {
   got_request unavailable /unavailable
   no_request inner /unavailable
   stop_recorder unavailable 8939
+
+  echo "-- a bypass gets only raw paths under its prefix"
+  expect 200 static.test ':8930/v2/x?exec=/bin/bash'
+  got_request inner '/v2/x?exec=/bin/bash'
+  expect 400 static.test ':8930/a/%2e%2e/v2/x?exec=/bin/bash'
+  expect 400 static.test ':8930/a/../v2/x?exec=/bin/bash' --path-as-is
+  no_request inner /a/
   stop_recorder inner 8931
   host_nginx
 

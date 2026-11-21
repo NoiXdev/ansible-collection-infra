@@ -117,7 +117,10 @@ waf_health_timeout: 60
 #                                    # /.within.website/ router
 # Paths (bypass_paths, exclusions) start with /, are matched as prefixes of
 # the normalized path nginx sees, and have no . or .. segments, no //, no
-# whitespace and no quotes; a crafted /v2/../admin is matched as /admin. A
+# whitespace and no quotes; a crafted /v2/../admin is matched as /admin. As
+# the backend gets the raw path, a request whose raw path does not start
+# with the prefix itself (/a/%2e%2e/v2/x) or has a .. segment answers 400
+# there. A
 # site without routers in traefik mode is reached only through a router with
 # service waf@file.
 waf_sites: []

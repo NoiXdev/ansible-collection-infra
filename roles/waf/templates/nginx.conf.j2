@@ -25,6 +25,19 @@
 {%- endfor -%}
 ^0*({{ alternatives | join('|') }})$
 {%- endmacro -%}
+{#- The refusals of a bypass or exclusion location: nginx matched its prefix
+    on the normalized path, but the backend gets the raw one. -#}
+{%- macro raw_path_checks(path, indent) -%}
+{{ indent }}# The backend gets the raw path: it must start with the prefix itself
+{{ indent }}# and have no .. segment, so no crafted path (/a/%2e%2e{{ path }}) gets
+{{ indent }}# this location's settings for another path.
+{{ indent }}if ($request_uri !~ "^{{ path | regex_escape }}") {
+{{ indent }}  return 400;
+{{ indent }}}
+{{ indent }}if ($request_uri ~* "{{ waf_raw_dots_re }}") {
+{{ indent }}  return 400;
+{{ indent }}}
+{%- endmacro -%}
 {#- On a detect site, the request bodies ModSecurity does not get: it reads
     a body whole into memory, so one larger than the site's inspection limit
     (by its Content-Length) and a chunked one (of a length nginx cannot know
@@ -48,7 +61,9 @@
 # The WAF: one server block per site of waf_sites, picked by Host, which
 # sends the site to its backend after ModSecurity's checks with the Core Rule
 # Set (modsecurity.conf, loaded once for all sites). Paths are matched on the
-# normalized path, so /v2/../x never gets the bypass or exclusion of /v2/.
+# normalized path, so /v2/../x never gets the bypass or exclusion of /v2/,
+# and a bypass or exclusion refuses a raw path that only its normalized form
+# puts under the prefix (/a/%2e%2e/v2/x).
 load_module {{ waf_module }};
 worker_processes {{ waf_workers }};
 pid /tmp/nginx.pid;
@@ -194,6 +209,7 @@ http {
 
     # Not inspected, so not limited either.
     location ^~ {{ path }} {
+{{ raw_path_checks(path, '      ') }}
       modsecurity off;
       client_max_body_size 0;
       proxy_pass $waf_backend;
@@ -202,6 +218,7 @@ http {
 {% for exclusion in site.exclusions if exclusion.path != '/' %}
 
     location ^~ {{ exclusion.path }} {
+{{ raw_path_checks(exclusion.path, '      ') }}
 {% if site.mode == 'detect' %}
 {{ uninspected_checks(site, '      ') }}
 {% endif %}
