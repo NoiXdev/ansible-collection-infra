@@ -13,7 +13,8 @@
 # front of tests/varnish/backend.py (in place of nginx's inner server) and
 # checks the packages, the loopback listeners, the front key and that only a
 # request with it reaches the backend; a second run changes nothing, a
-# deleted key is created anew, and without any site the VCL still compiles.
+# malformed key is refused before any change, a deleted key is created anew,
+# and without any site the VCL still compiles.
 #
 # The scenario "badvcl" runs a copy of the collection whose VCL does not
 # compile and checks that the run fails before the running VCL is touched,
@@ -219,6 +220,12 @@ no_role_files() {
     || fail "$1: the refused run left files of the role"
 }
 
+# role_files: the checksums of the role's files on the test host.
+role_files() {
+  h sha256sum "$key" "$vcl" /etc/systemd/system/varnish.service.d/noixdev.conf /etc/apt/sources.list.d/varnish.sources \
+    /etc/apt/preferences.d/varnish /etc/apt/keyrings/varnish.asc /etc/apt/apt.conf.d/52noixdev-varnish
+}
+
 # Every refusal stops the run before any change, naming the field and the site
 # (invalid.yml asserts that, play by play).
 test_invalid() {
@@ -240,7 +247,7 @@ test_valid() {
 }
 
 test_install() {
-  local before after answer target
+  local before after answer target files pid
   echo "== install: Varnish Software's 9.1 on the loopback address, behind the front key (ubuntu $1)"
   use_host "$1" varnish
   start_backend
@@ -272,6 +279,22 @@ test_install() {
   run_ok install-again converge.yml -e "@$out/install-vars.json"
   unchanged install-again
   [ "$(h sha256sum "$key")" = "$before" ] || fail "install: the second run changed the front key"
+
+  echo "== install: a malformed key is refused before any change"
+  # A new cache size would change the drop-in (and restart Varnish): the
+  # refusal comes first, and the role's files and the running Varnish stay.
+  h cp -p "$key" /root/good-front.key
+  h sh -c "printf 'not-a-front-key\\n' >$key"
+  files="$(role_files)"
+  pid="$(h systemctl show -P MainPID varnish)"
+  run_fails install-bad-key "varnish: $key is not 64 hex digits; remove it, and the next run creates a new one" \
+    converge.yml -e "@$out/install-vars.json" -e varnish_memory=1g
+  unchanged_refused install-bad-key
+  [ "$(role_files)" = "$files" ] || fail "install: the refused run changed the role's files"
+  [ "$(h systemctl show -P MainPID varnish)" = "$pid" ] || fail "install: the refused run restarted Varnish"
+  h mv /root/good-front.key "$key"
+  run_ok install-good-key converge.yml -e "@$out/install-vars.json"
+  unchanged install-good-key
 
   echo "== install: a deleted key is created anew, and the old one is refused"
   h cp -p "$key" /root/old-front.key

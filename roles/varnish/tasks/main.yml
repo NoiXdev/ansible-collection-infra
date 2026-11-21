@@ -49,6 +49,31 @@
     - varnish_installed_varnish | length > 0
     - varnish_installed_series != varnish_version
 
+# A front key from an earlier run is checked before anything changes: the
+# VCL holds it as it is, so only 64 hex digits, as tasks/vcl.yml creates it.
+# Never shown. A missing key is created in tasks/vcl.yml.
+- name: Look for the front key
+  ansible.builtin.stat:
+    path: "{{ varnish_front_key_file }}"
+    get_checksum: false
+  register: varnish_front_key_stat
+
+- name: Read the front key
+  ansible.builtin.slurp:
+    src: "{{ varnish_front_key_file }}"
+  register: varnish_front_key_read
+  when: varnish_front_key_stat.stat.exists
+  no_log: true
+
+- name: Refuse a malformed front key
+  ansible.builtin.fail:
+    msg: >-
+      varnish: {{ varnish_front_key_file }} is not 64 hex digits; remove it, and the next run
+      creates a new one
+  when:
+    - varnish_front_key_stat.stat.exists
+    - varnish_front_key is not match('^[0-9a-f]{64}\Z')
+
 # A task that fails after an earlier one notified the restart or the reload:
 # that runs first, so Varnish does not stay on its old settings while the
 # next run, seeing no change, would leave it there.

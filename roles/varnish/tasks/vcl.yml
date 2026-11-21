@@ -14,19 +14,13 @@
     group: root
     mode: "0600"
 
+# A key from an earlier run was checked in tasks/main.yml; this one is the
+# file as the VCL gets it (a new key included).
 - name: Read the front key
   ansible.builtin.slurp:
     src: "{{ varnish_front_key_file }}"
   register: varnish_front_key_read
   no_log: true
-
-- name: Check the front key
-  ansible.builtin.assert:
-    that: varnish_front_key is match('^[0-9a-f]{64}\Z')
-    fail_msg: >-
-      varnish: {{ varnish_front_key_file }} is not 64 hex digits; remove it, and the next run
-      creates a new one
-    quiet: true
 
 # The VCL is compared first; a new one is written next to it, compiled, and
 # only then moved into place and loaded (Reload varnish). One that does not
