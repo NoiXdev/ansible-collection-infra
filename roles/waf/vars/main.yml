@@ -166,6 +166,10 @@ waf_reload_marker: "{{ waf_staged_dir }}/reload-pending"
 # health check server inside the container.
 waf_listen_port: 8080
 waf_health_port: 8932
+# The header of the 421 for a Host no site lists (the nginx role's
+# nginx_waf_unknown_header): only the WAF sets it.
+waf_unknown_header: X-Noix-Waf
+waf_unknown_value: unknown-site
 # Where the sites are served: on every address of the container in traefik
 # mode (its own network), on the host's loopback only in host mode.
 waf_listen: "{{ ('127.0.0.1:' ~ waf_host_port) if waf_mode == 'host' else waf_listen_port }}"

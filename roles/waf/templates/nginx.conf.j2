@@ -92,10 +92,12 @@ http {
   }
 {% endfor %}
 
-  # A Host no site lists.
+  # A Host no site lists. The header tells this 421 from a backend's (the
+  # nginx role's probe in host mode refuses a site only on this one).
   server {
     listen {{ waf_listen }} default_server;
     modsecurity off;
+    add_header {{ waf_unknown_header }} {{ waf_unknown_value }} always;
     return 421;
   }
 
