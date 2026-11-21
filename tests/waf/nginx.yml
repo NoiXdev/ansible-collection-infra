@@ -5,8 +5,10 @@
 # recorder on 127.0.0.1:8940) go through the WAF, plain does not. secure and
 # proxied use a self-signed certificate (converge.yml creates it).
 waf_mode: host
-# run.sh removes WAF sites (-e '{"test_without": ["app"]}').
+# run.sh removes WAF sites (-e '{"test_without": ["app"]}') and nginx sites
+# (-e '{"test_nginx_without": ["proxied"]}').
 test_without: []
+test_nginx_without: []
 waf_sites: "{{ test_waf_sites | rejectattr('name', 'in', test_without) | list }}"
 test_waf_sites:
   - name: app
@@ -37,7 +39,8 @@ test_nginx_plain:
   user: app_plain
   root: /srv/plain
   tls: "off"
-nginx_sites:
+nginx_sites: "{{ test_nginx_sites | rejectattr('name', 'in', test_nginx_without) | list }}"
+test_nginx_sites:
   - name: app
     domains: [app.test]
     user: app_waf

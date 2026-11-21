@@ -710,8 +710,20 @@ host_nginx() {
   [ -z "$(h ss -Hltn 'sport = :80')" ] || fail "port 80 is taken before nginx: $(h ss -Hltn 'sport = :80')"
   h ip addr replace "$client/32" dev lo
   start_recorder proxied 8940 200 "$proxied_headers"
+  # app and secure first; proxied joins the running setup, where the WAF
+  # sends its probe to the inner listener before proxied has a block there.
+  converge "${nginx_args[@]}" -e '{"test_without": ["proxied"], "test_nginx_without": ["proxied"]}'
+  site_expect 200 app.test /
   converge "${nginx_args[@]}"
   converge_unchanged "${nginx_args[@]}"
+  # The probe (/.noix-front-probe) is answered on the inner side: it reaches
+  # no app, and no rule of the WAF matches it (the first run's probe, before
+  # the inner listener exists, is logged with its 502 and the site rule
+  # 9599906 alone).
+  if php_log | grep -qF noix-front-probe; then fail "the WAF probe reached PHP"; fi
+  got="$(audit | grep -F noix-front-probe | grep -o '"ruleId":"[0-9]*"' | grep -v '"9599906"' || true)"
+  [ -z "$got" ] || { audit >&2; fail "a WAF rule matched its probe: $got"; }
+  if audit | grep -F noix-front-probe | grep -qF '"http_code":403'; then audit >&2; fail "the WAF refused its probe"; fi
 
   echo "-- app: PHP behind the WAF sees the client, not the loopback, and an attack never reaches it"
   got="$(site app.test / -H 'X-Forwarded-For: 203.0.113.9')"
@@ -723,6 +735,11 @@ host_nginx() {
   php_log | grep -qF 'noix-app /' || { php_log >&2; fail "the PHP log lacks app's requests"; }
   if php_log | grep -qF 'exec='; then php_log >&2; fail "an attack reached PHP"; fi
   reported app 932160 --since 10m
+
+  echo "-- a streamed answer passes the front hop unbuffered"
+  # The first line within 2 s, the second only after 4 s: curl stops at 2 s.
+  got="$(h curl -sN --max-time 2 --interface "$client" -H 'Host: app.test' http://127.0.0.1/stream || true)"
+  [ "$got" = first ] || fail "app's stream gave within 2 s: $got"
 
   echo "-- plain: served by nginx without the WAF, its config as before"
   before="$(audit_lines)"

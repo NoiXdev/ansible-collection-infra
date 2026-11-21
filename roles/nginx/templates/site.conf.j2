@@ -345,12 +345,15 @@ server {
 {% endif %}
 
     # The front hop ({{ site.front }}): every request the checks above let
-    # through, its body streamed. Its answers, the WAF's own 403 too, pass
+    # through, its body and answer streamed. Its answers, the WAF's own 403 too, pass
     # unchanged; while it does not answer, nginx answers 502.
     location / {
         proxy_pass {{ site.front }};
         proxy_http_version 1.1;
         proxy_request_buffering off;
+        # The inner block buffers unless the app says X-Accel-Buffering: no
+        # (which it keeps to itself): streamed answers stay streamed.
+        proxy_buffering off;
         proxy_set_header Host $host;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
@@ -388,6 +391,12 @@ server {
 {% if site.root is defined %}
     {{ root(site) | trim | indent(4) }}
 {% endif %}
+
+    # The nginx role's probe through the WAF (tasks/main.yml), never the
+    # app's.
+    location = {{ nginx_waf_probe_path }} {
+        return 204;
+    }
 
     {{ content(site, true) | trim | indent(4) }}
 }

@@ -211,6 +211,14 @@ nginx_anubis_url: "http://127.0.0.1:{{ nginx_anubis_port }}"
 # The sites the WAF inspects.
 nginx_waf_sites: "{{ nginx_sites_public | selectattr('waf', 'sameas', true) | list }}"
 nginx_waf_url: "http://127.0.0.1:{{ nginx_waf_port }}"
+# The probe of tasks/main.yml: a path every inner server block (and the
+# inner listener's default server) answers itself with 204, so it never
+# reaches an app; and the header of the WAF's own 421 for a Host no
+# waf_sites entry lists (the waf role's waf_unknown_header and
+# waf_unknown_value), which a backend's 421 does not carry.
+nginx_waf_probe_path: /.noix-front-probe
+nginx_waf_unknown_header: X-Noix-Waf
+nginx_waf_unknown_value: unknown-site
 
 # IPv6 listeners only where the host has IPv6 beyond link-local addresses:
 # Docker's bridge gets one when its first container starts (the error pages

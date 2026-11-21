@@ -79,13 +79,16 @@
     - nginx_anubis_sites | length > 0
     - nginx_anubis_probe.status | default(-1) | int <= 0
 
-# The WAF (the waf role in host mode) answers for a site it knows, and 421
-# for a Host no waf_sites entry lists. The probe reaches the site's inner
-# block through the WAF, or nothing there yet on a first run (502): either
-# answer will do. No redirect is followed (the site's own answer).
+# The WAF (the waf role in host mode) sends a request for a site it knows
+# to its backend, and answers a Host no waf_sites entry lists with 421 and
+# its header nginx_waf_unknown_header. The probe's path is answered with 204
+# on the inner listener (by the site's inner block, or by the listener's
+# default server while the site has none yet), never by an app; before the
+# first inner block exists nothing listens there (502). Only no answer, or
+# the WAF's own 421, refuses the site.
 - name: Ask the WAF
   ansible.builtin.uri:
-    url: "{{ nginx_waf_url }}/"
+    url: "{{ nginx_waf_url }}{{ nginx_waf_probe_path }}"
     headers:
       Host: "{{ item.domains[0] }}"
     follow_redirects: none
@@ -101,12 +104,16 @@
   ansible.builtin.fail:
     msg: "{{ nginx_waf_silent_msg if nginx_waf_silent | length > 0 else nginx_waf_unknown_msg }}"
   vars:
+    # uri returns each response header as a lower-case key with _ for -.
+    nginx_waf_marker: "{{ nginx_waf_unknown_header | lower | replace('-', '_') }}"
     nginx_waf_answers: "{{ nginx_waf_probe.results | map(attribute='status', default=-1) | map('int') | list }}"
+    nginx_waf_markers: "{{ nginx_waf_probe.results | map(attribute=nginx_waf_marker, default='') | list }}"
     nginx_waf_silent: >-
       {{ nginx_waf_sites | map(attribute='name') | zip(nginx_waf_answers)
          | selectattr(1, 'le', 0) | map(attribute=0) | list }}
     nginx_waf_unknown: >-
-      {{ nginx_waf_sites | zip(nginx_waf_answers) | selectattr(1, 'eq', 421) | map(attribute=0) | list }}
+      {{ nginx_waf_sites | zip(nginx_waf_answers, nginx_waf_markers) | selectattr(1, 'eq', 421)
+         | selectattr(2, 'eq', nginx_waf_unknown_value) | map(attribute=0) | list }}
     nginx_waf_silent_msg: >-
       nginx: nginx_sites {{ 'entry' if nginx_waf_silent | length == 1 else 'entries' }}
       {{ nginx_waf_silent | join(', ') }} {{ 'sets' if nginx_waf_silent | length == 1 else 'set' }}

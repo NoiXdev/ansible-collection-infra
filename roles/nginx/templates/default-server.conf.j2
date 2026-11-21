@@ -21,10 +21,16 @@ server {
 {% if nginx_waf_sites | length > 0 %}
 
 # The inner listener of the waf sites: a Host none of them lists (a waf_sites
-# entry no nginx site matches) gets no site's content.
+# entry no nginx site matches) gets no site's content. The role's probe
+# through the WAF gets its 204 here while its site has no inner block yet.
 server {
     listen 127.0.0.1:{{ nginx_inner_port }} default_server;
     server_name _;
-    return 421;
+    location = {{ nginx_waf_probe_path }} {
+        return 204;
+    }
+    location / {
+        return 421;
+    }
 }
 {% endif %}
