@@ -92,27 +92,10 @@
       {{ files }}
   when: nginx_sites_public | selectattr('basic_auth_on') | list | length > 0
 
-# Varnish's front key for the varnish sites: read from the varnish role's
-# file, and written into a root-only include (nginx's master reads it as
-# root) before the site configs that include it; it leaves after the last
-# varnish site's config stopped including it. Never shown: the read, the
-# check and the write log nothing of it.
-- name: Read Varnish's front key
-  ansible.builtin.slurp:
-    src: "{{ nginx_varnish_key_file }}"
-  register: nginx_varnish_key_read
-  when: nginx_varnish_sites | length > 0
-  no_log: true
-
-- name: Check Varnish's front key
-  ansible.builtin.fail:
-    msg: >-
-      nginx: the front key in {{ nginx_varnish_key_file }} is not 64 hexadecimal digits; delete
-      the file and run the varnish role, which creates a new one
-  when:
-    - nginx_varnish_sites | length > 0
-    - nginx_varnish_front_key is not match('^[0-9a-f]{64}$')
-
+# Varnish's front key for the varnish sites (read and checked in
+# tasks/main.yml): written into a root-only include (nginx's master reads it
+# as root) before the site configs that include it; it leaves after the last
+# varnish site's config stopped including it. The write logs nothing of it.
 - name: Write Varnish's front key for nginx
   ansible.builtin.include_tasks: apply.yml
   vars:

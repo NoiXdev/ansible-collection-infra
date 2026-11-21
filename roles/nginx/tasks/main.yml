@@ -169,6 +169,24 @@
     - nginx_varnish_sites | length > 0
     - nginx_varnish_missing | length > 0
 
+# The key goes into nginx's config as it is (tasks/sites.yml writes it):
+# only 64 hex digits, as the varnish role creates it. Never shown.
+- name: Read Varnish's front key
+  ansible.builtin.slurp:
+    src: "{{ nginx_varnish_key_file }}"
+  register: nginx_varnish_key_read
+  when: nginx_varnish_sites | length > 0
+  no_log: true
+
+- name: Refuse a front key that is not the varnish role's
+  ansible.builtin.fail:
+    msg: >-
+      nginx: the front key in {{ nginx_varnish_key_file }} is not 64 hexadecimal digits; delete
+      the file and run the varnish role, which creates a new one
+  when:
+    - nginx_varnish_sites | length > 0
+    - nginx_varnish_front_key is not match('^[0-9a-f]{64}$')
+
 # A task that fails after an earlier one notified the reload: the reload runs
 # first, so nginx does not stay on its old config while the next run, seeing
 # no change, would leave it there.
