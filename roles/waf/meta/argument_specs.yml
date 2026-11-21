@@ -85,6 +85,13 @@ argument_specs:
           The default number of request body bytes a site's requests are
           inspected up to (13107200). In mode block a larger body answers
           413; in mode detect it passes and is logged.
+      waf_arguments_limit:
+        type: int
+        description: >-
+          The number of arguments (query string and body) a request may have
+          (1000). ModSecurity inspects no argument past this many, so a
+          request with as many is refused (400) in mode block and logged in
+          mode detect.
       waf_rules_before:
         type: str
         description: Raw ModSecurity rules before the Core Rule Set; an Include is refused.

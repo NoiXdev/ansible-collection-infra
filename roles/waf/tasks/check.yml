@@ -14,6 +14,7 @@
       - waf_anomaly_inbound | string is match('^[1-9][0-9]*$')
       - waf_anomaly_outbound | string is match('^[1-9][0-9]*$')
       - waf_request_body_limit | string is match('^[1-9][0-9]*$')
+      - waf_arguments_limit | string is match('^[1-9][0-9]*$')
       - waf_cpus | string is match('^[0-9]+([.][0-9]+)?$') and waf_cpus | float > 0
       - waf_memory | string is match('^[1-9][0-9]*[bkmgBKMG]?$')
       - waf_workers | string is match('^[1-9][0-9]*$')
@@ -23,9 +24,9 @@
     fail_msg: >-
       waf: waf_mode must be traefik or host, waf_dir an absolute path without spaces, quotes or .
       and .. parts, waf_paranoia 1 to 4, waf_anomaly_inbound, waf_anomaly_outbound,
-      waf_request_body_limit, waf_workers and waf_health_timeout whole numbers above 0, waf_cpus
-      a number above 0 such as "1.0", waf_memory a size such as 256M, waf_host_port a port, and
-      waf_rules_before and waf_rules_after strings
+      waf_request_body_limit, waf_arguments_limit, waf_workers and waf_health_timeout whole
+      numbers above 0, waf_cpus a number above 0 such as "1.0", waf_memory a size such as 256M,
+      waf_host_port a port, and waf_rules_before and waf_rules_after strings
     quiet: true
 
 # A tag alone can be moved to other code; a digest alone tells the reader

@@ -49,6 +49,10 @@ waf_anomaly_outbound: 4
 # size limit: what a site accepts at all stays with the proxy in front and the
 # app.
 waf_request_body_limit: 13107200
+# How many arguments (query string and body together) a request may have.
+# ModSecurity inspects none past this many, so a request with as many is
+# refused (400) in mode block and logged in mode detect.
+waf_arguments_limit: 1000
 
 # Raw ModSecurity rules (SecLang) before and after the Core Rule Set, for
 # what the site settings cannot say. They cannot contain an Include: every

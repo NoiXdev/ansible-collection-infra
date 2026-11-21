@@ -247,6 +247,21 @@ direct() {
   shift 2
   h docker exec "$waf" curl -s -o /dev/null -w '%{http_code}' --max-time 30 -H "Host: $host_header" "$@" "$waf_url$path" || true
 }
+# padded <args...>: the query string of a thousand empty arguments
+# (SecArgumentsLimit), then the given ones (a=b&c=d).
+padded() {
+  local i query=
+  for i in $(seq 0 999); do query="${query}a$i=&"; done
+  printf '%s%s' "$query" "$1"
+}
+# multipart <name> <body>: a multipart/form-data POST (boundary NOIX) of the
+# printf-escaped body from inside the test host to block.test; prints the
+# status.
+multipart() {
+  # shellcheck disable=SC2059
+  printf -- "$2" | hi curl -s -o /dev/null -w '%{http_code}' --max-time 30 -H 'Host: block.test' -H 'Expect:' \
+    -H 'Content-Type: multipart/form-data; boundary=NOIX' --data-binary @- "http://127.0.0.1/$1" || true
+}
 # audit: the WAF's stdout (its audit log, one JSON line per event).
 audit() { h docker logs "$waf" 2>/dev/null; }
 audit_lines() { audit | wc -l | tr -d ' '; }
@@ -358,6 +373,31 @@ test_traefik() {
     || fail "a direct attack was not refused"
   if audit | grep -qF 203.0.113.9; then fail "the WAF believed a client's X-Forwarded-For"; fi
 
+  echo "-- an attack after a thousand arguments, malformed multipart bodies"
+  # ModSecurity inspects no argument past SecArgumentsLimit (1000): so many
+  # are refused, in the query string and in a form body.
+  expect 400 block.test "/padded?$(padded exec=/bin/bash)"
+  expect 400 block.test /padded-form -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
+    --data-binary "$(padded exec=/bin/bash)"
+  [ "$(multipart multipart-ok '--NOIX\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--NOIX--\r\n')" = 200 ] \
+    || fail "a well-formed multipart body was refused"
+  # Data before the first boundary, LF line ends, a part after the final
+  # boundary: refused (strict multipart), as an unclosed quote is.
+  for body in 'x\r\n--NOIX\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--NOIX--\r\n' \
+    '--NOIX\nContent-Disposition: form-data; name="a"\n\nb\n--NOIX--\n' \
+    '--NOIX\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--NOIX--\r\n--NOIX\r\nContent-Disposition: form-data; name="exec"\r\n\r\n/bin/bash\r\n--NOIX--\r\n' \
+    '--NOIX\r\nContent-Disposition: form-data; name="a\r\n\r\nb\r\n--NOIX--\r\n'; do
+    [ "$(multipart multipart-bad "$body")" = 400 ] || fail "a malformed multipart body was not refused: $body"
+  done
+  if recorded | grep -Eq '/padded|multipart-bad'; then
+    recorded >&2
+    fail "a padded request or a malformed multipart body reached the backend"
+  fi
+  recorded | grep -qF 'POST /multipart-ok HTTP/1.1' || fail "the well-formed multipart body did not arrive"
+  for id in 9599907 9599908; do
+    audit | grep -qF "\"$id\"" || { audit >&2; fail "the audit log lacks rule $id"; }
+  done
+
   echo "-- inspected bodies reach the backend whole: small, 3 MiB, chunked"
   # Below the inspection limit, in a type the Core Rule Set allows at
   # paranoia 1; no Expect header (CRS refuses it, 920450).
@@ -407,6 +447,8 @@ test_traefik() {
   expect 200 detect.test / -A Nikto
   expect 200 detect.test '/?file=../../etc/passwd'
   [ "$(audit_lines)" -ge $((before + 3)) ] || { audit >&2; fail "detect.test's attacks were not logged"; }
+  expect 200 detect.test "/padded?$(padded exec=/bin/bash)"
+  audit | grep -F '"/padded?' | grep -qF '"9599907"' || { audit >&2; fail "detect.test's padded request was not logged"; }
 
   echo "-- a registry: an uninspected upload path, the rest inspected"
   h sh -c 'head -c 20971520 /dev/zero >/tmp/blob'
