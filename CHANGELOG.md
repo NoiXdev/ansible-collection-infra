@@ -221,27 +221,30 @@
   a response the app makes cacheable (`max-age`, `s-maxage` or `Expires`, without `private`,
   `no-cache` or `no-store`) is stored, for the app's TTL; a page without such headers is not
   cached unless the site sets `microcache` (1 to 300 seconds, for anonymous `GET`/`HEAD` with a
-  200, 301 or 404, never with `shopware`). Responses with `Set-Cookie`, 5xx and `Vary: *` are
-  never stored. Requests with a cookie left after removing the tracking and Anubis cookies of
-  `varnish_strip_cookies` and the site's `strip_cookies` (no consent cookies by default), or with
-  `Authorization`, pass; tracking query parameters are removed from the URL. The `shopware`
-  profile follows Shopware 6.7's own Varnish rules (variants by its context hash or currency,
-  logged-in and cart states, xkey tags, ESI); `typo3` passes TYPO3's session cookies and takes the
-  `X-Cache-Tags` of the response. Stale pages are served for 30 s while the app is healthy and up
-  to 6 h while the site's health probe says sick (`varnish_grace_healthy`, `varnish_grace_sick`);
-  microcached pages get no stale time. Only requests from nginx, which carry a per-host key
-  (`/etc/varnish/noixdev-front.key`, root 0600, created once), are answered; anything else on the
-  port gets 403, except one internal check of the `nginx` role, which Varnish answers itself.
-  WebSocket upgrades from nginx go straight through to the app, uncached. PURGE (a URL, or xkey
-  tags) and BAN (a URL regex, or an `X-Cache-Tags` regex) go straight to the port from the host,
-  with Basic auth of the site's name and token or the headers `X-Noix-Site` and `X-Purge-Token`,
-  and act on that site's objects only: 401 for missing or wrong credentials and for a site that is
-  not listed, 400 for invalid input, 403 for a request that came through nginx or the WAF. A new
-  cache config is compiled before it is loaded (the cache is kept), and one that does not compile
-  fails the run before the running one is touched; listener or storage changes restart Varnish
-  (the cache is lost). Refused before any change: another release, an installed varnish that is
-  Ubuntu's or of another series, and invalid settings or site entries (each message names the
-  entry). The test suite `varnish` runs once per release in `VARNISH_UBUNTU`.
+  200, 301 or 404 without `Surrogate-Control: no-store`, never with `shopware`). Responses with
+  `Set-Cookie`, 5xx and `Vary: *` are never stored. Requests with a cookie left after removing the
+  tracking and Anubis cookies of `varnish_strip_cookies` and the site's `strip_cookies` (no consent
+  cookies by default), or with `Authorization`, pass; tracking query parameters are removed from
+  the URL. The app never gets the removed cookies and parameters, on cached pages or not: the
+  parameters on every request through Varnish, the cookies on a `generic` site's `POST`s too. The
+  `shopware` profile follows Shopware 6.7's own Varnish rules (variants by its context hash or
+  currency, logged-in and cart states, xkey tags, ESI); `typo3` passes TYPO3's session cookies and
+  takes the `X-Cache-Tags` of the response. Stale pages are served for 30 s while the app is
+  healthy and up to 6 h while the site's health probe says sick (`varnish_grace_healthy`,
+  `varnish_grace_sick`); microcached pages get no stale time. Only requests from nginx, which carry
+  a per-host key (`/etc/varnish/noixdev-front.key`, root 0600, created once), are answered;
+  anything else on the port gets 403, except one internal check of the `nginx` role, which Varnish
+  answers itself. WebSocket upgrades from nginx go straight through to the app, uncached. PURGE (a
+  URL, or xkey tags) and BAN (a URL regex, or an `X-Cache-Tags` regex) go straight to the port from
+  the host, with Basic auth of the site's name and token or the headers `X-Noix-Site` and
+  `X-Purge-Token`, and act on that site's objects only: 401 for missing or wrong credentials and
+  for a site that is not listed, 400 for invalid input, 403 for a request that came through nginx
+  or the WAF. A new cache config is compiled before it is loaded (the cache is kept), and one that
+  does not compile fails the run before the running one is touched; listener or storage changes
+  restart Varnish (the cache is lost). Refused before any change: another release, an installed
+  varnish that is Ubuntu's or of another series, a front key that is not 64 hex digits, and invalid
+  settings or site entries (each message names the entry). The test suite `varnish` runs once per
+  release in `VARNISH_UBUNTU`.
 - `nginx`: a site with `varnish: true` (default `false`) is served through the `varnish` role on
   `127.0.0.1:nginx_varnish_port` (default 6081, keep it equal to `varnish_port`); run `php`, then
   `varnish`, then `nginx` (with the WAF: `php`, `varnish`, `waf`, `nginx`). The site's access log
@@ -250,7 +253,10 @@
   site without the WAF is served from nginx uncached (with the WAF, point its `backend` at Varnish
   and its `backend_fallback` at `http://127.0.0.1:8931`); PURGE and BAN through nginx answer 405.
   The front key never reaches the app on the paths around Varnish, except in an `inner_extra`
-  location with its own `proxy_set_header` or `fastcgi_param`, which clears `X-Noix-Front` itself.
+  location with its own `proxy_set_header` or `fastcgi_param`, which must clear `X-Noix-Front`
+  itself: an app that gets the key can fill the cache of every other site on the host. An
+  `inner_extra` location without its own gets none of the `proxy_set_header` or `fastcgi_param`
+  lines of `nginx_http_extra`, as the inner block sets its own.
   nginx waits `nginx_varnish_read_timeout` seconds (default 90; keep it above Varnish's backend
   timeouts) for Varnish, so a slow page gets Varnish's answer and reaches the app once. After a
   new front key, the cached sites answer 403 until the next nginx run. The run is refused before

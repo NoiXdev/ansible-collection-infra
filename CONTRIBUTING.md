@@ -46,7 +46,10 @@ inside, sends its attack payloads only to its own containers there, publishes no
 machine and checks Ubuntu 24.04 and 26.04 in one entry (`WAF_UBUNTU` for fewer,
 `NOIXDEV_INFRA_WAF_TESTS` picks scenarios). The
 `varnish` suite installs Varnish Software's packages from their repository (network access) and
-checks Ubuntu 24.04 and 26.04 in one entry (`VARNISH_UBUNTU` for fewer). The
+checks Ubuntu 24.04 and 26.04 in one entry (`VARNISH_UBUNTU` for fewer): the cache scenarios put
+a small backend behind Varnish, the `nginx` and `waf` scenarios run the php, varnish, nginx and
+waf roles on one host with Docker inside (WebSocket upgrades, the path around a stopped Varnish,
+the nginx run's refusals). The
 `mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
 (`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `tandoor` about 2 GB and `n8n` about 3 GB of images, `cloudpanel` runs CloudPanel's real installer.

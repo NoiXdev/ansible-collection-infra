@@ -169,7 +169,10 @@ argument_specs:
             clears X-Noix-Front (the front key, which arrives there while Varnish is skipped) for
             every location without its own proxy_set_header or fastcgi_param; an inner_extra
             location with its own sets proxy_set_header X-Noix-Front "" (or fastcgi_param
-            HTTP_X_NOIX_FRONT "") itself, or the key reaches its app.
+            HTTP_X_NOIX_FRONT "") itself, or the key reaches its app, which could then fill the
+            cache of every other site on the host. Because the inner block sets its own at server
+            level, an inner_extra location without its own proxy_set_header or fastcgi_param gets
+            none of those set at http level in nginx_http_extra.
       nginx_http_extra:
         type: str
         description: Raw config at http level.

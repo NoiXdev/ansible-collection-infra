@@ -80,8 +80,8 @@ argument_specs:
           - >-
             microcache, seconds from 0 to 300 (default 0) a 200, 301 or 404 that the app does not
             make cacheable (no max-age, s-maxage or Expires; private, no-cache, no-store) is kept,
-            never one with Set-Cookie; not with the profile shopware. Without microcache such a
-            page is not cached.
+            never one with Set-Cookie or Surrogate-Control no-store; not with the profile
+            shopware. Without microcache such a page is not cached.
           - >-
             health_path, empty (the default) or a path starting with / that Varnish probes for the
             backend's health; health_host (required with health_path), the lower-case host name
@@ -96,4 +96,5 @@ argument_specs:
         description: >-
           Cookie names (a trailing * means prefix) removed from requests of every site, so that
           analytics, tracking and Anubis's cookies do not make a page uncacheable. No consent
-          cookies.
+          cookies. The app never gets a removed cookie, on cached pages or not (a generic site's
+          POSTs too): an app that reads one on the server keeps it out of this list.

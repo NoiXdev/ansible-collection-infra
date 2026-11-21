@@ -81,11 +81,12 @@
 
 # The WAF (the waf role in host mode) sends a request for a site it knows
 # to its backend, and answers a Host no waf_sites entry lists with 421 and
-# its header nginx_waf_unknown_header. The probe's path is answered with 204
-# on the inner listener (by the site's inner block, or by the listener's
-# default server while the site has none yet), never by an app; before the
-# first inner block exists nothing listens there (502). Only no answer, or
-# the WAF's own 421, refuses the site.
+# its header nginx_waf_unknown_header. The probe's path is answered with 204,
+# never by an app: for a site with waf and varnish by Varnish itself (the
+# WAF's backend), otherwise on the inner listener (by the site's inner block,
+# or by the listener's default server while the site has none yet); before
+# the first inner block exists nothing listens there (502). Only no answer,
+# or the WAF's own 421, refuses the site.
 - name: Ask the WAF
   ansible.builtin.uri:
     url: "{{ nginx_waf_url }}{{ nginx_waf_probe_path }}"

@@ -57,7 +57,8 @@ varnish_between_bytes_timeout: 60
 #                                      # or 404 the app does not make cacheable (no
 #                                      # max-age, s-maxage or Expires; private, no-cache,
 #                                      # no-store) is kept that long, never one with
-#                                      # Set-Cookie. Without it such a page is not cached.
+#                                      # Set-Cookie or Surrogate-Control: no-store.
+#                                      # Without it such a page is not cached.
 #     health_path: ""                  # e.g. /health; probed every 5 s (200 = healthy, sick
 #                                      # after 3 failures of 5); while sick, stale pages
 #                                      # are served for varnish_grace_sick
@@ -89,7 +90,10 @@ varnish_sites: []
 # request in nginx already). A request with any other cookie left passes
 # (generic, typo3). No consent cookies: stripping one is right only for an
 # app that reads consent in the browser, so a site that knows adds its own
-# to strip_cookies.
+# to strip_cookies. The app never gets a removed cookie, on cached pages or
+# not (a generic site's POSTs too): an app that reads one on the server
+# (attribution) needs it kept out of these lists. The tracking parameters
+# (vars/main.yml) are removed from every request through Varnish.
 varnish_strip_cookies:
   - _ga
   - _ga_*

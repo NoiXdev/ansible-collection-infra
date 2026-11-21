@@ -47,7 +47,13 @@ nginx_apt_key_fingerprint: 8540A6F18833A80E9C1653A42FD21310B49F6B46
 #                                      # with its own proxy_set_header or
 #                                      # fastcgi_param sets X-Noix-Front ""
 #                                      # (HTTP_X_NOIX_FRONT "") itself, or the
-#                                      # front key reaches its app
+#                                      # front key reaches its app, which
+#                                      # could then fill the cache of every
+#                                      # other site on the host; a location
+#                                      # here without its own gets none of the
+#                                      # proxy_set_header or fastcgi_param of
+#                                      # nginx_http_extra (the inner block
+#                                      # sets its own at server level)
 nginx_sites: []
 
 # Raw config at http level.
