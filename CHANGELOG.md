@@ -153,38 +153,45 @@
   restores the backup for one run (refused when there is no such update) or the marker is
   removed. A downgrade is refused, and a failed install leaves `install-incomplete`, which makes
   every later run refuse.
-- `waf`: new role, a web application firewall in front of web apps. One container
-  (`noixdev-waf`, compose project `waf` in `waf_dir`) knows each site of `waf_sites` by its
-  `domains` and forwards its requests to the site's `backend` after the checks. Two modes, one per
-  host: `waf_mode: traefik` (the default) joins Traefik's network at the fixed address
+- `waf`: new role, a web application firewall in front of web apps. One container (`noixdev-waf`,
+  compose project `waf` in `waf_dir`) knows each site of `waf_sites` by its `domains` and forwards
+  its requests to the site's `backend` after the checks. Two modes, one per host:
+  `waf_mode: traefik` (the default) joins Traefik's network at the fixed address
   `waf_traefik_address` (`172.31.255.253`), publishes no port and writes the service `waf` and a
   router `waf-<site>-<n>` per entry of a site's `routers` (priority 1000 by default, its
   `middlewares` such as `anubis@file` run before the WAF) to `waf.yml` in Traefik's file provider
   directory; a router of your own can use the service `waf@file` instead. `waf_mode: host` listens
   on `127.0.0.1:waf_host_port` (8930) only, for the `nginx` role's sites with `waf: true`, with
-  nginx's inner listener `127.0.0.1:8931` as the default backend and an optional
-  `backend_fallback` (another loopback URL, used only while the backend refuses or times out).
-  Per site: `mode` (`detect`, the default, logs only; `block` answers 403 over the anomaly
-  threshold; `off` forwards without inspection), `paranoia` and `detection_paranoia` (1 to 4,
-  default `waf_paranoia` 1), `anomaly_inbound` and `anomaly_outbound` (5 and 4),
-  `allowed_methods` and `allowed_content_types` (added to the defaults), `request_body_limit`
-  (`waf_request_body_limit`, 12.5 MiB: in `block` a larger body answers 413, in `detect` a body
-  whose length is over it is logged), `bypass_paths` (path prefixes without inspection) and
-  `exclusions` (`remove_tags`, `remove_ids` and `remove_targets` for a path prefix, `/` for the
-  whole site). Paths are matched on the normalized path, so `/v2/../admin` never gets the bypass
-  of `/v2/`. Raw rules go into `waf_rules_before` and `waf_rules_after`. The log (`docker logs
-  noixdev-waf`) has one JSON line per event with the client address, the request line, the status
-  and the matched rules, never request headers or bodies; headers and cookies whose names mark
-  credentials (such as `Authorization`, `Cookie`, API keys and session cookies) are not inspected,
-  so no rule copies them into the log. `noix-waf-report [--since 24h] [site]` lists per site the
-  matched rules with count, message and example requests, to see whether a site in `detect` is
-  clean before it switches to `block`. Every setting is checked before any change, and each
-  refusal names the variable and the site; new settings are tested in a throwaway container
-  before they replace the running ones, and a failed test leaves the running WAF as it was. While the WAF is down its sites answer 504 behind Traefik and 502 on the host's nginx,
-  never the backend; the next run starts it again. Response bodies are not inspected, and there
-  is no entrypoint-wide mode. Needs Docker. Covered by the new test suite `waf` (Ubuntu 24.04 and
-  26.04). The `traefik` role is unchanged: without the `waf` role, Traefik's files stay as they
-  were.
+  nginx's inner listener `127.0.0.1:8931` as the default backend and an optional `backend_fallback`
+  (another loopback URL, used only while the backend refuses or times out). Per site: `mode`
+  (`detect`, the default, logs only; `block` answers 403 over the anomaly threshold; `off` forwards
+  without inspection), `paranoia` and `detection_paranoia` (1 to 4, default `waf_paranoia` 1),
+  `anomaly_inbound` and `anomaly_outbound` (5 and 4), `allowed_methods` and `allowed_content_types`
+  (added to the defaults), `request_body_limit` (`waf_request_body_limit`, 12.5 MiB: in `block` a
+  larger body answers 413; in `detect` a body whose length is over it, and a chunked body, passes
+  without inspection, logged, since the engine would read it whole into memory; bodies are spooled
+  to `waf_dir/spool` on disk), `bypass_paths` (path prefixes without inspection) and `exclusions`
+  (`remove_tags`, `remove_ids` and `remove_targets` for a path prefix, `/` for the whole site).
+  Paths are matched on the normalized path, so `/v2/../admin` never gets the bypass of `/v2/`, and
+  a bypass or exclusion answers 400 to a raw path that does not itself start with its prefix
+  (`/a/%2e%2e/v2/x`) or has a `..` segment. A request with `waf_arguments_limit` (1000) arguments
+  or more, a multipart body that fails strict parsing and an internal error of the engine are
+  refused (logged in `detect`). A site's settings follow its `Host` like nginx's server block does,
+  with any port or a trailing dot. Raw rules go into `waf_rules_before` and `waf_rules_after` (rule
+  IDs 9500000-9599999 are the role's). The log (`docker logs noixdev-waf`) has one JSON line per
+  event with the client address, the request line, the status and the matched rules, never request
+  headers or bodies; headers and cookies whose names mark credentials (such as `Authorization`,
+  `Cookie`, API keys and session cookies) are not inspected, so no rule copies them into the log.
+  `noix-waf-report [--since 24h] [site]` lists per site the matched rules with count, message and
+  example requests, to see whether a site in `detect` is clean before it switches to `block`. Every
+  setting is checked before any change, and each refusal names the variable and the site; new
+  settings are tested in a throwaway container before they replace the running ones, and a failed
+  test leaves the running WAF as it was. Each run reports the rule set's and the engine's versions
+  in `waf_image`, and `--check` shows a change without making it. While the WAF is down its sites
+  answer 504 behind Traefik and 502 on the host's nginx, never the backend; the next run starts it
+  again. Response bodies are not inspected, and there is no entrypoint-wide mode. Needs Docker.
+  Covered by the new test suite `waf` (Ubuntu 24.04 and 26.04). The `traefik` role is unchanged:
+  without the `waf` role, Traefik's files stay as they were.
 - `nginx`: a site with `waf: true` (default `false`) is inspected by the `waf` role in host mode
   on the same host (`nginx_waf_port`, default 8930, the `waf` role's `waf_host_port`). Its public
   server block keeps TLS, the rate limit, Basic auth, the hardening, the headers, Anubis and the

@@ -39,14 +39,15 @@
       owasp/modsecurity-crs:<tag>@sha256:<64 hex digits>
     quiet: true
 
-# Every file the WAF reads comes from the role (and is tried in the check
-# container first).
+# The configuration stays in the role's files (tried in the check container
+# first): no Include. Operators that read a file or a URL are the rules' own
+# business.
 - name: Check the raw rules
   ansible.builtin.assert:
     that: lookup('vars', item) is not search(waf_include_re, ignorecase=true)
     fail_msg: >-
-      waf: {{ item }} contains an Include; the WAF reads only the role's files, so put the rules
-      themselves there
+      waf: {{ item }} contains an Include; the WAF's configuration is the role's files, so put
+      the rules themselves there
     quiet: true
   loop: [waf_rules_before, waf_rules_after]
 
