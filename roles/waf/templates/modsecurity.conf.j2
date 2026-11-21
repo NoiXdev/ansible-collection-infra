@@ -88,8 +88,9 @@ SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * 
 # A body over the site's inspection limit, as an event of its own: mode
 # block answers 413 to it, so noix-waf-report shows which detect sites would.
 # On a detect site such a body, and a chunked one, then passes without
-# ModSecurity's body checks (nginx.conf: ModSecurity would read it whole
-# into memory), after these phase 1 rules logged it.
+# ModSecurity's phase 2 (nginx.conf: ModSecurity would read it whole into
+# memory), after these phase 1 rules logged it: the rule set's URI,
+# argument and body rules do not run for it.
 SecRule TX:noix_waf_body_limit "@gt 0" "id:9599903,phase:1,pass,t:none,log,severity:'NOTICE',msg:'Request body over the inspection limit, not inspected (mode block answers 413)',logdata:'Content-Length %{MATCHED_VAR}, limit %{tx.noix_waf_body_limit}',tag:'noix-waf/body-limit',chain"
   SecRule REQUEST_HEADERS:Content-Length "@gt %{tx.noix_waf_body_limit}" "t:none"
 SecRule TX:noix_waf_mode "@streq detect" "id:9599911,phase:1,pass,t:none,log,severity:'NOTICE',msg:'Chunked request body, not inspected in mode detect (mode block inspects it)',tag:'noix-waf/chunked',chain"

@@ -41,9 +41,10 @@
 {#- On a detect site, the request bodies ModSecurity does not get: it reads
     a body whole into memory, so one larger than the site's inspection limit
     (by its Content-Length) and a chunked one (of a length nginx cannot know
-    first) go to @waf_uninspected. ModSecurity has seen the request line and
-    headers by then and logs such a body (role rules 9599903 and 9599911).
-    Mode block answers 413 to a body over the limit instead
+    first) go to @waf_uninspected. Only the phase 1 rules have run by then
+    (the rule set's URI and argument rules are phase 2, so they do not run
+    at all); they log such a body (role rules 9599903 and 9599911). Mode
+    block answers 413 to a body over the limit instead
     (client_max_body_size). -#}
 {%- macro uninspected_checks(site, indent) -%}
 {{ indent }}if ($http_transfer_encoding) {
