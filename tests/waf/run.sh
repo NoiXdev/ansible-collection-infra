@@ -532,7 +532,8 @@ test_traefik() {
   expect 403 hooks.test '/a?exec=/bin/bash'
   expect 403 hooks.test '/webhook/../a?exec=/bin/bash' --path-as-is
   [ "$(direct hooks.test '/webhook/../a?exec=/bin/bash' --path-as-is)" = 403 ] || fail "/webhook/../ carried the exclusion"
-  [ "$(direct hooks.test '/a/%2e%2e/webhook/a?exec=/bin/bash')" = 400 ] || fail "/a/%2e%2e/webhook/ got the exclusion"
+  # --path-as-is: curl itself resolves %2e%2e otherwise and sends /webhook/a.
+  [ "$(direct hooks.test '/a/%2e%2e/webhook/a?exec=/bin/bash' --path-as-is)" = 400 ] || fail "/a/%2e%2e/webhook/ got the exclusion"
 
   echo "-- Anubis before the WAF"
   got="$(h curl -s --max-time 30 -H 'Host: guarded.test' -A "$browser" -w '\n%{http_code}' 'http://127.0.0.1/?exec=/bin/bash' || true)"
@@ -1011,7 +1012,7 @@ test_host() {
   echo "-- a bypass gets only raw paths under its prefix"
   expect 200 static.test ':8930/v2/x?exec=/bin/bash'
   got_request inner '/v2/x?exec=/bin/bash'
-  expect 400 static.test ':8930/a/%2e%2e/v2/x?exec=/bin/bash'
+  expect 400 static.test ':8930/a/%2e%2e/v2/x?exec=/bin/bash' --path-as-is
   expect 400 static.test ':8930/a/../v2/x?exec=/bin/bash' --path-as-is
   no_request inner /a/
   stop_recorder inner 8931
