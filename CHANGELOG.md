@@ -231,17 +231,17 @@
   to 6 h while the site's health probe says sick (`varnish_grace_healthy`, `varnish_grace_sick`);
   microcached pages get no stale time. Only requests from nginx, which carry a per-host key
   (`/etc/varnish/noixdev-front.key`, root 0600, created once), are answered; anything else on the
-  port gets 403, except `GET`/`HEAD` of `/.noix-front-probe` (the nginx role's check through the
-  WAF), which Varnish answers itself with 204. PURGE (a URL, or xkey tags) and BAN (a URL regex,
-  or an `X-Cache-Tags` regex) go straight to the port from the host, with Basic auth of the site's
-  name and token or the headers `X-Noix-Site` and `X-Purge-Token`, and act on that site's objects
-  only: 401 for missing or wrong credentials and for a site that is not listed, 400 for invalid
-  input, 403 with nginx's front key. A new cache config is compiled before it is loaded (the cache
-  is kept), and one that does not compile fails the run before the running one is touched;
-  listener or storage changes restart Varnish (the cache is lost). Refused before any change:
-  another release, an installed varnish that is Ubuntu's or of another series, and invalid
-  settings or site entries (each message names the entry). The test suite `varnish` runs once per
-  release in `VARNISH_UBUNTU`.
+  port gets 403, except one internal check of the `nginx` role, which Varnish answers itself.
+  WebSocket upgrades from nginx go straight through to the app, uncached. PURGE (a URL, or xkey
+  tags) and BAN (a URL regex, or an `X-Cache-Tags` regex) go straight to the port from the host,
+  with Basic auth of the site's name and token or the headers `X-Noix-Site` and `X-Purge-Token`,
+  and act on that site's objects only: 401 for missing or wrong credentials and for a site that is
+  not listed, 400 for invalid input, 403 for a request that came through nginx or the WAF. A new
+  cache config is compiled before it is loaded (the cache is kept), and one that does not compile
+  fails the run before the running one is touched; listener or storage changes restart Varnish
+  (the cache is lost). Refused before any change: another release, an installed varnish that is
+  Ubuntu's or of another series, and invalid settings or site entries (each message names the
+  entry). The test suite `varnish` runs once per release in `VARNISH_UBUNTU`.
 - `nginx`: a site with `varnish: true` (default `false`) is served through the `varnish` role on
   `127.0.0.1:nginx_varnish_port` (default 6081, keep it equal to `varnish_port`); run `php`, then
   `varnish`, then `nginx` (with the WAF: `php`, `varnish`, `waf`, `nginx`). The site's access log
@@ -249,10 +249,14 @@
   `-` when Varnish did not answer or the WAF refused the request). While Varnish is stopped, a
   site without the WAF is served from nginx uncached (with the WAF, point its `backend` at Varnish
   and its `backend_fallback` at `http://127.0.0.1:8931`); PURGE and BAN through nginx answer 405.
-  The front key never reaches the app, also on the paths around Varnish. After a new front key,
-  the cached sites answer 403 until the next nginx run. The run is refused before any change while
-  a site has `varnish: true` and nothing answers on that port or the front key is missing.
-  Existing sites, and hosts without `varnish: true`, are unchanged.
+  The front key never reaches the app on the paths around Varnish, except in an `inner_extra`
+  location with its own `proxy_set_header` or `fastcgi_param`, which clears `X-Noix-Front` itself.
+  nginx waits `nginx_varnish_read_timeout` seconds (default 90; keep it above Varnish's backend
+  timeouts) for Varnish, so a slow page gets Varnish's answer and reaches the app once. After a
+  new front key, the cached sites answer 403 until the next nginx run. The run is refused before
+  any change while a site has `varnish: true` and nothing answers on that port, or the front key
+  is missing or not the `varnish` role's. Existing sites, and hosts without `varnish: true`, are
+  unchanged.
 
 ## 0.6.0 — 2026-11-17
 

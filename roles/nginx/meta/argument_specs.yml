@@ -165,7 +165,11 @@ argument_specs:
             the WAF and Varnish (a location here is not inspected or cached).
           - >-
             inner_extra, raw config inside the site's inner server block, behind the WAF and
-            Varnish; only a site with waf or varnish has one (refused otherwise).
+            Varnish; only a site with waf or varnish has one (refused otherwise). The inner block
+            clears X-Noix-Front (the front key, which arrives there while Varnish is skipped) for
+            every location without its own proxy_set_header or fastcgi_param; an inner_extra
+            location with its own sets proxy_set_header X-Noix-Front "" (or fastcgi_param
+            HTTP_X_NOIX_FRONT "") itself, or the key reaches its app.
       nginx_http_extra:
         type: str
         description: Raw config at http level.
@@ -237,6 +241,13 @@ argument_specs:
           waf role's default backend in host mode, the varnish role's varnish_backend_port);
           8931 by default. Neither 80 nor 443, and not nginx_anubis_port or nginx_waf_port. A
           Host no such site lists answers 421 there.
+      nginx_varnish_read_timeout:
+        type: int
+        description: >-
+          Seconds nginx waits for Varnish's answer on the sites with varnish and no waf; 90 by
+          default. Keep it above the varnish role's varnish_connect_timeout plus
+          varnish_first_byte_timeout, so that Varnish answers a slow app itself (503, or a stale
+          page) and nginx never retries the request at the inner block.
       nginx_varnish_port:
         type: int
         description: >-

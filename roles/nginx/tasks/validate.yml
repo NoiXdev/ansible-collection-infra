@@ -22,11 +22,13 @@
       - nginx_inner_port | int >= 1 and nginx_inner_port | int <= 65535
       - nginx_varnish_port | string is match('^[0-9]+$')
       - nginx_varnish_port | int >= 1 and nginx_varnish_port | int <= 65535
+      - nginx_varnish_read_timeout | string is match('^[0-9]+$') and nginx_varnish_read_timeout | int > 0
     fail_msg: >-
       nginx: nginx_version must be a major.minor series such as "1.30", nginx_http_extra a
       string, nginx_acme_email empty or an address, nginx_acme_server an https URL,
       nginx_error_pages and nginx_user_includes true or false, nginx_include_user a user name,
-      nginx_anubis_port, nginx_waf_port, nginx_inner_port and nginx_varnish_port port numbers
+      nginx_anubis_port, nginx_waf_port, nginx_inner_port and nginx_varnish_port port numbers,
+      and nginx_varnish_read_timeout a positive number of seconds
     quiet: true
 
 # The paths go into the site configs and the export script as they are.
