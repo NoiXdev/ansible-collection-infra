@@ -360,6 +360,8 @@ test_traefik() {
   [ "$got" = '{"/tmp":"size=32m"} /opt/waf/spool true' ] || fail "the WAF's tmpfs and spool are: $got"
   got="$(h stat -c '%u:%g %a' /opt/waf/spool)"
   [ "$got" = '101:101 700' ] || fail "the spool directory is $got"
+  # The run reports the versions in the image.
+  expect_in_log converge 'has the Core Rule Set 4.25.2 and ModSecurity 3.0.17'
   for name in waf-block-1 waf-detect-1 waf-paused-1 'url: http://172.31.255.253:8080'; do
     h grep -qF -- "$name" /opt/traefik/dynamic/waf.yml || fail "waf.yml lacks $name"
   done

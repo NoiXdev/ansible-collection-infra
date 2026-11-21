@@ -234,6 +234,44 @@
     path: "{{ waf_reload_marker }}"
     state: absent
 
+# The image's own versions, for the run's output: what changes with
+# waf_image. Read-only (a throwaway container without a network, never a
+# pull), so it runs in check mode too.
+- name: Read the versions in the image
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --pull
+      - never
+      - --network
+      - none
+      - --read-only
+      - --cap-drop
+      - ALL
+      - --security-opt
+      - no-new-privileges:true
+      - --user
+      - "{{ waf_uid }}:{{ waf_uid }}"
+      - --entrypoint
+      - sh
+      - "{{ waf_image }}"
+      - -c
+      - "{{ waf_versions_script }}"
+  register: waf_versions
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Report the versions in the image
+  ansible.builtin.debug:
+    msg: >-
+      waf: {{ waf_image }} has the Core Rule Set
+      {{ waf_versions.stdout_lines | select('match', '^crs=') | map('regex_replace', '^crs=', '') | first | default('') or 'unknown' }}
+      and ModSecurity
+      {{ waf_versions.stdout_lines | select('match', '^modsecurity=') | map('regex_replace', '^modsecurity=', '') | first | default('') or 'unknown' }}
+
 # Only once the WAF serves the sites: a new router never points at a WAF
 # that does not know its site yet. The traefik role leaves files it did not
 # write alone.
