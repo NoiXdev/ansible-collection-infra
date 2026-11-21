@@ -548,6 +548,10 @@ test_traefik() {
   expect 200 block.test '/?q=a%27b%27c%28%29'
   expect 200 tuned.test /x -X PUT -d a=b
   expect 403 block.test /x -X PUT -d a=b
+  # allowed_content_types adds to the Core Rule Set's types.
+  expect 200 tuned.test /octet -X POST -H 'Content-Type: application/octet-stream' -H 'Expect:' --data-binary abc
+  expect 403 block.test /octet -X POST -H 'Content-Type: application/octet-stream' -H 'Expect:' --data-binary abc
+  expect 200 tuned.test /soap -X POST -H 'Content-Type: application/soap+xml' -H 'Expect:' --data-binary '<a>b</a>'
 
   echo "-- mode off: no inspection, nothing logged"
   before="$(audit_lines)"

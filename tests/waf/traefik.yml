@@ -78,6 +78,7 @@ test_sites:
     mode: block
     paranoia: 2
     allowed_methods: [PUT]
+    allowed_content_types: [application/octet-stream]
     routers:
       - entrypoints: [web]
   - name: paused
