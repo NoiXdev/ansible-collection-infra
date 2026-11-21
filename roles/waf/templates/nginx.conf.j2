@@ -13,6 +13,33 @@
 {%- for target in exclusion.remove_targets %}{% set _ = lines.append('SecRuleUpdateTargetById ' ~ target.id ~ ' "!' ~ target.target ~ '"') %}{% endfor -%}
 {{ lines | to_json }}
 {%- endmacro -%}
+{#- A regex for a Content-Length above limit (digits): more digits, or as
+    many and a higher one at the first place they differ; leading zeros
+    allowed. -#}
+{%- macro over_limit_re(limit) -%}
+{%- set n = limit | string -%}
+{%- set alternatives = ['[1-9][0-9]{' ~ n | length ~ ',}'] -%}
+{%- for i in range(n | length) if n[i] | int < 9 -%}
+{%- set rest = n | length - i - 1 -%}
+{%- set _ = alternatives.append(n[:i] ~ '[' ~ (n[i] | int + 1) ~ '-9]' ~ (('[0-9]{' ~ rest ~ '}') if rest > 0 else '')) -%}
+{%- endfor -%}
+^0*({{ alternatives | join('|') }})$
+{%- endmacro -%}
+{#- On a detect site, the request bodies ModSecurity does not get: it reads
+    a body whole into memory, so one larger than the site's inspection limit
+    (by its Content-Length) and a chunked one (of a length nginx cannot know
+    first) go to @waf_uninspected. ModSecurity has seen the request line and
+    headers by then and logs such a body (role rules 9599903 and 9599911).
+    Mode block answers 413 to a body over the limit instead
+    (client_max_body_size). -#}
+{%- macro uninspected_checks(site, indent) -%}
+{{ indent }}if ($http_transfer_encoding) {
+{{ indent }}  return 418;
+{{ indent }}}
+{{ indent }}if ($http_content_length ~ "{{ over_limit_re(site.request_body_limit) }}") {
+{{ indent }}  return 418;
+{{ indent }}}
+{%- endmacro -%}
 {#- host:port of a backend URL, the port from its scheme when it names none. -#}
 {%- macro address(url) -%}
 {{ url | regex_replace(waf_url_re, waf_url_host) }}:{{ url | regex_replace(waf_url_re, waf_url_port) or (443 if url is match('^https:') else 80) }}
@@ -38,8 +65,9 @@ http {
   # ModSecurity inspects up to the site's request_body_limit. Only a site in
   # mode block sets a limit (its server block).
   client_max_body_size 0;
-  # The root file system is read-only; /tmp is the container's tmpfs.
-  client_body_temp_path /tmp/client_body;
+  # The root file system is read-only. Request bodies are spooled to disk
+  # (waf_spool_dir); /tmp is the container's small tmpfs.
+  client_body_temp_path {{ waf_spool_mount }}/client_body;
   proxy_temp_path /tmp/proxy;
   fastcgi_temp_path /tmp/fastcgi;
   uwsgi_temp_path /tmp/uwsgi;
@@ -146,8 +174,20 @@ http {
               if site.request_body_limit | int != waf_request_body_limit | int else [])
            + (exclusion_rules(root_exclusion[0]) | from_json if root_exclusion | length > 0 else []), '    ') }}
 {% endif %}
+{% if site.mode == 'detect' %}
+    error_page 418 = @waf_uninspected;
+
+    # A body ModSecurity does not get: it passes without its checks.
+    location @waf_uninspected {
+      modsecurity off;
+      proxy_pass $waf_backend;
+    }
+{% endif %}
 
     location / {
+{% if site.mode == 'detect' %}
+{{ uninspected_checks(site, '      ') }}
+{% endif %}
       proxy_pass $waf_backend;
     }
 {% for path in site.bypass_paths %}
@@ -162,6 +202,9 @@ http {
 {% for exclusion in site.exclusions if exclusion.path != '/' %}
 
     location ^~ {{ exclusion.path }} {
+{% if site.mode == 'detect' %}
+{{ uninspected_checks(site, '      ') }}
+{% endif %}
 {{ rules(exclusion_rules(exclusion) | from_json, '      ') }}
       proxy_pass $waf_backend;
     }

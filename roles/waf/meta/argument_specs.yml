@@ -84,7 +84,7 @@ argument_specs:
         description: >-
           The default number of request body bytes a site's requests are
           inspected up to (13107200). In mode block a larger body answers
-          413; in mode detect it passes and is logged.
+          413; in mode detect it passes without inspection and is logged.
       waf_arguments_limit:
         type: int
         description: >-

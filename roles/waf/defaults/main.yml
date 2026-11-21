@@ -45,9 +45,10 @@ waf_anomaly_inbound: 5
 waf_anomaly_outbound: 4
 # How many bytes of a request body ModSecurity inspects (its recommended
 # 12.5 MiB). In mode block a larger body answers 413, so nothing passes
-# uninspected; in mode detect it passes and is logged. The WAF itself sets no
-# size limit: what a site accepts at all stays with the proxy in front and the
-# app.
+# uninspected; in mode detect it passes without inspection and is logged (as
+# does a chunked body there: ModSecurity would read it whole into memory).
+# The WAF itself sets no size limit: what a site accepts at all stays with the
+# proxy in front and the app.
 waf_request_body_limit: 13107200
 # How many arguments (query string and body together) a request may have.
 # ModSecurity inspects none past this many, so a request with as many is

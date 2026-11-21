@@ -157,6 +157,13 @@ waf_uid: 101
 waf_staged_dir: "{{ waf_dir }}/staged"
 waf_files: [nginx.conf, modsecurity.conf, compose.yaml]
 waf_conf_dir: /etc/nginx
+# Request bodies nginx holds while ModSecurity inspects them (and
+# ModSecurity's own temporary files) go to disk, not to the container's
+# memory: waf_spool_dir, the image's /var/cache/nginx in the container, the
+# only writable place besides the small /tmp (waf_tmp_size).
+waf_spool_dir: "{{ waf_dir }}/spool"
+waf_spool_mount: /var/cache/nginx
+waf_tmp_size: 32m
 waf_module: /usr/lib/nginx/modules/ngx_http_modsecurity_module.so
 waf_crs_dir: /etc/modsecurity.d/owasp-crs
 waf_unicode_map: /etc/modsecurity.d/unicode.mapping

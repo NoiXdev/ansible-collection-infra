@@ -86,3 +86,10 @@ test_sites:
     mode: "off"
     routers:
       - entrypoints: [web]
+  # A detect site in front of the recorder, for uploads larger than the
+  # WAF's memory limit.
+  - name: bulk
+    domains: [bulk.test]
+    backend: http://recorder:8000
+    routers:
+      - entrypoints: [web]

@@ -20,6 +20,15 @@
     group: root
     mode: "0755"
 
+# The WAF's user writes request bodies there; nobody else reads them.
+- name: Create the spool directory
+  ansible.builtin.file:
+    path: "{{ waf_spool_dir }}"
+    state: directory
+    owner: "{{ waf_uid }}"
+    group: "{{ waf_uid }}"
+    mode: "0700"
+
 # A checksum of both nginx files (nginx.conf without the id itself), which
 # the health check server answers: after a reload the role waits until
 # nginx serves it.
@@ -83,7 +92,9 @@
           - none
           - --read-only
           - --tmpfs
-          - /tmp
+          - "/tmp:size={{ waf_tmp_size }}"
+          - --tmpfs
+          - "{{ waf_spool_mount }}:uid={{ waf_uid }},gid={{ waf_uid }},mode=0700"
           - --cap-drop
           - ALL
           - --security-opt

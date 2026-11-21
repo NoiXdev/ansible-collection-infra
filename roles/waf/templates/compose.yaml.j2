@@ -15,12 +15,16 @@ services:
     user: "{{ waf_uid }}:{{ waf_uid }}"
     # waf_dir as nginx's configuration directory, read-only: nginx.conf and
     # modsecurity.conf (a directory, so a reload reads files the role
-    # replaced).
+    # replaced). The spool, the only writable directory on disk: request
+    # bodies nginx holds while ModSecurity inspects them, and ModSecurity's
+    # temporary files (on disk, so a large upload does not fill memory).
     volumes:
       - {{ q(waf_dir ~ ':' ~ waf_conf_dir ~ ':ro') }}
-    # nginx's temporary files and pid, and ModSecurity's directories.
+      - {{ q(waf_spool_dir ~ ':' ~ waf_spool_mount) }}
+    # nginx's other temporary files and pid, and ModSecurity's data
+    # directory, in memory: small, so nothing can fill the memory limit.
     tmpfs:
-      - /tmp
+      - {{ q('/tmp:size=' ~ waf_tmp_size) }}
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

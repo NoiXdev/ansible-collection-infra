@@ -262,6 +262,13 @@ multipart() {
   printf -- "$2" | hi curl -s -o /dev/null -w '%{http_code}' --max-time 30 -H 'Host: block.test' -H 'Expect:' \
     -H 'Content-Type: multipart/form-data; boundary=NOIX' --data-binary @- "http://127.0.0.1/$1" || true
 }
+# no_oom: the WAF was never killed for memory, nor one of its workers.
+no_oom() {
+  local got
+  got="$(h docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}}' "$waf")"
+  [ "$got" = 'false 0' ] || fail "the WAF ran out of memory (OOMKilled, restarts: $got)"
+  if h docker logs "$waf" 2>&1 | grep -F 'exited on signal'; then fail "a worker of the WAF was killed"; fi
+}
 # audit: the WAF's stdout (its audit log, one JSON line per event).
 audit() { h docker logs "$waf" 2>/dev/null; }
 audit_lines() { audit | wc -l | tr -d ' '; }
@@ -348,6 +355,11 @@ test_traefik() {
   [ "$got" = "true 101:101 [ALL] [no-new-privileges:true] 0" ] || fail "the WAF container runs as: $got"
   got="$(h docker inspect -f '{{(index .NetworkSettings.Networks "proxy").IPAMConfig.IPv4Address}}' "$waf")"
   [ "$got" = 172.31.255.253 ] || fail "the WAF's address is $got"
+  # Request bodies are spooled to disk, not to the small /tmp in memory.
+  got="$(h docker inspect -f '{{json .HostConfig.Tmpfs}} {{range .Mounts}}{{if eq .Destination "/var/cache/nginx"}}{{.Source}} {{.RW}}{{end}}{{end}}' "$waf")"
+  [ "$got" = '{"/tmp":"size=32m"} /opt/waf/spool true' ] || fail "the WAF's tmpfs and spool are: $got"
+  got="$(h stat -c '%u:%g %a' /opt/waf/spool)"
+  [ "$got" = '101:101 700' ] || fail "the spool directory is $got"
   for name in waf-block-1 waf-detect-1 waf-paused-1 'url: http://172.31.255.253:8080'; do
     h grep -qF -- "$name" /opt/traefik/dynamic/waf.yml || fail "waf.yml lacks $name"
   done
@@ -456,6 +468,25 @@ test_traefik() {
   [ "$(audit_lines)" -ge $((before + 3)) ] || { audit >&2; fail "detect.test's attacks were not logged"; }
   expect 200 detect.test "/padded?$(padded exec=/bin/bash)"
   audit | grep -F '"/padded?' | grep -qF '"9599907"' || { audit >&2; fail "detect.test's padded request was not logged"; }
+
+  echo "-- a detect site: uploads larger than the WAF's memory pass whole, and are logged"
+  # 300 MiB, with a length and chunked. ModSecurity would read such a body
+  # whole into memory (256M); nginx spools it to disk and sends it on
+  # without ModSecurity's body checks. curl -T streams the file.
+  h sh -c 'head -c 314572800 /dev/zero | tr "\0" a >/tmp/huge'
+  expect 200 bulk.test /huge -X POST -T /tmp/huge -H 'Content-Type: application/octet-stream' -H 'Expect:' --max-time 300
+  arrived_whole POST /huge /tmp/huge
+  expect 200 bulk.test /huge-chunked -X POST -T /tmp/huge -H 'Transfer-Encoding: chunked' \
+    -H 'Content-Type: application/octet-stream' -H 'Expect:' --max-time 300
+  arrived_whole POST /huge-chunked /tmp/huge
+  h rm -f /tmp/huge
+  no_oom
+  got="$(h docker exec "$waf" cat /sys/fs/cgroup/memory.peak 2>/dev/null || true)"
+  [ -z "$got" ] || [ "$got" -lt 268435456 ] || fail "the WAF's memory peaked at $got bytes"
+  [ -z "$(h find /opt/waf/spool -type f)" ] || fail "the spool kept a body: $(h find /opt/waf/spool -type f)"
+  expect 200 bulk.test /after
+  reported bulk 9599903 --since 10m
+  reported bulk 9599911 --since 10m
 
   echo "-- a registry: an uninspected upload path, the rest inspected"
   h sh -c 'head -c 20971520 /dev/zero >/tmp/blob'
