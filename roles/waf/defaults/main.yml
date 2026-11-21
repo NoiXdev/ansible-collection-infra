@@ -65,12 +65,15 @@ waf_rules_after: ""
 
 # Compose limits, nginx worker processes in the container, and the seconds to
 # wait for the container's health check after a start. Each worker inspects
-# one body at a time and needs about 45M plus up to 15 times the body
-# (measured: a 12M form body peaks a worker at about 225M), so waf_memory
-# should be at least waf_workers * (45M + 15 * the largest
-# request_body_limit). The defaults do not cover that: two parallel bodies
-# near 12.5 MiB can exceed 256M; the kernel kills workers, nginx starts new
-# ones, and the requests in flight on them fail, for every site.
+# one body at a time and needs about 45M plus a multiple of the body that
+# depends on its content: about 10 times for an upload, about 15 times for
+# a plain form field or JSON string, and over 40 times for a body crafted to
+# match many rules (measured: a 12M form field of mixed characters peaks a
+# worker at about 585M). The defaults do not cover that: one crafted body
+# near 12.5 MiB can exceed 256M; the kernel kills the worker, nginx starts a
+# new one, and the requests in flight on it fail, for every site. Size
+# waf_memory for waf_workers * (45M + 45 * the largest request_body_limit),
+# or lower request_body_limit.
 waf_cpus: "1.0"
 waf_memory: 256M
 waf_workers: 2

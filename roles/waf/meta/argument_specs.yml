@@ -105,8 +105,8 @@ argument_specs:
         type: str
         description: >-
           Compose memory limit of the container (256M). A worker inspecting
-          a body needs about 45M plus up to 15 times its size; see the
-          defaults for the formula.
+          a body needs about 45M plus 10 to over 40 times its size,
+          depending on its content; see the defaults for the formula.
       waf_workers:
         type: int
         description: nginx worker processes in the container (2).
