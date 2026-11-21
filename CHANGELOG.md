@@ -201,9 +201,10 @@
   which serves the content (PHP, proxy or static files) with the client's address, and PHP's
   `HTTPS` and `SERVER_PORT` of the public block. While the WAF does not answer, the site answers
   502, never its content. The new site key `inner_extra` is raw config inside that inner block
-  (refused on a site without `waf`); `extra` stays in the public block, where a `location` is not
-  behind the WAF and the site's `root` is not set, so directives for the content (such as
-  `fastcgi_read_timeout`) belong in `inner_extra`. The run is refused before any change while the
+  (refused on a site without `waf` or `varnish`); `extra` stays in the public block, where a
+  `location` is not behind the WAF and the site's `root` is not set, so directives for the
+  content (such as `fastcgi_read_timeout`) belong in `inner_extra`. The run is refused before any
+  change while the
   WAF does not answer on `127.0.0.1:nginx_waf_port`, or answers that no `waf_sites` entry lists a
   site's first domain, and when `nginx_anubis_port`, `nginx_waf_port` and `nginx_inner_port` are
   not three different ports or `nginx_inner_port` is 80 or 443. Waf sites answer
