@@ -232,6 +232,11 @@ waf_audit_relevant_status: "^(?:5|4(?!04))"
 # The role's rule that names the site of each event (its logdata is the
 # site's name), which noix-waf-report groups by.
 waf_site_rule_id: 9599906
+# The IDs of the events nginx writes for a request a detect site passes
+# without ModSecurity: a body over the inspection limit (the role rule for
+# such a body) and a chunked body.
+waf_body_limit_rule_id: 9599903
+waf_chunked_rule_id: 9599911
 # Request headers and cookies whose (lower-cased) names contain one of these
 # carry credentials: no rule of the Core Rule Set looks at their values, so
 # none can copy them into the log. Lower case, regex-safe. front: the

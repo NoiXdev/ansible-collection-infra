@@ -71,7 +71,7 @@ SecRule TX:/^MSC_/ "!@streq 0" "id:9599910,phase:2,t:none,log,deny,severity:'CRI
 # and the site's name and inspection limit for the role's rules below.
 {% for site in waf_sites_public %}
 # Site {{ site.name }}
-SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * site.index }},phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.noix_waf_site={{ site.name }},setvar:tx.noix_waf_mode={{ site.mode }},setvar:tx.noix_waf_body_limit={{ site.request_body_limit }},setvar:tx.blocking_paranoia_level={{ site.paranoia }},setvar:tx.detection_paranoia_level={{ site.detection_paranoia }},setvar:tx.inbound_anomaly_score_threshold={{ site.anomaly_inbound }},setvar:tx.outbound_anomaly_score_threshold={{ site.anomaly_outbound }}
+SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * site.index }},phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.noix_waf_site={{ site.name }},setvar:tx.noix_waf_body_limit={{ site.request_body_limit }},setvar:tx.blocking_paranoia_level={{ site.paranoia }},setvar:tx.detection_paranoia_level={{ site.detection_paranoia }},setvar:tx.inbound_anomaly_score_threshold={{ site.anomaly_inbound }},setvar:tx.outbound_anomaly_score_threshold={{ site.anomaly_outbound }}
 {%- if site.allowed_methods | length > 0 -%}
 ,setvar:'tx.allowed_methods={{ (waf_crs_methods + site.allowed_methods) | unique | join(' ') }}'
 {%- endif -%}
@@ -87,14 +87,11 @@ SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * 
 
 # A body over the site's inspection limit, as an event of its own: mode
 # block answers 413 to it, so noix-waf-report shows which detect sites would.
-# On a detect site such a body, and a chunked one, then passes without
-# ModSecurity's phase 2 (nginx.conf: ModSecurity would read it whole into
-# memory), after these phase 1 rules logged it: the rule set's URI,
-# argument and body rules do not run for it.
+# On a detect site nginx sends such a request, and a chunked one, past
+# ModSecurity (which would read the body whole into memory) and logs the
+# event with this rule's ID itself (nginx.conf); the rule is the backstop.
 SecRule TX:noix_waf_body_limit "@gt 0" "id:9599903,phase:1,pass,t:none,log,severity:'NOTICE',msg:'Request body over the inspection limit, not inspected (mode block answers 413)',logdata:'Content-Length %{MATCHED_VAR}, limit %{tx.noix_waf_body_limit}',tag:'noix-waf/body-limit',chain"
   SecRule REQUEST_HEADERS:Content-Length "@gt %{tx.noix_waf_body_limit}" "t:none"
-SecRule TX:noix_waf_mode "@streq detect" "id:9599911,phase:1,pass,t:none,log,severity:'NOTICE',msg:'Chunked request body, not inspected in mode detect (mode block inspects it)',tag:'noix-waf/chunked',chain"
-  SecRule &REQUEST_HEADERS:Transfer-Encoding "@gt 0" "t:none"
 # Every event names its site: when the audit log writes the request (an
 # error status, or a matched rule with a severity, which every logging rule
 # of the Core Rule Set has), one more message carries the site's name. Other

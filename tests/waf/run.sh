@@ -507,6 +507,8 @@ test_traefik() {
   expect 200 bulk.test /after
   reported bulk 9599903 --since 10m
   reported bulk 9599911 --since 10m
+  # One event per request: ModSecurity never sees them.
+  [ "$(audit | grep -cF '"uri":"/huge"')" = 1 ] || { audit >&2; fail "the upload /huge is not one event"; }
 
   echo "-- a registry: an uninspected upload path, the rest inspected"
   h sh -c 'head -c 20971520 /dev/zero >/tmp/blob'
@@ -655,9 +657,13 @@ test_report() {
   echo "-- bodies over the inspection limit: logged in detect, 413 in block"
   # 14 MiB (the limit is 12.5 MiB) in a form type the Core Rule Set allows,
   # without Expect (CRS refuses it, 920450).
+  # The detect site is bulk, whose backend (the recorder) reads the body:
+  # whoami answers without reading it, so its request would not finish
+  # before curl gives up, and an event is logged when a request finishes.
   h sh -c 'head -c 14680064 /dev/zero | tr "\0" a >/tmp/heavy'
-  expect 200 detect.test /upload -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
+  expect 200 bulk.test /detect-upload -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
     --data-binary @/tmp/heavy "${creds[@]}"
+  arrived_whole POST /detect-upload /tmp/heavy
   expect 413 block.test /upload -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
     --data-binary @/tmp/heavy "${creds[@]}"
   expect 413 block.test /upload-chunked -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
@@ -674,7 +680,7 @@ test_report() {
 
   echo "-- the report per site"
   reported detect 932160 --since 10m detect
-  reported detect 9599903 --since 10m detect
+  reported bulk 9599903 --since 10m bulk
   if report --since 10m detect | grep -q '^site block '; then
     report --since 10m detect >&2
     fail "the report for site detect lists site block"

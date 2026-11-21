@@ -38,13 +38,11 @@
 {{ indent }}  return 400;
 {{ indent }}}
 {%- endmacro -%}
-{#- On a detect site, the request bodies ModSecurity does not get: it reads
-    a body whole into memory, so one larger than the site's inspection limit
-    (by its Content-Length) and a chunked one (of a length nginx cannot know
-    first) go to @waf_uninspected. Only the phase 1 rules have run by then
-    (the rule set's URI and argument rules are phase 2, so they do not run
-    at all); they log such a body (role rules 9599903 and 9599911). Mode
-    block answers 413 to a body over the limit instead
+{#- On a detect site, the requests ModSecurity does not get: it reads a body
+    whole into memory, so one larger than the site's inspection limit (by its
+    Content-Length) and a chunked one (of a length nginx cannot know first)
+    go to @waf_uninspected before ModSecurity runs at all, where nginx logs
+    them itself. Mode block answers 413 to a body over the limit instead
     (client_max_body_size). -#}
 {%- macro uninspected_checks(site, indent) -%}
 {{ indent }}if ($http_transfer_encoding) {
@@ -107,6 +105,31 @@ http {
     default upgrade;
     '' close;
   }
+{% set detect_sites = waf_sites_public | selectattr('mode', 'equalto', 'detect') | list %}
+{% if detect_sites | length > 0 %}
+
+  # The events of the requests a detect site passes without ModSecurity, in
+  # the audit log's JSON shape (noix-waf-report reads both): a chunked body,
+  # or one over the site's inspection limit. nginx writes them, as it logs
+  # every request it finishes (ModSecurity, which does not run for them, may
+  # not). None for a bypass path, which is never inspected anyway.
+  map "$waf_event_site:$uri" $waf_event_bypassed {
+    default "";
+{% for site in detect_sites if site.bypass_paths | length > 0 %}
+    "~^{{ site.name }}:({{ site.bypass_paths | map('regex_escape') | join('|') }})" 1;
+{% endfor %}
+  }
+  map "$http_transfer_encoding:$waf_event_bypassed" $waf_event_chunked {
+    "~^[^:]+:$" 1;
+    default 0;
+  }
+  map "$http_transfer_encoding:$waf_event_bypassed" $waf_event_body_limit {
+    ":" 1;
+    default 0;
+  }
+  log_format waf_event_body_limit escape=json '{"transaction":{"client_ip":"$remote_addr","time_stamp":"$time_local","request":{"method":"$request_method","uri":"$request_uri","hostname":"$host"},"response":{"http_code":$status},"messages":[{"message":"Request body over the inspection limit, not inspected (mode block answers 413)","details":{"ruleId":"{{ waf_body_limit_rule_id }}","data":"Content-Length $http_content_length, limit $waf_event_limit"}},{"message":"Site","details":{"ruleId":"{{ waf_site_rule_id }}","data":"$waf_event_site"}}]}}';
+  log_format waf_event_chunked escape=json '{"transaction":{"client_ip":"$remote_addr","time_stamp":"$time_local","request":{"method":"$request_method","uri":"$request_uri","hostname":"$host"},"response":{"http_code":$status},"messages":[{"message":"Chunked request body, not inspected in mode detect (mode block inspects it)","details":{"ruleId":"{{ waf_chunked_rule_id }}","data":"limit $waf_event_limit"}},{"message":"Site","details":{"ruleId":"{{ waf_site_rule_id }}","data":"$waf_event_site"}}]}}';
+{% endif %}
 
   # Host, the X-Forwarded-* headers of the proxy in front and the rest of
   # the request pass unchanged; WebSocket upgrades pass; long uploads and
@@ -176,6 +199,11 @@ http {
 {% else %}
     set $waf_backend "{{ site.backend }}";
 {% endif %}
+{% if site.mode == 'detect' %}
+    # Before ModSecurity runs (server level), after $waf_backend is set.
+    error_page 418 = @waf_uninspected;
+{{ uninspected_checks(site, '    ') }}
+{% endif %}
 {% if site.mode == 'block' %}
     # A body larger than ModSecurity inspects answers 413 (with a length or
     # chunked alike), so nothing passes uninspected. Exclusions keep it.
@@ -191,19 +219,20 @@ http {
            + (exclusion_rules(root_exclusion[0]) | from_json if root_exclusion | length > 0 else []), '    ') }}
 {% endif %}
 {% if site.mode == 'detect' %}
-    error_page 418 = @waf_uninspected;
 
-    # A body ModSecurity does not get: it passes without its checks.
+    # A request ModSecurity does not get: it passes without inspection, and
+    # nginx logs it as an event.
     location @waf_uninspected {
       modsecurity off;
+      set $waf_event_site "{{ site.name }}";
+      set $waf_event_limit "{{ site.request_body_limit }}";
+      access_log /dev/stdout waf_event_body_limit if=$waf_event_body_limit;
+      access_log /dev/stdout waf_event_chunked if=$waf_event_chunked;
       proxy_pass $waf_backend;
     }
 {% endif %}
 
     location / {
-{% if site.mode == 'detect' %}
-{{ uninspected_checks(site, '      ') }}
-{% endif %}
       proxy_pass $waf_backend;
     }
 {% for path in site.bypass_paths %}
@@ -220,9 +249,6 @@ http {
 
     location ^~ {{ exclusion.path }} {
 {{ raw_path_checks(exclusion.path, '      ') }}
-{% if site.mode == 'detect' %}
-{{ uninspected_checks(site, '      ') }}
-{% endif %}
 {{ rules(exclusion_rules(exclusion) | from_json, '      ') }}
       proxy_pass $waf_backend;
     }
