@@ -7,9 +7,14 @@
 # backend is Varnish and its fallback nginx's inner listener. Each site has
 # its own user (app_<site>), web root (/srv/<site>, tests/varnish/index.php)
 # and pool; converge.yml creates the users, web roots and the certificate
-# first.
+# first. ws (a proxy to tests/varnish/backend.py on 127.0.0.1:8945, which
+# run.sh starts) goes through Varnish too, for WebSocket upgrades; a's
+# inner_extra location proxies there as well.
 test_varnish: true
-test_site_names: [a, b, p, w]
+test_site_names: [a, b, p, w, ws]
+# Varnish gives up on a slow app after 3 s (and nginx waits 90 s for
+# Varnish): the slow-page test.
+varnish_first_byte_timeout: 3
 
 php_versions:
   - version: "8.3"
@@ -39,8 +44,21 @@ test_nginx_tls:
 # for it before sites could have varnish.
 nginx_sites: "{{ test_nginx_sites + (test_nginx_waf_sites if test_waf | default(false) | bool else []) }}"
 test_nginx_sites:
-  - {name: a, domains: [a.test], user: app_a, php_pool: a, root: /srv/a, tls: "off", varnish: true}
+  - name: a
+    domains: [a.test]
+    user: app_a
+    php_pool: a
+    root: /srv/a
+    tls: "off"
+    varnish: true
+    # No proxy_set_header of its own: the inner block's clearing of the
+    # front key applies.
+    inner_extra: |-
+      location = /inner-extra {
+          proxy_pass http://127.0.0.1:8945;
+      }
   - {name: b, domains: [b.test], user: app_b, php_pool: b, root: /srv/b, tls: "{{ test_nginx_tls }}", varnish: true}
   - {name: p, domains: [p.test], user: app_p, php_pool: p, root: /srv/p, tls: "off"}
+  - {name: ws, domains: [ws.test], user: app_ws, proxy: "http://127.0.0.1:8945", tls: "off", varnish: true}
 test_nginx_waf_sites:
   - {name: w, domains: [w.test], user: app_w, php_pool: w, root: /srv/w, tls: "off", waf: true, varnish: true}

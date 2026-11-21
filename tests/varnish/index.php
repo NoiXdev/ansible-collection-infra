@@ -5,8 +5,11 @@
 // The answer counts the requests for its URL (a file per URL in the site's
 // var/), and shows the client address, HTTPS and whether the front key
 // header reached PHP. It is cacheable for 60 s, for max_age=<n> seconds, or
-// private with private=1.
+// private with private=1; sleep=<n> waits n seconds first.
 error_log('noix-varnish ' . ($_SERVER['REQUEST_URI'] ?? ''));
+if (isset($_GET['sleep'])) {
+    sleep((int) $_GET['sleep']);
+}
 $file = __DIR__ . '/var/' . md5($_SERVER['REQUEST_URI'] ?? '');
 $handle = fopen($file, 'c+');
 flock($handle, LOCK_EX);

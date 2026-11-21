@@ -161,15 +161,17 @@ apt_install() {
   h env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@" >/dev/null
 }
 
-# start_backend: tests/varnish/backend.py on 127.0.0.1:8931 of the test host
-# (a transient unit), and curl for the probes.
+# start_backend [<unit> <port>]: tests/varnish/backend.py on 127.0.0.1:8931
+# of the test host (a transient unit noixdev-test-backend, or the unit and
+# port given), curl for the probes and tests/varnish/wsclient.py.
 start_backend() {
-  local tries=0
+  local tries=0 unit="${1:-noixdev-test-backend}" port="${2:-8931}"
   h sh -c 'command -v curl >/dev/null' || apt_install curl
   docker cp -q "$here/backend.py" "$host:/usr/local/bin/noixdev-test-backend"
-  h systemctl is-active -q noixdev-test-backend \
-    || h systemd-run -q --unit noixdev-test-backend python3 /usr/local/bin/noixdev-test-backend serve 127.0.0.1 8931
-  until h curl -fsS -o /dev/null http://127.0.0.1:8931/health 2>/dev/null; do
+  docker cp -q "$here/wsclient.py" "$host:/usr/local/bin/noixdev-test-wsclient"
+  h systemctl is-active -q "$unit" \
+    || h systemd-run -q --unit "$unit" python3 /usr/local/bin/noixdev-test-backend serve 127.0.0.1 "$port"
+  until h curl -fsS -o /dev/null "http://127.0.0.1:$port/health" 2>/dev/null; do
     tries=$((tries + 1))
     [ "$tries" -lt 30 ] || fail "the backend does not answer"
     sleep 1
@@ -379,7 +381,7 @@ expect() {
 # front of tests/varnish/backend.py: its count=<n> shows how often a request
 # reached it.
 test_cache() {
-  local p c gz plain
+  local p c gz plain answer
   echo "== cache: what the app allows is cached, per site (ubuntu $1)"
   use_host "$1" varnish
   start_backend
@@ -434,6 +436,15 @@ test_cache() {
   ! printf '%s\n' "$headers" | grep -qi '^X-Echo:' || fail "the backend got X-Noix-Front on a pass"
   req a a.test '/c/echo?echo=X-Noix-Site' -H 'Cookie: session=1'
   printf '%s\n' "$headers" | grep -qix 'X-Echo: a' || fail "the backend's echo does not work"
+
+  echo "== cache: a WebSocket upgrade with the front key is piped to the backend, without the key"
+  answer="$(h sh -c 'exec python3 /usr/local/bin/noixdev-test-wsclient 127.0.0.1 6081 "/ws?echo=X-Noix-Front" \
+    "Host: a.test" "X-Noix-Site: a" "X-Noix-Front: $(cat '"$key"')"' | tr -d '\r')" || fail "the WebSocket through Varnish failed: $answer"
+  case "$answer" in "HTTP/1.1 101 "*) ;; *) fail "the WebSocket through Varnish got: $answer" ;; esac
+  printf '%s\n' "$answer" | grep -qx 'echo: noix-ping' || fail "the WebSocket through Varnish echoed nothing: $answer"
+  ! printf '%s\n' "$answer" | grep -qi '^X-Echo:' || fail "the backend got X-Noix-Front on the pipe"
+  answer="$(h python3 /usr/local/bin/noixdev-test-wsclient 127.0.0.1 6081 /ws "Host: a.test" "X-Noix-Site: a" | tr -d '\r' || true)"
+  case "$answer" in "HTTP/1.1 403 "*) ;; *) fail "a WebSocket upgrade without the front key got: $answer" ;; esac
 
   echo "== cache: cookies"
   p='/c/cookie?cc=public,max-age=60'
@@ -1086,6 +1097,8 @@ nginx_host() {
   run_ok nginx converge.yml "${nginx_args[@]}"
   run_ok nginx-again converge.yml "${nginx_args[@]}"
   unchanged nginx-again
+  # The app of ws and of a's inner_extra location.
+  start_backend noixdev-test-app 8945
 }
 # varnish_back: Varnish started again, and nginx sends to it again (after
 # the 5 s an upstream that did not answer is left alone).
@@ -1095,7 +1108,7 @@ varnish_back() {
 }
 
 test_nginx() {
-  local fixture line
+  local fixture line answer
   echo "== nginx: sites with varnish: true are served through Varnish (ubuntu $1)"
   nginx_host "$1"
 
@@ -1139,6 +1152,22 @@ test_nginx() {
   site_expect "a.test/page after them" 200 "$(php_answer 1)"
   logged a HIT
 
+  echo "== nginx: a WebSocket upgrade on ws goes through Varnish (a pipe) to the app, without the front key"
+  answer="$(h python3 /usr/local/bin/noixdev-test-wsclient 127.0.0.1 80 '/ws?echo=X-Noix-Front' 'Host: ws.test' \
+    | tr -d '\r')" || fail "the WebSocket through nginx failed: $answer"
+  case "$answer" in "HTTP/1.1 101 "*) ;; *) fail "the WebSocket through nginx got: $answer" ;; esac
+  printf '%s\n' "$answer" | grep -qx 'echo: noix-ping' || fail "the WebSocket through nginx echoed nothing: $answer"
+  ! printf '%s\n' "$answer" | grep -qi '^X-Echo:' || fail "the app got X-Noix-Front on the WebSocket"
+  h varnishlog -d -g request -q 'ReqURL ~ "^/ws"' | grep -Eq 'VCL_return +pipe' \
+    || fail "the WebSocket did not go through Varnish's pipe"
+
+  echo "== nginx: a page slower than Varnish waits for gets Varnish's 503, and reaches PHP once"
+  site a.test '/slow?sleep=6'
+  site_expect "a page slower than varnish_first_byte_timeout" 503
+  sleep 5
+  [ "$(h grep -c 'noix-varnish /slow?sleep=6' /var/log/php/a.log)" = 1 ] \
+    || fail "the slow page reached PHP $(h grep -c 'noix-varnish /slow?sleep=6' /var/log/php/a.log) times, not once"
+
   echo "== nginx: with a's pool stopped, its stale page is still served"
   site a.test '/grace?max_age=2'
   site_expect "a page for 2 s" 200 "$(php_answer 1)"
@@ -1163,6 +1192,14 @@ test_nginx() {
   logged b -
   site a.test / -X PURGE
   site_expect "PURGE a.test/, Varnish stopped" 405
+  # a's inner_extra location gets the request with the front key here (the
+  # backup), and its app never sees it; X-Noix-Site shows the path.
+  site a.test '/inner-extra?echo=X-Noix-Site'
+  site_expect "a's inner_extra location, Varnish stopped" 200
+  header 'X-Echo: a'
+  site a.test '/inner-extra?echo=X-Noix-Front'
+  site_expect "a's inner_extra location with the front key's echo, Varnish stopped" 200
+  no_header X-Echo
   varnish_back
   site a.test /page
   site_expect "a.test/page, Varnish started again" 200 "$(php_answer 4)"
@@ -1208,13 +1245,18 @@ test_nginx() {
   echo "== nginx: varnish: true without Varnish or its key is refused before any change"
   h systemctl stop varnish
   nginx_refused nginx-stopped \
-    'nginx: nginx_sites entries a, b set varnish, but Varnish does not answer on http://127.0.0.1:6081/; run the varnish role (varnish_port 6081) first'
+    'nginx: nginx_sites entries a, b, ws set varnish, but Varnish does not answer on http://127.0.0.1:6081/; run the varnish role (varnish_port 6081) first'
   h mv "$key" /root/front.key
   nginx_refused nginx-stopped-no-key \
-    'nginx: nginx_sites entries a, b set varnish, but Varnish does not answer on http://127.0.0.1:6081/ and the front key /etc/varnish/noixdev-front.key is missing; run the varnish role (varnish_port 6081) first'
+    'nginx: nginx_sites entries a, b, ws set varnish, but Varnish does not answer on http://127.0.0.1:6081/ and the front key /etc/varnish/noixdev-front.key is missing; run the varnish role (varnish_port 6081) first'
   varnish_back
   nginx_refused nginx-no-key \
-    'nginx: nginx_sites entries a, b set varnish, but the front key /etc/varnish/noixdev-front.key is missing; run the varnish role (varnish_port 6081) first'
+    'nginx: nginx_sites entries a, b, ws set varnish, but the front key /etc/varnish/noixdev-front.key is missing; run the varnish role (varnish_port 6081) first'
+  h mv /root/front.key "$key"
+  h cp -p "$key" /root/front.key
+  h sh -c "printf 'not-a-front-key\\n' >$key"
+  nginx_refused nginx-bad-key \
+    'nginx: the front key in /etc/varnish/noixdev-front.key is not 64 hexadecimal digits; delete the file and run the varnish role'
   h mv /root/front.key "$key"
   nginx_refused nginx-varnish-string 'nginx: nginx_sites entry a has an invalid hardening, hsts, user_includes, anubis, waf, varnish,' \
     -e '{"test_nginx_sites": [{"name": "a", "domains": ["a.test"], "user": "app_a", "php_pool": "a", "root": "/srv/a", "tls": "off", "varnish": "yes"}]}'
