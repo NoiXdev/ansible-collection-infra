@@ -14,7 +14,9 @@ ID_MIN = 9500000
 ID_MAX = 9999999
 ALLOWED = ("secrule", "secaction", "secmarker")
 _CTL = re.compile(r"\bctl:\s*(auditengine|auditlogparts)\b", re.IGNORECASE)
-_ID = re.compile(r"^id:\s*'?(\d+)'?$", re.IGNORECASE)
+# Quote-unaware on purpose: any id:<digits> in a rule counts, however the
+# quotes and escapes are read by the engine.
+_ID = re.compile(r"""(?:^|(?<=[,\s'"]))id:\s*'?(\d+)""", re.IGNORECASE)
 
 
 def waf_plugin_pick(paths, name):
@@ -47,6 +49,9 @@ def _directives(text):
     for number, line in enumerate(text.split("\n"), 1):
         if not parts:
             start = number
+            if line.lstrip().startswith("#"):
+                yield start, line
+                continue
         if line.endswith("\\"):
             parts.append(line[:-1])
             continue
@@ -82,14 +87,19 @@ def _actions(argument):
 
 def waf_plugin_check(name, files):
     """Return {"ids", "low", "high", "errors"} for the file texts of a plugin."""
-    ids, errors, chained = [], [], False
+    ids, errors = [], []
     for kind in KINDS:
         if kind not in files:
             continue
         fname = f"{name}-{kind}.conf"
+        chained = 0  # start line of the rule whose actions had chain, else 0
         for number, directive in _directives(files[kind]):
             stripped = directive.strip()
-            if not stripped or stripped.startswith("#"):
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                if stripped.endswith("\\"):
+                    errors.append(f"{fname} line {number}: a comment that ends in \\")
                 continue
             word = stripped.split(None, 1)[0]
             if word.lower() not in ALLOWED:
@@ -100,22 +110,25 @@ def waf_plugin_check(name, files):
                 continue
             if word.lower() == "secmarker":
                 continue
+            rest = stripped[len(word):]
             argument = _last_argument(stripped)
-            actions = _actions(argument)
-            ctl = _CTL.search(argument)
+            ctl = _CTL.search(rest)
             if ctl:
                 errors.append(f"{fname} line {number}: ctl:{ctl.group(1)} is not allowed in a plugin")
-            if not chained:
-                rule_id = next((m.group(1) for m in map(_ID.match, actions) if m), None)
-                if rule_id is None:
-                    errors.append(f"{fname} line {number}: a rule without an id")
-                else:
-                    ids.append(int(rule_id))
-                    if not ID_MIN <= int(rule_id) <= ID_MAX:
-                        errors.append(
-                            f"{fname} line {number}: rule id {rule_id} is outside {ID_MIN}-{ID_MAX}"
-                        )
-            chained = any(a.lower() == "chain" for a in actions)
+            found = _ID.findall(rest)
+            if not found and not chained:
+                errors.append(f"{fname} line {number}: a rule without an id")
+            if len(found) > 1:
+                errors.append(f"{fname} line {number}: a rule with more than one id")
+            for rule_id in found:
+                ids.append(int(rule_id))
+                if not ID_MIN <= int(rule_id) <= ID_MAX:
+                    errors.append(
+                        f"{fname} line {number}: rule id {int(rule_id)} is outside {ID_MIN}-{ID_MAX}"
+                    )
+            chained = number if any(a.lower() == "chain" for a in _actions(argument)) else 0
+        if chained:
+            errors.append(f"{fname} line {chained}: a chain that no rule continues")
     ids = sorted(set(ids))
     if not ids:
         errors.append("has no rule with an id")

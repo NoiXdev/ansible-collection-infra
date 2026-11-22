@@ -103,7 +103,7 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(got["ids"], [9500000])
 
     def test_check_crlf_and_trailing_backslash(self):
-        got = check('SecAction \\\r\n "id:9590001"\r\n# end \\')
+        got = check('SecAction \\\r\n "id:9590001"\r\nSecMarker END \\')
         self.assertEqual(got["errors"], [])
         self.assertEqual(got["ids"], [9590001])
         self.assertEqual(check('SecAction "id:9590001"\nSecMarker X \\')["errors"], [])
@@ -117,6 +117,45 @@ class CheckTest(unittest.TestCase):
             "x", {"config": 'SecAction "id:9590009"', "before": 'SecAction "id:9590001"'}
         )
         self.assertEqual((got["ids"], got["low"], got["high"]), ([9590001, 9590009], 9590001, 9590009))
+
+    def test_check_escaped_quote_hidden_id(self):
+        got = check('SecAction "msg:\'a\\\',id:9590001,b\',id:5000000"\n')
+        self.assertIn("x-before.conf line 1: rule id 5000000 is outside 9500000-9999999", got["errors"])
+
+    def test_check_two_ids(self):
+        got = check('SecAction "id:9590001,id:9590002"\n')
+        self.assertEqual(got["errors"], ["x-before.conf line 1: a rule with more than one id"])
+        got = check('SecAction "id:9590001,id:5000000"\n')
+        self.assertIn("x-before.conf line 1: a rule with more than one id", got["errors"])
+        self.assertIn("x-before.conf line 1: rule id 5000000 is outside 9500000-9999999", got["errors"])
+
+    def test_check_faked_chain(self):
+        got = check('SecAction "id:9590001,msg:\'a\\\',chain,b\'"\nSecAction "id:5000001"\n')
+        self.assertIn("x-before.conf line 2: rule id 5000001 is outside 9500000-9999999", got["errors"])
+
+    def test_check_chain_open_at_eof_and_per_file(self):
+        got = waf_plugin.waf_plugin_check(
+            "x", {"config": 'SecAction "id:9590002,chain"\n', "before": 'SecAction "id:5000001"\n'}
+        )
+        self.assertEqual(
+            got["errors"],
+            ["x-config.conf line 1: a chain that no rule continues",
+             "x-before.conf line 1: rule id 5000001 is outside 9500000-9999999"],
+        )
+
+    def test_check_comment_ending_in_backslash(self):
+        got = check("# note \\\nInclude foo\nSecAction \"id:9590001\"\n")
+        self.assertEqual(got["errors"][0], "x-before.conf line 1: a comment that ends in \\")
+        self.assertIn(f"x-before.conf line 2: Include is not allowed in a plugin {ALLOWED}", got["errors"])
+
+    def test_check_realistic_chained_rule(self):
+        text = (
+            'SecRule REQUEST_FILENAME "@contains /x" \\\n'
+            '    "id:9590010,phase:1,pass,nolog,msg:\'a,b\',chain"\n'
+            '    SecRule REQUEST_METHOD "POST" \\\n'
+            '        "t:none,ctl:ruleRemoveTargetById=942100;ARGS:x"\n'
+        )
+        self.assertEqual(check(text), {"ids": [9590010], "low": 9590010, "high": 9590010, "errors": []})
 
     def test_filters(self):
         self.assertEqual(
