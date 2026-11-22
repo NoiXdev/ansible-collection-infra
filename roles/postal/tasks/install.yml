@@ -8,7 +8,11 @@
 # before the first data directory until Postal is healthy, so a run after a
 # failed install refuses (state.yml) instead of taking the half-made
 # installation for a finished one. A failed install stops Postal and deletes
-# nothing.
+# nothing (install_failed.yml). An own MariaDB whose data directory already
+# holds a database (Postal's schema, or a root that does not log in through
+# the socket, as the role leaves none) is asked before anything is done in
+# it, and the install is refused without a change to it: what this run
+# wrote beside it goes again, so the next run is an install as well.
 
 - name: Create the Postal directory
   ansible.builtin.file:
@@ -17,6 +21,11 @@
     owner: root
     group: root
     mode: "0750"
+
+# For the hint of a failed install: these were there before it.
+- name: Note the data subdirectories that were there before the install
+  ansible.builtin.set_fact:
+    postal_install_data_before: "{{ postal_data_present }}"
 
 - name: Write the marker of an install in progress
   ansible.builtin.copy:
@@ -28,7 +37,7 @@
     group: root
     mode: "0644"
 
-- name: Install Postal
+- name: Install Postal up to the own MariaDB
   block:
     - name: Create the data directory
       ansible.builtin.file:
@@ -64,53 +73,91 @@
     - name: Write the database target
       ansible.builtin.include_tasks: target.yml
 
-    - name: Set up the own MariaDB
+    - name: Start MariaDB
+      community.docker.docker_compose_v2:
+        project_src: "{{ postal_dir }}"
+        services: [mariadb]
+        state: present
+        pull: missing
+        wait: true
+        wait_timeout: "{{ postal_health_timeout | int }}"
       when: postal_database == 'mariadb'
-      block:
-        - name: Start MariaDB
-          community.docker.docker_compose_v2:
-            project_src: "{{ postal_dir }}"
-            services: [mariadb]
-            state: present
-            pull: missing
-            wait: true
-            wait_timeout: "{{ postal_health_timeout | int }}"
 
-        - name: Set up Postal's database user
-          ansible.builtin.include_tasks: db_user.yml
+    # state.yml could not ask the server, which did not run yet. Read-only, as
+    # root through the socket: a fresh server lets root in without a
+    # password; one that does not (root has a password) is not the empty
+    # server the install needs either.
+    - name: Look for Postal's schema in the own MariaDB
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - exec
+          - -T
+          - mariadb
+          - mariadb
+          - --user=root
+          - --batch
+          - --skip-column-names
+          - "--execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{{ postal_db_name }}' AND table_name = 'schema_migrations'"
+        chdir: "{{ postal_dir }}"
+      register: postal_schema_read
+      changed_when: false
+      failed_when: false
+      when: postal_database == 'mariadb'
 
-        # state.yml could not ask the server, which did not run yet.
-        - name: Look for Postal's schema in the own MariaDB
-          ansible.builtin.command:
-            argv:
-              - docker
-              - compose
-              - exec
-              - -T
-              - mariadb
-              - mariadb
-              - --user=root
-              - --batch
-              - --skip-column-names
-              - "--execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{{ postal_db_name }}' AND table_name = 'schema_migrations'"
-            chdir: "{{ postal_dir }}"
-          register: postal_schema_read
-          changed_when: false
+  rescue:
+    - name: Fail with the failed install
+      ansible.builtin.include_tasks: install_failed.yml
 
-        - name: Note whether the database holds Postal's schema
-          ansible.builtin.set_fact:
-            postal_db_has_schema: "{{ postal_schema_read.stdout | trim not in ['', '0'] }}"
+- name: Note whether the own MariaDB holds a database
+  ansible.builtin.set_fact:
+    postal_db_has_schema: >-
+      {{ postal_schema_read.rc | default(0) != 0 or (postal_schema_read.stdout | default('0') | trim) not in ['', '0'] }}
+  when: postal_database == 'mariadb'
 
-    # Taking over a database that holds Postal's data needs its signing key and
-    # Rails secret and postal upgrade in place of initialize.
-    - name: Refuse to install over Postal's data
+# Taking over a database that holds Postal's data needs its signing key and
+# Rails secret and postal upgrade in place of initialize. Nothing was done in
+# the database: the containers and what this run wrote beside the data go
+# again (the configuration directory stays, its keys are taken up by the
+# next run), so the next run installs again and asks again.
+- name: Refuse to install over an existing database
+  when: postal_db_has_schema | bool
+  block:
+    - name: Remove the containers of the refused install
+      community.docker.docker_compose_v2:
+        project_src: "{{ postal_dir }}"
+        state: absent
+      failed_when: false
+
+    - name: Remove what the refused install wrote
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ postal_compose_file }}"
+        - "{{ postal_mariadb_cnf_file }}"
+        - "{{ postal_target_file }}"
+        - "{{ postal_install_marker }}"
+
+    - name: Fail on an existing database
       ansible.builtin.fail:
         msg: >-
-          The database {{ postal_db_name }} already holds Postal's schema (a
-          schema_migrations table), and this version of the role installs on an
-          empty database only: taking over an existing Postal database is not
-          supported yet. Install on an empty database.
-      when: postal_db_has_schema | bool
+          {{ postal_data_dir }}/mariadb already holds a database
+          ({{ 'its root does not log in through the socket'
+              if postal_schema_read.rc | default(0) != 0
+              else postal_db_name ~ " holds Postal's schema, a schema_migrations table" }}),
+          and this version of the role installs on an empty server only:
+          taking over an existing Postal database is not supported yet. The
+          role changed nothing in that database and removed again the compose
+          file, mariadb.cnf, the database target and the containers it had
+          made; the data stays as it was.
+
+- name: Install Postal
+  block:
+    - name: Set up Postal's database user
+      ansible.builtin.include_tasks: db_user.yml
+      when: postal_database == 'mariadb'
 
     # rake db:create postal:update: the main database and its schema.
     - name: Initialize the database
@@ -169,33 +216,8 @@
         state: absent
 
   rescue:
-    # The admin script's own line (a validation message, no value); any
-    # other failure as postal_failure says it. Neither quotes the input of a
-    # no_log task: Ansible hides its result.
-    - name: Note why the install failed
-      ansible.builtin.set_fact:
-        postal_install_failure: >-
-          {{ postal_failure | trim if ansible_failed_task.name != 'Create the first admin'
-             else ('Create the first admin: Postal refused the values of postal_admin_* (' ~ postal_admin_invalid ~ ')')
-             if postal_admin_invalid | length > 0
-             else 'Create the first admin: the script failed (the error is not shown, as it can quote the password)' }}
-      vars:
-        postal_admin_invalid: >-
-          {{ postal_admin_created.stdout_lines | default([]) | select('match', '^invalid:') | last | default('') }}
-
-    # Stopped, not removed: what is left is for the hint's removal, and a
-    # running Postal would take mail into the installation it says to remove.
-    - name: Stop Postal after the failed install
-      community.docker.docker_compose_v2:
-        project_src: "{{ postal_dir }}"
-        state: stopped
-      failed_when: false
-
-    - name: Fail with what to remove
-      ansible.builtin.fail:
-        msg: >-
-          The install of Postal {{ postal_version }} in {{ postal_dir }} failed
-          ({{ postal_install_failure }}). {{ postal_install_hint }}
+    - name: Fail with the failed install
+      ansible.builtin.include_tasks: install_failed.yml
 
 - name: Report the DNS records
   ansible.builtin.debug:

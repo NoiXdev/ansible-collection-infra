@@ -29,8 +29,19 @@
 #             signing key stays byte-identical; a pending restart (its
 #             marker, as a stopped reconfigure leaves it) restarts them on the
 #             next run; postal_smtp_submission_port 0 removes the submission
-#             service and the health check asks smtp only, and the default
-#             brings it back
+#             service and the health check asks smtp only; a larger
+#             postal_max_message_size recreates MariaDB with the larger redo
+#             log (mariadb.cnf) and restarts the Postal services; the
+#             default brings everything back
+#   takeover  the MariaDB data of an installation without its compose file,
+#             configuration and database target (a takeover): refused as not
+#             supported yet, with another postal_db_password that the
+#             database then still refuses and root still on the socket; with
+#             a root that has a password the same; the files and containers
+#             the refused run made are gone again, and with the old files back
+#             Postal runs as before
+#   ipv6_off  IPv6 switched off on the test host: the SMTP servers listen on
+#             0.0.0.0 (postal.yml, the sockets) and answer EHLO; back on, on ::
 #   missing_data
 #             the MariaDB data moved away (an unmounted volume): the run
 #             refuses and creates nothing, and compose does not start MariaDB
@@ -154,6 +165,7 @@ write_role_vars() {
     printf '{"test_postal": true}\n' >"$out/role-vars.json"
   )
   write_db_vars db-vars.json "$db_password"
+  write_db_vars new-db-vars.json "${db_password}-new"
   # Postal puts the password into a double-quoted YAML string.
   write_db_vars quote-db-vars.json 'a"b'"$db_password"
   write_db_vars backslash-db-vars.json 'a\b'"$db_password"
@@ -343,6 +355,7 @@ test_refusals() {
   refused 'is not a release the role runs' -e postal_version=3.5
   refused 'value of postal_database must be one of' -e postal_database=mysql
   refused 'postal_db_host is required' -e postal_database=mariadb_external
+  refused 'an external MariaDB is not supported yet' -e postal_database=mariadb_external -e postal_db_host=db.example.test
   refused 'postal_smtp_tls must be traefik, files or off' -e postal_smtp_tls=files
   refused 'value of postal_spam must be one of' -e postal_spam=spamd
   refused 'postal_config_extra must be a mapping' -e '{"postal_config_extra": {"main_db": {}}}'
@@ -478,8 +491,102 @@ test_reconfigure() {
   verify -e verify_submission=false
   install_converge_unchanged -e '{"postal_smtp_submission_port": 0}'
   install_converge
+
+  # MariaDB's settings: a new mariadb.cnf recreates it, and the run waits for
+  # it before it sets up the user; postal.yml changes too (the message size).
+  echo "== reconfigure: MariaDB's settings (ubuntu $1)"
+  note_starts
+  install_converge -e '{"postal_max_message_size": 20}'
+  expect_restarted web smtp submission worker mariadb
+  h grep -qx 'innodb_log_file_size = 200M' "$app_dir/mariadb.cnf" || fail "mariadb.cnf lacks the redo log of 200M"
+  [ "$(compose exec -T mariadb mariadb --user=root --batch --skip-column-names --execute="'SELECT @@innodb_log_file_size'")" = 209715200 ] \
+    || fail "MariaDB does not run with the redo log of 200M"
+  install_converge_unchanged -e '{"postal_max_message_size": 20}'
+  install_converge
   verify
   expect_clean
+  install_converge_unchanged
+}
+
+# db_login <password>: whether Postal's user logs in to the own MariaDB with
+# it, over TCP as Postal does; the password goes through stdin.
+db_login() {
+  printf '%s' "$1" | hi sh -c 'cd '"$app_dir"' && exec docker compose exec -T mariadb sh -c '"'"'MYSQL_PWD="$(cat; echo x)"; MYSQL_PWD="${MYSQL_PWD%x}"; export MYSQL_PWD; exec mariadb --host=127.0.0.1 --port=3307 --user=postal --execute="SELECT 1"'"'" >/dev/null 2>&1
+}
+root_user() { compose exec -T mariadb mariadb --user=root --batch --skip-column-names --execute="'SHOW CREATE USER root@localhost'"; }
+# Moves the compose file, the configuration, mariadb.cnf and the database
+# target aside, with Postal down: the data of an installation without it.
+set_files_aside() {
+  compose down >/dev/null 2>&1
+  h sh -c "rm -rf /root/aside && mkdir /root/aside && cd $app_dir && mv compose.yaml config mariadb.cnf database-target /root/aside/"
+}
+# Puts them back over what a run wrote, and MariaDB up.
+put_files_back() {
+  h sh -c "cd $app_dir && rm -rf compose.yaml config mariadb.cnf database-target && mv /root/aside/* . && docker compose up -d --wait mariadb" >/dev/null 2>&1 \
+    || fail "MariaDB does not start with the files put back"
+}
+# expect_refused_takeover <reason>: the refused run left nothing but the
+# configuration directory, and the database user still takes the old
+# password only.
+expect_refused_takeover() {
+  expect_in_log 'taking over an existing Postal database is not supported yet'
+  expect_in_log "$1"
+  expect_not_in_log "Create Postal's database user and its grants"
+  expect_not_in_log 'Initialize the database'
+  local file
+  for file in compose.yaml mariadb.cnf database-target install-incomplete; do
+    h test ! -e "$app_dir/$file" || fail "the refused takeover left $app_dir/$file"
+  done
+  [ -z "$(h docker ps -aq --filter label=com.docker.compose.project=postal)" ] || fail "the refused takeover left containers"
+}
+
+test_takeover() {
+  echo "== takeover (ubuntu $1)"
+  ensure_installed takeover
+  set_files_aside
+  install_converge_fails -e "@$out/new-db-vars.json"
+  expect_refused_takeover "postal holds Postal's schema"
+  put_files_back
+  db_login "$db_password" || fail "the refused takeover changed the password of Postal's database user"
+  if db_login "${db_password}-new"; then fail "the refused takeover gave Postal's database user the new password"; fi
+  [[ "$(root_user)" == *'IDENTIFIED VIA unix_socket'* ]] || fail "root is no longer on the socket: $(root_user)"
+
+  # A root with a password: it does not log in through the socket, which is
+  # refused as well, and the password stays.
+  echo "== takeover: a root with a password (ubuntu $1)"
+  compose exec -T mariadb mariadb --user=root --execute="\"ALTER USER root@localhost IDENTIFIED BY 'noix-root-test'\""
+  set_files_aside
+  install_converge_fails -e "@$out/new-db-vars.json"
+  expect_refused_takeover 'its root does not log in through the socket'
+  put_files_back
+  [[ "$(compose exec -T -e MYSQL_PWD=noix-root-test mariadb mariadb --user=root --batch --skip-column-names \
+        --execute="'SHOW CREATE USER root@localhost'")" == *PASSWORD* ]] || fail "the refused takeover changed root"
+  db_login "$db_password" || fail "the refused takeover changed the password of Postal's database user"
+  compose exec -T -e MYSQL_PWD=noix-root-test mariadb mariadb --user=root \
+    --execute="\"ALTER USER root@localhost IDENTIFIED VIA unix_socket\""
+
+  compose up -d >/dev/null 2>&1
+  install_converge_unchanged
+  [ "$(postal_rails 'puts User.count')" = 1 ] || fail "the admin is gone after the refused takeovers"
+}
+
+test_ipv6_off() {
+  echo "== ipv6_off (ubuntu $1)"
+  ensure_installed ipv6_off
+  h sysctl -q -w net.ipv6.conf.all.disable_ipv6=1
+  note_starts
+  install_converge
+  expect_restarted web smtp submission worker
+  verify -e verify_smtp_bind=0.0.0.0
+  for port in 25 587; do
+    h ss -ltnH "sport = :$port" | grep -q "0.0.0.0:$port " || fail "nothing listens on 0.0.0.0:$port: $(h ss -ltnH "sport = :$port")"
+  done
+  expect_in_log '(item=smtp on 25)'
+  expect_in_log '(item=submission on 587)'
+  install_converge_unchanged
+  h sysctl -q -w net.ipv6.conf.all.disable_ipv6=0
+  install_converge
+  verify
   install_converge_unchanged
 }
 
@@ -518,7 +625,7 @@ test_mountpoint() {
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure missing_data mountpoint"
+all_scenarios="refusals install noop_down reconfigure takeover ipv6_off missing_data mountpoint"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -528,6 +635,8 @@ for ubuntu in $releases; do
       install) test_install "$ubuntu" ;;
       noop_down) test_noop_down "$ubuntu" ;;
       reconfigure) test_reconfigure "$ubuntu" ;;
+      takeover) test_takeover "$ubuntu" ;;
+      ipv6_off) test_ipv6_off "$ubuntu" ;;
       missing_data) test_missing_data "$ubuntu" ;;
       mountpoint) test_mountpoint "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;

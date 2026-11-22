@@ -189,6 +189,17 @@
     quiet: true
   when: postal_database == 'mariadb_external'
 
+# Its checks (login, version, grants) and the database check of every run
+# come with the support for it; until then the role would run Postal's
+# setup against a server it did not check.
+- name: Refuse an external MariaDB
+  ansible.builtin.fail:
+    msg: >-
+      postal_database mariadb_external is set, but an external MariaDB is not
+      supported yet by this version of the role. Use postal_database mariadb
+      (a MariaDB container of the project). The role changes nothing.
+  when: postal_database == 'mariadb_external'
+
 - name: Check postal_smtp_tls
   ansible.builtin.assert:
     that:

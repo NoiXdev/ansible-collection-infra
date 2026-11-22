@@ -53,7 +53,7 @@
   'logging': {'level': postal_logging_level | string},
   'smtp_server': {
     'default_port': postal_smtp_port | int,
-    'default_bind_address': '::',
+    'default_bind_address': postal_smtp_bind_address,
     'default_health_server_port': postal_smtp_health_port | int,
     'default_health_server_bind_address': '127.0.0.1',
     'tls_enabled': false,

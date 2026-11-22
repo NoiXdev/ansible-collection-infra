@@ -194,7 +194,9 @@ postal_failure: >-
      else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
 
 # After a failed install: nothing in it should be worth keeping yet, so what
-# it made is removed and the next run installs afresh.
+# it made is removed and the next run installs afresh. A data subdirectory
+# that was there before the install (install.yml notes them in
+# postal_install_data_before; a later run cannot tell) is kept.
 postal_install_hint: >-
   It left a partial installation, which the role does not take for a
   finished one. To install again, first check that nothing in it is worth
@@ -202,8 +204,18 @@ postal_install_hint: >-
   in {{ postal_dir }} (if {{ postal_compose_file }} exists), remove
   {{ postal_compose_file }}, {{ postal_config_dir }},
   {{ postal_mariadb_cnf_file }}, {{ postal_target_file }},
-  {{ postal_install_marker }}{{ (' and the subdirectories ' ~ postal_data_subdirs | join(' and ') ~ ' of '
-  ~ postal_data_dir) if postal_data_subdirs | length > 0 else '' }}, then run the role again.
+  {{ postal_install_marker }}{{ postal_install_hint_data }}, then run the role
+  again.
+postal_install_hint_data: >-
+  {%- set made = postal_data_subdirs | reject('in', postal_install_data_before | default([])) | list -%}
+  {%- set kept = postal_data_subdirs | select('in', postal_install_data_before | default([])) | list -%}
+  {%- if postal_install_data_before is not defined and postal_data_subdirs | length > 0 -%}
+  {{ ' and the subdirectories ' ~ postal_data_subdirs | join(' and ') ~ ' of ' ~ postal_data_dir
+     ~ ' (keep those that held data before the install)' }}
+  {%- else -%}
+  {{ ((' and the subdirectories ' ~ made | join(' and ') ~ ' of ' ~ postal_data_dir) if made | length > 0 else '')
+     ~ ((' (keep ' ~ kept | join(' and ') ~ ': it was there before the install)') if kept | length > 0 else '') }}
+  {%- endif -%}
 
 # The files the role renders, as it writes them.
 postal_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"

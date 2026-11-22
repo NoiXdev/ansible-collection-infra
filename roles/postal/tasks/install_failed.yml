@@ -1,0 +1,32 @@
+---
+# The rescue of install.yml: notes why the install failed, stops Postal and
+# fails with what to remove (postal_install_hint). It quotes nothing of a
+# no_log task's input.
+
+# The admin script's own line (a validation message, no value); any
+# other failure as postal_failure says it. Neither quotes the input of a
+# no_log task: Ansible hides its result.
+- name: Note why the install failed
+  ansible.builtin.set_fact:
+    postal_install_failure: >-
+      {{ postal_failure | trim if ansible_failed_task.name != 'Create the first admin'
+         else ('Create the first admin: Postal refused the values of postal_admin_* (' ~ postal_admin_invalid ~ ')')
+         if postal_admin_invalid | length > 0
+         else 'Create the first admin: the script failed (the error is not shown, as it can quote the password)' }}
+  vars:
+    postal_admin_invalid: >-
+      {{ postal_admin_created.stdout_lines | default([]) | select('match', '^invalid:') | last | default('') }}
+
+# Stopped, not removed: what is left is for the hint's removal, and a
+# running Postal would take mail into the installation it says to remove.
+- name: Stop Postal after the failed install
+  community.docker.docker_compose_v2:
+    project_src: "{{ postal_dir }}"
+    state: stopped
+  failed_when: false
+
+- name: Fail with what to remove
+  ansible.builtin.fail:
+    msg: >-
+      The install of Postal {{ postal_version }} in {{ postal_dir }} failed
+      ({{ postal_install_failure }}). {{ postal_install_hint }}

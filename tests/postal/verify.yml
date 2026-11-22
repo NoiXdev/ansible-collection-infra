@@ -13,7 +13,8 @@
 # Extra variables: verify_submission (default true: the submission service
 # runs), verify_mail_host and verify_mail_port (postal_mail's host and port;
 # empty host: the role writes no host), verify_spam_threshold (the
-# default_spam_threshold the run set, empty for none).
+# default_spam_threshold the run set, empty for none), verify_smtp_bind (the
+# address of the SMTP servers: :: with IPv6, else 0.0.0.0).
 - name: Verify
   hosts: all
   gather_facts: false
@@ -26,6 +27,7 @@
     verify_mail_host: ""
     verify_mail_port: 25
     verify_spam_threshold: ""
+    verify_smtp_bind: "::"
     verify_services: "{{ ['mariadb', 'smtp', 'web', 'worker'] + (['submission'] if verify_submission | bool else []) }}"
     verify_all: "{{ verify_inspect.stdout | from_json }}"
     # One container per service (the worker has one replica).
@@ -204,6 +206,7 @@
           - verify_config.message_db.database_name_prefix == 'postal'
           - verify_config.rails.secret_key | length == 128
           - verify_config.smtp_server.default_port == 25
+          - verify_config.smtp_server.default_bind_address == verify_smtp_bind
           - verify_config.smtp_server.default_health_server_port == 9091
           - verify_config.worker.default_health_server_port == 9090
           - verify_config.dns.return_path_domain == 'rp.mail.test'
@@ -219,6 +222,7 @@
           databases {{ verify_config.main_db.host | default('') }}:{{ verify_config.main_db.port | default('') }}
           with the prefix {{ verify_config.message_db.database_name_prefix | default('') }},
           the spam threshold {{ verify_config.postal.default_spam_threshold | default('none') }},
+          the SMTP address {{ verify_config.smtp_server.default_bind_address | default('') }},
           a Rails secret of 128 characters), or its smtp section is
           {{ verify_smtp_plain }}, not {{ verify_smtp_expected }}.
       vars:

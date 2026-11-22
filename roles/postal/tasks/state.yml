@@ -12,7 +12,8 @@
 # postal_target_file, empty without it) and postal_installed_target (the
 # external server it records), postal_signing_key_value and
 # postal_rails_secret_value (the given ones, else those on disk, else empty:
-# config.yml generates them), postal_config_differs, postal_restart_pending,
+# config.yml generates them), postal_smtp_bind_address (:: with IPv6, else
+# 0.0.0.0), postal_config_differs, postal_restart_pending,
 # postal_down (the services that are not running) and postal_db_has_schema
 # (the main database holds a schema_migrations table: asked of the running
 # own MariaDB of an installation; on an install of the own MariaDB it is
@@ -221,14 +222,14 @@
   register: postal_config_read
   failed_when: false
   no_log: true
-  when: postal_installed
 
+# Also before an install: keys a refused or earlier install left (or the
+# operator put there) are taken up, never generated over.
 - name: Note the configuration on disk
   ansible.builtin.set_fact:
     postal_config_disk: "{{ postal_config_read.results[0].content | default('') | b64decode }}"
     postal_signing_key_disk: "{{ postal_config_read.results[1].content | default('') | b64decode }}"
   no_log: true
-  when: postal_installed
 
 # A postal.yml that is not YAML has no Rails secret to keep (one is
 # generated, which ends the sessions only).
@@ -275,6 +276,19 @@
   when:
     - postal_installed
     - postal_signing_key_value | length == 0
+
+# Postal's SMTP servers listen on :: (IPv4 and IPv6) where the host has
+# IPv6, else on 0.0.0.0: binding :: fails without it.
+- name: Read whether the host has IPv6
+  ansible.builtin.slurp:
+    src: /proc/sys/net/ipv6/conf/all/disable_ipv6
+  register: postal_ipv6_read
+  failed_when: false
+
+- name: Note the address of the SMTP servers
+  ansible.builtin.set_fact:
+    postal_smtp_bind_address: >-
+      {{ '::' if (postal_ipv6_read.content | default('') | b64decode | trim) == '0' else '0.0.0.0' }}
 
 # The rendered postal.yml compared with the one on disk, and the key; the
 # Rails secret is empty only when config.yml has to generate one, which then
