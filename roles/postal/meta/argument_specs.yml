@@ -90,8 +90,10 @@ argument_specs:
       postal_traefik_track_cert_resolver:
         type: str
         description: >-
-          Certificate resolver of the tracking router (HTTP-01: customer
-          domains are outside your DNS zone).
+          Certificate resolver of the router of the customer tracking domains
+          that Postal verified (HTTP-01: they are outside your DNS zone; the
+          traefik role's resolver http). The track domain and
+          postal_track_hostnames keep the entrypoint's certificates.
       postal_traefik_priority:
         type: int
         description: Priority of the routers; keep it above catch-all routers.
@@ -99,8 +101,9 @@ argument_specs:
         type: list
         elements: str
         description: >-
-          More host names the tracking router serves, besides the track domain
-          and the verified customer tracking domains.
+          More host names the tracking router serves beside the track domain,
+          with the entrypoint's certificates. The customer tracking domains
+          Postal verified are read on every run and get a router of their own.
       postal_database:
         type: str
         choices: [mariadb, mariadb_external]

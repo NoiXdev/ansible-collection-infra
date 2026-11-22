@@ -65,6 +65,18 @@
 #             the domain's own key needs its DNS checked); a message to
 #             in@routes.mail.test on port 25
 #             reaches the echo endpoint (postal_allowed_request_destinations)
+#   track_domains
+#             customer tracking domains of Postal's track_domains table: one
+#             whose DNS Postal has not verified gets no router (Traefik's
+#             404); once its dns_status is OK the next run routes it on
+#             postal-track-customers with the resolver http, recreating web
+#             alone, and the run after that changes nothing; without SSL it is
+#             routed too; a name in the table that is no host name is skipped
+#             and named, never written into a rule; a table that cannot be
+#             read (MariaDB stopped, a new postal_db_password) keeps the
+#             routed domains; postal_track_hostnames go on postal-track (a
+#             verified domain listed there too on postal-track alone); a
+#             domain removed in Postal loses its router on the next run
 #   missing_data
 #             the MariaDB data moved away (an unmounted volume): the run
 #             refuses and creates nothing, and compose does not start MariaDB
@@ -406,6 +418,34 @@ server = Organization.find_by!(permalink: "noix").servers.find_by!(permalink: "t
 credential = server.credentials.find_by(type: "SMTP", name: "fixture") || server.credentials.create!(type: "SMTP", name: "fixture")
 puts credential.key' | tail -n 1
 }
+# track_domain <domain> <name> <ruby attributes>: the customer tracking
+# domain <name>.<domain> of the fixture's mail server (made with the domain,
+# marked verified, when missing), then its columns set as given (no callback
+# or validation runs, so a test can mark the DNS check or write a name Postal
+# would refuse; dns_checked_at now keeps Postal's own hourly check away);
+# prints its full name. untrack_domain <domain>: removes the tracking domains
+# of the domain.
+track_domain() {
+  postal_rails '
+server = Organization.find_by!(permalink: "noix").servers.find_by!(permalink: "test")
+domain = server.domains.find_by(name: "'"$1"'") || server.domains.create!(name: "'"$1"'", verification_method: "DNS")
+domain.update!(verified_at: Time.now) unless domain.verified?
+track = server.track_domains.find_by(domain: domain) || server.track_domains.create!(name: "'"$2"'", domain: domain)
+track.update_columns('"$3"', dns_checked_at: Time.now)
+track.reload
+puts "#{track.name}.#{domain.name}"' | tail -n 1
+}
+untrack_domain() {
+  postal_rails '
+server = Organization.find_by!(permalink: "noix").servers.find_by!(permalink: "test")
+domain = server.domains.find_by!(name: "'"$1"'")
+puts TrackDomain.where(server: server, domain: domain).delete_all' | tail -n 1
+}
+# expect_compose_lacks <text>: the compose file does not hold the text.
+expect_compose_lacks() {
+  if h grep -qF -- "$1" "$app_dir/compose.yaml"; then fail "the compose file holds $1: $(h grep -nF -- "$1" "$app_dir/compose.yaml" | head -n 3)"; fi
+}
+
 # The echo endpoint (echo.py) on the test host's 127.0.0.1:8090, storing each
 # POST body in /root/echo.
 start_echo() {
@@ -878,6 +918,109 @@ test_routers() {
   install_converge_unchanged
 }
 
+test_track_domains() {
+  local key name
+  local new_db="@$out/new-db-vars.json"
+  local extra='{"postal_track_hostnames": ["extra.customer.test"]}'
+  local listed='{"postal_track_hostnames": ["click.customer.test"]}'
+  echo "== track_domains (ubuntu $1)"
+  ensure_installed track_domains
+  key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$key")
+
+  # A customer tracking domain whose CNAME Postal has not verified
+  # (dns_status NULL): no router names it, so Traefik asks no certificate for
+  # it and answers it with its own 404.
+  name="$(track_domain customer.test click 'dns_status: nil, ssl_enabled: true')" \
+    || fail "the tracking domain failed: $(tail -n 20 "$out/rails.log")"
+  [ "$name" = click.customer.test ] || fail "the tracking domain is $name, not click.customer.test"
+  install_converge_unchanged
+  expect_compose_lacks click.customer.test
+  expect_compose_lacks postal-track-customers
+  verify
+  expect_answer 404 '404 page not found' 443 click.customer.test /
+
+  # Postal marks its DNS OK: the next run routes it on a router of its own
+  # with the HTTP-01 resolver, which recreates web alone, and the run after
+  # that changes nothing.
+  echo "== track_domains: a verified domain (ubuntu $1)"
+  track_domain customer.test click 'dns_status: "OK"' >/dev/null
+  note_starts
+  install_converge
+  grep -Eq 'changed=[1-9]' "$out/converge.log" || fail "the verified tracking domain changed nothing"
+  expect_restarted web
+  verify -e verify_track_customers=click.customer.test
+  wait_answer 200 'Hello.' 443 click.customer.test /
+  tracking 443 track.mail.test /
+  install_converge_unchanged
+
+  # Without SSL (Postal writes http:// links, which the web entrypoint of a
+  # server redirects): routed all the same.
+  track_domain customer.test click 'dns_status: "OK", ssl_enabled: false' >/dev/null
+  install_converge_unchanged
+  tracking 443 click.customer.test /
+
+  # A name in the table that is no host name (Postal would refuse it; here it
+  # is written past its validation) never reaches a rule: the run skips and
+  # names it, and changes nothing.
+  echo "== track_domains: a name that is no host name (ubuntu $1)"
+  track_domain inject.customer.test x 'name: "x`) || Host(`evil.test", dns_status: "OK"' >/dev/null
+  install_converge_unchanged
+  expect_in_log 'are no host names, so no router names them'
+  expect_compose_lacks evil.test
+  verify -e verify_track_customers=click.customer.test
+  [ "$(untrack_domain inject.customer.test)" = 1 ] || fail "the injected tracking domain was not removed"
+
+  # The table cannot be read: the run keeps the domains the compose file
+  # routes instead of dropping them. With MariaDB stopped, a run without
+  # changes refuses and touches nothing (no reconfigure without them);
+  # with a new postal_db_password (state.yml reads with it before the role
+  # gives it to Postal's user) the reconfigure keeps them.
+  echo "== track_domains: the database cannot be read (ubuntu $1)"
+  compose stop mariadb >/dev/null 2>&1
+  note_untouched
+  install_converge_fails
+  expect_in_log "the services mariadb are not running"
+  expect_untouched
+  compose up -d --wait mariadb >/dev/null 2>&1
+  install_converge_unchanged
+  role_converge -e "$new_db" -e "@$out/admin-vars.json"
+  expect_in_log 'keeps the customer tracking domains of the compose file'
+  verify -e verify_track_customers=click.customer.test
+  wait_answer 200 'Hello.' 443 click.customer.test /
+  role_converge_unchanged -e "$new_db" -e "@$out/admin-vars.json"
+  install_converge
+  install_converge_unchanged
+
+  # postal_track_hostnames: on the tracking router with the entrypoint's
+  # resolver, beside the customers' router; a verified domain listed there too
+  # is on the tracking router alone.
+  echo "== track_domains: postal_track_hostnames (ubuntu $1)"
+  install_converge -e "$extra"
+  verify -e verify_track_hostnames=extra.customer.test -e verify_track_customers=click.customer.test
+  wait_answer 200 'Hello.' 443 extra.customer.test /
+  tracking 443 click.customer.test /
+  install_converge_unchanged -e "$extra"
+  install_converge -e "$listed"
+  verify -e verify_track_hostnames=click.customer.test
+  wait_answer 200 'Hello.' 443 click.customer.test /
+  install_converge_unchanged -e "$listed"
+
+  # The domain removed in Postal: the next run drops its router.
+  echo "== track_domains: a removed domain (ubuntu $1)"
+  [ "$(untrack_domain customer.test)" = 1 ] || fail "the tracking domain was not removed"
+  install_converge
+  verify
+  expect_compose_lacks click.customer.test
+  for _ in $(seq 30); do
+    [ "$(request 443 click.customer.test / | tail -n 1)" = 404 ] && break
+    sleep 2
+  done
+  expect_answer 404 '404 page not found' 443 click.customer.test /
+  install_converge_unchanged
+  expect_clean
+}
+
 test_mail() {
   local key smtp_key subject raw body
   echo "== mail (ubuntu $1)"
@@ -927,7 +1070,7 @@ test_mail() {
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure takeover ipv6_off routers mail missing_data mountpoint"
+all_scenarios="refusals install noop_down reconfigure takeover ipv6_off routers mail track_domains missing_data mountpoint"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -941,6 +1084,7 @@ for ubuntu in $releases; do
       ipv6_off) test_ipv6_off "$ubuntu" ;;
       routers) test_routers "$ubuntu" ;;
       mail) test_mail "$ubuntu" ;;
+      track_domains) test_track_domains "$ubuntu" ;;
       missing_data) test_missing_data "$ubuntu" ;;
       mountpoint) test_mountpoint "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;

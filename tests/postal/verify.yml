@@ -17,8 +17,11 @@
 # default_spam_threshold the run set, empty for none), verify_smtp_bind (the
 # address of the SMTP servers: :: with IPv6, else 0.0.0.0), and the Traefik
 # settings of the run: verify_entrypoints, verify_ui_entrypoints and
-# verify_ui_middlewares (comma-separated, empty: none) and
-# verify_track_hostnames (the tracking host names besides track.mail.test).
+# verify_ui_middlewares (comma-separated, empty: none),
+# verify_track_hostnames (the tracking host names besides track.mail.test)
+# and verify_track_customers (the verified customer tracking domains, sorted,
+# of the router postal-track-customers with the resolver http; empty: no such
+# router).
 - name: Verify
   hosts: all
   gather_facts: false
@@ -36,6 +39,7 @@
     verify_ui_entrypoints: ""
     verify_ui_middlewares: ""
     verify_track_hostnames: ""
+    verify_track_customers: ""
     verify_services: "{{ ['mariadb', 'smtp', 'web', 'worker'] + (['submission'] if verify_submission | bool else []) }}"
     verify_all: "{{ verify_inspect.stdout | from_json }}"
     # One container per service (the worker has one replica).
@@ -111,6 +115,13 @@
           {%-   set _ = rules.append('Host(`' ~ name ~ '`)') -%}
           {%- endfor -%}
           {{ rules | join(' || ') }}
+        verify_customers: "{{ verify_track_customers | split(',') | select | list }}"
+        verify_customers_rule: >-
+          {%- set rules = [] -%}
+          {%- for name in verify_customers -%}
+          {%-   set _ = rules.append('Host(`' ~ name ~ '`)') -%}
+          {%- endfor -%}
+          {{ rules | join(' || ') }}
         verify_api: "PathPrefix(`/api/`) || Path(`/.well-known/jwks.json`)"
         verify_routers:
           - name: postal-api
@@ -128,6 +139,10 @@
             entrypoints: "{{ verify_entrypoints }}"
             priority: "101"
             middlewares: postal-set-track
+        verify_customer_routers: >-
+          {{ [{'name': 'postal-track-customers', 'rule': verify_customers_rule, 'entrypoints': verify_entrypoints,
+               'priority': '101', 'middlewares': 'postal-set-track', 'certresolver': 'http'}]
+             if verify_customers | length > 0 else [] }}
         verify_expected: >-
           {%- set found = {
             'traefik.enable': 'true',
@@ -136,12 +151,15 @@
             'traefik.http.middlewares.postal-set-track.headers.customrequestheaders.X-Postal-Track-Host': '1',
             'traefik.http.services.postal.loadbalancer.server.port': '5000',
           } -%}
-          {%- for r in verify_routers -%}
+          {%- for r in verify_routers + verify_customer_routers -%}
           {%-   set prefix = 'traefik.http.routers.' ~ r.name -%}
           {%-   set _ = found.update({prefix ~ '.rule': r.rule, prefix ~ '.priority': r.priority,
                                      prefix ~ '.middlewares': r.middlewares, prefix ~ '.service': 'postal'}) -%}
           {%-   if r.entrypoints | length > 0 -%}
           {%-     set _ = found.update({prefix ~ '.entrypoints': r.entrypoints}) -%}
+          {%-   endif -%}
+          {%-   if r.certresolver is defined -%}
+          {%-     set _ = found.update({prefix ~ '.tls.certresolver': r.certresolver}) -%}
           {%-   endif -%}
           {%- endfor -%}
           {{ found }}

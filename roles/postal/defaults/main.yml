@@ -32,15 +32,22 @@ postal_dns: {}
 
 # Traefik: the external network, its fixed address (the proxy Postal trusts
 # for X-Forwarded-For) and the entrypoints of the routers (empty: Traefik's
-# default entrypoints). Three routers, at postal_traefik_priority (the API and
-# tracking one above):
+# default entrypoints). Four routers, at postal_traefik_priority (the API and
+# tracking ones above):
 #   <project>-api    /api/ and the JWKS of postal_web_hostname, on
 #                    postal_traefik_entrypoints with postal_traefik_middlewares
 #   <project>-ui     everything else of postal_web_hostname, on
 #                    postal_traefik_ui_entrypoints with
 #                    postal_traefik_ui_middlewares
-#   <project>-track  the tracking domains, on postal_traefik_entrypoints with
-#                    postal_traefik_track_middlewares
+#   <project>-track  the track domain of postal_dns and postal_track_hostnames,
+#                    on postal_traefik_entrypoints with
+#                    postal_traefik_track_middlewares and the entrypoint's
+#                    certificates
+#   <project>-track-customers
+#                    the customer tracking domains whose CNAME Postal verified
+#                    (read on every run), the same with the resolver
+#                    postal_traefik_track_cert_resolver; left out while there
+#                    is none
 # The API and UI routers set X-Postal-Track-Host to 0, so that no client
 # spelling of it reaches Postal; the tracking router sets it to 1.
 postal_traefik_network: proxy
@@ -50,12 +57,14 @@ postal_traefik_middlewares: []
 postal_traefik_ui_entrypoints: "{{ postal_traefik_entrypoints }}"
 postal_traefik_ui_middlewares: []
 postal_traefik_track_middlewares: []
-# The certificate resolver of the tracking router: customer tracking domains
-# are outside your DNS zone, so they need HTTP-01.
+# The certificate resolver of the customer tracking domains: they are outside
+# your DNS zone, so they need HTTP-01 (the traefik role's resolver http: its
+# http challenge, or traefik_acme_http_resolver next to the dns one).
 postal_traefik_track_cert_resolver: http
 postal_traefik_priority: 100
-# More host names the tracking router serves (customer tracking domains that
-# Postal has verified are added on every run).
+# More host names of the tracking router, with the entrypoint's certificates
+# (names you control); customer tracking domains that Postal verified are
+# added on every run, on a router of their own.
 postal_track_hostnames: []
 
 # Where the databases live:

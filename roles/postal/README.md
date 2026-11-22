@@ -9,9 +9,12 @@ update and a rollback when an update fails.
 This part of the role installs Postal with a MariaDB container of its own,
 creates the first admin (`postal_admin_email`, `postal_admin_password`),
 prints the DNS records to set, applies changed settings, routes the API, the
-web interface and the tracking domain through Traefik and checks on every run
-that Postal answers; updates, the external MariaDB, the customer tracking
-domains, SMTP TLS and the spam checks follow. A password of the database user
+web interface and the tracking domains through Traefik and checks on every run
+that Postal answers; updates, the external MariaDB, SMTP TLS and the spam
+checks follow. A customer tracking domain added in Postal gets its router and
+its certificate on the next run of the role, once Postal has verified its
+CNAME; its certificate comes from HTTP-01 (the `traefik` role's
+`traefik_acme_http_resolver` with the DNS-01 challenge). A password of the database user
 must not hold a double quote or a backslash, which Postal cannot read. Docker
 comes from the playbook (the `docker` role); the role checks for it. The host
 must be x86_64, as Postal's image exists for that architecture only.
@@ -35,6 +38,8 @@ the defaults in `defaults/main.yml`.
 | `postal_traefik_network` | `proxy` | Traefik's network |
 | `postal_traefik_entrypoints` | `[]` | Entrypoints of the API and tracking routers |
 | `postal_traefik_ui_entrypoints` | the API's | Entrypoints of the web interface router |
+| `postal_traefik_track_cert_resolver` | `http` | Certificate resolver of the customer tracking domains |
+| `postal_track_hostnames` | `[]` | More tracking host names, with the entrypoint's certificates |
 | `postal_database` | `mariadb` | `mariadb` (a container of the project) or `mariadb_external` (MariaDB 10.6 or newer of your own) |
 | `postal_db_password` | required | Password of the database user |
 | `postal_db_host` | required with `mariadb_external` | Host name or address of the external server |

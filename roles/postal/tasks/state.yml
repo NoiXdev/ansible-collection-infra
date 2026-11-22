@@ -14,18 +14,19 @@
 # postal_rails_secret_value (the given ones, else those on disk, else empty:
 # config.yml generates them), postal_smtp_bind_address (:: with IPv6, else
 # 0.0.0.0), postal_config_differs, postal_restart_pending,
-# postal_down (the services that are not running) and postal_db_has_schema
+# postal_down (the services that are not running), postal_db_has_schema
 # (the main database holds a schema_migrations table: asked of the running
 # own MariaDB of an installation; on an install of the own MariaDB it is
 # false here, as the server does not run yet, and install.yml asks again once
-# it does). Refuses, before any change and in this order: a postal_data_dir
-# that is not a mountpoint (with postal_data_dir_mountpoint), an installation
-# of another database mode, an external installation of another server, an
-# installation without its data subdirectories (an unmounted volume), a
-# compose file that is not YAML, an install that did not complete (its
-# marker), a compose file without a Postal version, a downgrade, and an
-# installation without its signing key when postal_signing_key is empty. It
-# changes nothing.
+# it does) and postal_track_domains (the tracking domains whose DNS Postal
+# verified, with postal_track_hostnames). Refuses, before any change and in
+# this order: a postal_data_dir that is not a mountpoint (with
+# postal_data_dir_mountpoint), an installation of another database mode, an
+# external installation of another server, an installation without its data
+# subdirectories (an unmounted volume), a compose file that is not YAML, an
+# install that did not complete (its marker), a compose file without a Postal
+# version, a downgrade, and an installation without its signing key when
+# postal_signing_key is empty. It changes nothing.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -341,6 +342,92 @@
     - postal_installed
     - postal_database == 'mariadb'
     - "'mariadb' in postal_ps.stdout_lines"
+
+# The customer tracking domains: the full names (<name>.<domain>) of
+# Postal's track_domains whose CNAME Postal verified (dns_status OK, the
+# filter Postal applies before it rewrites links), with or without SSL. Read
+# on every run as Postal's user over TCP, the password through stdin into the
+# client's environment (no_log). On an install the database does not run
+# yet. With the external server (postal_db_settings) only the client
+# container changes.
+- name: Read the verified tracking domains
+  ansible.builtin.command:
+    argv: "{{ postal_db_client }}"
+    chdir: "{{ postal_dir }}"
+    stdin: "{{ postal_db_password }}"
+    stdin_add_newline: false
+  vars:
+    postal_db_client:
+      - docker
+      - compose
+      - exec
+      - -T
+      - mariadb
+      - sh
+      - -c
+      - >-
+        MYSQL_PWD="$(cat; echo x)"; MYSQL_PWD="${MYSQL_PWD%x}"; export MYSQL_PWD;
+        exec mariadb --host=127.0.0.1 --port={{ postal_mariadb_port | int }} --user={{ postal_db_user }}
+        --database={{ postal_db_name }} --batch --skip-column-names --connect-timeout=10
+        --execute="SELECT CONCAT(t.name, '.', d.name) FROM track_domains t
+        JOIN domains d ON d.id = t.domain_id WHERE t.dns_status = 'OK'"
+  register: postal_track_read
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - postal_installed
+    - postal_database == 'mariadb'
+    - "'mariadb' in postal_ps.stdout_lines"
+
+# A table that cannot be read (MariaDB down, a postal_db_password the
+# database does not know yet) must not drop the routers of the customers:
+# the domains of the compose file stay. Every name, read or kept, must be a
+# host name before it goes into a Traefik rule; the others are skipped.
+- name: Note the tracking domains
+  ansible.builtin.set_fact:
+    postal_track_read_ok: "{{ postal_track_read.rc | default(1) == 0 }}"
+    postal_track_found: "{{ postal_track_found_names | map('lower') | unique | list }}"
+  vars:
+    postal_track_router_rule: >-
+      {{ ((postal_compose_on_disk.services | default({})).web | default({})).labels | default([], true)
+         | map('string') | select('match', '^traefik[.]http[.]routers[.]' ~ postal_project ~ '-track-customers[.]rule=')
+         | first | default('') }}
+    postal_track_found_names: >-
+      {{ (postal_track_read.stdout_lines | default([]) | map('trim') | select | list)
+         if postal_track_read.rc | default(1) == 0
+         else postal_track_router_rule | regex_findall('Host\(`([^`]*)`\)') }}
+
+- name: Report the tracking domains the role keeps
+  ansible.builtin.debug:
+    msg: >-
+      The role cannot read Postal's track_domains table ({{ postal_track_error }}),
+      so it keeps the customer tracking domains of the compose file:
+      {{ postal_track_found | join(', ') or 'none' }}.
+  vars:
+    postal_track_error: >-
+      {{ 'MariaDB is not running' if postal_track_read.rc is not defined
+         else (postal_track_read.stderr | default('') | trim).splitlines() | select('search', 'ERROR')
+              | first | default('the client failed') }}
+  when:
+    - postal_installed
+    - not postal_track_read_ok
+
+- name: Report the tracking domains that are no host names
+  ansible.builtin.debug:
+    msg: >-
+      The tracking domains {{ postal_track_invalid | map('to_json') | join(', ') }}
+      of Postal's track_domains table are no host names, so no router names
+      them.
+  vars:
+    postal_track_invalid: "{{ postal_track_found | reject('match', postal_hostname_pattern) | list }}"
+  when: postal_track_invalid | length > 0
+
+- name: Note the tracking domains Traefik routes
+  ansible.builtin.set_fact:
+    postal_track_domains: >-
+      {{ (postal_track_found | select('match', postal_hostname_pattern) | list
+          + postal_track_hostnames | map('string') | list) | unique | sort }}
 
 # Written by reconfigure.yml before it writes the compose file and the
 # configuration, and removed by main.yml once a run ends healthy: a run

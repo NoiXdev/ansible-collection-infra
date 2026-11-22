@@ -17,19 +17,28 @@
 {%- set own_db = postal_database == 'mariadb' -%}
 {#- The routers of web: the public API (and the key of the webhook
     signatures), the UI on entrypoints of its own (everything else of the web
-    host name) and tracking on the role-known tracking host and
-    postal_track_hostnames. Postal answers as its tracking server whenever a
-    request carries X-Postal-Track-Host: 1, and Puma reads every spelling of
-    it with dashes or underscores as that header unless the all-dash one is
-    there. So the routers of the web host name set the all-dash one to 0,
+    host name), tracking on the role-known tracking host and
+    postal_track_hostnames (with the entrypoint's certificates), and tracking
+    on the customer tracking domains Postal verified (state.yml), outside the
+    operator's DNS zone, with the HTTP-01 resolver
+    postal_traefik_track_cert_resolver; without such a domain that router is
+    left out (a Host rule needs a host). Postal answers as its tracking server
+    whenever a request carries X-Postal-Track-Host: 1, and Puma reads every
+    spelling of it with dashes or underscores as that header unless the
+    all-dash one is there. So the routers of the web host name set the all-dash one to 0,
     which outweighs any spelling a client sends, and only the tracking router
     sets it to 1. -#}
 {%- set router = postal_project -%}
 {%- set host_rule = 'Host(`' ~ postal_web_hostname ~ '`)' -%}
 {%- set api_paths = 'PathPrefix(`/api/`) || Path(`/.well-known/jwks.json`)' -%}
+{%- set track_names = ([postal_dns_settings.track_domain] + postal_track_hostnames) | map('string') | unique | list -%}
 {%- set track_rules = [] -%}
-{%- for name in ([postal_dns_settings.track_domain] + postal_track_hostnames) | map('string') | unique -%}
+{%- for name in track_names -%}
 {%-   set _ = track_rules.append('Host(`' ~ name ~ '`)') -%}
+{%- endfor -%}
+{%- set customer_rules = [] -%}
+{%- for name in postal_track_domains if name | lower not in track_names | map('lower') | list -%}
+{%-   set _ = customer_rules.append('Host(`' ~ name ~ '`)') -%}
 {%- endfor -%}
 {%- set strip = router ~ '-strip-track' -%}
 {%- set set_track = router ~ '-set-track' -%}
@@ -44,6 +53,13 @@
    'entrypoints': postal_traefik_entrypoints, 'priority': postal_traefik_priority | int + 1,
    'middlewares': [set_track] + postal_traefik_track_middlewares},
 ] -%}
+{%- if customer_rules | length > 0 -%}
+{%-   set _ = routers.append(
+  {'name': router ~ '-track-customers', 'rule': customer_rules | join(' || '),
+   'entrypoints': postal_traefik_entrypoints, 'priority': postal_traefik_priority | int + 1,
+   'middlewares': [set_track] + postal_traefik_track_middlewares,
+   'certresolver': postal_traefik_track_cert_resolver}) -%}
+{%- endif -%}
 # Managed by the noixdev.infra.postal role; changes are overwritten.
 
 # What every Postal service shares: the image (linux/amd64 only; the role
@@ -132,6 +148,9 @@ services:
       - {{ q('traefik.http.routers.' ~ r.name ~ '.priority=' ~ r.priority) }}
       - {{ q('traefik.http.routers.' ~ r.name ~ '.middlewares=' ~ r.middlewares | join(',')) }}
       - {{ q('traefik.http.routers.' ~ r.name ~ '.service=' ~ router) }}
+{%   if r.certresolver is defined %}
+      - {{ q('traefik.http.routers.' ~ r.name ~ '.tls.certresolver=' ~ r.certresolver) }}
+{%   endif %}
 {% endfor %}
       # Plain HTTP stays on the compose networks; Traefik terminates TLS.
       - {{ q('traefik.http.services.' ~ router ~ '.loadbalancer.server.port=5000') }}
