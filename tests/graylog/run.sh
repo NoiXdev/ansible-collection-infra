@@ -329,6 +329,7 @@ test_refusals() {
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": 12201, "options": {"x": [1]}}]}'
 
   refused 'sets these itself' -e '{"graylog_env": {"GRAYLOG_MONGODB_URI": "x"}}'
+  refused 'sets these itself' -e '{"graylog_env": {"GRAYLOG_SELFSIGNED_STARTUP": false}}'
   refused 'sets these itself' -e '{"graylog_env": {"GRAYLOG_DATANODE_X": "x"}}'
   refused 'sets these itself' -e '{"graylog_env": {"GRAYLOG_FOO__FILE": "x"}}'
   refused 'must be environment variable names' -e '{"graylog_env": {"lower": "x"}}'

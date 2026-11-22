@@ -15,8 +15,9 @@
 {%- endmacro %}
 {%- set secrets = graylog_container_secrets_dir -%}
 {%- set mongodb_uri = 'mongodb://mongodb:27017/graylog' -%}
-{#- graylog_env first, the settings the role owns over it (main.yml refuses
-    them in graylog_env). GRAYLOG_SELFSIGNED_STARTUP makes the server create
+{#- graylog_env first, then the settings the role owns, which main.yml
+    refuses in graylog_env (graylog_env_owned), so none of them replaces a
+    value given there. GRAYLOG_SELFSIGNED_STARTUP makes the server create
     its CA and an automatic certificate renewal policy on its first start and
     mark the preflight finished, so the Data Node is provisioned without
     anyone opening the preflight's web interface. -#}

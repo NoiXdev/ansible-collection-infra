@@ -53,6 +53,9 @@ graylog_env_owned:
   - GRAYLOG_HTTP_EXTERNAL_URI
   - GRAYLOG_MONGODB_URI
   - GRAYLOG_SERVER_JAVA_OPTS
+  # The unattended first start (the CA and the Data Node's certificates
+  # without the preflight); off, the role cannot provision the Data Node.
+  - GRAYLOG_SELFSIGNED_STARTUP
 graylog_env_owned_prefixes: [GRAYLOG_ROOT_, GRAYLOG_DATANODE_]
 graylog_env_owned_suffix: __FILE
 
