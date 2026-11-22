@@ -4,13 +4,14 @@
 # (plain HTTP, HTTPS with Traefik's own certificate and a TCP entrypoint for
 # the inputs on 127.0.0.1, and a "deny" middleware; vars.yml):
 #   refusals  settings the role must refuse: each run fails with its message
-#             and leaves no /opt/graylog (a missing host name, root password
-#             or password secret, a short password secret, bad Graylog and
-#             MongoDB versions, a bad heap, bad inputs: an unknown type, a
-#             bad or a duplicate name, two inputs on one port and
-#             transport, traefik on a UDP input or without entrypoints, a
-#             token on a syslog input, options with a list; bad graylog_env
-#             keys and a null value)
+#             and leaves no /opt/graylog (a missing or null host name, root
+#             password or password secret, a short password secret, bad
+#             Graylog and MongoDB versions, a bad heap, bad inputs: an
+#             unknown type, a bad or a duplicate name, two inputs on one port
+#             and transport, also spelled "012201" and 12201, traefik on a
+#             UDP input or without entrypoints, a token on a syslog input or
+#             a null one, options with a list; bad graylog_env keys and a
+#             null value)
 # Every converge runs at least at -v, and its output must not hold a test
 # secret; every successful converge of a scenario is repeated and must change
 # nothing.
@@ -145,6 +146,10 @@ test_refusals() {
   refused 'graylog_hostname is required' -e graylog_hostname=
   refused 'graylog_root_password is required' -e graylog_root_password=
   refused 'graylog_password_secret is required' -e graylog_password_secret=
+  # A key left empty in YAML is null, which must not pass as the text None.
+  refused 'graylog_hostname is required' -e '{"graylog_hostname": null}'
+  refused 'graylog_root_password is required' -e '{"graylog_root_password": null}'
+  refused 'graylog_password_secret is required' -e '{"graylog_password_secret": null}'
   refused 'at least 16 characters' -e "graylog_password_secret=$short_secret"
   refused 'is not a release the role runs' -e graylog_version=latest
   refused 'is not a release the role runs' -e graylog_version=6.3.15
@@ -161,10 +166,15 @@ test_refusals() {
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": 12201}, {"name": "a", "type": "gelf_udp", "port": 12202}]}'
   refused 'uses a port twice for the same transport' \
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": 12201}, {"name": "b", "type": "gelf_udp", "port": 12201}]}'
+  # The same port spelled another way.
+  refused 'uses a port twice for the same transport' \
+    -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": "012201"}, {"name": "b", "type": "gelf_udp", "port": 12201}]}'
   refused 'is a UDP input and has a traefik block' \
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": 12201, "traefik": {"hostname": "a.test", "entrypoints": ["websecure"]}}]}'
   refused 'only gelf_http inputs take a token' \
     -e '{"graylog_inputs": [{"name": "a", "type": "syslog_tcp", "port": 1514, "token": "x"}]}'
+  refused 'only gelf_http inputs take a token' \
+    -e '{"graylog_inputs": [{"name": "a", "type": "gelf_http", "port": 12202, "token": null}]}'
   refused 'traefik takes hostname and entrypoints' \
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_http", "port": 12202, "traefik": {"hostname": "a.test"}}]}'
   refused 'options must be a mapping' \

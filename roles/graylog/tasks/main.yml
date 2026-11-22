@@ -5,9 +5,11 @@
   ansible.builtin.include_role:
     name: noixdev.infra.docker_check
 
+# A key left empty in YAML is null: default(..., true) takes it as unset, here,
+# for the secrets and for the tokens, not as the text None.
 - name: Check that graylog_hostname is set
   ansible.builtin.assert:
-    that: graylog_hostname | default('') | string is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+    that: graylog_hostname | default('', true) | string is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
     fail_msg: >-
       graylog_hostname is required and must be a host name: the web interface
       is reached only through Traefik at that name. The role changes nothing.
@@ -19,7 +21,7 @@
   block:
     - name: Check graylog_root_password
       ansible.builtin.assert:
-        that: graylog_root_password | default('') | string | length > 0
+        that: graylog_root_password | default('', true) | string | length > 0
       no_log: true
   rescue:
     - name: Fail without graylog_root_password
@@ -33,7 +35,7 @@
   block:
     - name: Check that graylog_password_secret is set and long enough
       ansible.builtin.assert:
-        that: graylog_password_secret | default('') | string | length >= 16
+        that: graylog_password_secret | default('', true) | string | length >= 16
       no_log: true
   rescue:
     - name: Fail without a usable graylog_password_secret
@@ -230,7 +232,7 @@
       ansible.builtin.assert:
         that:
           - graylog_inputs[input_index].type == 'gelf_http'
-          - graylog_inputs[input_index].token | string | length > 0
+          - graylog_inputs[input_index].token | default('', true) | string | length > 0
       loop: "{{ range(graylog_inputs | length) | list }}"
       loop_control:
         loop_var: input_index
@@ -274,6 +276,7 @@
     quiet: true
 
 # One UDP and one TCP input may share a port; two of one transport may not.
+# Compared as numbers, so that "012201" and 12201 are the same port.
 - name: Check that no port is published twice per transport
   ansible.builtin.assert:
     that: graylog_input_ports | length == graylog_input_ports | unique | list | length
@@ -287,7 +290,7 @@
     graylog_input_ports: >-
       {%- set ports = [] -%}
       {%- for input in graylog_inputs -%}
-      {%- set _ = ports.append((input.port | string) ~ '/' ~ graylog_input_types[input.type].transport) -%}
+      {%- set _ = ports.append((input.port | int | string) ~ '/' ~ graylog_input_types[input.type].transport) -%}
       {%- endfor -%}
       {{ ports }}
 
