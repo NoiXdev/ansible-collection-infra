@@ -146,11 +146,11 @@ waf_name_re: '^[A-Za-z0-9_-]+$'
 # (https only; the role unpacks tar), its checksum, a setting's name (a
 # plugin's setting is a ModSecurity variable of the site) and a setting's
 # value (a string; a number is also accepted).
-waf_plugin_name_re: '^[a-z0-9][a-z0-9-]*$'
-waf_plugin_url_re: '^https://[^\s''"\\{}]+[.](tar[.]gz|tgz)$'
-waf_plugin_sha256_re: '^[0-9a-f]{64}$'
-waf_plugin_setting_re: '^[a-z0-9_]+$'
-waf_plugin_value_re: '^[A-Za-z0-9_.:/-]+$'
+waf_plugin_name_re: '^[a-z0-9][a-z0-9-]*\Z'
+waf_plugin_url_re: '^https://[^\s''"\\{}]+[.](tar[.]gz|tgz)\Z'
+waf_plugin_sha256_re: '^[0-9a-f]{64}\Z'
+waf_plugin_setting_re: '^[a-z0-9_]+\Z'
+waf_plugin_value_re: '^[A-Za-z0-9_.:/-]+\Z'
 waf_middleware_re: '^[A-Za-z0-9_.@-]+$'
 waf_include_re: '(^|[^A-Za-z0-9_])include([^A-Za-z0-9_]|$)'
 waf_dir_re: '^(/[A-Za-z0-9._@+=,~-]+)+$'

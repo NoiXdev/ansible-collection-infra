@@ -218,6 +218,10 @@ test_refusals() {
     -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent", "foo": 1}]}'
   refused plugin-name 'waf: waf_plugins has an entry with name "Bad_Name"; use lower-case letters, digits and -, at most 64 characters, not empty' \
     -e '{"waf_plugins": [{"name": "Bad_Name", "src": "/nonexistent"}]}'
+  refused plugin-name-newline 'waf: waf_plugins has an entry with name \"x\n\"; use lower-case letters, digits and -, at most 64 characters, not empty' \
+    -e '{"waf_plugins": [{"name": "x\n", "src": "/nonexistent"}]}'
+  refused plugin-name-long 'waf: waf_plugins has an entry with name "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; use lower-case letters, digits and -, at most 64 characters, not empty' \
+    -e '{"waf_plugins": [{"name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "src": "/nonexistent"}]}'
   refused plugin-name-empty 'waf: waf_plugins has an entry with name "empty"; use lower-case letters, digits and -, at most 64 characters, not empty' \
     -e '{"waf_plugins": [{"name": "empty", "src": "/nonexistent"}]}'
   refused plugin-dup 'waf: waf_plugins has more than one entry named x' \
@@ -244,6 +248,10 @@ test_refusals() {
     -e "$(one_site '"plugins": ["x"], "plugin_settings": {"x": {"enabled": 1}}')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
   refused site-setting-value 'waf: site a has plugin_settings x.mode with a value that is not a number or [A-Za-z0-9_.:/-]' \
     -e "$(one_site '"plugins": ["x"], "plugin_settings": {"x": {"mode": "a b"}}')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
+  refused site-setting-value-newline 'waf: site a has plugin_settings x.mode with a value that is not a number or [A-Za-z0-9_.:/-]' \
+    -e "$(one_site '"plugins": ["x"], "plugin_settings": {"x": {"mode": "on\n"}}')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
+  refused site-setting-value-bool 'waf: site a has plugin_settings x.mode with a value that is not a number or [A-Za-z0-9_.:/-]' \
+    -e "$(one_site '"plugins": ["x"], "plugin_settings": {"x": {"mode": true}}')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
   # This host has no Traefik: its directory and network are missing.
   refused no-dynamic-dir 'waf: /opt/traefik/dynamic (waf_traefik_dynamic_dir) is not a directory' \
     -e "$(one_site '')"
