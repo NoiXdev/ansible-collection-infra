@@ -1,0 +1,75 @@
+{#- Postal's configuration (format version 2), its only source: the role sets
+    no environment variable but the per-service ports of compose. It holds
+    every secret of the installation (the database password, the Rails
+    secret, the SMTP password of postal_mail, the OIDC secret), so the role
+    writes it 0440 root:999 in no_log tasks. postal_config_extra is merged
+    last; main.yml refuses the keys the role owns there. -#}
+{%- set db = postal_db_settings -%}
+{%- set mail = postal_mail_settings -%}
+{%- set smtp = {'from_name': mail.from_name | string, 'from_address': mail.from_address | string} -%}
+{%- if mail.host | string | length > 0 -%}
+{%-   set _ = smtp.update({'host': mail.host | string, 'port': mail.port | int}) -%}
+{#-   Postal's default authentication_type (login) makes its mail client
+      ask for a login even without a username, which then fails: null
+      switches the login off. -#}
+{%-   if mail.username | string | length > 0 -%}
+{%-     set _ = smtp.update({'username': mail.username | string, 'password': mail.password | string}) -%}
+{%-   else -%}
+{%-     set _ = smtp.update({'authentication_type': none}) -%}
+{%-   endif -%}
+{%- endif -%}
+{%- set config = {
+  'version': 2,
+  'postal': {
+    'web_hostname': postal_web_hostname | string,
+    'web_protocol': postal_web_protocol | string,
+    'smtp_hostname': postal_smtp_hostname | string,
+    'use_ip_pools': postal_use_ip_pools | bool,
+    'signing_key_path': postal_container_config_dir ~ '/signing.key',
+    'smtp_relays': postal_smtp_relays | list,
+    'trusted_proxies': [postal_traefik_address | string],
+    'allowed_request_destinations': postal_allowed_request_destinations | list,
+  } | combine(postal_settings),
+  'web_server': {'default_bind_address': '0.0.0.0', 'default_port': 5000},
+  'worker': {
+    'default_health_server_port': postal_worker_health_port | int,
+    'default_health_server_bind_address': '127.0.0.1',
+    'threads': postal_worker_threads | int,
+  },
+  'main_db': {
+    'host': db.host,
+    'port': db.port,
+    'username': postal_db_user | string,
+    'password': postal_db_password | string,
+    'database': postal_db_name | string,
+  },
+  'message_db': {
+    'host': db.host,
+    'port': db.port,
+    'username': postal_db_user | string,
+    'password': postal_db_password | string,
+    'database_name_prefix': postal_message_db_prefix | string,
+  },
+  'logging': {'level': postal_logging_level | string},
+  'smtp_server': {
+    'default_port': postal_smtp_port | int,
+    'default_bind_address': '::',
+    'default_health_server_port': postal_smtp_health_port | int,
+    'default_health_server_bind_address': '127.0.0.1',
+    'tls_enabled': false,
+    'proxy_protocol': postal_smtp_proxy_protocol | bool,
+    'log_connections': postal_smtp_log_connections | bool,
+    'max_message_size': postal_max_message_size | int,
+  },
+  'dns': postal_dns_settings,
+  'smtp': smtp,
+  'rails': {'environment': 'production', 'secret_key': postal_rails_secret_value | string},
+} -%}
+{%- if postal_gelf | length > 0 -%}
+{%-   set _ = config.update({'gelf': {'port': 12201, 'facility': 'postal'} | combine(postal_gelf)}) -%}
+{%- endif -%}
+{%- if postal_oidc | length > 0 -%}
+{%-   set _ = config.update({'oidc': postal_oidc}) -%}
+{%- endif -%}
+# Managed by the noixdev.infra.postal role; changes are overwritten.
+{{ config | combine(postal_config_extra, recursive=true) | to_nice_yaml(indent=2, sort_keys=false) }}

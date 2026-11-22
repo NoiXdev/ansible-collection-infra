@@ -1,0 +1,192 @@
+---
+# Waits up to postal_health_timeout seconds in all until every container of
+# postal_services runs (MariaDB healthy), then asks Postal itself: the health
+# servers of the worker and of the SMTP services on their 127.0.0.1 ports
+# answer OK, web answers GET /login with 200 from the runner service on the
+# Traefik network (at web's address on that network, with Host:
+# postal_web_hostname, as Traefik sends it), and each SMTP service answers
+# EHLO on its port with 250. Then the database check: the users and servers
+# tables of the main database read as Postal's user, so that a broken schema
+# or a revoked right fails it. Callable from any state; sets postal_healthy
+# and postal_health_lines (each container's service and state, then what each
+# check got). Never fails by itself.
+
+- name: Note when the health check starts
+  ansible.builtin.set_fact:
+    postal_health_start: "{{ now().timestamp() }}"
+    postal_health_expected: >-
+      {{ postal_app_services | map('regex_replace', '^(.*)$', '\1 running') | list
+         + (['mariadb running healthy'] if postal_database == 'mariadb' else []) }}
+
+# retries is an upper bound (every attempt takes at least the delay); the
+# deadline ends each wait below after those seconds from the start.
+- name: Wait until the containers run
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --all, --format, "{{ '{{.Service}} {{.State}} {{.Health}}' }}"]
+    chdir: "{{ postal_dir }}"
+  register: postal_health
+  until: >-
+    postal_health_expected | difference(postal_health.stdout_lines | default([]) | map('trim') | list) | length == 0
+    or now().timestamp() - postal_health_start | float >= postal_health_timeout | int
+  retries: "{{ postal_health_retries }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Note whether the containers run
+  ansible.builtin.set_fact:
+    postal_containers_up: >-
+      {{ postal_health_expected | difference(postal_health.stdout_lines | default([]) | map('trim') | list) | length == 0 }}
+
+- name: Ask the health servers of the worker and the SMTP services
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ item.port }}/health"
+    return_content: true
+    timeout: 10
+  loop: "{{ postal_health_servers }}"
+  loop_control:
+    label: "{{ item.service }} on {{ item.port }}"
+  register: postal_health_servers_read
+  until: >-
+    postal_health_servers_read.content | default('') | trim == 'OK'
+    or now().timestamp() - postal_health_start | float >= postal_health_timeout | int
+  retries: "{{ postal_health_retries }}"
+  delay: 5
+  failed_when: false
+  when: postal_containers_up | bool
+
+- name: Note whether the health servers answer
+  ansible.builtin.set_fact:
+    postal_health_servers_ok: >-
+      {{ postal_containers_up | bool
+         and postal_health_servers_read.results | default([]) | selectattr('content', 'defined')
+             | map(attribute='content') | map('trim') | select('eq', 'OK') | list | length
+             == postal_health_servers | length }}
+
+- name: Read the address of web on the Traefik network
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - --format
+      - "{{ '{{(index .NetworkSettings.Networks \"' ~ postal_traefik_network ~ '\").IPAddress}}' }}"
+      - "{{ postal_project }}-web-1"
+    chdir: "{{ postal_dir }}"
+  register: postal_web_address
+  changed_when: false
+  failed_when: false
+  when: postal_health_servers_ok | bool
+
+# Prints the status code only.
+- name: Ask web for the login page
+  ansible.builtin.command:
+    argv: >-
+      {{ postal_runner + ['--entrypoint', 'curl', 'runner', '--silent', '--max-time', '30',
+                          '--output', '/dev/null', '--write-out', '%{http_code}',
+                          '--header', 'Host: ' ~ postal_web_hostname,
+                          'http://' ~ postal_web_address.stdout | default('') | trim ~ ':5000/login'] }}
+    chdir: "{{ postal_dir }}"
+  register: postal_web_read
+  until: >-
+    postal_web_read.stdout | default('') | trim == '200'
+    or now().timestamp() - postal_health_start | float >= postal_health_timeout | int
+  retries: "{{ postal_health_retries }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  when:
+    - postal_health_servers_ok | bool
+    - postal_web_address.stdout | default('') | trim | length > 0
+
+# A connection on loopback, as a client of the host would make it.
+- name: Ask the SMTP services for EHLO
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import smtplib, sys
+        with smtplib.SMTP("127.0.0.1", int(sys.argv[1]), local_hostname="health.invalid", timeout=30) as smtp:
+            print(smtp.ehlo()[0])
+      - "{{ item.port }}"
+  loop: "{{ postal_smtp_services }}"
+  loop_control:
+    label: "{{ item.service }} on {{ item.port }}"
+  register: postal_ehlo_read
+  until: >-
+    postal_ehlo_read.stdout | default('') | trim == '250'
+    or now().timestamp() - postal_health_start | float >= postal_health_timeout | int
+  retries: "{{ postal_health_retries }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  when: postal_web_read.stdout | default('') | trim == '200'
+
+- name: Note whether Postal answers
+  ansible.builtin.set_fact:
+    postal_answers: >-
+      {{ postal_web_read.stdout | default('') | trim == '200'
+         and postal_ehlo_read.results | default([]) | selectattr('stdout', 'defined')
+             | map(attribute='stdout') | map('trim') | select('eq', '250') | list | length
+             == postal_smtp_services | length }}
+
+# Read-only, as Postal's user over TCP inside the MariaDB container; the
+# password goes through stdin into the environment of the client (the x
+# keeps trailing newlines), so the task is no_log, and the note below quotes
+# only the client's error line.
+- name: Read the users and servers tables
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - mariadb
+      - sh
+      - -c
+      - >-
+        MYSQL_PWD="$(cat; echo x)"; MYSQL_PWD="${MYSQL_PWD%x}"; export MYSQL_PWD;
+        exec mariadb --host=127.0.0.1 --port={{ postal_mariadb_port | int }} --user={{ postal_db_user }}
+        --database={{ postal_db_name }} --batch --skip-column-names --connect-timeout=10
+        --execute='SELECT (SELECT COUNT(*) FROM users), (SELECT COUNT(*) FROM servers)'
+    chdir: "{{ postal_dir }}"
+    stdin: "{{ postal_db_password }}"
+    stdin_add_newline: false
+  register: postal_db_check
+  until: postal_db_check.rc == 0
+  retries: 2
+  delay: 2
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+  when:
+    - postal_answers | bool
+    - postal_database == 'mariadb'
+
+- name: Note whether Postal is healthy
+  ansible.builtin.set_fact:
+    postal_health_lines: >-
+      {%- set lines = postal_health.stdout_lines | default([]) | map('trim') | sort | list -%}
+      {%- for result in postal_health_servers_read.results | default([]) if result.skipped is not defined -%}
+      {%-   set _ = lines.append(result.item.service ~ ' /health answered '
+                                 ~ ((result.content | default('', true) | trim | truncate(40)) or 'nothing')) -%}
+      {%- endfor -%}
+      {%- if postal_web_read.stdout is defined -%}
+      {%-   set _ = lines.append('web GET /login answered ' ~ (postal_web_read.stdout | trim or 'nothing')) -%}
+      {%- endif -%}
+      {%- for result in postal_ehlo_read.results | default([]) if result.skipped is not defined -%}
+      {%-   set _ = lines.append(result.item.service ~ ' EHLO answered ' ~ (result.stdout | default('', true) | trim or 'nothing')) -%}
+      {%- endfor -%}
+      {%- if postal_db_check.rc is defined -%}
+      {%-   set _ = lines.append('the users and servers tables '
+                                 ~ ('read' if postal_db_check.rc == 0 else 'cannot be read: ' ~ postal_db_error)) -%}
+      {%- endif -%}
+      {{ lines }}
+    postal_healthy: >-
+      {{ postal_answers | bool and (postal_database != 'mariadb' or postal_db_check.rc | default(1) == 0) }}
+  vars:
+    postal_db_error: >-
+      {%- set stderr = (postal_db_check.stderr | default('') | trim).splitlines() -%}
+      {{ ((stderr | select('search', 'ERROR') | list) or stderr
+          or ['exit code ' ~ postal_db_check.rc | default('?') | string]) | last | trim }}

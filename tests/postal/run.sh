@@ -4,9 +4,40 @@
 # (plain HTTP, HTTPS with Traefik's own certificate and "ui", a second HTTPS
 # entrypoint standing in for a tailnet one, on 127.0.0.1, and a "deny"
 # middleware; vars.yml) and Mailpit catching the mail (converge.yml; SMTP on
-# the host's 127.0.0.1:1025, its API on 127.0.0.1:8025):
+# the host's 127.0.0.1:1025 and on the Traefik network as mailpit:1025, its
+# API on 127.0.0.1:8025):
 #   refusals  settings the role must refuse: each run fails with its message
 #             and leaves no /opt/postal
+#   install   a fresh install with the own MariaDB and the first admin
+#             (verify.yml: web on the Traefik network without a published
+#             port, smtp, submission and worker on the host's network,
+#             MariaDB on 127.0.0.1:3307 only, no secret in an environment,
+#             the modes of postal.yml and signing.key, a 2048-bit signing
+#             key, the values the role owns in postal.yml and no smtp host);
+#             the DNS records in the install's output with the rp. DKIM
+#             record of the signing key; no secret in the compose file or
+#             docker inspect; the admin logs in through the login form from a
+#             container on the Traefik network and sees the organization
+#             list; other postal_admin_* values on the next run change nothing
+#             and make no second user; postal_mail to Mailpit: the smtp section
+#             in postal.yml and a password reset mail arriving in Mailpit
+#   noop_down a stopped smtp service: a run without changes fails naming it
+#             and starts nothing
+#   reconfigure
+#             a new postal_settings.default_spam_threshold rewrites postal.yml
+#             and restarts web, smtp, submission and worker, not MariaDB; the
+#             signing key stays byte-identical; a pending restart (its
+#             marker, as a stopped reconfigure leaves it) restarts them on the
+#             next run; postal_smtp_submission_port 0 removes the submission
+#             service and the health check asks smtp only, and the default
+#             brings it back
+#   missing_data
+#             the MariaDB data moved away (an unmounted volume): the run
+#             refuses and creates nothing, and compose does not start MariaDB
+#             either; with the data back it runs as before
+#   mountpoint
+#             postal_data_dir_mountpoint on a plain directory refused, nothing
+#             changed (installed) or created (a fresh directory)
 # Postal's image is linux/amd64 only, so on a machine that is not amd64 (an
 # arm64 Mac, for example) it runs under emulation (Docker Desktop's Rosetta or
 # QEMU) inside the test host; every scenario but the arch refusal sets
@@ -33,10 +64,15 @@ host=
 app_dir=/opt/postal
 
 # Generated for this run, so that no test secret lives in the repository. The
-# password holds $, a quote and a space, so that the tests prove it reaches
-# the database, the files and the commands as written.
-db_password="$(openssl rand -hex 12)"' pa$s"w'"'"'o rd'
-secrets=("$db_password")
+# passwords hold $, a quote and a space, so that the tests prove they reach
+# the database, the files and the commands as written. (Postal puts the
+# database password into a double-quoted YAML string, so the role refuses a
+# double quote or a backslash in it.) The signing key and the Rails secret the
+# role generates join the list once an install made them (note_generated).
+db_password="$(openssl rand -hex 12)"' pa$s w'"'"'o rd'
+admin_password="$(openssl rand -hex 10)"' ad$m '"'"'in'
+admin_email=admin@example.test
+secrets=("$db_password" "$admin_password")
 
 cleanup() {
   [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
@@ -118,6 +154,22 @@ write_role_vars() {
     printf '{"test_postal": true}\n' >"$out/role-vars.json"
   )
   write_db_vars db-vars.json "$db_password"
+  # Postal puts the password into a double-quoted YAML string.
+  write_db_vars quote-db-vars.json 'a"b'"$db_password"
+  write_db_vars backslash-db-vars.json 'a\b'"$db_password"
+  write_admin_vars admin-vars.json "$admin_email" "$admin_password" Noix Admin
+  write_admin_vars other-admin-vars.json other@example.test "${admin_password}-other" Other Person
+}
+# write_admin_vars <file> <email> <password> <first name> <last name>: the
+# first admin, in a file of mode 0600.
+write_admin_vars() {
+  (
+    umask 077
+    env "EMAIL=$2" "PASSWORD=$3" "FIRST=$4" "LAST=$5" python3 -c '
+import json, os
+print(json.dumps({"postal_admin_email": os.environ["EMAIL"], "postal_admin_password": os.environ["PASSWORD"],
+                  "postal_admin_first_name": os.environ["FIRST"], "postal_admin_last_name": os.environ["LAST"]}))' >"$out/$1"
+  )
 }
 # role_converge [-e ...]: the host's playbook with the role. The *_unchanged
 # and *_fails variants are as above; db_vars adds the database password.
@@ -130,9 +182,21 @@ db_vars() { printf '%s\n' "@$out/db-vars.json"; }
 postal_converge() { role_converge -e "$(db_vars)" "$@"; }
 postal_converge_unchanged() { role_converge_unchanged -e "$(db_vars)" "$@"; }
 postal_converge_fails() { role_converge_fails -e "$(db_vars)" "$@"; }
+# install_converge [-e ...]: the same with the first admin of the run.
+install_converge() { postal_converge -e "@$out/admin-vars.json" "$@"; }
+install_converge_unchanged() { postal_converge_unchanged -e "@$out/admin-vars.json" "$@"; }
+install_converge_fails() { postal_converge_fails -e "@$out/admin-vars.json" "$@"; }
+
+# verify [-e ...]: verify.yml; its output must hold no test secret either.
+verify() {
+  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$here/verify.yml" "$@" >"$out/verify.log" 2>&1 \
+    || { cat "$out/verify.log" >&2; fail "verify.yml failed"; }
+  expect_no_secrets "$out/verify.log" "the output of verify.yml"
+}
 
 # start_host <ubuntu>: a fresh systemd host with Docker, Traefik and Mailpit,
-# where postal.test is 127.0.0.1.
+# where postal.test is 127.0.0.1 and web.sh is /root/web.sh. IPv6 is on, as on
+# a server: Postal's SMTP server listens on ::.
 start_host() {
   local ubuntu="$1"
   host="noixdev-postal-$ubuntu"
@@ -142,12 +206,15 @@ start_host() {
   # overlays on; "docker rm -v" removes them with the host.
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /run --tmpfs /run/lock -v /var/lib/docker -v /var/lib/containerd \
+    --sysctl net.ipv6.conf.all.disable_ipv6=0 \
     --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
   until (h systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
   # The image's policy-rc.d (exit 101) keeps package scripts from starting
   # services; servers have none.
   h rm -f /usr/sbin/policy-rc.d
   h sh -c 'echo "127.0.0.1 postal.test" >>/etc/hosts'
+  docker cp "$here/web.sh" "$host:/root/web.sh" >/dev/null
+  secrets=("$db_password" "$admin_password")
 
   echo "== test host (ubuntu $ubuntu)"
   converge
@@ -167,11 +234,110 @@ refused() {
   h test ! -e "$app_dir" || fail "$message: $app_dir was created"
 }
 
+# docker compose in app_dir on the test host: compose <args...>.
+compose() { h sh -c "cd $app_dir && docker compose $*"; }
+# The container of a service (the first replica): container <service>.
+container() { printf '%s\n' "postal-$1-1"; }
+started_at() { h docker inspect --format '{{.State.StartedAt}}' "$(container "$1")"; }
+# postal_rails '<ruby>': runs the Ruby code in Postal's Rails environment (as
+# postal console does) through rails runner in the runner service, and prints
+# what it prints. The code goes through stdin into the argument of rails
+# runner inside the test host.
+postal_rails() {
+  printf '%s' "$1" | hi sh -c 'cd '"$app_dir"' && exec docker compose run --rm -T runner bundle exec rails runner "$(cat)"' \
+    2>>"$out/rails.log"
+}
+# Mailpit's API on the test host: the number of messages, and the newest one
+# as JSON.
+mailpit_count() {
+  h curl -s --max-time 30 http://127.0.0.1:8025/api/v1/messages \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["total"])'
+}
+mailpit_last_json() { h curl -s --max-time 30 http://127.0.0.1:8025/api/v1/message/latest; }
+# The address of web on the Traefik network.
+web_ip() { h docker inspect --format '{{(index .NetworkSettings.Networks "proxy").IPAddress}}' "$(container web)"; }
+# web <action> [args...]: web.sh in the runner (on the Traefik network, not
+# started with its dependencies) against web's address there; stdin goes to
+# web.sh.
+web() {
+  local action="$1"
+  shift
+  hi sh -c 'cd '"$app_dir"' && exec docker compose run --rm --no-deps -T --entrypoint sh runner -c "$(cat /root/web.sh)" web.sh "$@"' \
+    sh "$action" "$(web_ip)" "$@" 2>>"$out/web.log"
+}
+# admin_login <email> <password>: logs in through the login form and prints
+# the status of POST /login, then the page / and its status.
+admin_login() { printf '%s\n%s' "$1" "$2" | web login; }
+
+# Adds what the install generated, the Rails secret and a line of the private
+# part of the signing key, to the secrets no output may hold.
+note_generated() {
+  local rails_secret key_line
+  rails_secret="$(h sed -n 's/^  secret_key: *//p' "$app_dir/config/postal.yml" | tr -d "'\"")"
+  key_line="$(h sed -n '12p' "$app_dir/config/signing.key")"
+  [ "${#rails_secret}" = 128 ] || fail "postal.yml holds no generated Rails secret of 128 characters"
+  [ "${#key_line}" -ge 32 ] || fail "signing.key has no line 12"
+  secrets=("$db_password" "$admin_password" "$rails_secret" "$key_line")
+}
+# Fails when the compose file or docker inspect of the project holds a test
+# secret.
+expect_clean() {
+  h cat "$app_dir/compose.yaml" >"$out/compose.yaml"
+  expect_no_secrets "$out/compose.yaml" "$app_dir/compose.yaml"
+  h sh -c 'docker inspect $(docker ps -aq --filter label=com.docker.compose.project=postal)' >"$out/inspect.json"
+  expect_no_secrets "$out/inspect.json" "docker inspect of the project"
+}
+# Notes the compose file, the configuration and the containers, for
+# expect_untouched.
+note_untouched() {
+  untouched_before="$(h sh -c "sha256sum $app_dir/compose.yaml $app_dir/config/*; docker ps -aq --filter label=com.docker.compose.project=postal")"
+}
+# Fails unless the refused run changed nothing: its recap, the files and the
+# containers since note_untouched.
+expect_untouched() {
+  grep -Eq 'changed=0 ' "$out/converge.log" || { cat "$out/converge.log" >&2; fail "the refused run changed something"; }
+  [ "$(h sh -c "sha256sum $app_dir/compose.yaml $app_dir/config/*; docker ps -aq --filter label=com.docker.compose.project=postal")" = "$untouched_before" ] \
+    || fail "the refused run changed the compose file, the configuration or the containers"
+}
+# Notes when each Postal service started, for expect_restarted.
+note_starts() {
+  local service
+  starts_before=
+  for service in web smtp submission worker mariadb; do
+    starts_before="$starts_before $service=$(started_at "$service" 2>/dev/null || echo none)"
+  done
+}
+# expect_restarted <services...>: these services started again since
+# note_starts, and the others of web, smtp, submission, worker and mariadb did
+# not.
+expect_restarted() {
+  local service before now
+  for service in web smtp submission worker mariadb; do
+    before="$(printf '%s\n' "$starts_before" | tr ' ' '\n' | sed -n "s/^$service=//p")"
+    now="$(started_at "$service" 2>/dev/null || echo none)"
+    case " $* " in
+      *" $service "*) [ "$now" != "$before" ] || fail "$service was not restarted" ;;
+      *) [ "$now" = "$before" ] || fail "$service was restarted ($before, now $now)" ;;
+    esac
+  done
+}
+
+# An installation with the first admin, as the install scenario makes it,
+# for a scenario that runs on a host without one.
+ensure_installed() {
+  h test -e "$app_dir/compose.yaml" && return 0
+  echo "== install for $1"
+  install_converge
+  note_generated
+}
+
 test_refusals() {
   echo "== refusals (ubuntu $1)"
   refused 'postal_web_hostname is required' -e postal_web_hostname=
   refused 'postal_dns_domain is required' -e postal_dns_domain=
   refused 'postal_db_password is required' -e postal_db_password=
+  refused 'postal_db_password must not hold' -e "@$out/quote-db-vars.json"
+  refused 'postal_db_password must not hold' -e "@$out/backslash-db-vars.json"
   refused 'is not a release the role runs' -e postal_version=latest
   refused 'is not a release the role runs' -e postal_version=2.3.0
   refused 'is not a release the role runs' -e postal_version=3.5
@@ -187,9 +353,8 @@ test_refusals() {
   refused 'must be ports (1 to 65535)' -e '{"postal_smtp_port": 70000}'
   refused 'must be ports (1 to 65535)' -e '{"postal_smtp_submission_port": -1}'
   refused 'must be absolute paths' -e '{"postal_track_hostnames": ["not a host"]}'
-
-  # 0 switches the submission service off; it is not refused.
-  postal_converge -e '{"postal_smtp_submission_port": 0}'
+  # postal_smtp_submission_port 0 is accepted: the reconfigure scenario runs
+  # it.
 
   # An arm64 test host is not x86_64: without postal_skip_arch_check the role
   # refuses it. (On an x86_64 machine the host is x86_64 and there is nothing
@@ -201,16 +366,170 @@ test_refusals() {
   fi
 }
 
-# All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="refusals" runs only
+test_install() {
+  local answer pub users
+  echo "== install (ubuntu $1)"
+  install_converge
+  h test ! -e "$app_dir/install-incomplete" || fail "the install left $app_dir/install-incomplete"
+  # The DNS records, with the return-path DKIM record of the signing key.
+  pub="$(h sh -c "openssl pkey -in $app_dir/config/signing.key -pubout | grep -v -- ----- | tr -d '\n'")"
+  expect_in_log 'postal._domainkey.rp.mail.test'
+  expect_in_log "v=DKIM1; t=s; h=sha256; p=$pub;"
+  expect_in_log 'mx.mail.test'
+  expect_in_log 'spf.mail.test'
+  expect_in_log 'routes.mail.test'
+  expect_in_log 'track.mail.test'
+  note_generated
+  verify
+  expect_clean
+  install_converge_unchanged
+
+  # The admin logs in from a container on the Traefik network and sees the
+  # organization list (none yet).
+  answer="$(admin_login "$admin_email" "$admin_password")"
+  [ "$(printf '%s\n' "$answer" | head -n 1)" = 302 ] || fail "the login was not redirected: $(printf '%s' "$answer" | head -c 300)"
+  [ "${answer##*$'\n'}" = 200 ] || fail "/ after the login answered ${answer##*$'\n'}"
+  [[ "$answer" == *'Welcome to Postal, Noix'* && "$answer" == *'There are no organizations.'* ]] \
+    || fail "/ after the login is not the organization list: $(printf '%s' "$answer" | head -c 300)"
+  # A wrong password: the form again (200, no redirect), and / sends to the
+  # login.
+  answer="$(admin_login "$admin_email" "${admin_password}-wrong")"
+  { [ "$(printf '%s\n' "$answer" | head -n 1)" = 200 ] && [ "${answer##*$'\n'}" = 302 ]; } \
+    || fail "a wrong password was not refused: $(printf '%s\n' "$answer" | head -n 1) ${answer##*$'\n'}"
+
+  # Other postal_admin_* values change nothing and make no second user.
+  postal_converge_unchanged -e "@$out/other-admin-vars.json"
+  users="$(postal_rails 'puts User.count')"
+  [ "$users" = 1 ] || fail "Postal has $users users after a run with another admin, not 1"
+
+  # Postal's own mail to Mailpit: the smtp section, and a password reset mail.
+  echo "== install: postal_mail (ubuntu $1)"
+  local mail='{"postal_mail": {"host": "mailpit", "port": 1025}}' count
+  install_converge -e "$mail"
+  verify -e verify_mail_host=mailpit -e verify_mail_port=1025
+  install_converge_unchanged -e "$mail"
+  count="$(mailpit_count)"
+  answer="$(printf '%s\n' "$admin_email" | web reset)"
+  [ "$answer" = 302 ] || fail "the password reset was not redirected: $answer"
+  for _ in $(seq 30); do
+    [ "$(mailpit_count)" -gt "$count" ] && break
+    sleep 2
+  done
+  mailpit_last_json >"$out/mail.json"
+  python3 - "$out/mail.json" "$admin_email" <<'PY' || fail "no password reset mail from postal@mail.test reached $admin_email: $(head -c 300 "$out/mail.json")"
+import json, sys
+mail = json.load(open(sys.argv[1]))
+assert [to["Address"] for to in mail["To"]] == [sys.argv[2]], mail["To"]
+assert mail["From"]["Address"] == "postal@mail.test", mail["From"]
+PY
+
+  # Back to the settings of the other scenarios.
+  install_converge
+  verify
+  install_converge_unchanged
+}
+
+test_noop_down() {
+  echo "== noop_down (ubuntu $1)"
+  ensure_installed noop_down
+  compose stop smtp >/dev/null 2>&1
+  note_untouched
+  install_converge_fails
+  expect_in_log "the services smtp are not running"
+  [ "$(compose ps --all --format "'{{.State}}'" smtp)" = exited ] || fail "the run without changes started smtp"
+  expect_untouched
+  compose start smtp >/dev/null 2>&1
+  install_converge_unchanged
+}
+
+test_reconfigure() {
+  local key threshold='{"postal_settings": {"default_spam_threshold": 7}}'
+  echo "== reconfigure (ubuntu $1)"
+  ensure_installed reconfigure
+
+  # A setting of postal.yml: rewritten, the Postal services restarted, MariaDB
+  # and the signing key left as they are.
+  key="$(h sha256sum "$app_dir/config/signing.key")"
+  note_starts
+  install_converge -e "$threshold"
+  grep -Eq 'changed=[1-9]' "$out/converge.log" || fail "the new spam threshold changed nothing"
+  expect_restarted web smtp submission worker
+  [ "$(h sha256sum "$app_dir/config/signing.key")" = "$key" ] || fail "the reconfigure changed signing.key"
+  verify -e verify_spam_threshold=7
+  install_converge_unchanged -e "$threshold"
+
+  # A restart a stopped reconfigure left pending: the next run restarts the
+  # Postal services, though the files equal the settings, and removes it.
+  echo "== reconfigure: a pending restart (ubuntu $1)"
+  h touch "$app_dir/restart-pending"
+  note_starts
+  install_converge -e "$threshold"
+  expect_restarted web smtp submission worker
+  h test ! -e "$app_dir/restart-pending" || fail "the healthy run kept $app_dir/restart-pending"
+  install_converge_unchanged -e "$threshold"
+
+  # Without the submission service: removed, and the health check asks smtp
+  # alone; the default brings it back (and the spam threshold goes).
+  echo "== reconfigure: no submission service (ubuntu $1)"
+  install_converge -e '{"postal_smtp_submission_port": 0}'
+  [ -z "$(compose ps --all --quiet submission)" ] || fail "the submission service is left with postal_smtp_submission_port 0"
+  expect_in_log '(item=smtp on 25)'
+  expect_not_in_log '(item=submission on 587)'
+  verify -e verify_submission=false
+  install_converge_unchanged -e '{"postal_smtp_submission_port": 0}'
+  install_converge
+  verify
+  expect_clean
+  install_converge_unchanged
+}
+
+test_missing_data() {
+  echo "== missing_data (ubuntu $1)"
+  ensure_installed missing_data
+  compose stop >/dev/null 2>&1
+  h mv "$app_dir/data/mariadb" "$app_dir/data/mariadb.aside"
+  note_untouched
+  install_converge_fails
+  expect_in_log "lacks mariadb: is the volume mounted?"
+  h test ! -e "$app_dir/data/mariadb" || fail "the refused run created $app_dir/data/mariadb"
+  expect_untouched
+  # compose does not create the bind's source either.
+  if compose start mariadb >/dev/null 2>&1; then fail "docker compose started MariaDB without its data"; fi
+  h test ! -e "$app_dir/data/mariadb" || fail "docker compose created $app_dir/data/mariadb"
+
+  h mv "$app_dir/data/mariadb.aside" "$app_dir/data/mariadb"
+  compose start >/dev/null 2>&1
+  install_converge_unchanged
+  [ "$(postal_rails 'puts User.count')" = 1 ] || fail "the admin is gone after the data came back"
+}
+
+test_mountpoint() {
+  echo "== mountpoint (ubuntu $1)"
+  ensure_installed mountpoint
+  note_untouched
+  install_converge_fails -e postal_data_dir_mountpoint=true
+  expect_in_log "is not a mountpoint: is the volume mounted?"
+  expect_untouched
+  install_converge_fails -e postal_data_dir_mountpoint=true -e postal_dir=/opt/postal-mountpoint
+  expect_in_log "/opt/postal-mountpoint/data is not a mountpoint"
+  h test ! -e /opt/postal-mountpoint || fail "the refused run created /opt/postal-mountpoint"
+}
+
+# All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals"
+all_scenarios="refusals install noop_down reconfigure missing_data mountpoint"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
   for scenario in $scenarios; do
     case "$scenario" in
       refusals) test_refusals "$ubuntu" ;;
+      install) test_install "$ubuntu" ;;
+      noop_down) test_noop_down "$ubuntu" ;;
+      reconfigure) test_reconfigure "$ubuntu" ;;
+      missing_data) test_missing_data "$ubuntu" ;;
+      mountpoint) test_mountpoint "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

@@ -1,0 +1,19 @@
+---
+# Writes postal_target_file: the database this installation keeps Postal's
+# data in (postal_database_target, no credentials). Included by install and,
+# for an installation that has no usable file (removed as the refusal of a
+# changed target says when the databases moved, or never written), by
+# main.yml once every refusal and check has passed. A later run whose
+# settings name another target refuses.
+- name: Write the database target
+  ansible.builtin.copy:
+    dest: "{{ postal_target_file }}"
+    content: |
+      # Written by the noixdev.infra.postal role: the database this
+      # installation keeps Postal's data in. Remove it only when the databases
+      # really moved (a dump loaded elsewhere); the next run records the
+      # target its settings name.
+      {{ postal_database_target | to_nice_yaml(sort_keys=false) }}
+    owner: root
+    group: root
+    mode: "0644"

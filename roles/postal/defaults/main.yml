@@ -103,9 +103,12 @@ postal_allowed_request_destinations: []
 # The remaining postal.* keys of Postal's configuration, by name.
 postal_settings: {}
 
-# Postal's own mail (password resets, notifications); no host sends none.
-# Keys, each left out for its default: host (""), port (25), username (""),
-# password (""), from_name (Postal) and from_address (postal@<postal_dns_domain>).
+# Postal's own mail (password resets, notifications), through this mail
+# server. Keys, each left out for its default: host (""), port (25), username
+# (""), password (""), from_name (Postal) and from_address
+# (postal@<postal_dns_domain>). Without a host the role writes none, and
+# Postal's own default (127.0.0.1:25) takes none of that mail: password
+# resets and notifications do not go out.
 postal_mail: {}
 # Single sign-on (Postal's oidc section) and log shipping (host, port,
 # facility); empty switches each off.

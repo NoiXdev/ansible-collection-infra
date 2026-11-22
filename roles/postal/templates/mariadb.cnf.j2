@@ -1,0 +1,9 @@
+# Managed by the noixdev.infra.postal role; changes are overwritten.
+# Server settings of Postal's own MariaDB: the port it listens on (the one
+# published on 127.0.0.1), the redo log at least ten times the largest
+# message Postal takes, connections for the worker threads, then
+# postal_mariadb_settings.
+[mariadbd]
+{% for key, value in postal_mariadb_server_settings | dictsort %}
+{{ key }} = {{ ('ON' if value else 'OFF') if value is boolean else value }}
+{% endfor %}

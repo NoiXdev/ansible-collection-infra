@@ -1,0 +1,66 @@
+---
+# Same installation, other settings: the compose file and the configuration
+# are written, Postal brought to them, and checked. The Postal services read
+# postal.yml and the keys only on start, so a changed configuration alone,
+# which leaves the compose file as it is, restarts them (web, smtp,
+# submission and worker; MariaDB only when its own settings change, through
+# the compose file). A run stopped after the files are written and before
+# that restart would leave files that equal the settings while the
+# containers run with the old ones, so postal_restart_marker is written
+# first, on every reconfigure; while it exists every run reconfigures and
+# restarts the Postal services, and main.yml removes it once a run ends
+# healthy. With the own MariaDB Postal's user gets postal_db_password (it
+# may be new) before the restart.
+
+- name: Note the restart before the configuration changes
+  ansible.builtin.copy:
+    dest: "{{ postal_restart_marker }}"
+    content: |
+      # Written by the noixdev.infra.postal role before it changed the
+      # configuration of Postal (its compose file, postal.yml or the keys),
+      # and removed once Postal runs on it. While it exists the role restarts
+      # Postal.
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write the compose file
+  ansible.builtin.copy:
+    dest: "{{ postal_compose_file }}"
+    content: "{{ postal_compose }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write the configuration
+  ansible.builtin.include_tasks: config.yml
+
+- name: Start Postal with the new compose file
+  community.docker.docker_compose_v2:
+    project_src: "{{ postal_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+
+- name: Set up Postal's database user
+  ansible.builtin.include_tasks: db_user.yml
+  when: postal_database == 'mariadb'
+
+- name: Restart Postal with the new configuration
+  community.docker.docker_compose_v2:
+    project_src: "{{ postal_dir }}"
+    services: "{{ postal_app_services }}"
+    state: restarted
+  when: postal_config_changed | bool or postal_restart_pending | bool
+
+- name: Check that Postal is healthy
+  ansible.builtin.include_tasks: health.yml
+
+- name: Fail when Postal is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      Postal in {{ postal_dir }} is not healthy within
+      {{ postal_health_timeout }} seconds after the reconfigure
+      ({{ postal_health_lines | join('; ') }}); see docker compose logs in
+      {{ postal_dir }}.
+  when: not postal_healthy

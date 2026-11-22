@@ -37,3 +37,5 @@ postal_dns_domain: mail.test
 # The Postal image is linux/amd64 only and runs under emulation on an arm64
 # machine; only the arch refusal switches the check back on.
 postal_skip_arch_check: true
+# Postal's Rails processes start slowly under emulation.
+postal_health_timeout: 900

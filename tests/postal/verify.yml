@@ -1,0 +1,240 @@
+---
+# Checks an installation on the test host as run.sh's settings make it, with
+# the own MariaDB: the containers of the compose project (web, smtp,
+# submission, worker and mariadb, each running with the pinned image; no
+# runner left), web on the project network and the Traefik network without a
+# published port, smtp, submission and worker on the host's network (smtp and
+# submission with NET_BIND_SERVICE and only their ports in the environment),
+# MariaDB published on 127.0.0.1 alone, no secret in any environment; the
+# files: the compose file 0644, the config directory 0750 root:999,
+# postal.yml and signing.key each 0440 root:999, signing.key a 2048-bit RSA
+# key, postal.yml with the values the role owns and the smtp section of
+# postal_mail, and the database target.
+# Extra variables: verify_submission (default true: the submission service
+# runs), verify_mail_host and verify_mail_port (postal_mail's host and port;
+# empty host: the role writes no host), verify_spam_threshold (the
+# default_spam_threshold the run set, empty for none).
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars:
+    verify_dir: /opt/postal
+    verify_defaults: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../roles/postal/defaults/main.yml') | from_yaml }}"
+    verify_image: "{{ verify_defaults.postal_image }}:{{ verify_defaults.postal_version }}"
+    verify_mariadb_image: "{{ verify_defaults.postal_mariadb_image }}"
+    verify_submission: true
+    verify_mail_host: ""
+    verify_mail_port: 25
+    verify_spam_threshold: ""
+    verify_services: "{{ ['mariadb', 'smtp', 'web', 'worker'] + (['submission'] if verify_submission | bool else []) }}"
+    verify_all: "{{ verify_inspect.stdout | from_json }}"
+    # One container per service (the worker has one replica).
+    verify_by_service: >-
+      {%- set found = {} -%}
+      {%- for container in verify_all -%}
+      {%-   set _ = found.update({container.Config.Labels['com.docker.compose.service']: container}) -%}
+      {%- endfor -%}
+      {{ found }}
+    # MARIADB_ALLOW_EMPTY_ROOT_PASSWORD is a switch: root logs in through the
+    # socket only.
+    verify_env_names: >-
+      {{ verify_all | map(attribute='Config.Env') | flatten | map('regex_replace', '=.*$', '') | unique
+         | reject('eq', 'MARIADB_ALLOW_EMPTY_ROOT_PASSWORD') | sort }}
+  tasks:
+    - name: Find the containers of the compose project
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, label=com.docker.compose.project=postal]
+      register: verify_ids
+      changed_when: false
+
+    - name: Inspect the containers
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'inspect'] + verify_ids.stdout_lines }}"
+      register: verify_inspect
+      changed_when: false
+
+    - name: Check the containers of the project
+      ansible.builtin.assert:
+        that:
+          - verify_all | length == verify_services | length
+          - verify_by_service.keys() | sort == verify_services | sort
+          - verify_all | rejectattr('State.Running') | list | length == 0
+          - verify_all | rejectattr('HostConfig.RestartPolicy.Name', 'eq', 'unless-stopped') | list | length == 0
+          - verify_by_service.mariadb.Config.Image == verify_mariadb_image
+          - verify_services | reject('eq', 'mariadb') | map('extract', verify_by_service) | map(attribute='Config.Image')
+            | reject('eq', verify_image) | list | length == 0
+          - verify_by_service.mariadb.State.Health.Status == 'healthy'
+        fail_msg: >-
+          The project does not run {{ verify_services | sort | join(', ') }} (one
+          container each, running, restarted unless stopped, the pinned images):
+          {{ verify_all | map(attribute='Name') | list }},
+          {{ verify_all | map(attribute='State.Status') | list }},
+          {{ verify_all | map(attribute='Config.Image') | list }}.
+
+    - name: Check the web container
+      ansible.builtin.assert:
+        that:
+          - verify_web.HostConfig.NetworkMode != 'host'
+          - verify_web.NetworkSettings.Networks.keys() | sort == ['postal_default', 'proxy']
+          - verify_web.HostConfig.PortBindings | default({}, true) | length == 0
+          - verify_web.NetworkSettings.Ports | default({}, true) | dict2items | selectattr('value') | list | length == 0
+          - verify_web.Config.Cmd == ['postal', 'web-server']
+        fail_msg: >-
+          web is not on the project network and proxy alone, without a
+          published port, running postal web-server:
+          {{ verify_web.NetworkSettings.Networks.keys() | list }},
+          {{ verify_web.NetworkSettings.Ports }}, {{ verify_web.Config.Cmd }}.
+      vars:
+        verify_web: "{{ verify_by_service.web }}"
+
+    - name: Check the services on the host's network
+      ansible.builtin.assert:
+        that:
+          - verify_container.HostConfig.NetworkMode == 'host'
+          - verify_container.Config.Cmd == item.cmd
+          - verify_container.HostConfig.CapAdd | default([], true) | map('regex_replace', '^CAP_', '') | sort == item.caps
+          - verify_container.Config.Env | select('match', '^(PORT|HEALTH_SERVER_PORT)=') | sort == item.env
+          - verify_container.Config.StopTimeout | default(0, true) | int == 60
+        fail_msg: >-
+          {{ item.name }} is not on the host's network running {{ item.cmd }}
+          with the capabilities {{ item.caps }}, the ports {{ item.env }} and a
+          grace of 60 seconds: {{ verify_container.HostConfig.NetworkMode }},
+          {{ verify_container.Config.Cmd }}, {{ verify_container.HostConfig.CapAdd }},
+          {{ verify_container.Config.Env | select('match', '^(PORT|HEALTH_SERVER_PORT)=') | list }},
+          {{ verify_container.Config.StopTimeout }}.
+      vars:
+        verify_container: "{{ verify_by_service[item.name] }}"
+      loop: >-
+        {{ [{'name': 'smtp', 'cmd': ['postal', 'smtp-server'], 'caps': ['NET_BIND_SERVICE'],
+             'env': ['HEALTH_SERVER_PORT=9091', 'PORT=25']},
+            {'name': 'worker', 'cmd': ['postal', 'worker'], 'caps': [], 'env': []}]
+           + ([{'name': 'submission', 'cmd': ['postal', 'smtp-server'], 'caps': ['NET_BIND_SERVICE'],
+                'env': ['HEALTH_SERVER_PORT=9092', 'PORT=587']}] if verify_submission | bool else []) }}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the MariaDB container
+      ansible.builtin.assert:
+        that:
+          - verify_mariadb.HostConfig.NetworkMode != 'host'
+          - verify_mariadb.NetworkSettings.Networks.keys() | list == ['postal_default']
+          - >-
+            verify_mariadb.HostConfig.PortBindings == {'3307/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '3307'}]}
+        fail_msg: >-
+          MariaDB is not on the project network alone, published on
+          127.0.0.1:3307 only: {{ verify_mariadb.NetworkSettings.Networks.keys() | list }},
+          {{ verify_mariadb.HostConfig.PortBindings }}.
+      vars:
+        verify_mariadb: "{{ verify_by_service.mariadb }}"
+
+    # The values are not shown: the names only.
+    - name: Check that no environment holds a secret
+      ansible.builtin.assert:
+        that: verify_env_names | select('search', '(?i)pass|secret|key|token|pwd') | list | length == 0
+        fail_msg: "An environment holds a variable that looks like a secret: {{ verify_env_names }}."
+
+    - name: Stat the files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop:
+        - "{{ verify_dir }}/compose.yaml"
+        - "{{ verify_dir }}/config"
+        - "{{ verify_dir }}/config/postal.yml"
+        - "{{ verify_dir }}/config/signing.key"
+      register: verify_stat
+
+    - name: Check the modes of the files
+      ansible.builtin.assert:
+        that:
+          - verify_stat.results[0].stat.mode == '0644'
+          - verify_stat.results[1].stat.isdir
+          - verify_stat.results[1].stat.mode == '0750'
+          - verify_stat.results[1].stat.uid == 0
+          - verify_stat.results[1].stat.gid == 999
+          - verify_stat.results[2:] | map(attribute='stat.mode') | unique == ['0440']
+          - verify_stat.results[2:] | map(attribute='stat.uid') | unique == [0]
+          - verify_stat.results[2:] | map(attribute='stat.gid') | unique == [999]
+        fail_msg: >-
+          The compose file is not 0644, the config directory not 0750
+          root:999, or postal.yml and signing.key not 0440 root:999:
+          {{ verify_stat.results | map(attribute='stat') | map('dict2items')
+             | map('selectattr', 'key', 'in', ['path', 'mode', 'uid', 'gid']) | map('items2dict') | list }}.
+
+    - name: Read the size of the signing key
+      ansible.builtin.command:
+        argv: [openssl, pkey, -in, "{{ verify_dir }}/config/signing.key", -noout, -text]
+      register: verify_key
+      changed_when: false
+      no_log: true
+
+    - name: Check the signing key
+      ansible.builtin.assert:
+        that: >-
+          verify_key.stdout_lines[0] | default('') == 'Private-Key: (2048 bit, 2 primes)'
+        fail_msg: "signing.key is not a 2048-bit RSA key: {{ verify_key.stdout_lines[0] | default('') }}"
+
+    # It holds every secret: read and parsed without output, and the message
+    # names only the values that are no secret.
+    - name: Read postal.yml
+      ansible.builtin.slurp:
+        src: "{{ verify_dir }}/config/postal.yml"
+      register: verify_config_read
+      no_log: true
+
+    - name: Parse postal.yml
+      ansible.builtin.set_fact:
+        verify_config: "{{ verify_config_read.content | b64decode | from_yaml }}"
+      no_log: true
+
+    - name: Check postal.yml
+      ansible.builtin.assert:
+        that:
+          - verify_config.version == 2
+          - >-
+            verify_config.web_server == {'default_bind_address': '0.0.0.0', 'default_port': 5000}
+          - verify_config.postal.web_hostname == 'postal.test'
+          - verify_config.postal.smtp_hostname == 'postal.test'
+          - verify_config.postal.trusted_proxies == ['172.31.255.254']
+          - verify_config.postal.signing_key_path == '/config/signing.key'
+          - verify_config.main_db.host == 'postal-mariadb'
+          - verify_config.main_db.port == 3307
+          - verify_config.main_db.database == 'postal'
+          - verify_config.message_db.host == 'postal-mariadb'
+          - verify_config.message_db.database_name_prefix == 'postal'
+          - verify_config.rails.secret_key | length == 128
+          - verify_config.smtp_server.default_port == 25
+          - verify_config.smtp_server.default_health_server_port == 9091
+          - verify_config.worker.default_health_server_port == 9090
+          - verify_config.dns.return_path_domain == 'rp.mail.test'
+          - verify_config.dns.mx_records == ['mx.mail.test']
+          - verify_config.postal.default_spam_threshold | default('') | string == verify_spam_threshold | string
+          - verify_smtp_plain == verify_smtp_expected
+          - (verify_config.smtp.username | default('')) == ''
+          - (verify_config.smtp.password | default('')) == ''
+        fail_msg: >-
+          postal.yml lacks a value the role owns (the bind address
+          {{ verify_config.web_server | default({}) }}, trusted_proxies
+          {{ verify_config.postal.trusted_proxies | default('') }}, the
+          databases {{ verify_config.main_db.host | default('') }}:{{ verify_config.main_db.port | default('') }}
+          with the prefix {{ verify_config.message_db.database_name_prefix | default('') }},
+          the spam threshold {{ verify_config.postal.default_spam_threshold | default('none') }},
+          a Rails secret of 128 characters), or its smtp section is
+          {{ verify_smtp_plain }}, not {{ verify_smtp_expected }}.
+      vars:
+        verify_smtp_plain: "{{ verify_config.smtp | default({}) | dict2items | rejectattr('key', 'in', ['username', 'password']) | items2dict }}"
+        verify_smtp_expected: >-
+          {{ {'from_name': 'Postal', 'from_address': 'postal@mail.test'}
+             | combine({'host': verify_mail_host, 'port': verify_mail_port | int, 'authentication_type': none}
+                       if verify_mail_host | length > 0 else {}) }}
+
+    - name: Read the database target
+      ansible.builtin.slurp:
+        src: "{{ verify_dir }}/database-target"
+      register: verify_target
+
+    - name: Check the database target
+      ansible.builtin.assert:
+        that: >-
+          (verify_target.content | b64decode | from_yaml) == {'database': 'mariadb'}
+        fail_msg: "The database target is not {'database': 'mariadb'}: {{ verify_target.content | b64decode }}"

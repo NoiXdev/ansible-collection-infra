@@ -131,3 +131,95 @@ postal_config_extra_owned: >-
 postal_config_extra_scalar: >-
   {{ (postal_config_extra if postal_config_extra is mapping else {}).items()
      | rejectattr('1', 'mapping') | map(attribute='0') | sort | list }}
+
+# Written by reconfigure.yml before it writes the compose file and the
+# configuration, and removed once a run ends healthy; while it exists a run
+# restarts the Postal services, which read postal.yml and the keys on start
+# only.
+postal_restart_marker: "{{ postal_dir }}/restart-pending"
+# MariaDB's settings (not secret), bound read-only into its container.
+postal_mariadb_cnf_file: "{{ postal_dir }}/mariadb.cnf"
+
+# The long-running services of the compose project, and those of them that
+# run Postal (and read postal.yml and the keys on start).
+postal_app_services: >-
+  {{ ['web', 'smtp'] + (['submission'] if postal_smtp_submission_port | int != 0 else []) + ['worker'] }}
+postal_services: "{{ (['mariadb'] if postal_database == 'mariadb' else []) + postal_app_services }}"
+# The ports the SMTP services listen on.
+postal_smtp_services: >-
+  {{ [{'service': 'smtp', 'port': postal_smtp_port | int}]
+     + ([{'service': 'submission', 'port': postal_smtp_submission_port | int}]
+        if postal_smtp_submission_port | int != 0 else []) }}
+
+# Where Postal reaches its database. The own MariaDB listens on
+# postal_mariadb_port inside its container too, under a name of the project
+# network; the services on the host's network resolve that name to
+# 127.0.0.1, where the port is published, so one postal.yml serves both.
+postal_mariadb_host: "{{ postal_project }}-mariadb"
+postal_db_settings: >-
+  {{ {'host': postal_mariadb_host, 'port': postal_mariadb_port | int} if postal_database == 'mariadb'
+     else {'host': postal_db_host | string, 'port': postal_db_port | int} }}
+# Server settings of the own MariaDB: the redo log ten times the largest
+# message (Postal's requirement, rounded up to whole MB, at least 128 MB),
+# connections for the worker threads, then postal_mariadb_settings over them.
+postal_mariadb_server_settings: >-
+  {{ {'port': postal_mariadb_port | int,
+      'skip-name-resolve': 'ON',
+      'innodb_log_file_size': ([(postal_max_message_size | float * 10) | round(0, 'ceil') | int, 128] | max) ~ 'M',
+      'max_connections': 50 + 20 * postal_worker_replicas | int * postal_worker_threads | int}
+     | combine(postal_mariadb_settings) }}
+
+# What install records in postal_target_file; no credentials. With the
+# external server also where it is.
+postal_database_target: >-
+  {{ {'database': postal_database}
+     | combine({'host': postal_db_host | string, 'port': postal_db_port | int}
+               if postal_database == 'mariadb_external' else {}) }}
+postal_external_target: "{{ postal_db_host }}:{{ postal_db_port | int }}"
+
+# A one-off command of Postal's image in the runner service (on the project
+# and the Traefik network, the configuration mounted), without starting
+# MariaDB: postal_runner + [command...].
+postal_runner: [docker, compose, run, --rm, --no-deps, -T]
+
+# The task that failed and its error: for a command the last line of stderr
+# that names an error (else its last line), for anything else the first line
+# of the message.
+postal_failure: >-
+  {%- set stderr = (ansible_failed_result.stderr | default('') | trim).splitlines() -%}
+  {%- set errors = stderr | select('search', '(?i)error') | list -%}
+  {{ ansible_failed_task.name }}:
+  {{ (errors or stderr or ['']) | last | trim
+     if ansible_failed_result.msg | default('') is search('non-zero return code')
+     else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
+
+# After a failed install: nothing in it should be worth keeping yet, so what
+# it made is removed and the next run installs afresh.
+postal_install_hint: >-
+  It left a partial installation, which the role does not take for a
+  finished one. To install again, first check that nothing in it is worth
+  keeping (organizations and servers in Postal), then run docker compose down
+  in {{ postal_dir }} (if {{ postal_compose_file }} exists), remove
+  {{ postal_compose_file }}, {{ postal_config_dir }},
+  {{ postal_mariadb_cnf_file }}, {{ postal_target_file }},
+  {{ postal_install_marker }}{{ (' and the subdirectories ' ~ postal_data_subdirs | join(' and ') ~ ' of '
+  ~ postal_data_dir) if postal_data_subdirs | length > 0 else '' }}, then run the role again.
+
+# The files the role renders, as it writes them.
+postal_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
+postal_mariadb_cnf: "{{ lookup('ansible.builtin.template', 'mariadb.cnf.j2') }}"
+# postal.yml: evaluated only once postal_rails_secret_value is known
+# (state.yml, config.yml).
+postal_config: "{{ lookup('ansible.builtin.template', 'postal.yml.j2') }}"
+# Where the containers see postal_config_dir, and its files on the host.
+postal_container_config_dir: /config
+postal_config_file: "{{ postal_config_dir }}/postal.yml"
+postal_signing_key_file: "{{ postal_config_dir }}/signing.key"
+# The health servers health.yml asks, and the upper bound of the attempts of
+# each of its waits (the deadline of postal_health_timeout ends them).
+postal_health_servers: >-
+  {{ [{'service': 'worker', 'port': postal_worker_health_port | int},
+      {'service': 'smtp', 'port': postal_smtp_health_port | int}]
+     + ([{'service': 'submission', 'port': postal_submission_health_port | int}]
+        if postal_smtp_submission_port | int != 0 else []) }}
+postal_health_retries: "{{ (postal_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"

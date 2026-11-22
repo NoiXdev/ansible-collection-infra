@@ -1,0 +1,40 @@
+---
+# The own MariaDB: root logs in through the socket only (no password at all),
+# and Postal's user postal_db_user has postal_db_password and all privileges
+# on the main database and on every message database (<prefix>-<id>, which
+# Postal creates per mail server). Run by install once MariaDB is healthy
+# and by reconfigure (so that a new postal_db_password reaches the server);
+# every statement keeps what is there. In a grant _ is a wildcard and is
+# escaped; the % of the message databases is meant. The SQL goes through
+# stdin as root logs in, so the password is in no argument, and the task is
+# no_log with a failure message of its own.
+- name: Set up Postal's database user
+  block:
+    - name: Create Postal's database user and its grants
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, mariadb, mariadb, --user=root, --batch]
+        chdir: "{{ postal_dir }}"
+        stdin: |
+          ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;
+          CREATE USER IF NOT EXISTS '{{ postal_db_user }}'@'%' IDENTIFIED BY '{{ postal_db_password_sql }}';
+          ALTER USER '{{ postal_db_user }}'@'%' IDENTIFIED BY '{{ postal_db_password_sql }}';
+          GRANT ALL PRIVILEGES ON `{{ postal_db_name | replace('_', '\\_') }}`.* TO '{{ postal_db_user }}'@'%';
+          GRANT ALL PRIVILEGES ON `{{ postal_message_db_prefix | replace('_', '\\_') }}-%`.* TO '{{ postal_db_user }}'@'%';
+      vars:
+        # A string literal of MariaDB's SQL (main.yml refuses a backslash in
+        # the password; doubled here all the same).
+        postal_db_password_sql: >-
+          {{ postal_db_password | string | replace('\\', '\\\\') | replace("'", "''") }}
+      changed_when: false
+      no_log: true
+
+  rescue:
+    - name: Fail with the task that could not set up the database user
+      ansible.builtin.fail:
+        msg: >-
+          Postal's database user {{ postal_db_user }} could not be set up in the
+          own MariaDB ({{ ansible_failed_task.name }}); the error is not shown,
+          as it can quote the password. Check that the mariadb service runs
+          (docker compose ps in {{ postal_dir }}) and that root logs in there
+          (docker compose exec mariadb mariadb -u root), then run the role
+          again.

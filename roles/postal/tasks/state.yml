@@ -1,0 +1,355 @@
+---
+# Reads the host and sets postal_state:
+#   install      no compose file
+#   update       postal_version is newer than the installed version
+#   reconfigure  the compose file or mariadb.cnf the role writes differs from
+#                the one on disk, postal.yml or signing.key from what the role
+#                writes, or a restart is pending (postal_restart_marker)
+#   noop         everything as the role writes it
+# Also sets postal_installed (a compose file exists), postal_compose_before
+# (the compose file on disk), postal_compose_on_disk (it parsed),
+# postal_installed_version, postal_installed_database (from
+# postal_target_file, empty without it) and postal_installed_target (the
+# external server it records), postal_signing_key_value and
+# postal_rails_secret_value (the given ones, else those on disk, else empty:
+# config.yml generates them), postal_config_differs, postal_restart_pending,
+# postal_down (the services that are not running) and postal_db_has_schema
+# (the main database holds a schema_migrations table: asked of the running
+# own MariaDB of an installation; on an install of the own MariaDB it is
+# false here, as the server does not run yet, and install.yml asks again once
+# it does). Refuses, before any change and in this order: a postal_data_dir
+# that is not a mountpoint (with postal_data_dir_mountpoint), an installation
+# of another database mode, an external installation of another server, an
+# installation without its data subdirectories (an unmounted volume), a
+# compose file that is not YAML, an install that did not complete (its
+# marker), a compose file without a Postal version, a downgrade, and an
+# installation without its signing key when postal_signing_key is empty. It
+# changes nothing.
+
+# A block volume that is not mounted leaves its mountpoint as an empty
+# directory on the root filesystem; an install there would put the data
+# beside the volume.
+- name: Check that the data directory is a mountpoint
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ postal_data_dir }}"]
+  register: postal_data_dir_mounted
+  changed_when: false
+  failed_when: false
+  when: postal_data_dir_mountpoint | bool
+
+- name: Refuse a data directory that is not a mountpoint
+  ansible.builtin.fail:
+    msg: >-
+      postal_data_dir_mountpoint is on, but {{ postal_data_dir }} is not a
+      mountpoint: is the volume mounted? The role changes nothing. Mount the
+      volume at {{ postal_data_dir }}, then run the role again.
+  when:
+    - postal_data_dir_mountpoint | bool
+    - postal_data_dir_mounted.rc != 0
+
+# The role writes no secret into it, but one changed by hand could hold one,
+# so it is read, noted and parsed in no_log tasks.
+- name: Read the compose file
+  ansible.builtin.slurp:
+    src: "{{ postal_compose_file }}"
+  register: postal_compose_read
+  failed_when: false
+  no_log: true
+
+- name: Look for the data subdirectories
+  ansible.builtin.stat:
+    path: "{{ postal_data_dir }}/{{ item }}"
+    get_checksum: false
+  loop: "{{ postal_data_subdirs }}"
+  register: postal_subdirs_stat
+
+- name: Note what is on the host
+  ansible.builtin.set_fact:
+    postal_compose_before: "{{ postal_compose_read.content | default('') | b64decode }}"
+    postal_installed: "{{ postal_compose_read.content is defined }}"
+    postal_data_present: >-
+      {{ postal_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
+  no_log: true
+
+# Not secret: the database mode (and for an external server where it is).
+- name: Read the database target
+  ansible.builtin.slurp:
+    src: "{{ postal_target_file }}"
+  register: postal_target_read
+  failed_when: false
+  when: postal_installed
+
+- name: Note the installed database
+  ansible.builtin.set_fact:
+    postal_installed_database: "{{ postal_target_recorded.database | default('') }}"
+    postal_installed_target: >-
+      {{ (postal_target_recorded.host | string ~ ':' ~ postal_target_recorded.port | string)
+         if postal_target_recorded.host is defined and postal_target_recorded.port is defined else '' }}
+  vars:
+    postal_target_parsed: "{{ (postal_target_read.content | default('') | b64decode or '{}') | from_yaml }}"
+    postal_target_recorded: "{{ postal_target_parsed if postal_target_parsed is mapping else {} }}"
+
+# Postal's data lives in the database: with another one it would start
+# empty. Refused before the data check, which would take the other mode's
+# missing subdirectory for an unmounted volume.
+- name: Refuse an installation of another database mode
+  ansible.builtin.fail:
+    msg: >-
+      postal_database {{ postal_database }} was set, but the installation in
+      {{ postal_dir }} was made with the database {{ postal_installed_database }}
+      ({{ postal_target_file }}). With another database Postal would start
+      without its organizations, servers and messages; the role changes
+      nothing. Set postal_database back to {{ postal_installed_database }}.
+      Moving to another database is manual work: dump the postal and
+      postal-* databases into the other server, then remove
+      {{ postal_target_file }}.
+  when:
+    - postal_installed
+    - postal_installed_database | length > 0
+    - postal_installed_database != postal_database
+
+# The same mode, another server: Postal would find no data there. User and
+# password may change.
+- name: Refuse an installation of another external database
+  ansible.builtin.fail:
+    msg: >-
+      The settings name the external database server
+      {{ postal_external_target }} (postal_db_host, postal_db_port), but the
+      installation in {{ postal_dir }} was made with
+      {{ ('the server ' ~ postal_installed_target) if postal_installed_target | length > 0
+         else 'a server that ' ~ postal_target_file ~ ' does not name in full' }}
+      ({{ postal_target_file }}). Postal would find none of its data there;
+      the role changes nothing. Set the two back to
+      {{ postal_installed_target if postal_installed_target | length > 0
+         else 'those of the server the installation was made with' }}. If the
+      databases really moved (a dump loaded elsewhere), remove
+      {{ postal_target_file }} and run the role again.
+  when:
+    - postal_installed
+    - postal_database == 'mariadb_external'
+    - postal_installed_database == 'mariadb_external'
+    - postal_installed_target != postal_external_target
+
+# Only install creates the subdirectories, and compose does not create a
+# missing one (create_host_path: false), so their absence beside a compose
+# file is data that is not there (an unmounted volume), never a state to
+# repair: MariaDB would start an empty server.
+- name: Refuse an installation without its data
+  ansible.builtin.fail:
+    msg: >-
+      Postal is installed in {{ postal_dir }} ({{ postal_compose_file }}), but
+      {{ postal_data_dir }} lacks {{ postal_data_missing | join(', ') }}: is
+      the volume mounted? The role changes nothing and creates none of them.
+      Mount the volume (or put the data back) at {{ postal_data_dir }}, then
+      run the role again.
+  vars:
+    # In the order of postal_data_subdirs, which difference does not keep.
+    postal_data_missing: "{{ postal_data_subdirs | reject('in', postal_data_present) | list }}"
+  when:
+    - postal_installed
+    - postal_data_missing | length > 0
+
+# A file that is not YAML gets a message of its own, without the parser's
+# error (it can quote a line). One that is YAML but not a mapping parses as
+# empty and names no version, which is refused below.
+- name: Check that the compose file is YAML
+  block:
+    - name: Parse the compose file
+      ansible.builtin.set_fact:
+        postal_compose_on_disk: "{{ postal_compose_parsed if postal_compose_parsed is mapping else {} }}"
+      vars:
+        postal_compose_parsed: "{{ (postal_compose_before or '{}') | from_yaml }}"
+      no_log: true
+  rescue:
+    - name: Fail on a compose file that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ postal_compose_file }} is not YAML, so the role cannot tell what is
+          installed and changes nothing. Put back the compose file the role
+          wrote (docker compose config --quiet in {{ postal_dir }} shows the
+          error).
+
+- name: Look for the marker of an install in progress
+  ansible.builtin.stat:
+    path: "{{ postal_install_marker }}"
+    get_checksum: false
+  register: postal_install_marker_stat
+
+- name: Refuse an install that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ postal_install_marker }} exists: an install of Postal in
+      {{ postal_dir }} did not complete. The role changes nothing.
+      {{ postal_install_hint }}
+  when: postal_install_marker_stat.stat.exists
+
+- name: Note the installed version
+  ansible.builtin.set_fact:
+    postal_installed_version: >-
+      {{ ((((postal_compose_on_disk.services | default({})).web | default({})).image | default(''))
+          | string).rpartition(':')[2] }}
+
+- name: Check the installed version
+  when: postal_installed
+  block:
+    - name: Check that the compose file names the Postal version
+      ansible.builtin.assert:
+        that: postal_installed_version is match('^\d+\.\d+\.\d+$')
+        fail_msg: >-
+          The Postal image of the web service in {{ postal_compose_file }} has
+          no tag X.Y.Z, so the role cannot tell which version is installed and
+          changes nothing. Put back the compose file the role wrote.
+        quiet: true
+
+    # Postal migrates its databases forward only.
+    - name: Refuse a downgrade
+      ansible.builtin.fail:
+        msg: >-
+          postal_version {{ postal_version }} is lower than the installed
+          version {{ postal_installed_version }} in {{ postal_dir }}; the role
+          refuses to downgrade, as Postal cannot migrate its databases down,
+          and changes nothing. Set postal_version to
+          {{ postal_installed_version }} or newer.
+      when: postal_version is version(postal_installed_version, '<')
+
+# The keys: postal.yml holds every secret and signing.key the private key of
+# the published DKIM record, so both are read and compared in no_log tasks.
+- name: Read the configuration
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: ["{{ postal_config_file }}", "{{ postal_signing_key_file }}"]
+  register: postal_config_read
+  failed_when: false
+  no_log: true
+  when: postal_installed
+
+- name: Note the configuration on disk
+  ansible.builtin.set_fact:
+    postal_config_disk: "{{ postal_config_read.results[0].content | default('') | b64decode }}"
+    postal_signing_key_disk: "{{ postal_config_read.results[1].content | default('') | b64decode }}"
+  no_log: true
+  when: postal_installed
+
+# A postal.yml that is not YAML has no Rails secret to keep (one is
+# generated, which ends the sessions only).
+- name: Read the Rails secret on disk
+  block:
+    - name: Parse postal.yml
+      ansible.builtin.set_fact:
+        postal_rails_secret_disk: >-
+          {{ (((postal_config_parsed if postal_config_parsed is mapping else {}).rails | default({}))
+              .secret_key | default('', true)) | string }}
+      vars:
+        postal_config_parsed: "{{ (postal_config_disk | default('') or '{}') | from_yaml }}"
+      no_log: true
+  rescue:
+    - name: Note a postal.yml without a Rails secret
+      ansible.builtin.set_fact:
+        postal_rails_secret_disk: ""
+
+# The given value wins (that is the operator's change); else what the
+# installation has; else config.yml generates one.
+- name: Note the keys the role writes
+  ansible.builtin.set_fact:
+    postal_signing_key_value: >-
+      {{ postal_signing_key | string if postal_signing_key | string | length > 0
+         else postal_signing_key_disk | default('') }}
+    postal_rails_secret_value: >-
+      {{ postal_rails_secret_key | string if postal_rails_secret_key | string | length > 0
+         else postal_rails_secret_disk | default('') }}
+  no_log: true
+
+# A new key would break the DKIM record published for the return-path
+# domain, and Postal's webhook signatures.
+- name: Refuse an installation without its signing key
+  ansible.builtin.fail:
+    msg: >-
+      Postal is installed in {{ postal_dir }}, but {{ postal_signing_key_file }}
+      is missing or empty and postal_signing_key is not set. A new key would
+      break the DKIM record published for
+      {{ postal_dns_settings.return_path_domain }} and the signatures of
+      Postal's webhooks, so the role generates none on an installation and
+      changes nothing. Put the key back (from your vault into
+      postal_signing_key, or the file from a backup), then run the role
+      again.
+  when:
+    - postal_installed
+    - postal_signing_key_value | length == 0
+
+# The rendered postal.yml compared with the one on disk, and the key; the
+# Rails secret is empty only when config.yml has to generate one, which then
+# changes the file.
+- name: Compare the configuration with what the role writes
+  ansible.builtin.set_fact:
+    postal_config_differs: >-
+      {{ postal_installed
+         and (postal_rails_secret_value | length == 0
+              or postal_config_disk != postal_config
+              or postal_signing_key_disk != postal_signing_key_value) }}
+  no_log: true
+
+- name: Read mariadb.cnf
+  ansible.builtin.slurp:
+    src: "{{ postal_mariadb_cnf_file }}"
+  register: postal_mariadb_cnf_read
+  failed_when: false
+  when:
+    - postal_installed
+    - postal_database == 'mariadb'
+
+- name: Read the services that run
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
+    chdir: "{{ postal_dir }}"
+  register: postal_ps
+  changed_when: false
+  when: postal_installed
+
+# Asked of the own MariaDB as root, through its socket.
+- name: Look for Postal's schema in the own MariaDB
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - mariadb
+      - mariadb
+      - --user=root
+      - --batch
+      - --skip-column-names
+      - "--execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{{ postal_db_name }}' AND table_name = 'schema_migrations'"
+    chdir: "{{ postal_dir }}"
+  register: postal_schema_read
+  changed_when: false
+  failed_when: false
+  when:
+    - postal_installed
+    - postal_database == 'mariadb'
+    - "'mariadb' in postal_ps.stdout_lines"
+
+# Written by reconfigure.yml before it writes the compose file and the
+# configuration, and removed by main.yml once a run ends healthy: a run
+# stopped in between leaves files that equal the settings while the
+# containers still run with the old ones (Postal reads them on start only),
+# so the next run restarts them.
+- name: Look for a pending restart
+  ansible.builtin.stat:
+    path: "{{ postal_restart_marker }}"
+    get_checksum: false
+  register: postal_restart_marker_stat
+
+- name: Decide what to do
+  ansible.builtin.set_fact:
+    postal_db_has_schema: "{{ (postal_schema_read.stdout | default('0') | trim) not in ['', '0'] }}"
+    postal_down: "{{ postal_services | difference(postal_ps.stdout_lines | default([])) }}"
+    postal_restart_pending: "{{ postal_installed and postal_restart_marker_stat.stat.exists }}"
+    postal_state: >-
+      {{ 'install' if not postal_installed
+         else 'update' if postal_version is version(postal_installed_version, '>')
+         else 'reconfigure' if postal_compose_before != postal_compose
+                               or postal_config_differs | bool
+                               or (postal_database == 'mariadb'
+                                   and (postal_mariadb_cnf_read.content | default('') | b64decode) != postal_mariadb_cnf)
+                               or postal_restart_marker_stat.stat.exists
+         else 'noop' }}

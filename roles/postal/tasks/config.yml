@@ -1,0 +1,110 @@
+---
+# Writes Postal's configuration into postal_config_dir (0750 root:999):
+# signing.key and postal.yml, each 0440 root:999, and with the own MariaDB
+# mariadb.cnf (0644, no secret) into postal_dir. The keys state.yml noted
+# (postal_signing_key_value, postal_rails_secret_value: given, else those of
+# the installation) are generated only when both the variable and the file
+# are empty, which state.yml allows on an install alone for the signing key:
+# openssl in the runner service (genrsa 2048, rand -hex 64), whose output
+# only no_log tasks see. A signing key given that differs from the file is
+# written: that is the operator's change. Sets postal_config_changed (one of
+# the files Postal reads changed). Needs the compose file (the runner). The
+# tasks that touch a secret are no_log, so a failure gets a message of its
+# own that quotes nothing of them.
+
+- name: Write the configuration
+  block:
+    - name: Create the configuration directory
+      ansible.builtin.file:
+        path: "{{ postal_config_dir }}"
+        state: directory
+        owner: root
+        group: "999"
+        mode: "0750"
+
+    - name: Generate the signing key
+      ansible.builtin.command:
+        argv: "{{ postal_runner + ['--entrypoint', 'openssl', 'runner', 'genrsa', '2048'] }}"
+        chdir: "{{ postal_dir }}"
+      register: postal_signing_key_generated
+      changed_when: true
+      no_log: true
+      when: postal_signing_key_value | length == 0
+
+    - name: Generate the Rails secret
+      ansible.builtin.command:
+        argv: "{{ postal_runner + ['--entrypoint', 'openssl', 'runner', 'rand', '-hex', '64'] }}"
+        chdir: "{{ postal_dir }}"
+      register: postal_rails_secret_generated
+      changed_when: true
+      no_log: true
+      when: postal_rails_secret_value | length == 0
+
+    # The PEM block alone, without what compose printed around it.
+    - name: Note the generated keys
+      ansible.builtin.set_fact:
+        postal_signing_key_value: >-
+          {{ (postal_signing_key_generated.stdout
+              | regex_search('-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----'))
+             if postal_signing_key_generated.stdout is defined else postal_signing_key_value }}
+        postal_rails_secret_value: >-
+          {{ postal_rails_secret_generated.stdout | regex_search('[0-9a-f]{128}')
+             if postal_rails_secret_generated.stdout is defined else postal_rails_secret_value }}
+        postal_keys_generated: >-
+          {{ (['signing.key'] if postal_signing_key_generated.stdout is defined else [])
+             + (['the Rails secret'] if postal_rails_secret_generated.stdout is defined else []) }}
+      no_log: true
+
+    - name: Check the generated keys
+      ansible.builtin.assert:
+        that:
+          - postal_signing_key_value is search('-----END [A-Z ]*PRIVATE KEY-----')
+          - postal_rails_secret_value | length > 0
+        fail_msg: openssl in the runner service printed no key (the output is not shown).
+        quiet: true
+      no_log: true
+
+    - name: Write the signing key
+      ansible.builtin.copy:
+        dest: "{{ postal_signing_key_file }}"
+        content: "{{ postal_signing_key_value }}"
+        owner: root
+        group: "999"
+        mode: "0440"
+      register: postal_signing_key_written
+      no_log: true
+
+    - name: Write postal.yml
+      ansible.builtin.copy:
+        dest: "{{ postal_config_file }}"
+        content: "{{ postal_config }}"
+        owner: root
+        group: "999"
+        mode: "0440"
+      register: postal_config_written
+      no_log: true
+
+    - name: Write mariadb.cnf
+      ansible.builtin.copy:
+        dest: "{{ postal_mariadb_cnf_file }}"
+        content: "{{ postal_mariadb_cnf }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: postal_database == 'mariadb'
+
+    - name: Note whether the configuration changed
+      ansible.builtin.set_fact:
+        postal_config_changed: "{{ postal_signing_key_written is changed or postal_config_written is changed }}"
+
+  rescue:
+    - name: Fail with the task that could not write the configuration
+      ansible.builtin.fail:
+        msg: >-
+          The configuration of Postal could not be written to
+          {{ postal_config_dir }} ({{ ansible_failed_task.name }}); the error is
+          not shown, as it can quote a secret. Running Postal services keep the
+          configuration they started with. Check the directory (its owner, the
+          free space) and, for a generated key, that docker compose run --rm
+          runner postal version works in {{ postal_dir }}, then run the role
+          again.

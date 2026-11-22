@@ -1,0 +1,136 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. No secret is in this file: Postal
+    reads them from postal.yml and signing.key of postal_config_dir, bound
+    read-only; the own MariaDB has no password of its own (root logs in
+    through its socket only, the role creates Postal's user). -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+{#- A bind mount that compose must not create: a missing data directory (an
+    unmounted volume) stops the container instead of starting it empty. -#}
+{%- macro bind(source, target, read_only=false, indent=6) %}
+{{ ' ' * indent }}- type: bind
+{{ ' ' * indent }}  source: {{ q(source) }}
+{{ ' ' * indent }}  target: {{ q(target) }}
+{{ ' ' * indent }}  read_only: {{ 'true' if read_only else 'false' }}
+{{ ' ' * indent }}  bind:
+{{ ' ' * indent }}    create_host_path: false
+{%- endmacro %}
+{%- set own_db = postal_database == 'mariadb' -%}
+# Managed by the noixdev.infra.postal role; changes are overwritten.
+
+# What every Postal service shares: the image (linux/amd64 only; the role
+# refuses other hosts unless a test lifts the check), the configuration
+# directory read-only, and the grace Postal needs to finish what it handles
+# on SIGTERM.
+x-postal: &postal
+  image: {{ q(postal_image ~ ':' ~ postal_version) }}
+  platform: linux/amd64
+  volumes:
+{{ bind(postal_config_dir, '/config', read_only=true, indent=4) }}
+  stop_grace_period: 60s
+  restart: unless-stopped
+{% if own_db %}
+  depends_on:
+    mariadb:
+      condition: service_healthy
+{% endif %}
+{% if own_db %}
+
+# The services on the host's network reach the own MariaDB at its published
+# port on 127.0.0.1, under the name web uses on the project network.
+x-host-network: &host-network
+  network_mode: host
+  extra_hosts:
+    - {{ q(postal_mariadb_host ~ ':127.0.0.1') }}
+{% else %}
+
+x-host-network: &host-network
+  network_mode: host
+{% endif %}
+
+services:
+{% if own_db %}
+  # The own MariaDB on the project network, published on 127.0.0.1 only (for
+  # the services on the host's network), listening on the same port inside.
+  # Its settings come from mariadb.cnf; the label changes with them, so that
+  # a change recreates the container. Root has no password: the role switches
+  # it to the socket on install, which only a command inside the container
+  # reaches.
+  mariadb:
+    image: {{ q(postal_mariadb_image) }}
+    environment:
+      MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"
+      MARIADB_ROOT_HOST: localhost
+      MARIADB_AUTO_UPGRADE: "1"
+    volumes:
+{{ bind(postal_data_dir ~ '/mariadb', '/var/lib/mysql') }}
+{{ bind(postal_mariadb_cnf_file, '/etc/mysql/conf.d/postal.cnf', read_only=true) }}
+    ports:
+      - {{ q('127.0.0.1:' ~ postal_mariadb_port ~ ':' ~ postal_mariadb_port) }}
+    networks:
+      default:
+        aliases:
+          - {{ q(postal_mariadb_host) }}
+    labels:
+      - {{ q('noixdev.postal.mariadb-cnf=' ~ (postal_mariadb_cnf | hash('sha256'))) }}
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+      start_interval: 5s
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+{% endif %}
+  # The web interface, the API and tracking, on 0.0.0.0:5000 (postal.yml) of
+  # the project network and the Traefik network; no published port.
+  web:
+    <<: *postal
+    command: [postal, web-server]
+    networks: [default, traefik]
+
+  # The SMTP server on the host's network, so that it sees the real client
+  # addresses; its health server on 127.0.0.1.
+  smtp:
+    <<: [*postal, *host-network]
+    command: [postal, smtp-server]
+    cap_add: [NET_BIND_SERVICE]
+    environment:
+      PORT: {{ q(postal_smtp_port | int) }}
+      HEALTH_SERVER_PORT: {{ q(postal_smtp_health_port | int) }}
+{% if postal_smtp_submission_port | int != 0 %}
+
+  # The same server on the submission port, for clients whose provider blocks
+  # outgoing port 25.
+  submission:
+    <<: [*postal, *host-network]
+    command: [postal, smtp-server]
+    cap_add: [NET_BIND_SERVICE]
+    environment:
+      PORT: {{ q(postal_smtp_submission_port | int) }}
+      HEALTH_SERVER_PORT: {{ q(postal_submission_health_port | int) }}
+{% endif %}
+
+  # Delivery and the other background work, on the host's network (IP
+  # pools bind addresses of the host). A second replica finds the health port
+  # taken and runs without a health server.
+  worker:
+    <<: [*postal, *host-network]
+    command: [postal, worker]
+    deploy:
+      replicas: {{ postal_worker_replicas | int }}
+
+  # One-off commands (docker compose run --rm runner postal <command>): the
+  # database setup, the first admin, the DKIM record, the role's checks.
+  runner:
+    <<: *postal
+    profiles: [tools]
+    command: [postal]
+    restart: "no"
+    networks: [default, traefik]
+
+networks:
+  traefik:
+    name: {{ q(postal_traefik_network) }}
+    external: true

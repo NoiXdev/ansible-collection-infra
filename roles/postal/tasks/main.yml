@@ -53,6 +53,19 @@
       it in a vault. The role changes nothing.
     quiet: true
 
+# Postal's database.yml puts the password into a double-quoted YAML string,
+# where a double quote ends it and a backslash starts an escape. The message
+# quotes nothing of the value.
+- name: Check the characters of postal_db_password
+  ansible.builtin.assert:
+    that: postal_db_password | string is not search('["\\\\\n\r]')
+    fail_msg: >-
+      postal_db_password must not hold a double quote, a backslash or a line
+      break: Postal writes the password into a double-quoted string of its
+      database configuration, which these break. The value is not shown.
+      The role changes nothing.
+    quiet: true
+
 - name: Check postal_version
   ansible.builtin.assert:
     that:
@@ -357,6 +370,68 @@
       nothing.
     quiet: true
 
-# Task 2 installs, updates and reconfigures Postal from here on.
-- name: Install and run Postal
-  ansible.builtin.include_tasks: pending.yml
+# Refuses what the role must not run over (an install that did not complete,
+# missing data, another database, a downgrade) and decides what to do.
+- name: Read the installation
+  ansible.builtin.include_tasks: state.yml
+
+# An installation without a usable database-target (the operator removed it
+# because the database moved, or it never had one): the settings are now the
+# target, recorded after every refusal and check of state.yml.
+- name: Record the database target
+  ansible.builtin.include_tasks: target.yml
+  when:
+    - postal_installed
+    - postal_installed_database | length == 0
+
+- name: Install Postal
+  ansible.builtin.include_tasks: install.yml
+  when: postal_state == 'install'
+
+# Backups, the new version and a rollback come with the update support.
+- name: Refuse an update
+  ansible.builtin.fail:
+    msg: >-
+      postal_version {{ postal_version }} is newer than the installed version
+      {{ postal_installed_version }} in {{ postal_dir }}, and this version of
+      the role does not update Postal yet. The role changes nothing. Set
+      postal_version back to {{ postal_installed_version }}.
+  when: postal_state == 'update'
+
+- name: Reconfigure Postal
+  ansible.builtin.include_tasks: reconfigure.yml
+  when: postal_state == 'reconfigure'
+
+# Read-only: a run without changes starts and restarts nothing, but stays red
+# while a container is down or Postal cannot read its database.
+- name: Check that Postal runs
+  when: postal_state == 'noop'
+  block:
+    - name: Fail when a container is not running
+      ansible.builtin.fail:
+        msg: >-
+          Postal in {{ postal_dir }} is down: the services
+          {{ postal_down | join(', ') }} are not running. The role starts
+          nothing on a run without changes; start them with docker compose up
+          -d in {{ postal_dir }}.
+      when: postal_down | length > 0
+
+    - name: Check that Postal is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Postal is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Postal in {{ postal_dir }} is unhealthy
+          ({{ postal_health_lines | join('; ') }}) within
+          {{ postal_health_timeout }} seconds. The role restarts nothing on a
+          run without changes; see docker compose logs in {{ postal_dir }}.
+      when: not postal_healthy
+
+# Reached only by a run that ended healthy, which (re)started Postal on the
+# compose file and the configuration as they are: the restart a stopped
+# reconfigure left pending is done.
+- name: Remove the marker of a pending restart
+  ansible.builtin.file:
+    path: "{{ postal_restart_marker }}"
+    state: absent

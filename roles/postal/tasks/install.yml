@@ -1,0 +1,239 @@
+---
+# A fresh install: the directories (the data subdirectories only here), the
+# compose file, the configuration with its keys, the database target, then
+# with the own MariaDB the server and Postal's user; postal initialize on an
+# empty database (it creates the main database and loads the schema), the
+# first admin when postal_admin_email is set, Postal until it is healthy,
+# and the DNS records to set. The marker postal_install_marker lives from
+# before the first data directory until Postal is healthy, so a run after a
+# failed install refuses (state.yml) instead of taking the half-made
+# installation for a finished one. A failed install stops Postal and deletes
+# nothing.
+
+- name: Create the Postal directory
+  ansible.builtin.file:
+    path: "{{ postal_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the marker of an install in progress
+  ansible.builtin.copy:
+    dest: "{{ postal_install_marker }}"
+    content: |
+      version: {{ postal_version }}
+      time: {{ now(utc=true).isoformat() }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install Postal
+  block:
+    - name: Create the data directory
+      ansible.builtin.file:
+        path: "{{ postal_data_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # MariaDB chowns its data directory on start.
+    - name: Create the data subdirectories
+      ansible.builtin.file:
+        path: "{{ postal_data_dir }}/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: "{{ postal_data_subdirs }}"
+
+    - name: Write the compose file
+      ansible.builtin.copy:
+        dest: "{{ postal_compose_file }}"
+        content: "{{ postal_compose }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Write the configuration
+      ansible.builtin.include_tasks: config.yml
+
+    # A later run with settings that name another database refuses: there
+    # Postal would find none of its data.
+    - name: Write the database target
+      ansible.builtin.include_tasks: target.yml
+
+    - name: Set up the own MariaDB
+      when: postal_database == 'mariadb'
+      block:
+        - name: Start MariaDB
+          community.docker.docker_compose_v2:
+            project_src: "{{ postal_dir }}"
+            services: [mariadb]
+            state: present
+            pull: missing
+            wait: true
+            wait_timeout: "{{ postal_health_timeout | int }}"
+
+        - name: Set up Postal's database user
+          ansible.builtin.include_tasks: db_user.yml
+
+        # state.yml could not ask the server, which did not run yet.
+        - name: Look for Postal's schema in the own MariaDB
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - exec
+              - -T
+              - mariadb
+              - mariadb
+              - --user=root
+              - --batch
+              - --skip-column-names
+              - "--execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{{ postal_db_name }}' AND table_name = 'schema_migrations'"
+            chdir: "{{ postal_dir }}"
+          register: postal_schema_read
+          changed_when: false
+
+        - name: Note whether the database holds Postal's schema
+          ansible.builtin.set_fact:
+            postal_db_has_schema: "{{ postal_schema_read.stdout | trim not in ['', '0'] }}"
+
+    # Taking over a database that holds Postal's data needs its signing key and
+    # Rails secret and postal upgrade in place of initialize.
+    - name: Refuse to install over Postal's data
+      ansible.builtin.fail:
+        msg: >-
+          The database {{ postal_db_name }} already holds Postal's schema (a
+          schema_migrations table), and this version of the role installs on an
+          empty database only: taking over an existing Postal database is not
+          supported yet. Install on an empty database.
+      when: postal_db_has_schema | bool
+
+    # rake db:create postal:update: the main database and its schema.
+    - name: Initialize the database
+      ansible.builtin.command:
+        argv: [docker, compose, run, --rm, -T, runner, postal, initialize]
+        chdir: "{{ postal_dir }}"
+      changed_when: true
+
+    # Only when Postal has no user yet; the values go through stdin as JSON
+    # (the password among them), so the task is no_log, and the script prints
+    # none of them.
+    - name: Create the first admin
+      ansible.builtin.command:
+        argv: "{{ postal_runner + ['runner', 'bundle', 'exec', 'rails', 'runner', lookup('ansible.builtin.file', 'make_admin.rb')] }}"
+        chdir: "{{ postal_dir }}"
+        stdin: >-
+          {{ {'email': postal_admin_email | string, 'password': postal_admin_password | string,
+              'first_name': postal_admin_first_name | string or 'Postal',
+              'last_name': postal_admin_last_name | string or 'Admin'} | to_json }}
+      register: postal_admin_created
+      changed_when: postal_admin_result == 'created'
+      failed_when: postal_admin_result not in ['created', 'exists']
+      no_log: true
+      vars:
+        postal_admin_result: "{{ postal_admin_created.stdout_lines | default([]) | select('match', '^(created|exists|invalid:)') | last | default('') }}"
+      when: postal_admin_email | string | length > 0
+
+    - name: Start Postal
+      community.docker.docker_compose_v2:
+        project_src: "{{ postal_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that Postal is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Postal is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Postal is not healthy within {{ postal_health_timeout }} seconds
+          ({{ postal_health_lines | join('; ') }}); see docker compose logs in
+          {{ postal_dir }}
+      when: not postal_healthy
+
+    - name: Read the DKIM record of the return-path domain
+      ansible.builtin.command:
+        argv: "{{ postal_runner + ['runner', 'postal', 'default-dkim-record'] }}"
+        chdir: "{{ postal_dir }}"
+      register: postal_dkim_read
+      changed_when: false
+
+    - name: Remove the marker of an install in progress
+      ansible.builtin.file:
+        path: "{{ postal_install_marker }}"
+        state: absent
+
+  rescue:
+    # The admin script's own line (a validation message, no value); any
+    # other failure as postal_failure says it. Neither quotes the input of a
+    # no_log task: Ansible hides its result.
+    - name: Note why the install failed
+      ansible.builtin.set_fact:
+        postal_install_failure: >-
+          {{ postal_failure | trim if ansible_failed_task.name != 'Create the first admin'
+             else ('Create the first admin: Postal refused the values of postal_admin_* (' ~ postal_admin_invalid ~ ')')
+             if postal_admin_invalid | length > 0
+             else 'Create the first admin: the script failed (the error is not shown, as it can quote the password)' }}
+      vars:
+        postal_admin_invalid: >-
+          {{ postal_admin_created.stdout_lines | default([]) | select('match', '^invalid:') | last | default('') }}
+
+    # Stopped, not removed: what is left is for the hint's removal, and a
+    # running Postal would take mail into the installation it says to remove.
+    - name: Stop Postal after the failed install
+      community.docker.docker_compose_v2:
+        project_src: "{{ postal_dir }}"
+        state: stopped
+      failed_when: false
+
+    - name: Fail with what to remove
+      ansible.builtin.fail:
+        msg: >-
+          The install of Postal {{ postal_version }} in {{ postal_dir }} failed
+          ({{ postal_install_failure }}). {{ postal_install_hint }}
+
+- name: Report the DNS records
+  ansible.builtin.debug:
+    msg: "{{ postal_dns_report }}"
+  vars:
+    postal_dkim_record: >-
+      {{ postal_dkim_read.stdout_lines | select('match', '^v=DKIM1') | last | default('(see docker compose run --rm runner postal default-dkim-record)') }}
+    postal_dns_report: >-
+      {%- set d = postal_dns_settings -%}
+      {%- set lines = [
+        'Postal ' ~ postal_version ~ ' is installed in ' ~ postal_dir ~ '. The role changes no DNS: set these records'
+        ~ ' (<address>: the public IPv4 address of this host as A, its IPv6 address as AAAA):',
+        postal_web_hostname ~ ' A <address>   (the web interface and the API)'] -%}
+      {%- if postal_smtp_hostname != postal_web_hostname -%}
+      {%-   set _ = lines.append(postal_smtp_hostname ~ ' A <address>   (the SMTP server)') -%}
+      {%- endif -%}
+      {%- for mx in d.mx_records if mx not in [postal_web_hostname, postal_smtp_hostname] -%}
+      {%-   set _ = lines.append(mx ~ ' A <address>   (the MX host your users point their domains at)') -%}
+      {%- endfor -%}
+      {%- set _ = lines.extend([
+        d.spf_include ~ ' TXT "v=spf1 ip4:<address> ~all"   (add ip6:<address> for IPv6)',
+        d.return_path_domain ~ ' A <address>',
+        d.return_path_domain ~ ' MX 10 ' ~ postal_smtp_hostname,
+        d.return_path_domain ~ ' TXT "v=spf1 a mx include:' ~ d.spf_include ~ ' ~all"',
+        d.dkim_identifier ~ '._domainkey.' ~ d.return_path_domain ~ ' TXT "' ~ postal_dkim_record ~ '"'
+        ~ '   (longer than 255 characters: publish it as a split TXT record)',
+        d.route_domain ~ ' MX 10 ' ~ postal_smtp_hostname,
+        d.track_domain ~ ' A <address>   (or a CNAME to ' ~ postal_web_hostname ~ ')',
+        'and at your provider a PTR record of <address> to ' ~ d.helo_hostname ~ '.']) -%}
+      {%- if postal_keys_generated | default([]) | length > 0 -%}
+      {%-   set _ = lines.append('The role generated ' ~ postal_keys_generated | join(' and ') ~ ' (in '
+                                 ~ postal_config_dir ~ '): copy ' ~ postal_signing_key_file
+                                 ~ ' into postal_signing_key and rails.secret_key of ' ~ postal_config_file
+                                 ~ ' into postal_rails_secret_key of your vault. A lost signing key breaks the'
+                                 ~ ' DKIM record above.') -%}
+      {%- endif -%}
+      {%- if postal_admin_email | string | length == 0 -%}
+      {%-   set _ = lines.append('No admin was created (postal_admin_email is empty): run docker compose run --rm'
+                                 ~ ' runner postal make-user in ' ~ postal_dir ~ '.') -%}
+      {%- endif -%}
+      {{ lines }}

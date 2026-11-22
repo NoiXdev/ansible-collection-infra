@@ -6,8 +6,13 @@ click tracking, spam and virus checks, the database of your choice (a MariaDB
 container of its own or a MariaDB server of your own), a backup before every
 update and a rollback when an update fails.
 
-This is the first part of the role: it checks its settings and refuses what it
-cannot run, and installs nothing yet. Docker comes from the playbook (the
+This part of the role installs Postal with a MariaDB container of its own,
+creates the first admin (`postal_admin_email`, `postal_admin_password`),
+prints the DNS records to set, applies changed settings and checks on every
+run that Postal answers; updates, the external MariaDB, the Traefik routers,
+SMTP TLS and the spam checks follow. A password of the database user must not
+hold a double quote or a backslash, which Postal cannot read. Docker comes
+from the playbook (the
 `docker` role); the role checks for it. The host must be x86_64, as Postal's
 image exists for that architecture only. `postal_web_hostname`,
 `postal_dns_domain` and `postal_db_password` (keep it in a vault) are required.
