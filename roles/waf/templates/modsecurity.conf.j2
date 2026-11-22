@@ -1,10 +1,11 @@
 # {{ ansible_managed }}
 # ModSecurity for every site of the WAF, loaded once (nginx's http level), in
 # this order: the engine settings, the role's own rules, waf_rules_before,
-# the sites' Host-keyed rules and the role's rules that use them, the Core
-# Rule Set, the credentials kept out of it, waf_rules_after. Each site's
-# server block (nginx.conf) sets the engine mode, so it follows nginx's own
-# choice of server block.
+# the sites' Host-keyed rules (with the plugin switches) and the role's rules
+# that use them, the Core Rule Set with the plugins' config and before files
+# ahead of its rules and their after files behind them, the credentials kept
+# out of both, waf_rules_after. Each site's server block (nginx.conf) sets
+# the engine mode, so it follows nginx's own choice of server block.
 
 # The engine. In mode block nginx answers 413 to a body over the site's
 # inspection limit before ModSecurity reads it (the site's
@@ -68,7 +69,11 @@ SecRule TX:/^MSC_/ "!@streq 0" "id:5099910,phase:2,t:none,log,deny,severity:'CRI
 
 # The sites' settings, keyed by the Host header the proxy in front routed by
 # (lower-cased, with or without a port), before the Core Rule Set reads them,
-# and the site's name and inspection limit for the role's rules below.
+# and the site's name and inspection limit for the role's rules below. Then
+# the plugin switches, before every plugin file: a plugin the site lists is
+# enabled with its settings; any other is disabled and its rules (the span of
+# its rule IDs) removed for the request, whether or not the plugin checks its
+# own switch.
 {% for site in waf_sites_public %}
 # Site {{ site.name }}
 SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 5000000 + 100 * site.index }},phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.noix_waf_site={{ site.name }},setvar:tx.noix_waf_body_limit={{ site.request_body_limit }},setvar:tx.blocking_paranoia_level={{ site.paranoia }},setvar:tx.detection_paranoia_level={{ site.detection_paranoia }},setvar:tx.inbound_anomaly_score_threshold={{ site.anomaly_inbound }},setvar:tx.outbound_anomaly_score_threshold={{ site.anomaly_outbound }}
@@ -82,8 +87,30 @@ SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 5000000 + 100 * 
 {%- endfor -%}
 '
 {%- endif -%}
+{%- for plugin in waf_plugins -%}
+{%- if plugin.name in site.plugins -%}
+,setvar:tx.{{ plugin.name }}-plugin_enabled=1
+{%- for setting, value in site.plugin_settings[plugin.name] | default({}) | dictsort -%}
+,setvar:'tx.{{ plugin.name }}-plugin_{{ setting }}={{ value }}'
+{%- endfor -%}
+{%- else -%}
+,setvar:tx.{{ plugin.name }}-plugin_enabled=0
+{%- if plugin.name in waf_plugin_spans -%}
+,ctl:ruleRemoveById={{ waf_plugin_spans[plugin.name].low }}-{{ waf_plugin_spans[plugin.name].high }}
+{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
 "
 {% endfor %}
+{% if waf_plugin_spans | length > 0 %}
+# A request whose Host matches no site (nginx answers it 421 before
+# ModSecurity runs; this is the backstop) runs no plugin rule.
+SecRule &TX:noix_waf_site "@eq 0" "id:{{ waf_no_site_rule_id }},phase:1,pass,nolog,t:none
+{%- for plugin in waf_plugins if plugin.name in waf_plugin_spans -%}
+,ctl:ruleRemoveById={{ waf_plugin_spans[plugin.name].low }}-{{ waf_plugin_spans[plugin.name].high }}
+{%- endfor -%}
+"
+{% endif %}
 
 # A body over the site's inspection limit, as an event of its own: mode
 # block answers 413 to it, so noix-waf-report shows which detect sites would.
@@ -101,9 +128,20 @@ SecRule HIGHEST_SEVERITY "@lt 255" "id:5099905,phase:5,pass,nolog,t:none,setvar:
 SecRule TX:noix_waf_event "@eq 1" "id:{{ waf_site_rule_id }},phase:5,pass,t:none,log,msg:'Site',logdata:'%{tx.noix_waf_site}',tag:'noix-waf/site',chain"
   SecRule TX:noix_waf_site "@rx ." "t:none"
 
-# The Core Rule Set of the image.
+# The Core Rule Set of the image, with the plugins' files in CRS's order
+# (each plugin's config, each plugin's before, the rules, each plugin's
+# after), named one by one: no glob picks up a stray file.
 Include {{ waf_crs_dir }}/crs-setup.conf
+{% for file in waf_plugin_files if file.kind == 'config' %}
+Include {{ waf_conf_dir }}/plugins/{{ file.name }}-config.conf
+{% endfor %}
+{% for file in waf_plugin_files if file.kind == 'before' %}
+Include {{ waf_conf_dir }}/plugins/{{ file.name }}-before.conf
+{% endfor %}
 Include {{ waf_crs_dir }}/rules/*.conf
+{% for file in waf_plugin_files if file.kind == 'after' %}
+Include {{ waf_conf_dir }}/plugins/{{ file.name }}-after.conf
+{% endfor %}
 
 # Credentials are never inspected: a matching rule would copy the value into
 # the log (ModSecurity cannot mask it). Request headers and cookies whose
@@ -113,6 +151,17 @@ Include {{ waf_crs_dir }}/rules/*.conf
 {% for collection in ['REQUEST_HEADERS', 'REQUEST_COOKIES'] %}
 SecRuleUpdateTargetByTag OWASP_CRS "{% for name in waf_secret_names %}!{{ collection }}:/{{ name }}/{{ '' if loop.last else '|' }}{% endfor %}"
 {% endfor %}
+{% if waf_plugin_spans | length > 0 %}
+# The same for every rule of the plugins, which need not carry the OWASP_CRS
+# tag: by rule ID, one line each.
+{% for plugin in waf_plugins if plugin.name in waf_plugin_spans %}
+{% for id in waf_plugin_spans[plugin.name].ids %}
+{% for collection in ['REQUEST_HEADERS', 'REQUEST_COOKIES'] %}
+SecRuleUpdateTargetById {{ id }} "{% for name in waf_secret_names %}!{{ collection }}:/{{ name }}/{{ '' if loop.last else '|' }}{% endfor %}"
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% endif %}
 {% if waf_rules_after | length > 0 %}
 
 # waf_rules_after

@@ -264,6 +264,41 @@ waf_site_rule_id: 5099906
 # such a body) and a chunked body.
 waf_body_limit_rule_id: 5099903
 waf_chunked_rule_id: 5099911
+# The role's rule that removes every plugin's rules from a request whose
+# Host matches no site.
+waf_no_site_rule_id: 5099912
+# CRS plugins. The archives of url plugins are kept by their checksum (a run
+# with the same sha256 downloads nothing); a plugin's files are of these
+# kinds, in CRS's include order, staged and served as
+# plugins/<name>-<kind>.conf.
+waf_plugin_cache_dir: "{{ waf_dir }}/plugin-cache"
+waf_plugin_kinds: [config, before, after]
+# The paths of waf_plugin_files (the plugins' files, set by the tasks) below
+# waf_staged_dir and waf_dir.
+waf_plugin_paths: >-
+  {%- set paths = [] -%}
+  {%- for file in waf_plugin_files | default([]) -%}
+  {%- set _ = paths.append('plugins/' ~ file.name ~ '-' ~ file.kind ~ '.conf') -%}
+  {%- endfor -%}
+  {{ paths }}
+# The first two plugins of waf_plugins whose rule ID spans
+# (waf_plugin_spans, set by the tasks) overlap, as the refusal names them,
+# else empty.
+waf_plugin_overlap: >-
+  {%- set pairs = [] -%}
+  {%- set known = waf_plugins | map(attribute='name') | select('in', waf_plugin_spans) | list -%}
+  {%- for a in known -%}
+  {%- for b in known[loop.index:] -%}
+  {%- set sa = waf_plugin_spans[a] -%}
+  {%- set sb = waf_plugin_spans[b] -%}
+  {%- if sa.low <= sb.high and sb.low <= sa.high -%}
+  {%- set _ = pairs.append(a ~ ' and ' ~ b ~ ' have overlapping rule IDs (' ~ a ~ ': ' ~ sa.low ~ '-' ~ sa.high
+                           ~ ', ' ~ b ~ ': ' ~ sb.low ~ '-' ~ sb.high ~ ')') -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ pairs | first | default('') }}
+
 # Request headers and cookies whose (lower-cased) names contain one of these
 # carry credentials: no rule of the Core Rule Set looks at their values, so
 # none can copy them into the log. Lower case, regex-safe. front: the

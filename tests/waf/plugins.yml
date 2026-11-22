@@ -1,0 +1,39 @@
+---
+# The plugins scenario's settings (run.sh passes them after -e @traefik.yml),
+# test-only values. The Nextcloud plugin's release archive from the suite's
+# own archive server inside the test host (fixtures/plugins/ over HTTPS,
+# run.sh starts it), and the suite's own plugin noix-test from
+# fixtures/plugins/noix-test (relative to the playbook, as a role's src). A
+# site of the traefik scenario's Traefik for each: cloud with the Nextcloud
+# plugin, own with noix-test and a setting, plain with neither.
+test_plugin_server: https://plugins.test:8443
+waf_plugins:
+  - name: nextcloud-rule-exclusions
+    url: "{{ test_plugin_server }}/nextcloud-rule-exclusions-plugin-1.7.1.tar.gz"
+    sha256: 654277708505cd3fb7ce3845f529c3b89f3d5001ea18eb59dcbdd4682a74dcbd
+  - name: noix-test
+    src: fixtures/plugins/noix-test
+waf_sites:
+  - name: cloud
+    domains: [cloud.test]
+    backend: http://whoami:80
+    mode: block
+    plugins: [nextcloud-rule-exclusions]
+    routers:
+      - entrypoints: [web]
+  - name: plain
+    domains: [plain.test]
+    backend: http://whoami:80
+    mode: block
+    routers:
+      - entrypoints: [web]
+  - name: own
+    domains: [own.test]
+    backend: http://whoami:80
+    mode: block
+    plugins: [noix-test]
+    plugin_settings:
+      noix-test:
+        greeting: hi
+    routers:
+      - entrypoints: [web]

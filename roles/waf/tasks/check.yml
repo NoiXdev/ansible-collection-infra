@@ -735,6 +735,73 @@
       loop_control:
         label: "{{ item.site }} {{ item.plugin }}.{{ item.setting }}"
 
+# The files of the src plugins, read on the controller now that every
+# setting is known to be sound: <name>-config.conf, -before.conf and
+# -after.conf from src/plugins/ (if it has one of them), else from src, each
+# checked by waf_plugin_check. The url plugins follow in apply.yml (plugins.yml),
+# after their download. src resolves like a role's src (relative to the
+# playbook's files/).
+- name: Read the src plugins
+  ansible.builtin.set_fact:
+    waf_plugin_src_checked: >-
+      {%- set out = [] -%}
+      {%- for plugin in waf_plugins if plugin.src is defined -%}
+      {%- set base = query('ansible.builtin.first_found', plugin.src, skip=true) -%}
+      {%- if base | length == 0 -%}
+      {%- set _ = out.append({'name': plugin.name, 'errors': ['src ' ~ plugin.src ~ ' was not found'], 'files': {}}) -%}
+      {%- else -%}
+      {%- set paths = [] -%}
+      {%- if query('ansible.builtin.first_found', base[0] ~ '/plugins', skip=true) | length > 0 -%}
+      {%- for path in query('ansible.builtin.fileglob', base[0] ~ '/plugins/*.conf') -%}
+      {%- set _ = paths.append('plugins/' ~ path | basename) -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- for path in query('ansible.builtin.fileglob', base[0] ~ '/*.conf') -%}
+      {%- set _ = paths.append(path | basename) -%}
+      {%- endfor -%}
+      {%- set pick = paths | noixdev.infra.waf_plugin_pick(plugin.name) -%}
+      {%- set files = {} -%}
+      {%- for kind, path in pick.files.items() if pick.errors | length == 0 -%}
+      {%- set _ = files.update({kind: lookup('ansible.builtin.file', base[0] ~ '/' ~ path, rstrip=false)}) -%}
+      {%- endfor -%}
+      {%- set check = plugin.name | noixdev.infra.waf_plugin_check(files) if pick.errors | length == 0 else {} -%}
+      {%- set _ = out.append({'name': plugin.name, 'errors': pick.errors or check.errors, 'files': files,
+                              'low': check.low | default(0), 'high': check.high | default(0),
+                              'ids': check.ids | default([])}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Check the files of the src plugins
+  ansible.builtin.assert:
+    that: item.errors | length == 0
+    fail_msg: "waf: plugin {{ item.name }}: {{ item.errors | join('; ') }}"
+    quiet: true
+  loop: "{{ waf_plugin_src_checked }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# waf_plugin_texts (name -> kind -> text) and waf_plugin_spans (name ->
+# low, high, ids) of every plugin whose files are known; plugins.yml adds
+# the url plugins.
+- name: Note the src plugins' files and rule IDs
+  ansible.builtin.set_fact:
+    waf_plugin_texts: "{{ dict(waf_plugin_src_checked | map(attribute='name') | zip(waf_plugin_src_checked | map(attribute='files'))) }}"
+    waf_plugin_spans: >-
+      {%- set spans = {} -%}
+      {%- for plugin in waf_plugin_src_checked -%}
+      {%- set _ = spans.update({plugin.name: {'low': plugin.low, 'high': plugin.high, 'ids': plugin.ids}}) -%}
+      {%- endfor -%}
+      {{ spans }}
+
+# A duplicate ID within a plugin fails nginx -t; between two plugins it would
+# also let one site's switch remove the other's rules.
+- name: Check that no two src plugins share rule IDs
+  ansible.builtin.assert:
+    that: waf_plugin_overlap | length == 0
+    fail_msg: "waf: plugins {{ waf_plugin_overlap }}"
+    quiet: true
+
 # Last, as the anubis role does: the role writes waf.yml into Traefik's file
 # provider directory and joins Traefik's network, so both must be there.
 - name: Check what traefik mode needs from Traefik

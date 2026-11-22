@@ -1,0 +1,210 @@
+---
+# The url plugins, before anything else changes: each archive is downloaded
+# once into the cache (by its checksum, which get_url checks before it keeps
+# the file), unpacked into a temporary directory, and its files are picked
+# and checked as check.yml checks the src plugins. A refusal here leaves the
+# WAF, its settings and staged/ unchanged; only the cache may be new. Check
+# mode downloads nothing: a plugin not in the cache is shown as a change and
+# its files are left out. Last, the files of every plugin, in waf_plugins
+# order and the include order of their kinds (waf_plugin_files).
+- name: Note that no plugin archive is pending
+  ansible.builtin.set_fact:
+    waf_plugin_pending: []
+
+- name: Fetch and check the plugin archives
+  when: waf_plugins | selectattr('url', 'defined') | list | length > 0
+  block:
+    - name: Create the waf directory for the plugin cache
+      ansible.builtin.file:
+        path: "{{ waf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create the plugin cache
+      ansible.builtin.file:
+        path: "{{ waf_plugin_cache_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Read the cached plugin archives
+      ansible.builtin.stat:
+        path: "{{ waf_plugin_cache_dir }}/{{ item.sha256 }}.tar.gz"
+        checksum_algorithm: sha256
+        get_attributes: false
+        get_mime: false
+      loop: "{{ waf_plugins | selectattr('url', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: waf_plugin_cache_stat
+
+    # A missing or damaged archive. get_url refuses one whose checksum is not
+    # sha256 (its message names the file) and keeps nothing of it.
+    - name: Download the plugin archives
+      ansible.builtin.get_url:
+        url: "{{ item.item.url }}"
+        dest: "{{ waf_plugin_cache_dir }}/{{ item.item.sha256 }}.tar.gz"
+        checksum: "sha256:{{ item.item.sha256 }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ waf_plugin_cache_stat.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - not ansible_check_mode
+        - not (item.stat.exists and item.stat.checksum == item.item.sha256)
+
+    # Every archive is at hand now, except in check mode the ones that are
+    # not in the cache yet.
+    - name: Note the plugin archives check mode does not download
+      ansible.builtin.set_fact:
+        waf_plugin_pending: >-
+          {%- set pending = [] -%}
+          {%- for result in waf_plugin_cache_stat.results -%}
+          {%- if ansible_check_mode and not (result.stat.exists and result.stat.checksum == result.item.sha256) -%}
+          {%- set _ = pending.append(result.item.name) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ pending }}
+
+    - name: Report the plugin archives a run would download
+      ansible.builtin.debug:
+        msg: "waf: plugin {{ item }} is not in the cache yet; a run without --check downloads it"
+      changed_when: true
+      loop: "{{ waf_plugin_pending }}"
+
+    # The temporary directories are the role's scratch space, also in check
+    # mode, and no change.
+    - name: Unpack and check the plugin archives
+      when: waf_plugin_pending | length < waf_plugin_cache_stat.results | length
+      block:
+        - name: Create a temporary directory per plugin archive
+          ansible.builtin.tempfile:
+            state: directory
+            suffix: -waf-plugin
+          loop: "{{ waf_plugins | selectattr('url', 'defined') | rejectattr('name', 'in', waf_plugin_pending) | list }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: waf_plugin_tmp
+          changed_when: false
+          check_mode: false
+
+        - name: Unpack the plugin archives
+          ansible.builtin.unarchive:
+            src: "{{ waf_plugin_cache_dir }}/{{ item.item.sha256 }}.tar.gz"
+            dest: "{{ item.path }}"
+            remote_src: true
+          loop: "{{ waf_plugin_tmp.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+          changed_when: false
+          check_mode: false
+
+        # Regular files only: a link in an archive is never read.
+        - name: List the files of the plugin archives
+          ansible.builtin.find:
+            paths: "{{ item.path }}"
+            recurse: true
+            file_type: file
+            hidden: true
+          loop: "{{ waf_plugin_tmp.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+          register: waf_plugin_found
+          check_mode: false
+
+        - name: Pick the files of the plugin archives
+          ansible.builtin.set_fact:
+            waf_plugin_picked: >-
+              {%- set out = [] -%}
+              {%- for found in waf_plugin_found.results -%}
+              {%- set pick = found.files | map(attribute='path') | map('relpath', found.item.path) | list
+                             | noixdev.infra.waf_plugin_pick(found.item.item.name) -%}
+              {%- set _ = out.append({'name': found.item.item.name, 'dir': found.item.path,
+                                      'files': pick.files if pick.errors | length == 0 else {},
+                                      'errors': pick.errors}) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Read the files of the plugin archives
+          ansible.builtin.slurp:
+            src: "{{ item.dir }}/{{ item.path }}"
+          loop: >-
+            {%- set out = [] -%}
+            {%- for plugin in waf_plugin_picked -%}
+            {%- for kind, path in plugin.files.items() -%}
+            {%- set _ = out.append({'name': plugin.name, 'kind': kind, 'dir': plugin.dir, 'path': path}) -%}
+            {%- endfor -%}
+            {%- endfor -%}
+            {{ out }}
+          loop_control:
+            label: "{{ item.name }} {{ item.kind }}"
+          register: waf_plugin_slurp
+
+        - name: Check the files of the plugin archives
+          ansible.builtin.set_fact:
+            waf_plugin_url_checked: >-
+              {%- set out = [] -%}
+              {%- for plugin in waf_plugin_picked -%}
+              {%- set files = {} -%}
+              {%- for read in waf_plugin_slurp.results if read.item.name == plugin.name -%}
+              {%- set _ = files.update({read.item.kind: read.content | b64decode}) -%}
+              {%- endfor -%}
+              {%- set check = plugin.name | noixdev.infra.waf_plugin_check(files) if plugin.errors | length == 0 else {} -%}
+              {%- set _ = out.append({'name': plugin.name, 'errors': plugin.errors or check.errors, 'files': files,
+                                      'low': check.low | default(0), 'high': check.high | default(0),
+                                      'ids': check.ids | default([])}) -%}
+              {%- endfor -%}
+              {{ out }}
+
+        - name: Refuse plugin archives with unsound files
+          ansible.builtin.assert:
+            that: item.errors | length == 0
+            fail_msg: "waf: plugin {{ item.name }}: {{ item.errors | join('; ') }}"
+            quiet: true
+          loop: "{{ waf_plugin_url_checked }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Note the url plugins' files and rule IDs
+          ansible.builtin.set_fact:
+            waf_plugin_texts: >-
+              {{ waf_plugin_texts | combine(dict(waf_plugin_url_checked | map(attribute='name')
+                                                 | zip(waf_plugin_url_checked | map(attribute='files')))) }}
+            waf_plugin_spans: >-
+              {%- set spans = {} -%}
+              {%- for plugin in waf_plugin_url_checked -%}
+              {%- set _ = spans.update({plugin.name: {'low': plugin.low, 'high': plugin.high, 'ids': plugin.ids}}) -%}
+              {%- endfor -%}
+              {{ waf_plugin_spans | combine(spans) }}
+
+        - name: Check that no two plugins share rule IDs
+          ansible.builtin.assert:
+            that: waf_plugin_overlap | length == 0
+            fail_msg: "waf: plugins {{ waf_plugin_overlap }}"
+            quiet: true
+      always:
+        - name: Remove the temporary directories of the plugin archives
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: absent
+          loop: "{{ waf_plugin_tmp.results | default([]) | selectattr('path', 'defined') | list }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+          changed_when: false
+          check_mode: false
+
+- name: Note the plugins' files
+  ansible.builtin.set_fact:
+    waf_plugin_files: >-
+      {%- set out = [] -%}
+      {%- for plugin in waf_plugins if plugin.name in waf_plugin_texts -%}
+      {%- for kind in waf_plugin_kinds if kind in waf_plugin_texts[plugin.name] -%}
+      {%- set _ = out.append({'name': plugin.name, 'kind': kind, 'content': waf_plugin_texts[plugin.name][kind]}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}

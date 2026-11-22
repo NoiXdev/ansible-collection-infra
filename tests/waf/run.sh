@@ -750,6 +750,186 @@ test_report() {
   h docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$waf" | tee "$out/memory-report-$1.txt"
 }
 
+# The plugins scenario: the traefik scenario's Traefik and backends with the
+# sites of plugins.yml, the Nextcloud plugin from an archive server inside
+# the test host and the suite's own plugin noix-test from a directory.
+plugins_args=("${traefik_args[@]}" -e "@$here/plugins.yml")
+nextcloud_sha=654277708505cd3fb7ce3845f529c3b89f3d5001ea18eb59dcbdd4682a74dcbd
+nextcloud_url=https://plugins.test:8443/nextcloud-rule-exclusions-plugin-1.7.1.tar.gz
+nextcloud_cache="/opt/waf/plugin-cache/$nextcloud_sha.tar.gz"
+noix_test_plugin='{"name": "noix-test", "src": "fixtures/plugins/noix-test"}'
+plugin_server=/opt/waf-plugin-server
+
+# serve_plugins: a test CA and a certificate for plugins.test (openssl in the
+# test host), the CA trusted by the host, plugins.test on 127.0.0.2 (Traefik's
+# alt entrypoint holds 127.0.0.1:8443) and fixtures/plugins/ served over
+# HTTPS on port 8443 by python3 under systemd-run.
+serve_plugins() {
+  h systemctl stop noix-plugin-server >/dev/null 2>&1 || true
+  h rm -rf "$plugin_server"
+  h mkdir -p "$plugin_server"
+  docker cp "$here/fixtures/plugins" "$host:$plugin_server/www"
+  hi sh -ec "cd $plugin_server
+    cat >ca.cnf
+    printf '%s\n' 'basicConstraints = CA:FALSE' 'keyUsage = critical,digitalSignature,keyEncipherment' \
+      'extendedKeyUsage = serverAuth' 'subjectAltName = DNS:plugins.test' 'subjectKeyIdentifier = hash' \
+      'authorityKeyIdentifier = keyid' >server.cnf
+    openssl req -x509 -config ca.cnf -newkey rsa:2048 -nodes -days 30 -keyout ca.key -out ca.crt 2>/dev/null
+    openssl req -new -newkey rsa:2048 -nodes -subj /CN=plugins.test -keyout server.key -out server.csr 2>/dev/null
+    openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 30 -extfile server.cnf \
+      -out server.crt 2>/dev/null
+    cp ca.crt /usr/local/share/ca-certificates/noix-test-plugins-ca.crt
+    update-ca-certificates >/dev/null 2>&1
+    grep -q ' plugins.test\$' /etc/hosts || echo '127.0.0.2 plugins.test' >>/etc/hosts" <<'CNF'
+[req]
+distinguished_name = dn
+x509_extensions = v3_ca
+prompt = no
+[dn]
+CN = noix test plugin CA
+[v3_ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+CNF
+  hi sh -c "cat >$plugin_server/serve.py" <<'PY'
+import functools, http.server, ssl, sys
+
+root = sys.argv[1]
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root + "/www")
+server = http.server.ThreadingHTTPServer(("127.0.0.2", 8443), handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(root + "/server.crt", root + "/server.key")
+server.socket = context.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
+PY
+  h systemd-run --quiet --collect --unit noix-plugin-server python3 -I "$plugin_server/serve.py" "$plugin_server"
+  for _ in $(seq 30); do
+    h curl -fsS -o /dev/null --max-time 5 "$nextcloud_url" 2>/dev/null && return 0
+    sleep 1
+  done
+  fail "the plugin archive server does not answer $nextcloud_url"
+}
+# fresh_waf: no WAF on the test host, Traefik and the backends stay: no
+# container, no waf_dir, no waf.yml.
+fresh_waf() {
+  h docker rm -f "$waf" >/dev/null 2>&1 || true
+  h rm -rf /opt/waf /opt/traefik/dynamic/waf.yml
+}
+# refused_cached <name> <text> [-e ...]: the WAF not running on a fresh
+# waf_dir, the waf role with plugins.yml must fail with the text, leaving
+# nothing in waf_dir but the plugin cache, no container and no waf.yml.
+refused_cached() {
+  local name="$1" text="$2" left
+  shift 2
+  fresh_waf
+  role_fails "$name" "${plugins_args[@]}" -e test_traefik=false "$@"
+  expect_in_log "$name" "$text"
+  left="$(h ls -A /opt/waf)"
+  [ "$left" = plugin-cache ] || fail "the refused run $name left in /opt/waf: $left"
+  h test ! -e /opt/traefik/dynamic/waf.yml || fail "the refused run $name wrote waf.yml"
+  [ -z "$(h docker ps -aq --filter name=^noixdev-waf)" ] || fail "the refused run $name started a container"
+}
+# bad_plugin <case> <rule>: a src plugin "bad" on the controller whose
+# bad-before.conf holds the rule; prints its waf_plugins.
+bad_plugin() {
+  mkdir -p "$out/plugin-src/$1"
+  printf '%s\n' "$2" >"$out/plugin-src/$1/bad-before.conf"
+  printf '{"waf_plugins": [{"name": "bad", "src": "%s"}]}' "$out/plugin-src/$1"
+}
+
+test_plugins() {
+  local mtime propfind
+  echo "== plugins (ubuntu $1)"
+  serve_plugins
+  converge "${plugins_args[@]}" -e test_waf=false
+
+  echo "-- refused plugin files, before any change"
+  fresh_waf
+  rm -rf "$out/plugin-src"
+  refused plugin-include 'waf: plugin bad: bad-before.conf line 1: Include is not allowed in a plugin (only SecRule, SecAction and SecMarker)' \
+    -e "$(one_site '')" -e "$(bad_plugin include 'Include /etc/passwd')"
+  refused plugin-default-action 'waf: plugin bad: bad-before.conf line 1: SecDefaultAction is not allowed in a plugin' \
+    -e "$(one_site '')" -e "$(bad_plugin default-action 'SecDefaultAction "phase:1,log,pass"')"
+  refused plugin-audit-parts 'waf: plugin bad: bad-before.conf line 1: ctl:auditLogParts is not allowed in a plugin' \
+    -e "$(one_site '')" -e "$(bad_plugin audit-parts 'SecAction "id:9600001,phase:1,pass,nolog,ctl:auditLogParts=+E"')"
+  refused plugin-id-range 'waf: plugin bad: bad-before.conf line 1: rule id 1234 is outside 9500000-9999999' \
+    -e "$(one_site '')" -e "$(bad_plugin id-range 'SecAction "id:1234,phase:1,pass,nolog"')"
+
+  echo "-- refused plugin archives, after the download"
+  refused_cached plugin-checksum "did not match 0000000000000000000000000000000000000000000000000000000000000000; it was $nextcloud_sha" \
+    -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\",
+         \"sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"}, $noix_test_plugin]}"
+  refused_cached plugin-no-files 'waf: plugin x: has no x-config.conf, x-before.conf or x-after.conf' \
+    -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"},
+         {\"name\": \"x\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"}, $noix_test_plugin]}"
+  mkdir -p "$out/plugin-src/overlap"
+  printf '%s\n' 'SecAction "id:9508500,phase:1,pass,nolog"' >"$out/plugin-src/overlap/overlap-before.conf"
+  refused_cached plugin-overlap 'waf: plugins nextcloud-rule-exclusions and overlap have overlapping rule IDs (nextcloud-rule-exclusions: 9508097-9508992, overlap: 9508500-9508500)' \
+    -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"},
+         $noix_test_plugin, {\"name\": \"overlap\", \"src\": \"$out/plugin-src/overlap\"}]}"
+
+  echo "-- the plugins load; a second run downloads and reloads nothing"
+  fresh_waf
+  converge "${plugins_args[@]}"
+  mtime="$(h stat -c %Y "$nextcloud_cache")"
+  converge_unchanged "${plugins_args[@]}"
+  [ "$(h stat -c %Y "$nextcloud_cache")" = "$mtime" ] || fail "the second run downloaded the plugin archive again"
+  for name in cloud plain own; do await 200 "$name.test" /; done
+
+  echo "-- the Nextcloud plugin, for its site only"
+  # A WebDAV listing: the Core Rule Set alone refuses the method (911100);
+  # the plugin allows it below /remote.php/ (9508190).
+  propfind='<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getlastmodified/></d:prop></d:propfind>'
+  expect 403 plain.test /remote.php/dav/files/u/ -X PROPFIND -H 'Depth: 1' -H 'Content-Type: application/xml' \
+    -H 'Expect:' --data-binary "$propfind"
+  expect 200 cloud.test /remote.php/dav/files/u/ -X PROPFIND -H 'Depth: 1' -H 'Content-Type: application/xml' \
+    -H 'Expect:' --data-binary "$propfind"
+
+  echo "-- noix-test: its three files and its setting"
+  expect 403 own.test '/?noixprobe=hi'
+  expect 200 own.test '/?noixprobe=hello'
+  expect 403 own.test '/?noixafter=1'
+
+  echo "-- no other site runs a plugin, nor a Host of no site"
+  # 9590010 does not check its switch; the site rule removes it.
+  expect 200 plain.test '/?noixprobe=hello'
+  expect 200 plain.test '/?noixafter=1'
+  [ "$(direct unknown.test '/?noixprobe=hello')" = 421 ] || fail "an unknown host did not answer 421"
+  if audit | grep -F 'noixprobe=hello' | grep -qF '"9590010"'; then
+    audit >&2
+    fail "rule 9590010 ran for a site without noix-test"
+  fi
+  # nginx answers an unknown Host before ModSecurity runs: the backstop rule
+  # is checked in the settings.
+  h grep -F 'id:5099912,' /opt/waf/modsecurity.conf | grep -F 'ctl:ruleRemoveById=9508097-9508992' \
+    | grep -qF 'ctl:ruleRemoveById=9590001-9590020' || fail "rule 5099912 does not remove every plugin's rules"
+
+  echo "-- a plugin rule never sees a credential"
+  expect 200 own.test / -H 'X-Secret-Token: tokenvalue123'
+  if h docker logs "$waf" 2>&1 | grep -F tokenvalue123; then fail "the WAF's log holds a credential"; fi
+
+  echo "-- check mode: nothing to change; a plugin not in the cache is a change, not a download"
+  checks_unchanged plugins-check "${plugins_args[@]}"
+  grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/plugins-check.log" \
+    || { cat "$out/plugins-check.log" >&2; fail "check mode found a change"; }
+  h rm "$nextcloud_cache"
+  checks_unchanged plugins-check-pending "${plugins_args[@]}"
+  if grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/plugins-check-pending.log"; then
+    cat "$out/plugins-check-pending.log" >&2
+    fail "check mode did not show the plugin archive to download"
+  fi
+  expect_in_log plugins-check-pending 'waf: plugin nextcloud-rule-exclusions is not in the cache yet'
+  if grep -E '^changed: .*plugins/nextcloud-rule-exclusions-' "$out/plugins-check-pending.log"; then
+    fail "check mode would remove the files of a plugin whose archive is not in the cache"
+  fi
+  h test ! -e "$nextcloud_cache" || fail "check mode downloaded the plugin archive"
+  converge "${plugins_args[@]}"
+  h test -e "$nextcloud_cache" || fail "the run did not download the plugin archive again"
+
+  h systemctl stop noix-plugin-server >/dev/null 2>&1 || true
+}
+
 # The host scenario: the WAF for the host's nginx on 127.0.0.1:8930, with
 # recorders on the test host's loopback in nginx's place. static uses the
 # default backend, nginx's inner listener 127.0.0.1:8931; cached has a
@@ -1071,7 +1251,7 @@ test_host() {
 }
 
 # All scenarios by default; NOIXDEV_INFRA_WAF_TESTS="refusals" runs only these.
-scenarios="${NOIXDEV_INFRA_WAF_TESTS:-refusals traefik report host}"
+scenarios="${NOIXDEV_INFRA_WAF_TESTS:-refusals traefik report plugins host}"
 for ubuntu in $releases; do
   start_host "$ubuntu" waf
   for scenario in $scenarios; do
@@ -1079,8 +1259,9 @@ for ubuntu in $releases; do
       refusals) test_refusals "$ubuntu" ;;
       traefik) test_traefik "$ubuntu" ;;
       report) test_report "$ubuntu" ;;
+      plugins) test_plugins "$ubuntu" ;;
       host) test_host "$ubuntu" ;;
-      *) fail "unknown scenario $scenario (refusals traefik report host)" ;;
+      *) fail "unknown scenario $scenario (refusals traefik report plugins host)" ;;
     esac
   done
   cleanup

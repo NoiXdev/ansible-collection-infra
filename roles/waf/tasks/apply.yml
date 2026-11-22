@@ -3,7 +3,11 @@
 # in a throwaway container (nginx -t, no network), put them in place, start
 # or reload the WAF and wait until it serves them; Traefik's waf.yml comes
 # last (written in traefik mode, removed in host mode). A failed try leaves
-# the running WAF, its files and waf.yml unchanged.
+# the running WAF, its files and waf.yml unchanged. The plugins' archives
+# come first: a refusal of one changes nothing but the plugin cache.
+- name: Fetch and check the plugins
+  ansible.builtin.import_tasks: plugins.yml
+
 - name: Create the waf directory
   ansible.builtin.file:
     path: "{{ waf_dir }}"
@@ -20,6 +24,16 @@
     group: root
     mode: "0755"
 
+# The plugins' files, next to the other settings.
+- name: Create the directories for the plugins' files
+  ansible.builtin.file:
+    path: "{{ item }}/plugins"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: ["{{ waf_staged_dir }}", "{{ waf_dir }}"]
+
 # The WAF's user writes request bodies there; nobody else reads them.
 - name: Create the spool directory
   ansible.builtin.file:
@@ -29,14 +43,15 @@
     group: "{{ waf_uid }}"
     mode: "0700"
 
-# A checksum of both nginx files (nginx.conf without the id itself), which
-# the health check server answers: after a reload the role waits until
-# nginx serves it.
+# A checksum of both nginx files (nginx.conf without the id itself) and the
+# plugins' files (modsecurity.conf names them), which the health check
+# server answers: after a reload the role waits until nginx serves it.
 - name: Note the id of the new settings
   ansible.builtin.set_fact:
     waf_config_id: >-
       {{ (lookup('ansible.builtin.template', 'nginx.conf.j2', template_vars={'waf_config_id': ''})
-          ~ lookup('ansible.builtin.template', 'modsecurity.conf.j2')) | hash('sha256') }}
+          ~ lookup('ansible.builtin.template', 'modsecurity.conf.j2')
+          ~ waf_plugin_files | map(attribute='content') | join) | hash('sha256') }}
 
 - name: Render the new settings
   ansible.builtin.template:
@@ -48,12 +63,59 @@
   loop: "{{ waf_files }}"
   register: waf_render
 
+- name: Stage the plugins' files
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ waf_staged_dir }}/plugins/{{ item.name }}-{{ item.kind }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ waf_plugin_files }}"
+  loop_control:
+    label: "{{ item.name }}-{{ item.kind }}.conf"
+  register: waf_plugin_stage
+
+# A plugin's files, staged or in place, that no plugin of waf_plugin_files
+# has any more (a plugin removed from waf_plugins, or a kind it dropped). In
+# check mode the files of a plugin whose archive is not in the cache stay.
+- name: Find the plugin files staged and in place
+  ansible.builtin.find:
+    paths: ["{{ waf_staged_dir }}/plugins", "{{ waf_dir }}/plugins"]
+    file_type: any
+    hidden: true
+  register: waf_plugin_present
+
+- name: Note the plugin files of no plugin
+  ansible.builtin.set_fact:
+    waf_plugin_strays: >-
+      {%- set strays = {waf_staged_dir: [], waf_dir: []} -%}
+      {%- set keep = waf_plugin_paths | list -%}
+      {%- for name in waf_plugin_pending -%}
+      {%- for kind in waf_plugin_kinds -%}
+      {%- set _ = keep.append('plugins/' ~ name ~ '-' ~ kind ~ '.conf') -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {%- for file in waf_plugin_present.files -%}
+      {%- set base = file.path | dirname | dirname -%}
+      {%- if base in strays and 'plugins/' ~ file.path | basename not in keep -%}
+      {%- set _ = strays[base].append(file.path) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ strays }}
+
+- name: Remove the staged plugin files of no plugin
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ waf_plugin_strays[waf_staged_dir] }}"
+  register: waf_plugin_unstage
+
 - name: Read the new settings' checksums
   ansible.builtin.stat:
     path: "{{ waf_staged_dir }}/{{ item }}"
     get_attributes: false
     get_mime: false
-  loop: "{{ waf_files }}"
+  loop: "{{ waf_files + waf_plugin_paths }}"
   register: waf_staged_stat
 
 - name: Read the running settings' checksums
@@ -61,17 +123,23 @@
     path: "{{ waf_dir }}/{{ item }}"
     get_attributes: false
     get_mime: false
-  loop: "{{ waf_files }}"
+  loop: "{{ waf_files + waf_plugin_paths }}"
   register: waf_running_stat
 
+- name: Note the plugin files in place of no plugin
+  ansible.builtin.set_fact:
+    waf_plugin_stale: "{{ waf_plugin_strays[waf_dir] }}"
+
 # In check mode the new settings are not written: a rendering that would
-# change them is the change.
+# change them is the change, and so is a plugin archive not yet downloaded.
 - name: Note whether the settings change
   ansible.builtin.set_fact:
     waf_settings_change: >-
-      {{ (waf_render is changed) if ansible_check_mode else
+      {{ (waf_render is changed or waf_plugin_stage is changed or waf_plugin_unstage is changed
+          or waf_plugin_stale | length > 0 or waf_plugin_pending | length > 0) if ansible_check_mode else
          (waf_staged_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list
-          != waf_running_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list) }}
+          != waf_running_stat.results | map(attribute='stat') | map(attribute='checksum', default='') | list
+          or waf_plugin_stale | length > 0) }}
 
 - name: Try the new settings in a check container
   when: waf_settings_change
@@ -147,7 +215,26 @@
     mode: "0644"
   when: waf_settings_change
 
-# The rules first: compose.yaml may recreate the container.
+# The rules first: compose.yaml may recreate the container. In check mode
+# only the plugin files already staged.
+- name: Put the new plugin files in place
+  ansible.builtin.copy:
+    src: "{{ waf_staged_dir }}/{{ item }}"
+    dest: "{{ waf_dir }}/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: >-
+    {{ waf_staged_stat.results | selectattr('stat.exists') | map(attribute='item')
+       | select('in', waf_plugin_paths) | list }}
+
+- name: Remove the plugin files of no plugin
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ waf_plugin_stale }}"
+
 - name: Put the new settings in place
   ansible.builtin.copy:
     src: "{{ waf_staged_dir }}/{{ item }}"

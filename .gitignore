@@ -1,5 +1,7 @@
 tests/output/
 *.tar.gz
+# The plugin archives the waf suite serves to the test host.
+!tests/waf/fixtures/plugins/*.tar.gz
 .DS_Store
 .ansible/
 __pycache__/
