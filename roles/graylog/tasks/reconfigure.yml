@@ -1,0 +1,64 @@
+---
+# Same installation, other settings: the secrets and the compose file are
+# written, Graylog brought to them, and checked. The server and the Data Node
+# read the secrets files only on start, so a changed secret alone, which
+# leaves the compose file as it is, restarts the containers that read it (the
+# server for both files, the Data Node for the password secret, which
+# state.yml refuses to change, so only a file changed by hand). A run stopped
+# after the files are written and before that restart would leave files that
+# equal the settings while the containers run with the old ones, so
+# graylog_restart_marker is written first, on every reconfigure; while it
+# exists every run reconfigures and restarts both, and main.yml removes it
+# once a run ends healthy.
+
+- name: Note the restart before the configuration changes
+  ansible.builtin.copy:
+    dest: "{{ graylog_restart_marker }}"
+    content: |
+      # Written by the noixdev.infra.graylog role before it changed the
+      # configuration of Graylog (its compose file or its secrets), and
+      # removed once Graylog runs on it. While it exists the role restarts
+      # the Graylog server and the Data Node.
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write the secrets
+  ansible.builtin.include_tasks: secrets.yml
+
+- name: Write the compose file
+  ansible.builtin.copy:
+    dest: "{{ graylog_compose_file }}"
+    content: "{{ graylog_compose }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+# Recreates the containers whose settings in the compose file changed.
+- name: Start Graylog with the new configuration
+  community.docker.docker_compose_v2:
+    project_src: "{{ graylog_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+
+- name: Restart the containers that read a changed secret
+  community.docker.docker_compose_v2:
+    project_src: "{{ graylog_dir }}"
+    state: restarted
+    services: >-
+      {{ ['datanode', 'graylog'] if graylog_restart_pending | bool or 'password_secret' in graylog_secrets_changed
+         else ['graylog'] }}
+  when: graylog_restart_pending | bool or graylog_secrets_changed | length > 0
+
+- name: Check that Graylog is healthy
+  ansible.builtin.include_tasks: health.yml
+
+- name: Fail when Graylog is not healthy
+  ansible.builtin.fail:
+    msg: >-
+      Graylog in {{ graylog_dir }} is not healthy within
+      {{ graylog_health_timeout }} seconds after the reconfigure
+      ({{ graylog_health_lines | join('; ') }}); see docker compose logs in
+      {{ graylog_dir }}.
+  when: not graylog_healthy

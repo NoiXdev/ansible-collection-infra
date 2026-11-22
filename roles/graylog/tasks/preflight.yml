@@ -1,0 +1,79 @@
+---
+# The first start of a fresh installation. The Data Node needs certificates
+# of the server's CA; without them the server starts in its preflight, a web
+# interface where someone creates the CA and provisions the Data Node by
+# hand. GRAYLOG_SELFSIGNED_STARTUP (compose file) makes the server do that on
+# its own: on the first start it records the preflight as finished, creates a
+# self-signed CA and an automatic renewal policy, and signs the Data Node's
+# certificate request; it then waits for the Data Node and starts its normal
+# API. This waits up to graylog_health_timeout seconds for that API
+# (GET /api/system/lbstatus answers 200, which the preflight never does) and
+# fails, naming the preflight when the server answers as one (its
+# GET /api/status), when it does not come. Sets graylog_api_url.
+
+- name: Note when the first start begins
+  ansible.builtin.set_fact:
+    graylog_preflight_start: "{{ now().timestamp() }}"
+
+# The address of the server on the project's network: the role asks the API
+# from the host, without a published port.
+- name: Read the address of the Graylog server
+  ansible.builtin.command:
+    argv: "{{ graylog_address_command }}"
+  register: graylog_address
+  until: graylog_address.stdout | trim is match('^[0-9]+(\.[0-9]+){3}$')
+  retries: 12
+  delay: 5
+  changed_when: false
+
+- name: Note the address of the API
+  ansible.builtin.set_fact:
+    graylog_api_url: "http://{{ graylog_address.stdout | trim }}:9000"
+
+- name: Wait for the API of the Graylog server
+  ansible.builtin.uri:
+    url: "{{ graylog_api_url }}/api/system/lbstatus"
+    return_content: true
+    timeout: 10
+  register: graylog_preflight_lbstatus
+  until: >-
+    graylog_preflight_lbstatus.status | default(-1) == 200
+    or now().timestamp() - graylog_preflight_start | float >= graylog_health_timeout | int
+  retries: "{{ (graylog_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  failed_when: false
+  changed_when: false
+
+- name: Ask whether the Graylog server is in its preflight
+  ansible.builtin.uri:
+    url: "{{ graylog_api_url }}/api/status"
+    timeout: 10
+  register: graylog_preflight_status
+  failed_when: false
+  changed_when: false
+  when: graylog_preflight_lbstatus.status | default(-1) != 200
+
+# The preflight's API wants the login it prints in the server's log, so it
+# answers 401 to a request without one; the normal API has no /api/status.
+- name: Fail when the Graylog server stays in its preflight
+  ansible.builtin.fail:
+    msg: >-
+      The Graylog server in {{ graylog_dir }} is still in its preflight (the
+      initial configuration of the Data Node) after
+      {{ graylog_health_timeout }} seconds: it did not provision the Data Node
+      on its own. Check that the Data Node runs (docker compose logs datanode
+      in {{ graylog_dir }}) and that vm.max_map_count is at least
+      {{ graylog_max_map_count }}.
+  when:
+    - graylog_preflight_lbstatus.status | default(-1) != 200
+    - graylog_preflight_status.status | default(-1) in [200, 401]
+
+- name: Fail when the Graylog server does not answer
+  ansible.builtin.fail:
+    msg: >-
+      The Graylog server in {{ graylog_dir }} does not answer its API at
+      {{ graylog_api_url }} after {{ graylog_health_timeout }} seconds
+      (GET /api/system/lbstatus answered
+      {{ graylog_preflight_lbstatus.status | default('nothing') }}); see
+      docker compose logs graylog in {{ graylog_dir }}.
+  when: graylog_preflight_lbstatus.status | default(-1) != 200

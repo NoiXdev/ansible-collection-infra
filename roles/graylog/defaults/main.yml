@@ -10,7 +10,8 @@ graylog_mongodb_image: docker.io/library/mongo
 graylog_mongodb_version: 8.0.38
 
 # Directory of the compose project (compose.yaml, the secrets, markers).
-# Its basename is the compose project name.
+# graylog_project is the compose project name (its containers, network and
+# router are named after it).
 graylog_dir: /opt/graylog
 graylog_project: graylog
 # The data: one subdirectory each for MongoDB, the Data Node (the search

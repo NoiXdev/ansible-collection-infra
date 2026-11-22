@@ -1,0 +1,149 @@
+{#- Values go through to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. No secret is in this file: they
+    reach the server and the Data Node as files of graylog_secrets_dir, which
+    the images' entrypoints read through GRAYLOG_<SETTING>__FILE. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
+{#- A bind mount that compose must not create: a missing data directory (an
+    unmounted volume) stops the container instead of starting it empty. -#}
+{%- macro bind(source, target, read_only=false) %}
+      - type: bind
+        source: {{ q(source) }}
+        target: {{ q(target) }}
+        read_only: {{ 'true' if read_only else 'false' }}
+        bind:
+          create_host_path: false
+{%- endmacro %}
+{%- set secrets = graylog_container_secrets_dir -%}
+{%- set mongodb_uri = 'mongodb://mongodb:27017/graylog' -%}
+{#- graylog_env first, the settings the role owns over it (main.yml refuses
+    them in graylog_env). GRAYLOG_SELFSIGNED_STARTUP makes the server create
+    its CA and an automatic certificate renewal policy on its first start and
+    mark the preflight finished, so the Data Node is provisioned without
+    anyone opening the preflight's web interface. -#}
+{%- set env = {} -%}
+{%- for key, value in graylog_env | dictsort -%}
+{%-   set _ = env.update({key: (('true' if value else 'false') if value is boolean else value)}) -%}
+{%- endfor -%}
+{%- set _ = env.update({
+  'GRAYLOG_PASSWORD_SECRET__FILE': secrets ~ '/password_secret',
+  'GRAYLOG_ROOT_PASSWORD_SHA2__FILE': secrets ~ '/root_password_sha2',
+  'GRAYLOG_ROOT_USERNAME': graylog_root_username,
+  'GRAYLOG_HTTP_EXTERNAL_URI': (graylog_url | regex_replace('/+$', '')) ~ '/',
+  'GRAYLOG_MONGODB_URI': mongodb_uri,
+  'GRAYLOG_SERVER_JAVA_OPTS': '-Xms' ~ graylog_server_heap ~ ' -Xmx' ~ graylog_server_heap,
+  'GRAYLOG_SELFSIGNED_STARTUP': 'true',
+}) -%}
+{%- set router = graylog_project -%}
+# Managed by the noixdev.infra.graylog role; changes are overwritten.
+name: {{ q(graylog_project) }}
+
+services:
+  # Graylog's configuration, on the project's network only.
+  mongodb:
+    image: {{ q(graylog_mongodb_image ~ ':' ~ graylog_mongodb_version) }}
+    command: {{ ['mongod', '--wiredTigerCacheSizeGB', graylog_mongodb_cache_gb | string] | to_json }}
+    healthcheck:
+      test: {{ ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping")'] | to_json }}
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+      start_interval: 5s
+    volumes:
+{{ bind(graylog_data_dir ~ '/mongodb', '/data/db') }}
+    # Never the daemon's default: on this host it may be GELF to Graylog's own
+    # input, and every message would make more.
+    logging:
+      driver: local
+    restart: unless-stopped
+
+  # The search engine, which the server provisions with certificates of its
+  # own CA. Its certificates name the host name, so it stays fixed.
+  datanode:
+    image: {{ q(graylog_datanode_image ~ ':' ~ graylog_version) }}
+    hostname: datanode
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      GRAYLOG_DATANODE_NODE_ID_FILE: /var/lib/graylog-datanode/node-id
+      GRAYLOG_DATANODE_PASSWORD_SECRET__FILE: {{ q(secrets ~ '/password_secret') }}
+      GRAYLOG_DATANODE_MONGODB_URI: {{ q(mongodb_uri) }}
+      GRAYLOG_DATANODE_OPENSEARCH_HEAP: {{ q(graylog_datanode_heap) }}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    # The image has no check of its own and no curl: its REST API listens
+    # once the server signed its certificate and the search engine is
+    # configured, so during the first start only after the server ran (hence
+    # the server waits for it only to start, and the check for as long as the
+    # role waits). Whether the search engine is up the server's API tells
+    # (health.yml).
+    healthcheck:
+      test: {{ ['CMD', 'bash', '-c', 'exec 3<>/dev/tcp/127.0.0.1/8999'] | to_json }}
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: {{ graylog_health_timeout | int }}s
+      start_interval: 5s
+    volumes:
+{{ bind(graylog_data_dir ~ '/datanode', '/var/lib/graylog-datanode') }}
+{{ bind(graylog_secrets_dir ~ '/password_secret', secrets ~ '/password_secret', read_only=true) }}
+    logging:
+      driver: local
+    restart: unless-stopped
+
+  graylog:
+    image: {{ q(graylog_image ~ ':' ~ graylog_version) }}
+    hostname: server
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      datanode:
+        condition: service_started
+    environment:
+{% for key, value in env | dictsort %}
+      {{ key }}: {{ q(value) }}
+{% endfor %}
+    volumes:
+{{ bind(graylog_data_dir ~ '/graylog', '/usr/share/graylog/data') }}
+{{ bind(graylog_secrets_dir ~ '/password_secret', secrets ~ '/password_secret', read_only=true) }}
+{{ bind(graylog_secrets_dir ~ '/root_password_sha2', secrets ~ '/root_password_sha2', read_only=true) }}
+    # The image's own check (/health_check.sh asks /api), every 5 seconds
+    # while it starts (as long as the role waits for it,
+    # graylog_health_timeout) instead of after the first two minutes.
+    healthcheck:
+      test: [CMD, /health_check.sh]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: {{ graylog_health_timeout | int }}s
+      start_interval: 5s
+    networks: [default, traefik]
+    # No published web port: Traefik reaches the server over its network.
+    labels:
+      - traefik.enable=true
+      - {{ q('traefik.docker.network=' ~ graylog_traefik_network) }}
+      - {{ q('traefik.http.routers.' ~ router ~ '.rule=Host(`' ~ graylog_hostname ~ '`)') }}
+{% if graylog_traefik_entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.entrypoints=' ~ graylog_traefik_entrypoints | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.priority=' ~ graylog_traefik_priority) }}
+{% if graylog_traefik_middlewares | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.middlewares=' ~ graylog_traefik_middlewares | join(',')) }}
+{% endif %}
+      - {{ q('traefik.http.routers.' ~ router ~ '.service=' ~ graylog_project) }}
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - {{ q('traefik.http.services.' ~ graylog_project ~ '.loadbalancer.server.port=9000') }}
+    logging:
+      driver: local
+    restart: unless-stopped
+
+networks:
+  traefik:
+    name: {{ q(graylog_traefik_network) }}
+    external: true

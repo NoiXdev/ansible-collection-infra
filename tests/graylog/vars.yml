@@ -36,3 +36,4 @@ graylog_hostname: graylog.test
 # Small heaps: the test host shares its memory with the Docker daemon.
 graylog_server_heap: 512m
 graylog_datanode_heap: 1g
+graylog_mongodb_cache_gb: 0.25

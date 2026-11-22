@@ -55,3 +55,60 @@ graylog_env_owned:
   - GRAYLOG_SERVER_JAVA_OPTS
 graylog_env_owned_prefixes: [GRAYLOG_ROOT_, GRAYLOG_DATANODE_]
 graylog_env_owned_suffix: __FILE
+
+# Written by reconfigure.yml before it writes the secrets and the compose
+# file, and removed once a run ends healthy; while it exists the role
+# restarts the server and the Data Node, which read the secrets files only on
+# start.
+graylog_restart_marker: "{{ graylog_dir }}/restart-pending"
+
+# The services of the compose project, in their start order.
+graylog_services: [mongodb, datanode, graylog]
+# Where the containers read the secrets files (each bound alone, read-only).
+graylog_container_secrets_dir: /run/secrets-graylog
+# The users the images run as, who own their data subdirectory: MongoDB's
+# mongodb, the Data Node's graylog (its entrypoint starts as root, reads the
+# secrets, then drops to it) and the server's graylog, who also reads the
+# secrets files.
+graylog_mongodb_uid: 999
+graylog_datanode_uid: 999
+graylog_server_uid: 1100
+# The Data Node's search engine refuses to start below this; the drop-in
+# never lowers a higher value the host has (Ubuntu's default is higher).
+graylog_max_map_count: 262144
+graylog_sysctl_file: /etc/sysctl.d/60-noixdev-graylog.conf
+
+graylog_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
+
+# The task that failed and its error: for a command the last line of stderr
+# that names an error (else its last line), for anything else the first line
+# of the message.
+graylog_failure: >-
+  {%- set stderr = (ansible_failed_result.stderr | default('') | trim).splitlines() -%}
+  {%- set errors = stderr | select('search', 'Error:') | list -%}
+  {{ ansible_failed_task.name }}:
+  {{ (errors or stderr or ['']) | last | trim
+     if ansible_failed_result.msg | default('') is search('non-zero return code')
+     else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
+
+# After a failed install: nothing in it should be worth keeping yet, so what
+# it made is removed and the next run installs afresh.
+graylog_install_hint: >-
+  It left a partial installation, which the role does not take for a
+  finished one. To install again, first check that nothing in it is worth
+  keeping (messages and settings in Graylog), then run docker compose down
+  in {{ graylog_dir }} (if {{ graylog_compose_file }} exists), remove
+  {{ graylog_compose_file }}, {{ graylog_secrets_dir }},
+  {{ graylog_versions_file }}, {{ graylog_install_marker }} and the
+  subdirectories {{ graylog_data_subdirs | join(', ') }} of
+  {{ graylog_data_dir }}, then run the role again.
+
+# Prints the address of the server's container on the project's network
+# (compose names it <project>-<service>-1), where the role asks the API from
+# the host.
+graylog_address_command:
+  - docker
+  - inspect
+  - --format
+  - "{{ '{{' }} (index .NetworkSettings.Networks \"{{ graylog_project }}_default\").IPAddress {{ '}}' }}"
+  - "{{ graylog_project }}-graylog-1"

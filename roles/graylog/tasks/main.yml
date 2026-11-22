@@ -335,6 +335,89 @@
   vars:
     graylog_env_null: "{{ graylog_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
 
-# Replaced by the install, update and reconfigure of the next tasks.
+# What is installed and what to do (graylog_state); refuses, before any
+# change, a data directory that is not mounted, an installation without its
+# data or its versions file, an install that did not complete and another
+# graylog_password_secret.
+- name: Read the installation
+  ansible.builtin.include_tasks: state.yml
+
+# Until the update with its backup and rollback comes with the next task of
+# the plan, another version is refused.
+- name: Refuse another version
+  ansible.builtin.fail:
+    msg: >-
+      Graylog {{ graylog_installed_version }} with MongoDB
+      {{ graylog_installed_mongodb_version }} is installed in {{ graylog_dir }},
+      but the settings name Graylog {{ graylog_version }} with MongoDB
+      {{ graylog_mongodb_version }}; this version of the role does not update
+      yet and changes nothing. Set graylog_version and graylog_mongodb_version
+      to the installed versions.
+  when: graylog_state == 'update'
+
+# The Data Node's search engine refuses to start below the minimum. The
+# drop-in keeps a higher value the host has, and is applied only when the
+# current one is lower; never lowered.
+- name: Read vm.max_map_count
+  ansible.builtin.command:
+    argv: [sysctl, -n, vm.max_map_count]
+  register: graylog_max_map_count_read
+  changed_when: false
+
+- name: Write the drop-in of vm.max_map_count
+  ansible.builtin.template:
+    src: sysctl.conf.j2
+    dest: "{{ graylog_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    graylog_sysctl_max_map_count: "{{ [graylog_max_map_count | int, graylog_max_map_count_read.stdout | int] | max }}"
+
+- name: Raise vm.max_map_count
+  ansible.builtin.command:
+    argv: [sysctl, --load, "{{ graylog_sysctl_file }}"]
+  changed_when: true
+  when: graylog_max_map_count_read.stdout | int < graylog_max_map_count | int
+
 - name: Install Graylog
   ansible.builtin.include_tasks: install.yml
+  when: graylog_state == 'install'
+
+- name: Reconfigure Graylog
+  ansible.builtin.include_tasks: reconfigure.yml
+  when: graylog_state == 'reconfigure'
+
+# Read-only: a run without changes starts and restarts nothing, but stays red
+# while a container is down or Graylog is unhealthy.
+- name: Check that Graylog runs
+  when: graylog_state == 'noop'
+  block:
+    - name: Fail when a container is not running
+      ansible.builtin.fail:
+        msg: >-
+          Graylog in {{ graylog_dir }} is down: the services
+          {{ graylog_down | join(', ') }} are not running. The role starts
+          nothing on a run without changes; start them with docker compose up
+          -d in {{ graylog_dir }}.
+      when: graylog_down | length > 0
+
+    - name: Check that Graylog is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Graylog is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Graylog in {{ graylog_dir }} is unhealthy
+          ({{ graylog_health_lines | join('; ') }}) within
+          {{ graylog_health_timeout }} seconds. The role restarts nothing on a
+          run without changes; see docker compose logs in {{ graylog_dir }}.
+      when: not graylog_healthy
+
+# Reached only by a run that ended healthy, which (re)started Graylog on the
+# compose file and the secrets files as they are: the restart a stopped
+# reconfigure left pending is done.
+- name: Remove the marker of a pending restart
+  ansible.builtin.file:
+    path: "{{ graylog_restart_marker }}"
+    state: absent

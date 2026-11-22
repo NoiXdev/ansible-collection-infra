@@ -1,0 +1,244 @@
+---
+# Reads the host and sets graylog_state:
+#   install      no compose file
+#   update       graylog_version or graylog_mongodb_version is not the
+#                installed one (graylog_versions_file)
+#   reconfigure  the compose file the role writes differs from the one on
+#                disk, a secrets file from what the role writes, or a
+#                restart is pending (graylog_restart_marker)
+#   noop         everything as the role writes it
+# Also sets graylog_installed (a compose file exists), graylog_compose_before
+# (the compose file on disk), graylog_installed_version and
+# graylog_installed_mongodb_version (from graylog_versions_file, empty
+# without an installation), graylog_secrets (file name to content of the
+# secrets the role writes), graylog_secrets_changed (the names of the secrets
+# files that differ from it), graylog_restart_pending and graylog_down (the
+# services that are not running). Refuses, before any change and in this
+# order: a graylog_data_dir that is not a mountpoint (with
+# graylog_data_dir_mountpoint), an installation without its data
+# subdirectories (an unmounted volume), an install that did not complete (its
+# marker), an installation without a versions file the role can read, and a
+# graylog_password_secret that is not the one of the installation. It makes
+# no change.
+
+# A block volume that is not mounted leaves its mountpoint as an empty
+# directory on the root filesystem; an install there would put the data
+# beside the volume.
+- name: Check that the data directory is a mountpoint
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ graylog_data_dir }}"]
+  register: graylog_data_dir_mounted
+  changed_when: false
+  failed_when: false
+  when: graylog_data_dir_mountpoint | bool
+
+- name: Refuse a data directory that is not a mountpoint
+  ansible.builtin.fail:
+    msg: >-
+      graylog_data_dir_mountpoint is on, but {{ graylog_data_dir }} is not a
+      mountpoint: is the volume mounted? The role changes nothing. Mount the
+      volume at {{ graylog_data_dir }}, then run the role again.
+  when:
+    - graylog_data_dir_mountpoint | bool
+    - graylog_data_dir_mounted.rc != 0
+
+# The role writes no secret into it, but one changed by hand could hold one,
+# so it is read and noted in no_log tasks.
+- name: Read the compose file
+  ansible.builtin.slurp:
+    src: "{{ graylog_compose_file }}"
+  register: graylog_compose_read
+  failed_when: false
+  no_log: true
+
+- name: Look for the data subdirectories
+  ansible.builtin.stat:
+    path: "{{ graylog_data_dir }}/{{ item }}"
+    get_checksum: false
+  loop: "{{ graylog_data_subdirs }}"
+  register: graylog_subdirs_stat
+
+- name: Note what is on the host
+  ansible.builtin.set_fact:
+    graylog_compose_before: "{{ graylog_compose_read.content | default('') | b64decode }}"
+    graylog_installed: "{{ graylog_compose_read.content is defined }}"
+    graylog_data_present: >-
+      {{ graylog_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
+  no_log: true
+
+# Only install creates the subdirectories, and compose does not create a
+# missing one (create_host_path: false), so their absence beside a compose
+# file is data that is not there (an unmounted volume), never a state to
+# repair: Graylog would start on an empty database and index.
+- name: Refuse an installation without its data
+  ansible.builtin.fail:
+    msg: >-
+      Graylog is installed in {{ graylog_dir }} ({{ graylog_compose_file }}),
+      but {{ graylog_data_dir }} lacks {{ graylog_data_missing | join(', ') }}:
+      is the volume mounted? The role changes nothing and creates none of
+      them. Mount the volume (or put the data back) at {{ graylog_data_dir }},
+      then run the role again.
+  vars:
+    # In the order of graylog_data_subdirs, which difference does not keep.
+    graylog_data_missing: "{{ graylog_data_subdirs | reject('in', graylog_data_present) | list }}"
+  when:
+    - graylog_installed
+    - graylog_data_missing | length > 0
+
+- name: Look for the marker of an install in progress
+  ansible.builtin.stat:
+    path: "{{ graylog_install_marker }}"
+    get_checksum: false
+  register: graylog_install_marker_stat
+
+- name: Refuse an install that did not complete
+  ansible.builtin.fail:
+    msg: >-
+      {{ graylog_install_marker }} exists: an install of Graylog in
+      {{ graylog_dir }} did not complete. The role changes nothing.
+      {{ graylog_install_hint }}
+  when: graylog_install_marker_stat.stat.exists
+
+# Mode 0600: beside the versions it holds the SHA-256 of the password secret,
+# so it is read and parsed in no_log tasks.
+- name: Read the versions file
+  ansible.builtin.slurp:
+    src: "{{ graylog_versions_file }}"
+  register: graylog_versions_read
+  failed_when: false
+  no_log: true
+  when: graylog_installed
+
+# A file that is not YAML, or lacks a key, parses as empty and is refused
+# below; the parser's error could quote the hash.
+- name: Parse the versions file
+  block:
+    - name: Note the versions file
+      ansible.builtin.set_fact:
+        graylog_versions: "{{ graylog_versions_yaml if graylog_versions_yaml is mapping else {} }}"
+      vars:
+        graylog_versions_yaml: "{{ (graylog_versions_read.content | default('') | b64decode or '{}') | from_yaml }}"
+      no_log: true
+  rescue:
+    - name: Note a versions file that is not YAML
+      ansible.builtin.set_fact:
+        graylog_versions: {}
+
+- name: Note the installed versions
+  ansible.builtin.set_fact:
+    graylog_installed_version: "{{ graylog_versions.graylog | default('', true) | string }}"
+    graylog_installed_mongodb_version: "{{ graylog_versions.mongodb | default('', true) | string }}"
+
+- name: Refuse an installation without its versions
+  ansible.builtin.fail:
+    msg: >-
+      Graylog is installed in {{ graylog_dir }} ({{ graylog_compose_file }}),
+      but {{ graylog_versions_file }} is missing, is not YAML or lacks
+      graylog, mongodb or password_secret_sha256, so the role cannot tell
+      which versions run and which password secret the installation was made
+      with; it changes nothing. Put back the versions file the role wrote.
+  when:
+    - graylog_installed
+    - >-
+      not graylog_installed_version is match('^\d+\.\d+\.\d+$')
+      or not graylog_installed_mongodb_version is match('^\d+\.\d+\.\d+$')
+      or not graylog_versions.password_secret_sha256 | default('', true) | string is match('^[0-9a-f]{64}$')
+
+# The secret encrypts values in the database (access tokens, the Data Node's
+# certificates and credentials): with another one Graylog cannot read them.
+# Compared by SHA-256 in a no_log task; the message quotes neither.
+- name: Compare graylog_password_secret with the installation's
+  ansible.builtin.set_fact:
+    graylog_password_secret_changed: >-
+      {{ graylog_installed and graylog_versions.password_secret_sha256 | string
+         != graylog_password_secret | string | hash('sha256') }}
+  no_log: true
+
+- name: Refuse another graylog_password_secret
+  ansible.builtin.fail:
+    msg: >-
+      graylog_password_secret is not the one the installation in
+      {{ graylog_dir }} was made with (its SHA-256 in
+      {{ graylog_versions_file }} differs; neither value is shown). Graylog
+      encrypts stored values with it (access tokens, the Data Node's
+      certificates), which another secret cannot read, so the role refuses to
+      change it and changes nothing. Set graylog_password_secret back to the
+      secret of the installation.
+  when: graylog_password_secret_changed | bool
+
+# What the secrets files hold: the password secret (the server's and the
+# Data Node's) and the SHA-256 of the root password, which is all the host
+# keeps of it.
+- name: Note the secrets the role writes
+  ansible.builtin.set_fact:
+    graylog_secrets:
+      password_secret: "{{ graylog_password_secret | string }}"
+      root_password_sha2: "{{ graylog_root_password | string | hash('sha256') }}"
+  no_log: true
+
+- name: Find the secrets files
+  ansible.builtin.find:
+    paths: "{{ graylog_secrets_dir }}"
+    file_type: any
+    hidden: true
+  register: graylog_secrets_on_disk
+  when: graylog_installed
+
+- name: Read the secrets files
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ graylog_secrets_on_disk.files | default([]) | map(attribute='path') | sort }}"
+  register: graylog_secrets_read
+  failed_when: false
+  no_log: true
+
+# By name, the files that differ from what the role writes (one that cannot
+# be read, is missing or is not the role's among them); the names are no
+# secret.
+- name: Compare the secrets files with what the role writes
+  ansible.builtin.set_fact:
+    graylog_secrets_changed: >-
+      {%- set found = {} -%}
+      {%- for read in graylog_secrets_read.results | default([]) -%}
+      {%-   set _ = found.update({read.item | basename: (read.content | b64decode) if read.content is defined else none}) -%}
+      {%- endfor -%}
+      {%- set changed = [] -%}
+      {%- for name, value in graylog_secrets.items() if found[name] | default(none) != value -%}
+      {%-   set _ = changed.append(name) -%}
+      {%- endfor -%}
+      {%- for name in found if name not in graylog_secrets -%}
+      {%-   set _ = changed.append(name) -%}
+      {%- endfor -%}
+      {{ changed | sort }}
+  no_log: true
+
+- name: Read the services that run
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --format, "{{ '{{.Service}}' }}", --status, running]
+    chdir: "{{ graylog_dir }}"
+  register: graylog_ps
+  changed_when: false
+  when: graylog_installed
+
+# Written by reconfigure.yml before it writes the secrets and the compose
+# file, and removed by main.yml once a run ends healthy: a run stopped in
+# between leaves files that equal the settings while the containers still
+# run with the old ones (they read them on start only), so the next run
+# restarts them.
+- name: Look for a pending restart
+  ansible.builtin.stat:
+    path: "{{ graylog_restart_marker }}"
+    get_checksum: false
+  register: graylog_restart_marker_stat
+
+- name: Decide what to do
+  ansible.builtin.set_fact:
+    graylog_down: "{{ graylog_services | difference(graylog_ps.stdout_lines | default([])) }}"
+    graylog_restart_pending: "{{ graylog_installed and graylog_restart_marker_stat.stat.exists }}"
+    graylog_state: >-
+      {{ 'install' if not graylog_installed
+         else 'update' if graylog_version | string != graylog_installed_version
+                          or graylog_mongodb_version | string != graylog_installed_mongodb_version
+         else 'reconfigure' if graylog_compose_before != graylog_compose or graylog_secrets_changed | length > 0
+                               or graylog_restart_marker_stat.stat.exists
+         else 'noop' }}

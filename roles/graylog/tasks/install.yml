@@ -1,6 +1,128 @@
 ---
-# A placeholder: the install, the update and the rest of the role come with
-# the next tasks of the plan; until then the role ends after its checks.
-- name: Report that nothing is installed yet
-  ansible.builtin.debug:
-    msg: The settings of Graylog are valid; this version of the role installs nothing yet.
+# A fresh install: the directories (the data subdirectories only here, each
+# owned by the user its image runs as), the secrets, the compose file and the
+# versions file, then Graylog: MongoDB, the Data Node and the server, which
+# provisions the Data Node on its own (preflight.yml), until it is healthy.
+# The marker graylog_install_marker lives from before the first data
+# directory until Graylog is healthy, so a run after a failed install refuses
+# (state.yml) instead of taking the half-made installation for a finished
+# one. A failed install stops Graylog and deletes nothing.
+
+- name: Create the Graylog directory
+  ansible.builtin.file:
+    path: "{{ graylog_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the marker of an install in progress
+  ansible.builtin.copy:
+    dest: "{{ graylog_install_marker }}"
+    content: |
+      version: {{ graylog_version }}
+      time: {{ now(utc=true).isoformat() }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install Graylog
+  block:
+    - name: Create the data directory
+      ansible.builtin.file:
+        path: "{{ graylog_data_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # MongoDB's database, the Data Node's search index (its entrypoint takes
+    # it over as its user on every start), the server's journal and node id,
+    # and the backups of the updates (root's only).
+    - name: Create the data subdirectories
+      ansible.builtin.file:
+        path: "{{ graylog_data_dir }}/{{ item.name }}"
+        state: directory
+        owner: "{{ item.uid }}"
+        group: "{{ item.uid }}"
+        mode: "0700"
+      loop:
+        - {name: mongodb, uid: "{{ graylog_mongodb_uid }}"}
+        - {name: datanode, uid: "{{ graylog_datanode_uid }}"}
+        - {name: graylog, uid: "{{ graylog_server_uid }}"}
+        - {name: backups, uid: 0}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Write the secrets
+      ansible.builtin.include_tasks: secrets.yml
+
+    - name: Write the compose file
+      ansible.builtin.copy:
+        dest: "{{ graylog_compose_file }}"
+        content: "{{ graylog_compose }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # A later run with another graylog_password_secret refuses: the
+    # installation's stored values are encrypted with this one.
+    - name: Write the versions file
+      ansible.builtin.copy:
+        dest: "{{ graylog_versions_file }}"
+        content: |
+          # Written by the noixdev.infra.graylog role: the installed versions,
+          # and the SHA-256 of the password secret (not the secret).
+          graylog: {{ graylog_version }}
+          mongodb: {{ graylog_mongodb_version }}
+          password_secret_sha256: {{ graylog_password_secret | string | hash('sha256') }}
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Start Graylog
+      community.docker.docker_compose_v2:
+        project_src: "{{ graylog_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Wait for the first start of the Graylog server
+      ansible.builtin.include_tasks: preflight.yml
+
+    - name: Check that Graylog is healthy
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Graylog is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Graylog is not healthy within {{ graylog_health_timeout }} seconds
+          ({{ graylog_health_lines | join('; ') }}); see docker compose logs in
+          {{ graylog_dir }}
+      when: not graylog_healthy
+
+    - name: Remove the marker of an install in progress
+      ansible.builtin.file:
+        path: "{{ graylog_install_marker }}"
+        state: absent
+
+  rescue:
+    - name: Note why the install failed
+      ansible.builtin.set_fact:
+        graylog_install_failure: "{{ graylog_failure | trim }}"
+
+    # Stopped, not removed: what is left is for the hint's removal, and a
+    # running Graylog would take messages into the installation it says to
+    # remove.
+    - name: Stop Graylog after the failed install
+      community.docker.docker_compose_v2:
+        project_src: "{{ graylog_dir }}"
+        state: stopped
+      failed_when: false
+
+    - name: Fail with what to remove
+      ansible.builtin.fail:
+        msg: >-
+          The install of Graylog {{ graylog_version }} in {{ graylog_dir }}
+          failed ({{ graylog_install_failure }}). {{ graylog_install_hint }}

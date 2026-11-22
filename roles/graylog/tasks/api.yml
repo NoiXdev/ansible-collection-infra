@@ -1,0 +1,32 @@
+---
+# One request to Graylog's REST API from the host: graylog_api_method
+# (default GET) on graylog_api_path (below /api, with its leading /), with
+# graylog_api_body as JSON when set, as the root user (basic auth) and with
+# the X-Requested-By header Graylog wants on every change. Sets
+# graylog_api_result: the uri module's result (status, json, content). Needs
+# graylog_api_url (health.yml sets it). no_log, as the request carries the
+# root password and a body can carry a token; the caller reads the result
+# and fails with a message of its own. Never fails by itself; a request other
+# than GET that Graylog answers with success reports changed.
+
+- name: Ask Graylog's API
+  ansible.builtin.uri:
+    url: "{{ graylog_api_url }}/api{{ graylog_api_path }}"
+    method: "{{ graylog_api_method | default('GET') }}"
+    url_username: "{{ graylog_root_username }}"
+    url_password: "{{ graylog_root_password | string }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+      X-Requested-By: ansible
+    body: "{{ graylog_api_body | default(omit) }}"
+    body_format: "{{ 'json' if graylog_api_body is defined else omit }}"
+    return_content: true
+    timeout: 30
+  register: graylog_api_result
+  failed_when: false
+  # A request other than GET that Graylog took changed something.
+  changed_when: >-
+    (graylog_api_method | default('GET')) != 'GET'
+    and graylog_api_result.status | default(-1) in [200, 201, 202, 204]
+  no_log: true

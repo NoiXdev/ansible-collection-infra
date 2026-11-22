@@ -1,0 +1,213 @@
+---
+# Checks an installation on the test host as run.sh's settings make it: the
+# containers of the compose project (mongodb, datanode and graylog, running
+# and healthy, with the pinned images, the local log driver whatever the
+# daemon's default, restarted unless stopped and with no published port);
+# the server's environment (the settings the role fixes, the heap, the
+# secrets only as *__FILE, never as values) and the Data Node's (its password
+# secret only as a file, its heap); the mounts (the data subdirectories, the
+# secrets files read-only); the files: the compose file 0644, the secrets
+# directory root's 0700 with password_secret and root_password_sha2, each
+# 0600, the versions file; and vm.max_map_count of at least 262144 from the
+# role's drop-in.
+# Extra variables: verify_server_heap (default the one of vars.yml).
+- name: Verify
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  vars:
+    verify_dir: /opt/graylog
+    verify_defaults: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../roles/graylog/defaults/main.yml') | from_yaml }}"
+    verify_version: "{{ verify_defaults.graylog_version }}"
+    verify_images:
+      mongodb: "{{ verify_defaults.graylog_mongodb_image }}:{{ verify_defaults.graylog_mongodb_version }}"
+      datanode: "{{ verify_defaults.graylog_datanode_image }}:{{ verify_version }}"
+      graylog: "{{ verify_defaults.graylog_image }}:{{ verify_version }}"
+    verify_server_heap: "{{ graylog_server_heap }}"
+    verify_all: "{{ verify_inspect.stdout | from_json }}"
+    # Service name to container.
+    verify_containers: >-
+      {%- set found = {} -%}
+      {%- for container in verify_all -%}
+      {%-   set _ = found.update({container.Config.Labels['com.docker.compose.service']: container}) -%}
+      {%- endfor -%}
+      {{ found }}
+    verify_server_env: "{{ verify_containers.graylog.Config.Env }}"
+    verify_datanode_env: "{{ verify_containers.datanode.Config.Env }}"
+    verify_expected_server_env:
+      - GRAYLOG_PASSWORD_SECRET__FILE=/run/secrets-graylog/password_secret
+      - GRAYLOG_ROOT_PASSWORD_SHA2__FILE=/run/secrets-graylog/root_password_sha2
+      - GRAYLOG_ROOT_USERNAME=admin
+      - GRAYLOG_HTTP_EXTERNAL_URI=https://graylog.test/
+      - GRAYLOG_MONGODB_URI=mongodb://mongodb:27017/graylog
+      - GRAYLOG_SERVER_JAVA_OPTS=-Xms{{ verify_server_heap }} -Xmx{{ verify_server_heap }}
+    verify_expected_datanode_env:
+      - GRAYLOG_DATANODE_PASSWORD_SECRET__FILE=/run/secrets-graylog/password_secret
+      - GRAYLOG_DATANODE_MONGODB_URI=mongodb://mongodb:27017/graylog
+      - GRAYLOG_DATANODE_NODE_ID_FILE=/var/lib/graylog-datanode/node-id
+      - GRAYLOG_DATANODE_OPENSEARCH_HEAP={{ graylog_datanode_heap }}
+  tasks:
+    - name: Find the containers of the compose project
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, label=com.docker.compose.project=graylog]
+      register: verify_ids
+      changed_when: false
+
+    - name: Check the number of containers
+      ansible.builtin.assert:
+        that: verify_ids.stdout_lines | length == 3
+        fail_msg: "The project has {{ verify_ids.stdout_lines | length }} containers, not three (mongodb, datanode, graylog)."
+
+    - name: Inspect the containers
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'inspect'] + verify_ids.stdout_lines }}"
+      register: verify_inspect
+      changed_when: false
+
+    - name: Check the services
+      ansible.builtin.assert:
+        that: verify_containers.keys() | sort == ['datanode', 'graylog', 'mongodb']
+        fail_msg: "The project's services are {{ verify_containers.keys() | sort }}, not datanode, graylog and mongodb."
+
+    - name: Check the containers
+      ansible.builtin.assert:
+        that:
+          - item.value.Config.Image == verify_images[item.key]
+          - item.value.State.Running
+          - item.value.State.Health.Status == 'healthy'
+          - item.value.HostConfig.RestartPolicy.Name == 'unless-stopped'
+          # Never the daemon's default: with GELF to the host's own input,
+          # every message would make more.
+          - item.value.HostConfig.LogConfig.Type == 'local'
+          - item.value.HostConfig.PortBindings | default({}, true) | length == 0
+          - item.value.NetworkSettings.Ports | default({}, true) | dict2items | selectattr('value') | list | length == 0
+        fail_msg: >-
+          {{ item.key }} is not {{ verify_images[item.key] }}, running, healthy,
+          restarted unless stopped, logging with local and without a published
+          port: {{ item.value.Config.Image }}, {{ item.value.State.Status }},
+          {{ item.value.State.Health.Status | default('no health') }},
+          {{ item.value.HostConfig.LogConfig.Type }}, {{ item.value.NetworkSettings.Ports }}.
+      loop: "{{ verify_containers | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Check the environment of the server
+      ansible.builtin.assert:
+        that:
+          - verify_expected_server_env | difference(verify_server_env) | length == 0
+          - "'GRAYLOG_SELFSIGNED_STARTUP=true' in verify_server_env"
+          - verify_server_env | select('match', '^GRAYLOG_(PASSWORD_SECRET|ROOT_PASSWORD_SHA2)=') | list | length == 0
+        fail_msg: >-
+          The server's environment lacks
+          {{ verify_expected_server_env | difference(verify_server_env) }}, or
+          GRAYLOG_SELFSIGNED_STARTUP, or holds a secret as a value (the names:
+          {{ verify_server_env | map('regex_replace', '=.*$', '') | sort }}).
+
+    - name: Check the environment of the Data Node
+      ansible.builtin.assert:
+        that:
+          - verify_expected_datanode_env | difference(verify_datanode_env) | length == 0
+          - verify_datanode_env | select('match', '^GRAYLOG_DATANODE_PASSWORD_SECRET=') | list | length == 0
+        fail_msg: >-
+          The Data Node's environment lacks
+          {{ verify_expected_datanode_env | difference(verify_datanode_env) }},
+          or holds the password secret as a value (the names:
+          {{ verify_datanode_env | map('regex_replace', '=.*$', '') | sort }}).
+
+    - name: Check the mounts
+      ansible.builtin.assert:
+        that:
+          - verify_mount.Type == 'bind'
+          - verify_mount.Source == item.source
+          - verify_mount.RW != (item.read_only | default(false))
+        fail_msg: "{{ item.service }} has no bind of {{ item.source }} at {{ item.target }}: {{ verify_containers[item.service].Mounts }}"
+      vars:
+        verify_mount: >-
+          {{ verify_containers[item.service].Mounts | selectattr('Destination', 'eq', item.target) | first | default({}) }}
+      loop:
+        - {service: mongodb, source: "{{ verify_dir }}/data/mongodb", target: /data/db}
+        - {service: datanode, source: "{{ verify_dir }}/data/datanode", target: /var/lib/graylog-datanode}
+        - service: datanode
+          source: "{{ verify_dir }}/secrets/password_secret"
+          target: /run/secrets-graylog/password_secret
+          read_only: true
+        - {service: graylog, source: "{{ verify_dir }}/data/graylog", target: /usr/share/graylog/data}
+        - service: graylog
+          source: "{{ verify_dir }}/secrets/password_secret"
+          target: /run/secrets-graylog/password_secret
+          read_only: true
+        - service: graylog
+          source: "{{ verify_dir }}/secrets/root_password_sha2"
+          target: /run/secrets-graylog/root_password_sha2
+          read_only: true
+      loop_control:
+        label: "{{ item.service }} {{ item.target }}"
+
+    - name: Stat the compose file, the secrets directory and the versions file
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: ["{{ verify_dir }}/compose.yaml", "{{ verify_dir }}/secrets", "{{ verify_dir }}/versions"]
+      register: verify_stat
+
+    - name: Check the modes of the compose file, the secrets directory and the versions file
+      ansible.builtin.assert:
+        that:
+          - verify_stat.results[0].stat.mode == '0644'
+          - verify_stat.results[1].stat.isdir
+          - verify_stat.results[1].stat.mode == '0700'
+          - verify_stat.results[1].stat.pw_name == 'root'
+          - verify_stat.results[2].stat.mode == '0600'
+        fail_msg: >-
+          The compose file is not 0644 ({{ verify_stat.results[0].stat.mode }}),
+          the secrets directory not root's 0700
+          ({{ verify_stat.results[1].stat.mode | default('missing') }}) or the
+          versions file not 0600 ({{ verify_stat.results[2].stat.mode | default('missing') }}).
+
+    - name: Find the secrets files
+      ansible.builtin.find:
+        paths: "{{ verify_dir }}/secrets"
+        file_type: any
+        hidden: true
+      register: verify_secrets_found
+
+    - name: Check the secrets files
+      ansible.builtin.assert:
+        that:
+          - verify_secrets_found.files | map(attribute='path') | map('basename') | sort == ['password_secret', 'root_password_sha2']
+          - verify_secrets_found.files | rejectattr('mode', 'eq', '0600') | list | length == 0
+        fail_msg: >-
+          The secrets files are not password_secret and root_password_sha2,
+          each 0600: {{ verify_secrets_found.files | map(attribute='path') | map('basename') | sort }}
+          ({{ verify_secrets_found.files | map(attribute='mode') | list }}).
+
+    - name: Read the versions file
+      ansible.builtin.slurp:
+        src: "{{ verify_dir }}/versions"
+      register: verify_versions
+
+    - name: Check the versions file
+      ansible.builtin.assert:
+        that:
+          - verify_versions_parsed.graylog | string == verify_version | string
+          - verify_versions_parsed.mongodb | string == verify_defaults.graylog_mongodb_version | string
+          - verify_versions_parsed.password_secret_sha256 | default('') is match('^[0-9a-f]{64}$')
+        fail_msg: >-
+          The versions file does not name Graylog {{ verify_version }}, MongoDB
+          {{ verify_defaults.graylog_mongodb_version }} and the SHA-256 of the
+          password secret.
+      vars:
+        verify_versions_parsed: "{{ verify_versions.content | b64decode | from_yaml }}"
+
+    - name: Read vm.max_map_count and the drop-in
+      ansible.builtin.command:
+        argv: [sh, -c, "sysctl -n vm.max_map_count; cat /etc/sysctl.d/60-noixdev-graylog.conf"]
+      register: verify_sysctl
+      changed_when: false
+
+    - name: Check vm.max_map_count
+      ansible.builtin.assert:
+        that:
+          - verify_sysctl.stdout_lines[0] | int >= 262144
+          - verify_sysctl.stdout is search('(?m)^vm\.max_map_count = [0-9]+$')
+        fail_msg: "vm.max_map_count is below 262144 or the drop-in does not set it: {{ verify_sysctl.stdout_lines }}"

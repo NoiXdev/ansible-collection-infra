@@ -1,0 +1,125 @@
+---
+# Waits up to graylog_health_timeout seconds (graylog_health_wait, when the
+# includer sets it) until every container of graylog_services reports the
+# health status healthy (MongoDB's ping, the Data Node's REST port, the
+# server's own check of /api), then asks the server's API from the host:
+# GET /api/system/lbstatus answers ALIVE, and as the root user (which proves
+# the login) the indexer cluster is green or yellow and a Data Node is listed
+# as AVAILABLE, within what is left of the same deadline. Sets graylog_healthy,
+# graylog_health_lines (service, state and health of each container, then
+# what the API answered) and graylog_api_url. Never fails by itself.
+
+- name: Note when the health check starts
+  ansible.builtin.set_fact:
+    graylog_health_start: "{{ now().timestamp() }}"
+    graylog_health_deadline: "{{ graylog_health_wait | default(graylog_health_timeout) | int }}"
+    graylog_health_expected: "{{ graylog_services | map('regex_replace', '^(.*)$', '\\1 running healthy') | list }}"
+
+# retries is an upper bound (every attempt takes at least the delay); the
+# deadline ends the wait after those seconds.
+- name: Wait until the containers are healthy
+  ansible.builtin.command:
+    argv: [docker, compose, ps, --all, --format, "{{ '{{.Service}} {{.State}} {{.Health}}' }}"]
+    chdir: "{{ graylog_dir }}"
+  register: graylog_health
+  until: >-
+    graylog_health_expected | difference(graylog_health.stdout_lines | default([])) | length == 0
+    or now().timestamp() - graylog_health_start | float >= graylog_health_deadline | int
+  retries: "{{ (graylog_health_deadline | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: Note whether the containers are healthy
+  ansible.builtin.set_fact:
+    graylog_containers_healthy: "{{ graylog_health_expected | difference(graylog_health.stdout_lines | default([])) | length == 0 }}"
+
+# A recreated container can have another address than before.
+- name: Read the address of the Graylog server
+  ansible.builtin.command:
+    argv: "{{ graylog_address_command }}"
+  register: graylog_address
+  changed_when: false
+  failed_when: false
+  when: graylog_containers_healthy | bool
+
+# Empty when it cannot be read, never the address of an earlier check.
+- name: Note the address of the API
+  ansible.builtin.set_fact:
+    graylog_api_url: >-
+      {{ ('http://' ~ graylog_address.stdout | trim ~ ':9000')
+         if graylog_address.stdout | default('') | trim is match('^[0-9]+(\.[0-9]+){3}$') else '' }}
+
+# Each request is asked until it answers as it should or the deadline is
+# reached. As the root user, so no_log; the note below quotes only the status
+# and the fields it checks.
+- name: Ask Graylog's API
+  ansible.builtin.uri:
+    url: "{{ graylog_api_url }}/api{{ item.path }}"
+    url_username: "{{ graylog_root_username }}"
+    url_password: "{{ graylog_root_password | string }}"
+    force_basic_auth: true
+    headers:
+      Accept: "{{ item.accept }}"
+      X-Requested-By: ansible
+    return_content: true
+    timeout: 10
+  loop:
+    - {name: lbstatus, path: /system/lbstatus, accept: text/plain}
+    - {name: indexer, path: /system/indexer/cluster/health, accept: application/json}
+    - {name: datanodes, path: /system/cluster/datanodes, accept: application/json}
+  loop_control:
+    label: "{{ item.name }}"
+  register: graylog_health_api
+  until: >-
+    (item.name == 'lbstatus' and graylog_health_api.content | default('') | trim == 'ALIVE')
+    or (item.name == 'indexer' and (graylog_health_api.json | default({})).status | default('') in ['green', 'yellow'])
+    or (item.name == 'datanodes'
+        and (graylog_health_api.json | default({})).elements | default([])
+            | selectattr('datanode_status', 'defined') | selectattr('datanode_status', 'eq', 'AVAILABLE') | list | length > 0)
+    or now().timestamp() - graylog_health_start | float >= graylog_health_deadline | int
+  retries: "{{ (graylog_health_deadline | int / 5) | round(0, 'ceil') | int + 1 }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: graylog_api_url | length > 0
+
+# What each request answered, by name: ALIVE, the cluster's status, the
+# number of Data Nodes AVAILABLE.
+- name: Note what the API answered
+  ansible.builtin.set_fact:
+    graylog_health_answers: >-
+      {%- set found = {} -%}
+      {%- for result in graylog_health_api.results | default([]) if result.skipped is not defined -%}
+      {%-   set json = result.json | default({}) if result.json | default({}) is mapping else {} -%}
+      {%-   set _ = found.update({result.item.name: {
+              'status': result.status | default(-1),
+              'answer': (result.content | default('') | trim | truncate(20, true, '')) if result.item.name == 'lbstatus'
+                        else json.status | default('') if result.item.name == 'indexer'
+                        else json.elements | default([]) | selectattr('datanode_status', 'defined')
+                             | selectattr('datanode_status', 'eq', 'AVAILABLE') | list | length}}) -%}
+      {%- endfor -%}
+      {{ found }}
+
+- name: Note whether Graylog is healthy
+  ansible.builtin.set_fact:
+    graylog_health_lines: >-
+      {%- set lines = graylog_health.stdout_lines | default([]) | sort -%}
+      {%- if graylog_containers_healthy | bool and graylog_api_url | length == 0 -%}
+      {%-   set _ = lines.append('the address of the server cannot be read') -%}
+      {%- endif -%}
+      {%- if 'lbstatus' in graylog_health_answers -%}
+      {%-   set _ = lines.append('GET /api/system/lbstatus answered ' ~ graylog_health_answers.lbstatus.status
+                                 ~ ' ' ~ (graylog_health_answers.lbstatus.answer or 'nothing')) -%}
+      {%-   set _ = lines.append('the indexer cluster is ' ~ (graylog_health_answers.indexer.answer or 'unknown')
+                                 ~ ' (status ' ~ graylog_health_answers.indexer.status ~ ')') -%}
+      {%-   set _ = lines.append(graylog_health_answers.datanodes.answer | string ~ ' Data Node(s) available (status '
+                                 ~ graylog_health_answers.datanodes.status ~ ')') -%}
+      {%- endif -%}
+      {{ lines }}
+    graylog_healthy: >-
+      {{ graylog_containers_healthy | bool
+         and graylog_health_answers.lbstatus.answer | default('') == 'ALIVE'
+         and graylog_health_answers.indexer.answer | default('') in ['green', 'yellow']
+         and graylog_health_answers.datanodes.answer | default(0) | int > 0 }}
