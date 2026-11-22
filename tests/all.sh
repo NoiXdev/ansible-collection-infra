@@ -23,6 +23,9 @@
 #               Ubuntu release in BACKREST_UBUNTU (default "24.04 26.04")
 #   vaultwarden tests/vaultwarden/run.sh (Vaultwarden, Traefik and PostgreSQL), once
 #               per Ubuntu release in VAULTWARDEN_UBUNTU (default "24.04 26.04")
+#   postal      tests/postal/run.sh (Postal, Traefik and Mailpit; its image is
+#               linux/amd64 only and runs under emulation on other machines),
+#               once per Ubuntu release in POSTAL_UBUNTU (default "24.04 26.04")
 #   waf         tests/waf/run.sh (the WAF with Traefik and nginx), once per
 #               Ubuntu release in WAF_UBUNTU (default "24.04 26.04")
 #   varnish     tests/varnish/run.sh (the varnish role), once per Ubuntu
@@ -64,7 +67,7 @@ out="$here/output/all"
 # suites. tests/attest.sh and .github/scripts/verify-tests-attestation.sh read
 # these lines (keep each on one line): an attestation needs every suite, host
 # and services once per release.
-all_suites=(e2e host services harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel pulsix_agent backrest vaultwarden waf varnish graylog)
+all_suites=(e2e host services harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel pulsix_agent backrest vaultwarden postal waf varnish graylog)
 host_releases=(24.04 26.04)
 services_releases=(24.04 26.04)
 

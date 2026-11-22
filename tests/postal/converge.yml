@@ -1,0 +1,53 @@
+---
+# The test host: Docker, Traefik and Mailpit (the relay and mail catcher: SMTP
+# on 127.0.0.1:1025 and its API on 127.0.0.1:8025 of the test host, and on the
+# Traefik network as mailpit). The postal role runs only when run.sh passes
+# test_postal=true.
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  vars:
+    converge_mailpit_image: axllent/mailpit:v1.33.1
+  pre_tasks:
+    # The base role installs ca-certificates and curl on the servers; the test
+    # image has neither.
+    - name: Install the packages the tests call
+      ansible.builtin.apt:
+        name: [ca-certificates, curl]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+  tasks:
+    - name: Run the docker role
+      ansible.builtin.include_role:
+        name: noixdev.infra.docker
+
+    - name: Run the traefik role
+      ansible.builtin.include_role:
+        name: noixdev.infra.traefik
+
+    - name: Look for Mailpit
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, name=^mailpit$]
+      register: converge_mailpit
+      changed_when: false
+
+    - name: Start Mailpit
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name=mailpit
+          - "--network={{ traefik_network | default('proxy') }}"
+          - --restart=unless-stopped
+          - --publish=127.0.0.1:1025:1025
+          - --publish=127.0.0.1:8025:8025
+          - "{{ converge_mailpit_image }}"
+      changed_when: true
+      when: converge_mailpit.stdout | length == 0
+
+    - name: Run the postal role
+      ansible.builtin.include_role:
+        name: noixdev.infra.postal
+      when: test_postal | default(false) | bool

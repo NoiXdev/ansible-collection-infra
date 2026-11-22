@@ -2,7 +2,7 @@ name: ci
 
 # Cheap checks only. The Docker test suites (tests/run.sh, tests/host,
 # tests/harbor, tests/listmonk, tests/paperless, tests/tandoor, tests/n8n, tests/anubis,
-# tests/mailcow, tests/cloudpanel, tests/pulsix_agent, tests/backrest, tests/vaultwarden, tests/waf, tests/varnish, tests/graylog) run locally with tests/all.sh before pushing; a release
+# tests/mailcow, tests/cloudpanel, tests/pulsix_agent, tests/backrest, tests/vaultwarden, tests/postal, tests/waf, tests/varnish, tests/graylog) run locally with tests/all.sh before pushing; a release
 # needs a signed attestation of that run (tests/attest.sh, checked by
 # release-gate.yml; the release workflow release.yml runs the same check before
 # it tags). tests/services runs through tests/all.sh and the attestation as

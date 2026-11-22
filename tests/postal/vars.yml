@@ -1,0 +1,39 @@
+---
+# Test-only values; nothing here is a secret. run.sh generates the passwords
+# and keys of each run (role-vars.json, db-vars.json).
+traefik_dir: /opt/traefik
+# Plain HTTP, HTTPS with Traefik's own certificate and "ui", a second HTTPS
+# entrypoint on another port that stands in for a tailnet entrypoint, all on
+# the test host's loopback. The ACME server does not exist, so Traefik serves
+# its own self-signed certificate, which the tests accept (curl -k).
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+  - name: websecure
+    port: 443
+    bind: [127.0.0.1]
+    tls: true
+    as_default: true
+  - name: ui
+    port: 8443
+    bind: [127.0.0.1]
+    tls: true
+traefik_acme_email: acme@example.test
+traefik_acme_challenge: http
+traefik_acme_ca_server: https://127.0.0.1:9/directory
+# A middleware that denies every client (192.0.2.1 is a documentation
+# address).
+traefik_dynamic_files:
+  deny.yml:
+    http:
+      middlewares:
+        deny:
+          ipAllowList:
+            sourceRange: [192.0.2.1/32]
+
+postal_web_hostname: postal.test
+postal_dns_domain: mail.test
+# The Postal image is linux/amd64 only and runs under emulation on an arm64
+# machine; only the arch refusal switches the check back on.
+postal_skip_arch_check: true

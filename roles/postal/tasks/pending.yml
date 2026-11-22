@@ -1,0 +1,5 @@
+---
+# Placeholder: the settings are checked, installing Postal follows.
+- name: Report the checked settings
+  ansible.builtin.debug:
+    msg: The settings of Postal in {{ postal_dir }} are valid; the role does nothing else yet.

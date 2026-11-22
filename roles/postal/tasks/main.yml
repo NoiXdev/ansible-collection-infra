@@ -1,0 +1,362 @@
+---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
+# The image exists for linux/amd64 only, and emulation on a server is not
+# supported. The tests run it under emulation on other machines and lift the
+# check with postal_skip_arch_check.
+- name: Read the architecture of the host
+  ansible.builtin.command:
+    argv: [uname, -m]
+  register: postal_arch
+  changed_when: false
+  check_mode: false
+  when: not postal_skip_arch_check | bool
+
+- name: Check the architecture of the host
+  ansible.builtin.assert:
+    that: postal_arch.stdout | trim == 'x86_64'
+    fail_msg: >-
+      Postal's image ({{ postal_image }}) exists for linux/amd64 only, and
+      {{ inventory_hostname }} is {{ postal_arch.stdout | default('') | trim }}:
+      the role does not run Postal under emulation on a server. Use an x86_64
+      host. The role changes nothing.
+    quiet: true
+  when: not postal_skip_arch_check | bool
+
+- name: Check that postal_web_hostname is set
+  ansible.builtin.assert:
+    that: postal_web_hostname | default('') | string is match(postal_hostname_pattern)
+    fail_msg: >-
+      postal_web_hostname is required and must be a host name: Postal's web
+      interface and API are reached only through Traefik at that name. The
+      role changes nothing.
+    quiet: true
+
+- name: Check that postal_dns_domain is set
+  ansible.builtin.assert:
+    that: postal_dns_domain | default('') | string is match(postal_hostname_pattern)
+    fail_msg: >-
+      postal_dns_domain is required and must be a domain name: the DNS names
+      Postal tells its users to set (mx., spf., rp., routes. and track. below
+      it) are derived from it. The role changes nothing.
+    quiet: true
+
+- name: Check that postal_db_password is set
+  ansible.builtin.assert:
+    that: postal_db_password | default('') | string | length > 0
+    fail_msg: >-
+      postal_db_password is required: the password of the database user. Keep
+      it in a vault. The role changes nothing.
+    quiet: true
+
+- name: Check postal_version
+  ansible.builtin.assert:
+    that:
+      - postal_version | string is match('^\d+\.\d+\.\d+$')
+      - postal_version | string is version(postal_min_version, '>=')
+    fail_msg: >-
+      postal_version {{ postal_version }} is not a release the role runs: it
+      must look like X.Y.Z (no v, no latest, stable or main) and be
+      {{ postal_min_version }} or newer. The role changes nothing.
+    quiet: true
+
+# The names end up in compose, Traefik rules and the configuration unquoted.
+- name: Check the Postal settings
+  ansible.builtin.assert:
+    that:
+      - postal_image | length > 0
+      - postal_dir is match('^/')
+      - postal_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - postal_data_dir is match('^/')
+      - postal_smtp_hostname | string is match(postal_hostname_pattern)
+      - postal_web_protocol in ['https', 'http']
+      - postal_traefik_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - postal_traefik_address | string is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+      - (postal_traefik_entrypoints + postal_traefik_ui_entrypoints) | reject('match', '^[A-Za-z0-9][A-Za-z0-9_-]*$') | list | length == 0
+      - >-
+        (postal_traefik_middlewares + postal_traefik_ui_middlewares + postal_traefik_track_middlewares)
+        | reject('match', '^[A-Za-z0-9][A-Za-z0-9_.@-]*$') | list | length == 0
+      - postal_traefik_track_cert_resolver is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - postal_traefik_priority | int >= 1
+      - postal_track_hostnames | reject('match', postal_hostname_pattern) | list | length == 0
+      - postal_db_user is match('^[A-Za-z_][A-Za-z0-9_]*$')
+      - postal_db_name is match('^[A-Za-z_][A-Za-z0-9_]*$')
+      - postal_message_db_prefix is match('^[A-Za-z_][A-Za-z0-9_]*$')
+      - postal_max_message_size | int >= 1
+      - postal_worker_replicas | int >= 1
+      - postal_worker_threads | int >= 1
+      - postal_backups_keep | int >= 1
+      - postal_health_timeout | int > 0
+      - postal_rollback_timeout | int > 0
+    fail_msg: >-
+      postal_dir and postal_data_dir must be absolute paths, the basename of
+      postal_dir (the compose project) only lowercase letters, digits, - and
+      _; postal_web_hostname, postal_smtp_hostname, postal_dns_domain and
+      every entry of postal_track_hostnames host names (postal_web_protocol is
+      https or http); postal_traefik_network a network name,
+      postal_traefik_address an IPv4 address, the entrypoint lists
+      entrypoint names, the middleware lists middleware names (name@provider)
+      and postal_traefik_track_cert_resolver a resolver name; postal_db_user,
+      postal_db_name and postal_message_db_prefix plain identifiers (letters,
+      digits and _); postal_image must be set; postal_traefik_priority,
+      postal_max_message_size, postal_worker_replicas,
+      postal_worker_threads, postal_backups_keep, postal_health_timeout and
+      postal_rollback_timeout must be positive. The role changes nothing.
+    quiet: true
+
+# The backup and the rollback bind files below it into one-off containers
+# with docker run --mount, whose source ends at the first comma.
+- name: Check that postal_data_dir has no comma
+  ansible.builtin.assert:
+    that: "',' not in postal_data_dir"
+    fail_msg: >-
+      postal_data_dir {{ postal_data_dir }} holds a comma, which the role
+      cannot pass to Docker as the source of a mount (the backup before an
+      update binds files below it). Use a path without a comma. The role
+      changes nothing.
+    quiet: true
+
+# 0 is no submission service, any other value a port; every port the role
+# binds on the host must differ from the others.
+- name: Check the ports
+  ansible.builtin.assert:
+    that:
+      - postal_smtp_port | int >= 1
+      - postal_smtp_port | int <= 65535
+      - postal_smtp_submission_port | int >= 0
+      - postal_smtp_submission_port | int <= 65535
+      - postal_smtp_submission_port | int != postal_smtp_port | int
+      - postal_mariadb_port | int >= 1
+      - postal_mariadb_port | int <= 65535
+      - postal_db_port | int >= 1
+      - postal_db_port | int <= 65535
+      - postal_rspamd_port | int >= 1
+      - postal_rspamd_port | int <= 65535
+      - postal_clamav_port | int >= 1
+      - postal_clamav_port | int <= 65535
+      - postal_worker_health_port | int >= 1
+      - postal_worker_health_port | int <= 65535
+      - postal_smtp_health_port | int >= 1
+      - postal_smtp_health_port | int <= 65535
+      - postal_submission_health_port | int >= 1
+      - postal_submission_health_port | int <= 65535
+      - postal_host_ports | unique | length == postal_host_ports | length
+    fail_msg: >-
+      postal_smtp_port, postal_mariadb_port, postal_db_port,
+      postal_rspamd_port, postal_clamav_port and the three health ports must
+      be ports (1 to 65535), and postal_smtp_submission_port a port or 0,
+      which switches the submission service off. The ports the role binds on
+      the host (the SMTP and submission ports, the health ports, and the ports
+      of the own MariaDB, rspamd and ClamAV when they run) must all differ,
+      the submission port from postal_smtp_port too. The role changes
+      nothing.
+    quiet: true
+
+- name: Check postal_database
+  ansible.builtin.assert:
+    that: postal_database in ['mariadb', 'mariadb_external']
+    fail_msg: >-
+      postal_database {{ postal_database }} is not one the role runs: it must
+      be mariadb (a MariaDB container of the project) or mariadb_external (a
+      MariaDB 10.6 or newer of your own); Postal does not support MySQL. The
+      role changes nothing.
+    quiet: true
+
+- name: Check that postal_db_host is set
+  ansible.builtin.assert:
+    that: postal_db_host | default('') | string is match('^[A-Za-z0-9][A-Za-z0-9.:-]*$')
+    fail_msg: >-
+      postal_db_host is required with postal_database mariadb_external and
+      must be a host name or address of the MariaDB server. The role changes
+      nothing.
+    quiet: true
+  when: postal_database == 'mariadb_external'
+
+- name: Check postal_smtp_tls
+  ansible.builtin.assert:
+    that:
+      - postal_smtp_tls in ['traefik', 'files', 'off']
+      - postal_smtp_tls != 'files' or postal_smtp_tls_cert | string is match('^/')
+      - postal_smtp_tls != 'files' or postal_smtp_tls_key | string is match('^/')
+      - postal_smtp_tls != 'traefik' or postal_traefik_acme_file | string is match('^/')
+    fail_msg: >-
+      postal_smtp_tls must be traefik, files or off; with files
+      postal_smtp_tls_cert and postal_smtp_tls_key must be absolute paths on
+      the host, with traefik postal_traefik_acme_file must be one. The role
+      changes nothing.
+    quiet: true
+
+- name: Check postal_spam and the spam and virus checks
+  ansible.builtin.assert:
+    that:
+      - postal_spam in ['none', 'rspamd']
+      - postal_clamav is boolean
+      - postal_rspamd_image | length > 0
+      - postal_clamav_image | length > 0
+      - postal_rspamd_password | string is match('^[^\s]*$')
+    fail_msg: >-
+      postal_spam must be none or rspamd, postal_clamav true or false,
+      postal_rspamd_image and postal_clamav_image must be set, and
+      postal_rspamd_password must not hold white space (the value is not
+      shown). The role changes nothing.
+    quiet: true
+
+# The role writes these itself; a copy in postal_config_extra would be
+# overridden or would break the installation. The message names the keys,
+# not their values.
+- name: Check postal_config_extra
+  ansible.builtin.assert:
+    that:
+      - postal_config_extra is mapping
+      - postal_config_extra_scalar | length == 0
+      - postal_config_extra_owned | length == 0
+    fail_msg: >-
+      postal_config_extra must be a mapping of Postal's configuration
+      sections, each a mapping of its own, and the role owns
+      {{ postal_config_owned_sections | join(', ') }}, the sections
+      {{ postal_config_owned_whole_sections | join(', ') }} (every key),
+      postal.web_hostname, postal.smtp_hostname, postal.signing_key_path,
+      postal.trusted_proxies, smtp_server.default_port,
+      smtp_server.default_bind_address, smtp_server.tls_* and every
+      default_health_server_* key. It holds
+      {{ (postal_config_extra_scalar + postal_config_extra_owned) | join(', ') }}.
+      Use the role's variables instead (postal_web_hostname,
+      postal_smtp_hostname, postal_signing_key, postal_database,
+      postal_db_*, postal_smtp_port, postal_smtp_tls, the health ports).
+      The role changes nothing.
+    quiet: true
+
+# The admin is created only with both of its e-mail address and password.
+- name: Check the first admin
+  ansible.builtin.assert:
+    that:
+      - postal_admin_email | string is match('^([^@\s]+@[^@\s]+)?$')
+      - postal_admin_email | string | length == 0 or postal_admin_password | string | length > 0
+      - postal_admin_password | string | length == 0 or postal_admin_email | string | length > 0
+    fail_msg: >-
+      postal_admin_email must be an e-mail address and is required with
+      postal_admin_password, and the other way round (the first admin of an
+      install; the values are not shown). The role changes nothing.
+    quiet: true
+
+- name: Check postal_dns
+  ansible.builtin.assert:
+    that:
+      - postal_dns is mapping
+      - >-
+        postal_dns.keys() | difference(['mx_records', 'spf_include', 'return_path_domain', 'route_domain',
+        'track_domain', 'helo_hostname', 'dkim_identifier', 'dkim_key_size', 'custom_return_path_prefix']) | length == 0
+      - postal_dns_settings.mx_records is sequence
+      - postal_dns_settings.mx_records is not string
+      - postal_dns_settings.mx_records | reject('match', postal_hostname_pattern) | list | length == 0
+      - postal_dns_settings.spf_include | string is match(postal_hostname_pattern)
+      - postal_dns_settings.return_path_domain | string is match(postal_hostname_pattern)
+      - postal_dns_settings.route_domain | string is match(postal_hostname_pattern)
+      - postal_dns_settings.track_domain | string is match(postal_hostname_pattern)
+      - postal_dns_settings.helo_hostname | string is match(postal_hostname_pattern)
+      - postal_dns_settings.dkim_identifier | string is match('^[A-Za-z0-9][A-Za-z0-9_-]*$')
+      - postal_dns_settings.dkim_key_size | int in [1024, 2048, 3072, 4096]
+      - postal_dns_settings.custom_return_path_prefix | string is match('^[A-Za-z0-9][A-Za-z0-9-]*$')
+    fail_msg: >-
+      postal_dns takes mx_records (a list of host names), spf_include,
+      return_path_domain, route_domain, track_domain and helo_hostname (host
+      names), dkim_identifier and custom_return_path_prefix (letters, digits
+      and -), and dkim_key_size (1024, 2048, 3072 or 4096). The role changes
+      nothing.
+    quiet: true
+
+- name: Check postal_smtp_relays and postal_allowed_request_destinations
+  ansible.builtin.assert:
+    that:
+      - postal_smtp_relays | reject('match', '^smtp://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?(\?ssl_mode=[A-Za-z]+)?$') | list | length == 0
+      - postal_allowed_request_destinations | reject('match', '^[A-Za-z0-9][A-Za-z0-9.:/-]*$') | list | length == 0
+    fail_msg: >-
+      postal_smtp_relays entries must look like smtp://host:port, optionally
+      followed by ?ssl_mode=<mode>, and postal_allowed_request_destinations
+      entries must be host names or addresses (CIDR ranges allowed). The role
+      changes nothing.
+    quiet: true
+
+- name: Check postal_settings
+  ansible.builtin.assert:
+    that:
+      - postal_settings is mapping
+      - postal_settings.keys() | difference(postal_settings_keys) | length == 0
+      - postal_settings.values() | select('mapping') | list | length == 0
+      - postal_settings.values() | reject('string') | select('iterable') | list | length == 0
+    fail_msg: >-
+      postal_settings takes these keys of Postal's postal section, with plain
+      values: {{ postal_settings_keys | join(', ') }}. The others are set
+      through the role's own variables (postal_web_hostname,
+      postal_smtp_hostname, postal_web_protocol, postal_use_ip_pools,
+      postal_smtp_relays, postal_allowed_request_destinations) or are the
+      role's (signing_key_path, trusted_proxies). The role changes nothing.
+    quiet: true
+
+# The message quotes nothing of the values: postal_mail holds a password.
+- name: Check postal_mail
+  ansible.builtin.assert:
+    that:
+      - postal_mail is mapping
+      - postal_mail.keys() | difference(['host', 'port', 'username', 'password', 'from_name', 'from_address']) | length == 0
+      - postal_mail_settings.host | string is match('^[A-Za-z0-9.:-]*$')
+      - postal_mail_settings.port | int >= 1
+      - postal_mail_settings.port | int <= 65535
+      - postal_mail_settings.from_address | string is match('^[^@\s]+@[^@\s]+$')
+      - postal_mail_settings.username | string | length == 0 or postal_mail_settings.password | string | length > 0
+    fail_msg: >-
+      postal_mail takes host (empty sends no mail), port, username, password,
+      from_name and from_address; host must be a host name, port a port,
+      from_address an e-mail address and password is required when username
+      is set. The values are not shown. The role changes nothing.
+    quiet: true
+
+- name: Check postal_oidc
+  ansible.builtin.assert:
+    that:
+      - postal_oidc is mapping
+      - postal_oidc.keys() | difference(postal_oidc_keys) | length == 0
+      - >-
+        not postal_oidc.enabled | default(false) | bool
+        or (postal_oidc.issuer | default('') | string | length > 0
+        and postal_oidc.identifier | default('') | string | length > 0
+        and postal_oidc.secret | default('') | string | length > 0)
+    fail_msg: >-
+      postal_oidc takes {{ postal_oidc_keys | join(', ') }}; with enabled it
+      needs issuer, identifier and secret. The values are not shown. The role
+      changes nothing.
+    quiet: true
+
+- name: Check postal_gelf
+  ansible.builtin.assert:
+    that:
+      - postal_gelf is mapping
+      - postal_gelf.keys() | difference(['host', 'port', 'facility']) | length == 0
+      - postal_gelf | length == 0 or postal_gelf.host | default('') | string is match('^[A-Za-z0-9][A-Za-z0-9.:-]*$')
+      - postal_gelf.port | default(12201) | int >= 1
+      - postal_gelf.port | default(12201) | int <= 65535
+    fail_msg: >-
+      postal_gelf takes host (required when it is not empty), port and
+      facility. The role changes nothing.
+    quiet: true
+
+- name: Check postal_mariadb_settings
+  ansible.builtin.assert:
+    that:
+      - postal_mariadb_settings is mapping
+      - postal_mariadb_settings.keys() | reject('match', '^[a-z][a-z0-9_-]*$') | list | length == 0
+      - postal_mariadb_settings.values() | select('mapping') | list | length == 0
+      - postal_mariadb_settings.values() | reject('string') | select('iterable') | list | length == 0
+    fail_msg: >-
+      postal_mariadb_settings keys must be MariaDB server option names
+      (lowercase letters, digits, _ and -) with plain values. The role changes
+      nothing.
+    quiet: true
+
+# Task 2 installs, updates and reconfigures Postal from here on.
+- name: Install and run Postal
+  ansible.builtin.include_tasks: pending.yml

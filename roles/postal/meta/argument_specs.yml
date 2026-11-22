@@ -1,0 +1,301 @@
+---
+argument_specs:
+  main:
+    short_description: Postal in Docker Compose, behind Traefik
+    # The required settings are not required here: the role's own checks
+    # name them when they are missing.
+    options:
+      postal_version:
+        type: str
+        description: >-
+          Postal image tag (X.Y.Z, no v, no latest, stable or main); 3.0.0 or
+          newer.
+      postal_image:
+        type: str
+        description: Postal image without its tag (linux/amd64 only).
+      postal_dir:
+        type: path
+        description: >-
+          Directory of the compose project (compose.yaml, the config,
+          markers). Its basename is the compose project name.
+      postal_data_dir:
+        type: path
+        description: >-
+          Directory of the data (the own MariaDB, ClamAV and rspamd state, the
+          backups); can be a mountpoint of its own.
+      postal_data_dir_mountpoint:
+        type: bool
+        description: Fail every run unless postal_data_dir is a mountpoint.
+      postal_web_hostname:
+        type: str
+        description: >-
+          Host name of the web interface and the API, which Traefik routes
+          (required).
+      postal_smtp_hostname:
+        type: str
+        description: >-
+          Host name of the SMTP service and its certificate (default
+          postal_web_hostname).
+      postal_web_protocol:
+        type: str
+        choices: [https, http]
+        description: Protocol of the web interface as the users reach it.
+      postal_dns_domain:
+        type: str
+        description: >-
+          Domain the DNS names of Postal's records are derived from
+          (required): mx., spf., rp., routes. and track. below it.
+      postal_dns:
+        type: dict
+        description: >-
+          Overrides of the derived DNS settings: mx_records (a list),
+          spf_include, return_path_domain, route_domain, track_domain,
+          helo_hostname, dkim_identifier, dkim_key_size (1024, 2048, 3072 or 4096)
+          and custom_return_path_prefix.
+      postal_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      postal_traefik_address:
+        type: str
+        description: >-
+          Traefik's fixed address on that network, the proxy whose
+          X-Forwarded-For Postal trusts (the traefik role's traefik_address).
+      postal_traefik_entrypoints:
+        type: list
+        elements: str
+        description: >-
+          Traefik entrypoints of the API router and the tracking router; empty
+          uses Traefik's default ones.
+      postal_traefik_middlewares:
+        type: list
+        elements: str
+        description: Traefik middlewares (name@provider) of the API router.
+      postal_traefik_ui_entrypoints:
+        type: list
+        elements: str
+        description: >-
+          Traefik entrypoints of the web interface router (default
+          postal_traefik_entrypoints); on any other entrypoint the interface's
+          paths have no router.
+      postal_traefik_ui_middlewares:
+        type: list
+        elements: str
+        description: Traefik middlewares (name@provider) of the web interface router.
+      postal_traefik_track_middlewares:
+        type: list
+        elements: str
+        description: >-
+          Traefik middlewares (name@provider) of the tracking router, which
+          already sets X-Postal-Track-Host.
+      postal_traefik_track_cert_resolver:
+        type: str
+        description: >-
+          Certificate resolver of the tracking router (HTTP-01: customer
+          domains are outside your DNS zone).
+      postal_traefik_priority:
+        type: int
+        description: Priority of the routers; keep it above catch-all routers.
+      postal_track_hostnames:
+        type: list
+        elements: str
+        description: >-
+          More host names the tracking router serves, besides the track domain
+          and the verified customer tracking domains.
+      postal_database:
+        type: str
+        choices: [mariadb, mariadb_external]
+        description: >-
+          mariadb (a container of the project) or mariadb_external (a MariaDB
+          10.6 or newer of your own).
+      postal_mariadb_image:
+        type: str
+        description: MariaDB image of the own database.
+      postal_mariadb_port:
+        type: int
+        description: Port the own MariaDB publishes on 127.0.0.1.
+      postal_mariadb_settings:
+        type: dict
+        description: More settings of the own MariaDB server.
+      postal_db_host:
+        type: str
+        description: >-
+          Host name or address of the external MariaDB (required with
+          mariadb_external).
+      postal_db_port:
+        type: int
+        description: Port of the external MariaDB.
+      postal_db_user:
+        type: str
+        description: >-
+          Database user, with all privileges on the main database and the
+          message databases.
+      postal_db_password:
+        type: str
+        description: Password of the database user (required; keep it in a vault).
+      postal_db_name:
+        type: str
+        description: The main database.
+      postal_message_db_prefix:
+        type: str
+        description: Prefix of the message databases (<prefix>-<id>).
+      postal_signing_key:
+        type: str
+        description: >-
+          The signing key (RSA PEM); empty generates one on a fresh install, a
+          takeover needs it. Keep it in a vault.
+      postal_rails_secret_key:
+        type: str
+        description: >-
+          Rails' secret key; empty generates one on a fresh install, a
+          takeover needs it. Keep it in a vault.
+      postal_smtp_port:
+        type: int
+        description: Port of the receiving SMTP service on the host.
+      postal_smtp_submission_port:
+        type: int
+        description: >-
+          Port of the submission service; 0 switches it off. Not the same as
+          postal_smtp_port.
+      postal_smtp_tls:
+        type: str
+        choices: [traefik, files, "off"]
+        description: >-
+          STARTTLS: traefik (the certificate Traefik obtained), files
+          (postal_smtp_tls_cert and _key on the host) or off.
+      postal_traefik_acme_file:
+        type: path
+        description: >-
+          Traefik's acme.json, where the certificate for postal_smtp_hostname
+          is read.
+      postal_smtp_tls_cert:
+        type: path
+        description: Certificate (PEM) on the host, with postal_smtp_tls files.
+      postal_smtp_tls_key:
+        type: path
+        description: Its key (PEM) on the host, with postal_smtp_tls files.
+      postal_max_message_size:
+        type: int
+        description: Largest message in MB.
+      postal_smtp_proxy_protocol:
+        type: bool
+        description: Expect PROXY protocol v1 on the SMTP services.
+      postal_smtp_log_connections:
+        type: bool
+        description: Log every SMTP connection.
+      postal_use_ip_pools:
+        type: bool
+        description: Use IP pools (the addresses must exist on the host).
+      postal_smtp_relays:
+        type: list
+        elements: str
+        description: >-
+          Relays for outgoing mail, as smtp://host:port with an optional
+          ?ssl_mode=.
+      postal_allowed_request_destinations:
+        type: list
+        elements: str
+        description: >-
+          Destinations that HTTP endpoints, routes and webhooks may reach
+          although they are private.
+      postal_settings:
+        type: dict
+        description: The remaining postal.* keys of Postal's configuration, by name.
+      postal_mail:
+        type: dict
+        description: >-
+          Postal's own mail: host (empty sends none), port, username,
+          password, from_name and from_address.
+      postal_oidc:
+        type: dict
+        description: Single sign-on (Postal's oidc section); empty switches it off.
+      postal_gelf:
+        type: dict
+        description: >-
+          Log shipping to Graylog: host, port and facility; empty switches it
+          off.
+      postal_logging_level:
+        type: str
+        choices: [debug, info, warn, error, fatal]
+        description: Postal's logging level.
+      postal_config_extra:
+        type: dict
+        description: >-
+          Sections of Postal's configuration that no variable covers, merged
+          last; the sections and keys the role owns are refused.
+      postal_spam:
+        type: str
+        choices: [none, rspamd]
+        description: none, or rspamd (a container of the project).
+      postal_rspamd_image:
+        type: str
+        description: rspamd image.
+      postal_rspamd_port:
+        type: int
+        description: Port rspamd publishes on 127.0.0.1.
+      postal_rspamd_password:
+        type: str
+        description: rspamd's controller password; empty sets none.
+      postal_clamav:
+        type: bool
+        description: >-
+          Run ClamAV (a container of the project; about 1.5 GB of RAM more).
+      postal_clamav_image:
+        type: str
+        description: ClamAV image.
+      postal_clamav_port:
+        type: int
+        description: Port ClamAV publishes on 127.0.0.1.
+      postal_worker_replicas:
+        type: int
+        description: Replicas of the worker.
+      postal_worker_threads:
+        type: int
+        description: Threads of each worker.
+      postal_worker_health_port:
+        type: int
+        description: Loopback port of the worker's health server.
+      postal_smtp_health_port:
+        type: int
+        description: Loopback port of the SMTP service's health server.
+      postal_submission_health_port:
+        type: int
+        description: Loopback port of the submission service's health server.
+      postal_admin_email:
+        type: str
+        description: >-
+          E-mail address of the first admin, created once on an install when
+          Postal has no user; needs postal_admin_password.
+      postal_admin_password:
+        type: str
+        description: Password of the first admin.
+      postal_admin_first_name:
+        type: str
+        description: First name of the first admin.
+      postal_admin_last_name:
+        type: str
+        description: Last name of the first admin.
+      postal_import_dump:
+        type: path
+        description: >-
+          Host path of a mariadb-dump of the postal and postal-* databases,
+          loaded once on an install into an empty own MariaDB.
+      postal_backups_keep:
+        type: int
+        description: Backups before updates that are kept.
+      postal_health_timeout:
+        type: int
+        description: Seconds to wait until Postal is healthy.
+      postal_rollback_timeout:
+        type: int
+        description: >-
+          Seconds a rollback waits for the previous version (default
+          postal_health_timeout).
+      postal_restore_interrupted:
+        type: bool
+        description: >-
+          For one run: restore the backup of an update that did not finish.
+      postal_skip_arch_check:
+        type: bool
+        description: >-
+          Tests only: run on a host that is not x86_64, where the image runs
+          under emulation.

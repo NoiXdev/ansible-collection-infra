@@ -1,0 +1,160 @@
+---
+# Postal release (tag of ghcr.io/postalserver/postal, X.Y.Z without a v);
+# 3.0.0 or newer. No latest, stable or main. The image exists for
+# linux/amd64 only, so the role refuses any other architecture.
+postal_version: 3.5.0
+postal_image: ghcr.io/postalserver/postal
+
+# Directory of the compose project (compose.yaml, the config, markers). Its
+# basename is the compose project name.
+postal_dir: /opt/postal
+# The data: the MariaDB data (own database), ClamAV's signatures, rspamd's
+# state and the backups, one subdirectory each. It can be a mountpoint of its
+# own (a block volume).
+postal_data_dir: "{{ postal_dir }}/data"
+postal_data_dir_mountpoint: false
+
+# Required, without a default:
+#   postal_web_hostname   host name of the web interface and the API
+#   postal_dns_domain     the domain the records below are derived from
+#   postal_db_password    password of the database user; keep it in a vault
+postal_web_hostname: ""
+postal_smtp_hostname: "{{ postal_web_hostname }}"
+postal_web_protocol: https
+postal_dns_domain: ""
+# The DNS names Postal tells its users to set. Anything left out is derived
+# from postal_dns_domain (mx.<d>, spf.<d>, rp.<d>, routes.<d>, track.<d>) and
+# postal_smtp_hostname; the role never changes DNS. Keys: mx_records (a
+# list), spf_include, return_path_domain, route_domain, track_domain,
+# helo_hostname, dkim_identifier, dkim_key_size (1024, 2048, 3072 or 4096) and
+# custom_return_path_prefix.
+postal_dns: {}
+
+# Traefik: the external network, its fixed address (the proxy Postal trusts
+# for X-Forwarded-For) and the entrypoints of the routers. Three routers on
+# postal_web_hostname, at postal_traefik_priority:
+#   <project>-api    /api/ and the JWKS, on postal_traefik_entrypoints with
+#                    postal_traefik_middlewares
+#   <project>-ui     everything else, on postal_traefik_ui_entrypoints with
+#                    postal_traefik_ui_middlewares
+#   <project>-track  the tracking domains, on postal_traefik_entrypoints with
+#                    postal_traefik_track_middlewares
+postal_traefik_network: proxy
+postal_traefik_address: 172.31.255.254
+postal_traefik_entrypoints: []
+postal_traefik_middlewares: []
+postal_traefik_ui_entrypoints: "{{ postal_traefik_entrypoints }}"
+postal_traefik_ui_middlewares: []
+postal_traefik_track_middlewares: []
+# The certificate resolver of the tracking router: customer tracking domains
+# are outside your DNS zone, so they need HTTP-01.
+postal_traefik_track_cert_resolver: http
+postal_traefik_priority: 100
+# More host names the tracking router serves (customer tracking domains that
+# Postal has verified are added on every run).
+postal_track_hostnames: []
+
+# Where the databases live:
+#   mariadb           a MariaDB container of the project
+#   mariadb_external  a MariaDB 10.6 or newer of your own (postal_db_host),
+#                     reachable from the host and from the Traefik network
+# MySQL is not supported by Postal. The role does not move an installation
+# from one to another.
+postal_database: mariadb
+# The own MariaDB publishes on 127.0.0.1 at this port (3306 stays free for a
+# MariaDB of the host); postal_mariadb_settings adds server settings.
+postal_mariadb_image: docker.io/library/mariadb:11.8
+postal_mariadb_port: 3307
+postal_mariadb_settings: {}
+postal_db_host: ""
+postal_db_port: 3306
+postal_db_user: postal
+postal_db_password: ""
+# The main database, and the prefix of the message databases (one per mail
+# server, <prefix>-<id>): set them for an installation that used others.
+postal_db_name: postal
+postal_message_db_prefix: postal
+
+# The signing key (an RSA PEM: DKIM of the return-path domain, webhook
+# signatures) and Rails' secret key. Empty: generated once on a fresh install
+# and never rewritten; copy them into a vault. A takeover needs both.
+postal_signing_key: ""
+postal_rails_secret_key: ""
+
+# SMTP: the port of the receiving server and of the submission service (0
+# switches it off); a second service of the same image.
+postal_smtp_port: 25
+postal_smtp_submission_port: 587
+# STARTTLS: traefik (the certificate Traefik obtained for
+# postal_smtp_hostname, read from postal_traefik_acme_file), files (the
+# paths below, on the host) or off.
+postal_smtp_tls: traefik
+postal_traefik_acme_file: /opt/traefik/acme/acme.json
+postal_smtp_tls_cert: ""
+postal_smtp_tls_key: ""
+# In MB.
+postal_max_message_size: 14
+postal_smtp_proxy_protocol: false
+postal_smtp_log_connections: false
+postal_use_ip_pools: false
+# Relays for outgoing mail: smtp://host:port, optionally with ?ssl_mode=.
+postal_smtp_relays: []
+postal_allowed_request_destinations: []
+# The remaining postal.* keys of Postal's configuration, by name.
+postal_settings: {}
+
+# Postal's own mail (password resets, notifications); no host sends none.
+# Keys, each left out for its default: host (""), port (25), username (""),
+# password (""), from_name (Postal) and from_address (postal@<postal_dns_domain>).
+postal_mail: {}
+# Single sign-on (Postal's oidc section) and log shipping (host, port,
+# facility); empty switches each off.
+postal_oidc: {}
+postal_gelf: {}
+postal_logging_level: info
+# Configuration of Postal that no variable covers, merged over everything the
+# role writes; the keys the role owns are refused.
+postal_config_extra: {}
+
+# Spam and virus checks, each a container of the project on 127.0.0.1:
+#   postal_spam: none or rspamd (its controller password: postal_rspamd_password)
+#   postal_clamav: ClamAV, which needs about 1.5 GB of RAM more
+# Pinned to the newest releases at the time of writing (rspamd 4.3.0 of
+# 2026-11-13; ClamAV 1.5.5 of 2026-11-19, the Debian variant, which has
+# arm64 images too).
+postal_spam: none
+postal_rspamd_image: docker.io/rspamd/rspamd:4.3.0
+postal_rspamd_port: 11334
+postal_rspamd_password: ""
+postal_clamav: false
+postal_clamav_image: docker.io/clamav/clamav:1.5.5-debian
+postal_clamav_port: 3310
+
+# Processes: the worker's replicas and threads, and the loopback ports of the
+# health servers of the worker, the SMTP service and the submission service.
+postal_worker_replicas: 1
+postal_worker_threads: 2
+postal_worker_health_port: 9090
+postal_smtp_health_port: 9091
+postal_submission_health_port: 9092
+
+# The first admin, created once on an install when Postal has no user yet and
+# never changed afterwards; the password is required with the e-mail address.
+postal_admin_email: ""
+postal_admin_password: ""
+postal_admin_first_name: ""
+postal_admin_last_name: ""
+# A host path of a mariadb-dump of the postal and postal-* databases, loaded
+# once on an install into an empty server of the own MariaDB.
+postal_import_dump: ""
+
+# Backups before updates that are kept, and the seconds a run waits for
+# Postal to be healthy and a rollback for the previous version.
+postal_backups_keep: 3
+postal_health_timeout: 300
+postal_rollback_timeout: "{{ postal_health_timeout }}"
+# For one run: restore the backup of an update that did not finish.
+postal_restore_interrupted: false
+# Tests only: runs on a host that is not x86_64 (the image then runs under
+# emulation, which is not supported on a server).
+postal_skip_arch_check: false

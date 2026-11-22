@@ -1,0 +1,133 @@
+---
+# The compose project name: compose's default for the directory.
+postal_project: "{{ postal_dir | basename }}"
+# Mode 0644: it holds no secret, which reach the containers as files of
+# postal_config_dir.
+postal_compose_file: "{{ postal_dir }}/compose.yaml"
+# Mode 0750 root:999 (Postal's uid). Mode 0440 root:999 files: postal.yml
+# (every secret of the installation), signing.key, and with the certificate
+# of SMTP TLS smtp.cert and smtp.key.
+postal_config_dir: "{{ postal_dir }}/config"
+# The database the installation was made with (mariadb, or the external
+# server), so that another one is refused.
+postal_target_file: "{{ postal_dir }}/database-target"
+
+# Written before an install creates anything and removed once Postal is
+# healthy; while it exists every run refuses.
+postal_install_marker: "{{ postal_dir }}/install-incomplete"
+# Written before the first change of an update and removed once it is healthy
+# or rolled back; a run that stopped in between leaves it, with a copy of the
+# compose file and of the config directory it replaces, for the next run.
+postal_update_marker: "{{ postal_dir }}/update-in-progress"
+postal_update_marker_compose: "{{ postal_dir }}/update-in-progress.compose.yaml"
+postal_update_marker_config: "{{ postal_dir }}/update-in-progress.config"
+# Written after a failed update; that version is not tried again while it
+# exists.
+postal_marker_file: "{{ postal_dir }}/update-failed"
+
+postal_backup_dir: "{{ postal_data_dir }}/backups"
+# The subdirectories of postal_data_dir whose absence means the data is
+# missing (an unmounted volume): only install creates them.
+postal_data_subdirs: >-
+  {{ (['mariadb'] if postal_database == 'mariadb' else [])
+     + (['rspamd'] if postal_spam == 'rspamd' else [])
+     + (['clamav'] if postal_clamav | bool else []) }}
+
+# The oldest release the role runs.
+postal_min_version: 3.0.0
+
+# postal_dns with the defaults of its keys that it leaves out.
+postal_dns_settings: >-
+  {{ {'mx_records': ['mx.' ~ postal_dns_domain],
+      'spf_include': 'spf.' ~ postal_dns_domain,
+      'return_path_domain': 'rp.' ~ postal_dns_domain,
+      'route_domain': 'routes.' ~ postal_dns_domain,
+      'track_domain': 'track.' ~ postal_dns_domain,
+      'helo_hostname': postal_smtp_hostname,
+      'dkim_identifier': 'postal',
+      'dkim_key_size': 2048,
+      'custom_return_path_prefix': 'psrp'}
+     | combine(postal_dns if postal_dns is mapping else {}) }}
+# postal_mail with the defaults of its keys that it leaves out.
+postal_mail_settings: >-
+  {{ {'host': '', 'port': 25, 'username': '', 'password': '', 'from_name': 'Postal',
+      'from_address': 'postal@' ~ postal_dns_domain}
+     | combine(postal_mail if postal_mail is mapping else {}) }}
+
+# The keys of Postal's postal section that postal_settings sets (the others
+# have a variable of their own or belong to the role), and the keys of its
+# oidc section that postal_oidc takes.
+postal_settings_keys:
+  - default_maximum_delivery_attempts
+  - default_maximum_hold_expiry_days
+  - default_suppression_list_automatic_removal_days
+  - default_spam_threshold
+  - default_spam_failure_threshold
+  - use_local_ns_for_domain_verification
+  - use_resent_sender_header
+  - queued_message_lock_stale_days
+  - batch_queued_messages
+postal_oidc_keys:
+  - enabled
+  - local_authentication_enabled
+  - name
+  - issuer
+  - identifier
+  - secret
+  - scopes
+  - uid_field
+  - email_address_field
+  - name_field
+  - discovery
+  - authorization_endpoint
+  - token_endpoint
+  - userinfo_endpoint
+  - jwks_uri
+
+# A host name, as it ends up in Traefik rules and the configuration.
+postal_hostname_pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+
+# The ports the role binds on the host, for the check that none is used
+# twice.
+postal_host_ports: >-
+  {{ ([postal_smtp_port, postal_worker_health_port, postal_smtp_health_port]
+      + ([postal_smtp_submission_port, postal_submission_health_port] if postal_smtp_submission_port | int != 0 else [])
+      + ([postal_mariadb_port] if postal_database == 'mariadb' else [])
+      + ([postal_rspamd_port] if postal_spam == 'rspamd' else [])
+      + ([postal_clamav_port] if postal_clamav | bool else []))
+     | map('int') | list }}
+
+# The sections and keys of Postal's configuration the role owns, which
+# postal_config_extra must not set: whole sections, single keys of a section,
+# a key prefix of a section, and a prefix of a key in any section.
+postal_config_owned_sections: [main_db, message_db, rails]
+postal_config_owned_section_keys:
+  postal: [web_hostname, smtp_hostname, signing_key_path, trusted_proxies]
+  smtp_server: [default_port, default_bind_address]
+postal_config_owned_whole_sections: [web_server]
+postal_config_owned_key_prefixes:
+  smtp_server: tls_
+postal_config_owned_any_prefix: default_health_server_
+# The owned sections and keys postal_config_extra sets, as section or
+# section.key.
+postal_config_extra_owned: >-
+  {%- set ns = namespace(found=[]) -%}
+  {%- for section, body in (postal_config_extra if postal_config_extra is mapping else {}).items() -%}
+  {%- if section in postal_config_owned_sections -%}
+  {%- set ns.found = ns.found + [section] -%}
+  {%- elif body is mapping -%}
+  {%- for key in body -%}
+  {%- if section in postal_config_owned_whole_sections
+        or key in postal_config_owned_section_keys.get(section, [])
+        or (section in postal_config_owned_key_prefixes and key | string is match(postal_config_owned_key_prefixes[section]))
+        or key | string is match(postal_config_owned_any_prefix) -%}
+  {%- set ns.found = ns.found + [section ~ '.' ~ key] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.found | sort }}
+# Every section of postal_config_extra that is not a mapping.
+postal_config_extra_scalar: >-
+  {{ (postal_config_extra if postal_config_extra is mapping else {}).items()
+     | rejectattr('1', 'mapping') | map(attribute='0') | sort | list }}
