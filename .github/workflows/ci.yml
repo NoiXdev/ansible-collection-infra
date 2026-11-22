@@ -51,8 +51,9 @@ jobs:
       - run: tests/attest/selftest.sh
 
   release-tool:
-    # The unit tests of the release tool that release.yml calls.
+    # Unit tests: the release tool that release.yml calls, and the waf plugin checker.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - run: python3 -I -m unittest discover -s .github/release -p test_release.py
+      - run: python3 -I -m unittest discover -s tests/waf -p 'test_*.py'
