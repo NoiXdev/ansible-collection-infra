@@ -108,6 +108,93 @@
     fail_msg: "waf: waf_sites must be a list of at most {{ waf_sites_max }} sites, each a mapping"
     quiet: true
 
+- name: Check that waf_plugins is a list of plugins
+  ansible.builtin.assert:
+    that:
+      - waf_plugins is sequence and waf_plugins is not string and waf_plugins is not mapping
+      - waf_plugins | reject('mapping') | list | length == 0
+    fail_msg: "waf: waf_plugins must be a list of plugins"
+    quiet: true
+
+# The plugins' shape. Their files are checked later, once every setting is
+# known to be sound. waf_plugin_entry names the entry as the messages do.
+- name: Check the plugins
+  vars:
+    waf_plugin_entry: "{{ item.name if item.name is defined and item.name is string and item.name | length > 0 else '#' ~ (waf_plugin_index + 1) }}"
+  block:
+    - name: Check the plugin keys
+      ansible.builtin.assert:
+        that: waf_unknown | length == 0
+        fail_msg: "waf: waf_plugins entry {{ waf_plugin_entry }} has unknown keys: {{ waf_unknown | join(', ') }}"
+        quiet: true
+      vars:
+        waf_unknown: "{{ item.keys() | difference(waf_plugin_keys) | sort }}"
+      loop: "{{ waf_plugins }}"
+      loop_control:
+        index_var: waf_plugin_index
+        label: "{{ waf_plugin_entry }}"
+
+    - name: Check the plugin names
+      ansible.builtin.assert:
+        that:
+          - item.name is defined and item.name is string
+          - item.name is match(waf_plugin_name_re) and item.name | length <= 64
+          - item.name != 'empty'
+        fail_msg: >-
+          waf: waf_plugins has an entry with name "{{ item.name | default('') }}"; use lower-case
+          letters, digits and -, at most 64 characters, not empty
+        quiet: true
+      loop: "{{ waf_plugins }}"
+      loop_control:
+        index_var: waf_plugin_index
+        label: "{{ waf_plugin_entry }}"
+
+    - name: Check that every plugin name is used once
+      ansible.builtin.assert:
+        that: waf_plugins | map(attribute='name') | select('eq', item.name) | list | length == 1
+        fail_msg: "waf: waf_plugins has more than one entry named {{ item.name }}"
+        quiet: true
+      loop: "{{ waf_plugins }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Exactly one source: an archive with its checksum, or a directory.
+    - name: Check the plugin sources
+      ansible.builtin.assert:
+        that:
+          - (item.url is defined) != (item.src is defined)
+          - (item.sha256 is defined) == (item.url is defined)
+          - item.src | default('') is string
+        fail_msg: "waf: waf_plugins entry {{ item.name }} needs exactly one of url (with sha256) and src"
+        quiet: true
+      loop: "{{ waf_plugins }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the plugin URLs
+      ansible.builtin.assert:
+        that: item.url is string and item.url is match(waf_plugin_url_re)
+        fail_msg: >-
+          waf: waf_plugins entry {{ item.name }} has url {{ item.url }}; use an https:// URL of a
+          .tar.gz or .tgz archive
+        quiet: true
+      loop: "{{ waf_plugins }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.url is defined
+
+    - name: Check the plugin checksums
+      ansible.builtin.assert:
+        that: item.sha256 is string and item.sha256 is match(waf_plugin_sha256_re)
+        fail_msg: >-
+          waf: waf_plugins entry {{ item.name }} has sha256 {{ item.sha256 }}; use 64 lower-case
+          hex digits
+        quiet: true
+      loop: "{{ waf_plugins }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.sha256 is defined
+
 - name: Check the sites
   vars:
     waf_entry: "{{ item.name if item.name is defined and item.name is string and item.name | length > 0 else '#' ~ (item.index + 1) }}"
@@ -574,6 +661,79 @@
       loop_control:
         label: "{{ item.1.name }}"
       when: waf_mode == 'traefik'
+
+    # The plugin checks of the sites, each relying on the ones before it.
+    - name: Check the plugin lists of the sites
+      ansible.builtin.assert:
+        that:
+          - item.plugins is sequence and item.plugins is not string and item.plugins is not mapping
+          - item.plugins | reject('string') | list | length == 0
+          - item.plugin_settings is mapping
+          - item.plugin_settings.values() | reject('mapping') | list | length == 0
+        fail_msg: >-
+          waf: site {{ item.name }} needs plugins, a list of plugin names, and plugin_settings, a
+          mapping of a plugin name to a mapping of its settings
+        quiet: true
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check that the plugins of a site exist
+      ansible.builtin.assert:
+        that: item.1 in waf_plugins | map(attribute='name') | list
+        fail_msg: "waf: site {{ item.0.name }} lists plugin {{ item.1 }}, which waf_plugins does not have"
+        quiet: true
+      loop: "{{ waf_sites_public | subelements('plugins') }}"
+      loop_control:
+        label: "{{ item.0.name }} {{ item.1 }}"
+
+    - name: Check that a site lists a plugin once
+      ansible.builtin.assert:
+        that: item.0.plugins | select('eq', item.1) | list | length == 1
+        fail_msg: "waf: site {{ item.0.name }} lists plugin {{ item.1 }} more than once"
+        quiet: true
+      loop: "{{ waf_sites_public | subelements('plugins') }}"
+      loop_control:
+        label: "{{ item.0.name }} {{ item.1 }}"
+
+    - name: Check that the plugin settings belong to listed plugins
+      ansible.builtin.assert:
+        that: waf_bad | length == 0
+        fail_msg: >-
+          waf: site {{ item.name }} has plugin_settings for {{ waf_bad | join(', ') }}, which it
+          does not list in plugins
+        quiet: true
+      vars:
+        waf_bad: "{{ item.plugin_settings.keys() | map('string') | difference(item.plugins) | sort }}"
+      loop: "{{ waf_sites_public }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the names of the plugin settings
+      ansible.builtin.assert:
+        that:
+          - item.setting | string is match(waf_plugin_setting_re)
+          - item.setting != 'enabled'
+        fail_msg: >-
+          waf: site {{ item.site }} has plugin_settings {{ item.plugin }}.{{ item.setting }}; a setting
+          is lower-case letters, digits and _, not enabled (that is plugins)
+        quiet: true
+      loop: "{{ waf_plugin_setting_list }}"
+      loop_control:
+        label: "{{ item.site }} {{ item.plugin }}.{{ item.setting }}"
+
+    - name: Check the values of the plugin settings
+      ansible.builtin.assert:
+        that: >-
+          (item.value is integer and item.value is not boolean)
+          or (item.value is string and item.value is match(waf_plugin_value_re))
+        fail_msg: >-
+          waf: site {{ item.site }} has plugin_settings {{ item.plugin }}.{{ item.setting }} with a
+          value that is not a number or [A-Za-z0-9_.:/-]
+        quiet: true
+      loop: "{{ waf_plugin_setting_list }}"
+      loop_control:
+        label: "{{ item.site }} {{ item.plugin }}.{{ item.setting }}"
 
 # Last, as the anubis role does: the role writes waf.yml into Traefik's file
 # provider directory and joins Traefik's network, so both must be there.

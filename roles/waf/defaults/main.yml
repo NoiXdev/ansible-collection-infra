@@ -133,6 +133,11 @@ waf_health_timeout: 60
 #         priority: 1000             # the default; above Traefik's
 #                                    # rule-length defaults, below Anubis's
 #                                    # /.within.website/ router
+#     plugins: [nextcloud-rule-exclusions]   # names from waf_plugins, loaded
+#                                    # for this site only (default none)
+#     plugin_settings:               # per listed plugin: setting -> value,
+#       nextcloud-rule-exclusions:   # a number or a string of
+#         some_setting: "1"          # [A-Za-z0-9_.:/-]; not enabled
 # Paths (bypass_paths, exclusions) start with /, are matched as prefixes of
 # the normalized path nginx sees, and have no . or .. segments, no //, no
 # whitespace and no quotes; a crafted /v2/../admin is matched as /admin. As
@@ -141,3 +146,15 @@ waf_health_timeout: 60
 # there. A site without routers in traefik mode is reached only through a
 # router with service waf@file.
 waf_sites: []
+
+# Core Rule Set plugins, each a name, loaded by the sites that list it in
+# their plugins. A plugin is an archive (url, https, .tar.gz or .tgz, with
+# its sha256) or a directory on the controller (src), with the files
+# <name>-config.conf, <name>-before.conf and <name>-after.conf:
+#   - name: nextcloud-rule-exclusions   # ^[a-z0-9][a-z0-9-]*$, at most 64
+#                                       # characters, unique, not empty
+#     url: https://github.com/coreruleset/nextcloud-rule-exclusions-plugin/archive/refs/tags/v1.7.1.tar.gz
+#     sha256: ...                       # sha256 of that archive
+#   - name: my-rules
+#     src: files/waf/my-rules           # a directory of the plugin's files
+waf_plugins: []

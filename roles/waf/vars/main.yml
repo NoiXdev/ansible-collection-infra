@@ -16,8 +16,11 @@ waf_site_keys:
   - bypass_paths
   - exclusions
   - routers
+  - plugins
+  - plugin_settings
 waf_exclusion_keys: [path, remove_tags, remove_ids, remove_targets]
 waf_router_keys: [entrypoints, middlewares, rule, priority]
+waf_plugin_keys: [name, url, sha256, src]
 waf_site_modes: [detect, block, "off"]
 waf_router_priority: 1000
 
@@ -51,7 +54,9 @@ waf_sites_public: >-
                    'request_body_limit': waf_request_body_limit,
                    'bypass_paths': [],
                    'exclusions': [],
-                   'routers': []} | combine(site) -%}
+                   'routers': [],
+                   'plugins': [],
+                   'plugin_settings': {}} | combine(site) -%}
   {%- set domains = entry.domains if entry.domains is defined and entry.domains is sequence
                     and entry.domains is not string and entry.domains is not mapping else [] -%}
   {%- set exclusions = [] -%}
@@ -82,6 +87,19 @@ waf_sites_public: >-
         'host_regex': '^(?:' ~ domains | map('string') | map('replace', '.', waf_escaped_dot) | join('|') ~ ')[.]?(?::.*)?$'})) -%}
   {%- endfor -%}
   {{ sites }}
+
+# Every setting of every site's plugins as {site, plugin, setting, value},
+# for the checks (the shape of plugin_settings is checked first).
+waf_plugin_setting_list: >-
+  {%- set list = [] -%}
+  {%- for site in waf_sites_public -%}
+  {%- for plugin, settings in site.plugin_settings.items() -%}
+  {%- for setting, value in settings.items() -%}
+  {%- set _ = list.append({'site': site.name, 'plugin': plugin, 'setting': setting, 'value': value}) -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ list }}
 
 # Replacement strings, kept out of the templates: Ansible versions differ in
 # how a template unescapes a backslash in a string literal.
@@ -124,6 +142,15 @@ waf_rule_id_re: '^[0-9]+$'
 waf_target_re: '^[^''"\\\r\n]+$'
 waf_line_break_re: '[\r\n]'
 waf_name_re: '^[A-Za-z0-9_-]+$'
+# A plugin's name (the file names <name>-config.conf and so on), its archive
+# (https only; the role unpacks tar), its checksum, a setting's name (a
+# plugin's setting is a ModSecurity variable of the site) and a setting's
+# value (a string; a number is also accepted).
+waf_plugin_name_re: '^[a-z0-9][a-z0-9-]*$'
+waf_plugin_url_re: '^https://[^\s''"\\{}]+[.](tar[.]gz|tgz)$'
+waf_plugin_sha256_re: '^[0-9a-f]{64}$'
+waf_plugin_setting_re: '^[a-z0-9_]+$'
+waf_plugin_value_re: '^[A-Za-z0-9_.:/-]+$'
 waf_middleware_re: '^[A-Za-z0-9_.@-]+$'
 waf_include_re: '(^|[^A-Za-z0-9_])include([^A-Za-z0-9_]|$)'
 waf_dir_re: '^(/[A-Za-z0-9._@+=,~-]+)+$'

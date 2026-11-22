@@ -212,6 +212,38 @@ test_refusals() {
     -e "$(one_site '"routers": [{"entrypoints": ["alt"]}]')" -e '{"traefik_entrypoints": [{"name": "web", "port": 80}]}'
   refused bypass-slashes 'waf: waf_sites entry a has invalid bypass_paths (/a//b)' \
     -e "$(one_site '"bypass_paths": ["/a//b"]')"
+  # The plugin checks (shape only; a plugin's files are checked later).
+  # src: /nonexistent stands for a valid plugin.
+  refused plugin-keys 'waf: waf_plugins entry x has unknown keys: foo' \
+    -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent", "foo": 1}]}'
+  refused plugin-name 'waf: waf_plugins has an entry with name "Bad_Name"; use lower-case letters, digits and -, at most 64 characters, not empty' \
+    -e '{"waf_plugins": [{"name": "Bad_Name", "src": "/nonexistent"}]}'
+  refused plugin-name-empty 'waf: waf_plugins has an entry with name "empty"; use lower-case letters, digits and -, at most 64 characters, not empty' \
+    -e '{"waf_plugins": [{"name": "empty", "src": "/nonexistent"}]}'
+  refused plugin-dup 'waf: waf_plugins has more than one entry named x' \
+    -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}, {"name": "x", "src": "/nonexistent"}]}'
+  refused plugin-source 'waf: waf_plugins entry x needs exactly one of url (with sha256) and src' \
+    -e '{"waf_plugins": [{"name": "x"}]}'
+  refused plugin-source-both 'waf: waf_plugins entry x needs exactly one of url (with sha256) and src' \
+    -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent", "url": "https://p.test/x.tar.gz"}]}'
+  refused plugin-source-no-sha 'waf: waf_plugins entry x needs exactly one of url (with sha256) and src' \
+    -e '{"waf_plugins": [{"name": "x", "url": "https://p.test/x.tar.gz"}]}'
+  refused plugin-source-src-sha 'waf: waf_plugins entry x needs exactly one of url (with sha256) and src' \
+    -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}]}'
+  refused plugin-url 'waf: waf_plugins entry x has url http://p.test/x.tar.gz; use an https:// URL of a .tar.gz or .tgz archive' \
+    -e '{"waf_plugins": [{"name": "x", "url": "http://p.test/x.tar.gz", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}]}'
+  refused plugin-sha256 'waf: waf_plugins entry x has sha256 abc; use 64 lower-case hex digits' \
+    -e '{"waf_plugins": [{"name": "x", "url": "https://p.test/x.tar.gz", "sha256": "abc"}]}'
+  refused site-plugin-unknown 'waf: site a lists plugin y, which waf_plugins does not have' \
+    -e "$(one_site '"plugins": ["y"]')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
+  refused site-plugin-dup 'waf: site a lists plugin x more than once' \
+    -e "$(one_site '"plugins": ["x", "x"]')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
+  refused site-settings-unlisted 'waf: site a has plugin_settings for x, which it does not list in plugins' \
+    -e "$(one_site '"plugin_settings": {"x": {"mode": "on"}}')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
+  refused site-setting-name 'waf: site a has plugin_settings x.enabled; a setting is lower-case letters, digits and _, not enabled (that is plugins)' \
+    -e "$(one_site '"plugins": ["x"], "plugin_settings": {"x": {"enabled": 1}}')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
+  refused site-setting-value 'waf: site a has plugin_settings x.mode with a value that is not a number or [A-Za-z0-9_.:/-]' \
+    -e "$(one_site '"plugins": ["x"], "plugin_settings": {"x": {"mode": "a b"}}')" -e '{"waf_plugins": [{"name": "x", "src": "/nonexistent"}]}'
   # This host has no Traefik: its directory and network are missing.
   refused no-dynamic-dir 'waf: /opt/traefik/dynamic (waf_traefik_dynamic_dir) is not a directory' \
     -e "$(one_site '')"

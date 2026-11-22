@@ -182,3 +182,27 @@ argument_specs:
             WAF), rule (default Host() of each domain, joined with ||) and
             priority (default 1000). A site without routers is reached only
             through a router with the service waf@file.
+          - >-
+            plugins, a list of names from waf_plugins, loaded for this site
+            only (default none; each name once).
+          - >-
+            plugin_settings, a mapping of a listed plugin's name to a mapping
+            of its settings (lower-case letters, digits and _, not enabled,
+            which plugins says) to values: a whole number or a string of
+            [A-Za-z0-9_.:/-] (default none).
+      waf_plugins:
+        type: list
+        elements: dict
+        default: []
+        description:
+          - >-
+            Core Rule Set plugins that sites load with their plugins. Each
+            entry takes exactly these keys; another key is refused.
+          - >-
+            name (required), ^[a-z0-9][a-z0-9-]*$, at most 64 characters,
+            unique, not empty.
+          - >-
+            url with sha256: an https:// URL of a .tar.gz or .tgz archive and
+            the 64 lower-case hex digits of its SHA-256. src: a directory on
+            the controller. Exactly one of url (with sha256) and src; sha256
+            is refused with src.
