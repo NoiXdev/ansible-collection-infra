@@ -25,7 +25,7 @@
       waf: waf_mode must be traefik or host, waf_dir an absolute path without spaces, quotes or .
       and .. parts, waf_paranoia 1 to 4, waf_anomaly_inbound, waf_anomaly_outbound,
       waf_request_body_limit, waf_arguments_limit, waf_workers and waf_health_timeout whole
-      numbers above 0, waf_cpus a number above 0 such as "1.0", waf_memory a size such as 256M,
+      numbers above 0, waf_cpus a number above 0 such as "1.0", waf_memory a size such as 512M,
       waf_host_port a port, and waf_rules_before and waf_rules_after strings
     quiet: true
 

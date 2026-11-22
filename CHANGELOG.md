@@ -167,11 +167,14 @@
   (`detect`, the default, logs only; `block` answers 403 over the anomaly threshold; `off` forwards
   without inspection), `paranoia` and `detection_paranoia` (1 to 4, default `waf_paranoia` 1),
   `anomaly_inbound` and `anomaly_outbound` (5 and 4), `allowed_methods` and `allowed_content_types`
-  (added to the defaults), `request_body_limit` (`waf_request_body_limit`, 12.5 MiB: in `block` a
-  larger body answers 413; in `detect` a body whose length is over it, and a chunked body, passes
-  without inspection, logged, since the engine would read it whole into memory; bodies are spooled
-  to `waf_dir/spool` on disk), `bypass_paths` (path prefixes without inspection) and `exclusions`
-  (`remove_tags`, `remove_ids` and `remove_targets` for a path prefix, `/` for the whole site).
+  (added to the defaults), `request_body_limit` (`waf_request_body_limit`, 4 MiB: in `block` a
+  larger body answers 413; in `detect` a request whose body length is over it, and a chunked
+  request, passes without any inspection, logged, since the engine would read the body whole into
+  memory; bodies are spooled to `waf_dir/spool` on disk; a site that takes larger uploads raises
+  its own `request_body_limit` and sizes `waf_memory`, default 512M, for `waf_workers` (2) ×
+  (45M + 45 × the largest `request_body_limit`), 450M with the defaults), `bypass_paths` (path
+  prefixes without inspection) and `exclusions` (`remove_tags`, `remove_ids` and
+  `remove_targets` for a path prefix, `/` for the whole site).
   Paths are matched on the normalized path, so `/v2/../admin` never gets the bypass of `/v2/`, and
   a bypass or exclusion answers 400 to a raw path that does not itself start with its prefix
   (`/a/%2e%2e/v2/x`) or has a `..` segment. A request with `waf_arguments_limit` (1000) arguments

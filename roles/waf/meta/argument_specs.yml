@@ -83,8 +83,10 @@ argument_specs:
         type: int
         description: >-
           The default number of request body bytes a site's requests are
-          inspected up to (13107200). In mode block a larger body answers
-          413; in mode detect it passes without inspection and is logged.
+          inspected up to (4194304, 4 MiB). In mode block a larger body
+          answers 413; in mode detect it passes without inspection and is
+          logged, as does a chunked body. A site taking larger uploads
+          raises its request_body_limit and waf_memory with it.
       waf_arguments_limit:
         type: int
         description: >-
@@ -104,9 +106,10 @@ argument_specs:
       waf_memory:
         type: str
         description: >-
-          Compose memory limit of the container (256M). A worker inspecting
+          Compose memory limit of the container (512M). A worker inspecting
           a body needs about 45M plus 10 to over 40 times its size,
-          depending on its content; see the defaults for the formula.
+          depending on its content: size it for waf_workers * (45M + 45 *
+          the largest request_body_limit), 450M with the defaults.
       waf_workers:
         type: int
         description: nginx worker processes in the container (2).
@@ -137,8 +140,10 @@ argument_specs:
             nginx's inner listener behind a cache on the same host.
           - >-
             mode, one of detect (the default; matches are logged, nothing is
-            blocked), block (a request over the anomaly threshold answers 403)
-            or off (forwarded without inspection, for emergencies).
+            blocked; a chunked request and one whose body is over
+            request_body_limit are logged and forwarded without any
+            inspection), block (a request over the anomaly threshold answers
+            403) or off (forwarded without inspection, for emergencies).
           - >-
             paranoia, the blocking paranoia level 1 to 4 (waf_paranoia by
             default); detection_paranoia, the level up to which rules run and
@@ -153,7 +158,8 @@ argument_specs:
             type/subtype values added to CRS's allowed request content types.
           - >-
             request_body_limit, the bytes of a request body inspected
-            (waf_request_body_limit by default).
+            (waf_request_body_limit by default); a larger value needs a
+            larger waf_memory.
           - >-
             bypass_paths, path prefixes forwarded without any inspection (not
             /: that is mode off). A path starts with /, has no . or ..

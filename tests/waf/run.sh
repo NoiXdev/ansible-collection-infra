@@ -436,7 +436,8 @@ test_traefik() {
   # Below the inspection limit, in a type the Core Rule Set allows at
   # paranoia 1; no Expect header (CRS refuses it, 920450).
   h sh -c 'printf "{\"a\": \"b\"}" >/tmp/small.json'
-  # 200 items of prose: about 3 MiB, 400 arguments (SecArgumentsLimit is 1000).
+  # 200 items of prose: about 3 MiB (the limit is 4 MiB), 400 arguments
+  # (SecArgumentsLimit is 1000).
   h python3 -c 'import json; open("/tmp/big.json", "w").write(json.dumps({"items": [{"id": i, "text": "lorem ipsum dolor sit amet " * 580} for i in range(200)]}))'
   expect 200 block.test /small -X POST -H 'Content-Type: application/json' -H 'Expect:' --data-binary @/tmp/small.json
   arrived_whole POST /small /tmp/small.json
@@ -493,7 +494,7 @@ test_traefik() {
 
   echo "-- a detect site: uploads larger than the WAF's memory pass whole, and are logged"
   # 300 MiB, with a length and chunked. ModSecurity would read such a body
-  # whole into memory (256M); nginx spools it to disk and sends it on
+  # whole into memory (512M); nginx spools it to disk and sends it on
   # without ModSecurity's body checks. curl -T streams the file.
   h sh -c 'head -c 314572800 /dev/zero | tr "\0" a >/tmp/huge'
   expect 200 bulk.test /huge -X POST -T /tmp/huge -H 'Content-Type: application/octet-stream' -H 'Expect:' --max-time 300
@@ -655,12 +656,12 @@ test_report() {
   expect 403 block.test /in-header -H 'X-Probe: () { :; }; echo'
 
   echo "-- bodies over the inspection limit: logged in detect, 413 in block"
-  # 14 MiB (the limit is 12.5 MiB) in a form type the Core Rule Set allows,
+  # 6 MiB (the limit is 4 MiB) in a form type the Core Rule Set allows,
   # without Expect (CRS refuses it, 920450).
   # The detect site is bulk, whose backend (the recorder) reads the body:
   # whoami answers without reading it, so its request would not finish
   # before curl gives up, and an event is logged when a request finishes.
-  h sh -c 'head -c 14680064 /dev/zero | tr "\0" a >/tmp/heavy'
+  h sh -c 'head -c 6291456 /dev/zero | tr "\0" a >/tmp/heavy'
   expect 200 bulk.test /detect-upload -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Expect:' \
     --data-binary @/tmp/heavy "${creds[@]}"
   arrived_whole POST /detect-upload /tmp/heavy

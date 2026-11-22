@@ -43,13 +43,15 @@ waf_host_backend: "http://127.0.0.1:{{ nginx_inner_port | default(8931) }}"
 waf_paranoia: 1
 waf_anomaly_inbound: 5
 waf_anomaly_outbound: 4
-# How many bytes of a request body ModSecurity inspects (its recommended
-# 12.5 MiB). In mode block a larger body answers 413, so nothing passes
-# uninspected; in mode detect it passes without inspection and is logged (as
-# does a chunked body there: ModSecurity would read it whole into memory).
+# How many bytes of a request body ModSecurity inspects (4 MiB). In mode
+# block a larger body answers 413, so nothing passes uninspected; in mode
+# detect it passes without inspection and is logged (as does a chunked body
+# there: ModSecurity would read it whole into memory). A site that takes
+# larger uploads raises its own request_body_limit and waf_memory with it
+# (see the formula below).
 # The WAF itself sets no size limit: what a site accepts at all stays with the
 # proxy in front and the app.
-waf_request_body_limit: 13107200
+waf_request_body_limit: 4194304
 # How many arguments (query string and body together) a request may have.
 # ModSecurity inspects none past this many, so a request with as many is
 # refused (400) in mode block and logged in mode detect.
@@ -69,13 +71,14 @@ waf_rules_after: ""
 # depends on its content: about 10 times for an upload, about 15 times for
 # a plain form field or JSON string, and over 40 times for a body crafted to
 # match many rules (measured: a 12M form field of mixed characters peaks a
-# worker at about 585M). The defaults do not cover that: one crafted body
-# near 12.5 MiB can exceed 256M; the kernel kills the worker, nginx starts a
-# new one, and the requests in flight on it fail, for every site. Size
-# waf_memory for waf_workers * (45M + 45 * the largest request_body_limit),
-# or lower request_body_limit.
+# worker at about 585M). Size waf_memory for
+# waf_workers * (45M + 45 * the largest request_body_limit), or lower
+# request_body_limit: the defaults give 2 * (45M + 45 * 4M) = 450M, within
+# 512M. Below that, one crafted body near the limit can exceed waf_memory;
+# the kernel kills the worker, nginx starts a new one, and the requests in
+# flight on it fail, for every site.
 waf_cpus: "1.0"
-waf_memory: 256M
+waf_memory: 512M
 waf_workers: 2
 waf_health_timeout: 60
 
@@ -98,7 +101,10 @@ waf_health_timeout: 60
 #                                        # cache in front of nginx's inner
 #                                        # listener still gets every request
 #                                        # inspected
-#     mode: detect                   # detect (log only, the default), block,
+#     mode: detect                   # detect (log only, the default; a
+#                                    # chunked body or one over
+#                                    # request_body_limit is logged, its
+#                                    # request not inspected), block,
 #                                    # off (proxy only, for emergencies)
 #     paranoia: 1                    # blocking level 1-4 (waf_paranoia)
 #     detection_paranoia: 1          # logged up to this level, >= paranoia
@@ -109,7 +115,8 @@ waf_health_timeout: 60
 #                                             # GET HEAD POST OPTIONS
 #     allowed_content_types: [application/octet-stream]  # type/subtype,
 #                                    # lower case, added to CRS's list
-#     request_body_limit: 13107200   # bytes (waf_request_body_limit)
+#     request_body_limit: 4194304    # bytes (waf_request_body_limit);
+#                                    # raise waf_memory with it
 #     bypass_paths: [/v2/]           # path prefixes without any inspection
 #     exclusions:                    # per path prefix ("/" = the whole site)
 #       - path: /webhook/
