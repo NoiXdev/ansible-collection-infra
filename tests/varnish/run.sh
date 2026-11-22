@@ -316,6 +316,12 @@ test_install() {
   run_ok install-nosites-verify verify.yml
 }
 
+# loaded_vcls: each loaded VCL's status (active or available) and name. The
+# other columns of vcl.list change on their own: the busy count is the number
+# of requests and connections that still hold a VCL, and an unused VCL cools
+# down after a while.
+loaded_vcls() { h varnishadm vcl.list | awk '{print $1, $NF}'; }
+
 test_badvcl() {
   local before_vcl before_list copy template
   echo "== badvcl: a VCL that does not compile fails the run, and the running one stays (ubuntu $1)"
@@ -325,7 +331,7 @@ test_badvcl() {
   host_state=varnish
   run_ok badvcl converge.yml -e "@$out/badvcl-vars.json"
   before_vcl="$(h sha256sum "$vcl")"
-  before_list="$(h varnishadm vcl.list)"
+  before_list="$(loaded_vcls)"
 
   # A copy of the collection whose VCL has an unknown word on the line with
   # the purge tokens (the compiler's message shows that line), run with a
@@ -355,7 +361,7 @@ test_badvcl() {
     || fail "badvcl: --check with a changed VCL did not get to the move"
 
   [ "$(h sha256sum "$vcl")" = "$before_vcl" ] || fail "badvcl: the failed and the --check runs changed $vcl"
-  [ "$(h varnishadm vcl.list)" = "$before_list" ] || fail "badvcl: the failed and the --check runs changed the loaded VCLs"
+  [ "$(loaded_vcls)" = "$before_list" ] || fail "badvcl: the failed and the --check runs changed the loaded VCLs"
   h test ! -e "$vcl.new" || fail "badvcl: the failed or the --check runs left $vcl.new"
   run_ok badvcl-verify verify.yml
   no_key_in_logs
