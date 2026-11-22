@@ -81,15 +81,15 @@ services:
     # The image has no check of its own and no curl: its REST API listens
     # once the server signed its certificate and the search engine is
     # configured, so during the first start only after the server ran (hence
-    # the server waits for it only to start, and the check for as long as the
-    # role waits). Whether the search engine is up the server's API tells
+    # the server waits for it only to start, and the check has a long start
+    # period). Whether the search engine is up the server's API tells
     # (health.yml).
     healthcheck:
       test: {{ ['CMD', 'bash', '-c', 'exec 3<>/dev/tcp/127.0.0.1/8999'] | to_json }}
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: {{ graylog_health_timeout | int }}s
+      start_period: {{ graylog_start_period }}s
       start_interval: 5s
     volumes:
 {{ bind(graylog_data_dir ~ '/datanode', '/var/lib/graylog-datanode') }}
@@ -115,14 +115,14 @@ services:
 {{ bind(graylog_secrets_dir ~ '/password_secret', secrets ~ '/password_secret', read_only=true) }}
 {{ bind(graylog_secrets_dir ~ '/root_password_sha2', secrets ~ '/root_password_sha2', read_only=true) }}
     # The image's own check (/health_check.sh asks /api), every 5 seconds
-    # while it starts (as long as the role waits for it,
-    # graylog_health_timeout) instead of after the first two minutes.
+    # while it starts (graylog_start_period) instead of after the first two
+    # minutes.
     healthcheck:
       test: [CMD, /health_check.sh]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: {{ graylog_health_timeout | int }}s
+      start_period: {{ graylog_start_period }}s
       start_interval: 5s
     networks: [default, traefik]
     # No published web port: Traefik reaches the server over its network.

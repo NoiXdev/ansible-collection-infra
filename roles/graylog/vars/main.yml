@@ -65,6 +65,12 @@ graylog_env_owned_suffix: __FILE
 # start.
 graylog_restart_marker: "{{ graylog_dir }}/restart-pending"
 
+# Seconds the Data Node's and the server's checks take as their start period
+# (checked every 5 seconds, failures not counted). Fixed, not
+# graylog_health_timeout: how long the role waits is no setting of the
+# containers, so changing it recreates nothing.
+graylog_start_period: 600
+
 # The services of the compose project, in their start order.
 graylog_services: [mongodb, datanode, graylog]
 # Where the containers read the secrets files (each bound alone, read-only).

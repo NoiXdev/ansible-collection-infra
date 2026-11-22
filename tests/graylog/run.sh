@@ -38,7 +38,8 @@
 #   reconfigure
 #             a new root password and server heap: the old password no
 #             longer logs in, the new one does, the heap is in the server's
-#             environment; then back to the first ones
+#             environment; then back to the first ones; a changed
+#             graylog_health_timeout alone changes nothing
 #   secret_changed
 #             another graylog_password_secret on the installation refused
 #             before any change
@@ -440,6 +441,9 @@ test_reconfigure() {
   expect_login "$root_password"
   expect_no_login "$new_root_password"
   verify
+
+  # How long the role waits is not Graylog's configuration.
+  role_converge_unchanged "a changed health timeout" -e graylog_health_timeout=900
 }
 
 test_secret_changed() {

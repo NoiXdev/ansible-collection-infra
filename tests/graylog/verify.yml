@@ -8,8 +8,8 @@
 # secret only as a file, its heap); the mounts (the data subdirectories, the
 # secrets files read-only); the files: the compose file 0644, the secrets
 # directory root's 0700 with password_secret and root_password_sha2, each
-# 0600, the versions file; and vm.max_map_count of at least 262144 from the
-# role's drop-in.
+# 0600, the versions file; and vm.max_map_count of at least 262144, at
+# runtime and in the role's drop-in.
 # Extra variables: verify_server_heap (default the one of vars.yml).
 - name: Verify
   hosts: all
@@ -210,4 +210,5 @@
         that:
           - verify_sysctl.stdout_lines[0] | int >= 262144
           - verify_sysctl.stdout is search('(?m)^vm\.max_map_count = [0-9]+$')
-        fail_msg: "vm.max_map_count is below 262144 or the drop-in does not set it: {{ verify_sysctl.stdout_lines }}"
+          - verify_sysctl.stdout | regex_search('(?m)^vm\.max_map_count = ([0-9]+)$', '\\1') | first | int >= 262144
+        fail_msg: "vm.max_map_count is below 262144 at runtime or in the drop-in: {{ verify_sysctl.stdout_lines }}"

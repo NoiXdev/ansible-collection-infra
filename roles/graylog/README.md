@@ -10,6 +10,11 @@ Docker comes from the playbook (the `docker` role); the role checks for it.
 required (keep the secrets in a vault). The full reference is in
 `meta/argument_specs.yml`, the defaults in `defaults/main.yml`.
 
+The search engine refuses to start with `vm.max_map_count` below 262144, so
+the role writes a sysctl drop-in (`/etc/sysctl.d/60-noixdev-graylog.conf`).
+The drop-in writes the larger of 262144 and the current runtime value, so a
+higher value an operator set is kept.
+
 ## Variables
 
 | Variable | Default | Purpose |

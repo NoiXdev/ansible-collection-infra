@@ -1,6 +1,8 @@
 ---
 # Waits up to graylog_health_timeout seconds (graylog_health_wait, when the
-# includer sets it) until every container of graylog_services reports the
+# includer sets it), counted from graylog_health_since when the includer
+# sets it (the start of an earlier wait that shares the deadline) and else
+# from now, until every container of graylog_services reports the
 # health status healthy (MongoDB's ping, the Data Node's REST port, the
 # server's own check of /api), then asks the server's API from the host:
 # GET /api/system/lbstatus answers ALIVE, and as the root user (which proves
@@ -11,7 +13,7 @@
 
 - name: Note when the health check starts
   ansible.builtin.set_fact:
-    graylog_health_start: "{{ now().timestamp() }}"
+    graylog_health_start: "{{ graylog_health_since | default(now().timestamp()) }}"
     graylog_health_deadline: "{{ graylog_health_wait | default(graylog_health_timeout) | int }}"
     graylog_health_expected: "{{ graylog_services | map('regex_replace', '^(.*)$', '\\1 running healthy') | list }}"
 

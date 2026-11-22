@@ -91,8 +91,12 @@
     - name: Wait for the first start of the Graylog server
       ansible.builtin.include_tasks: preflight.yml
 
+    # The same deadline as the wait for the first start, so that the
+    # install waits graylog_health_timeout seconds in all.
     - name: Check that Graylog is healthy
       ansible.builtin.include_tasks: health.yml
+      vars:
+        graylog_health_since: "{{ graylog_preflight_start }}"
 
     - name: Fail when Graylog is not healthy
       ansible.builtin.fail:
