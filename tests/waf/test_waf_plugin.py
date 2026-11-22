@@ -2,6 +2,7 @@
 
 import importlib.util
 import pathlib
+import tarfile
 import unittest
 
 _PATH = pathlib.Path(__file__).resolve().parents[2] / "plugins" / "filter" / "waf_plugin.py"
@@ -156,6 +157,34 @@ class CheckTest(unittest.TestCase):
             '        "t:none,ctl:ruleRemoveTargetById=942100;ARGS:x"\n'
         )
         self.assertEqual(check(text), {"ids": [9590010], "low": 9590010, "high": 9590010, "errors": []})
+
+    def test_check_commented_out_rule_run(self):
+        text = (
+            '# SecRule A "@eq 0" \\\n#     "id:9508010,\\\n#     pass"\\\n#     nolog\n'
+            'SecAction "id:9590001,pass,nolog"\n'
+        )
+        got = check(text)
+        self.assertEqual((got["errors"], got["ids"]), ([], [9590001]))
+
+    def test_check_backslash_comment_before_blank_or_eof(self):
+        self.assertEqual(check('# a \\\n\nSecAction "id:9590001"\n')["errors"], [])
+        self.assertEqual(check('SecAction "id:9590001"\n# a \\')["errors"], [])
+
+    def test_check_real_nextcloud_plugin(self):
+        archive = pathlib.Path(__file__).resolve().parent / "fixtures" / "plugins" / f"{NC}-plugin-1.7.1.tar.gz"
+        if not archive.is_file():
+            self.skipTest("fixture archive not present")
+        with tarfile.open(archive) as tar:
+            members = {m.name: m for m in tar.getmembers() if m.isfile()}
+            picked = waf_plugin.waf_plugin_pick(list(members), NC)
+            self.assertEqual(picked["errors"], [])
+            texts = {
+                kind: tar.extractfile(members[path]).read().decode("utf-8")
+                for kind, path in picked["files"].items()
+            }
+        got = waf_plugin.waf_plugin_check(NC, texts)
+        self.assertEqual(got["errors"], [])
+        self.assertEqual((got["low"], got["high"]), (9508097, 9508992))
 
     def test_filters(self):
         self.assertEqual(

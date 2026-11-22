@@ -46,11 +46,14 @@ def _directives(text):
     """Yield (line number, directive text) with continuation lines joined."""
     text = text.replace("\r\n", "\n")
     start, parts = 0, []
-    for number, line in enumerate(text.split("\n"), 1):
+    lines = text.split("\n")
+    for number, line in enumerate(lines, 1):
         if not parts:
             start = number
             if line.lstrip().startswith("#"):
-                yield start, line
+                nxt = lines[number].strip() if number < len(lines) else ""
+                risky = line.rstrip().endswith("\\") and bool(nxt) and not nxt.startswith("#")
+                yield start, line.rstrip() if risky else "#"
                 continue
         if line.endswith("\\"):
             parts.append(line[:-1])
