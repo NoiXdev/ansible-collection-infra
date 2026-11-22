@@ -94,6 +94,10 @@ grep -q "Error pages entrypoints must exist" "$out/error-pages-invalid.log" \
 docker exec "$host" test ! -e /opt/traefik-invalid \
   || { echo "traefik touched the host before checking its settings" >&2; exit 1; }
 
+echo "== traefik certificate resolvers: HTTP-01 next to DNS-01"
+play "$here/traefik_acme.yml" >"$out/traefik-acme.log" 2>&1 \
+  || { cat "$out/traefik-acme.log" >&2; echo "the certificate resolvers of the traefik role are wrong" >&2; exit 1; }
+
 echo "== portainer agent registration without a token must fail"
 if play "$here/portainer_register_invalid.yml" >"$out/portainer-register-invalid.log" 2>&1; then
   echo "portainer registered an agent without a token" >&2; exit 1

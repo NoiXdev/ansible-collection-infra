@@ -8,10 +8,16 @@
 - name: Require an ACME e-mail for TLS entrypoints
   ansible.builtin.assert:
     that: traefik_acme_email | length > 0
-    fail_msg: traefik_acme_email is required when an entrypoint has tls enabled.
+    fail_msg: >-
+      traefik_acme_email is required when an entrypoint has tls enabled or
+      traefik_acme_http_resolver is on.
     quiet: true
-  when: traefik_entrypoints | selectattr('tls', 'defined') | selectattr('tls') | list | length > 0
+  when: >-
+    traefik_entrypoints | selectattr('tls', 'defined') | selectattr('tls') | list | length > 0
+    or traefik_acme_http_resolver | bool
 
+# Also for the HTTP resolver next to the dns one; traefik_cert_domains belong
+# to the default resolver, so only the http challenge refuses wildcards.
 - name: Check the HTTP-01 settings
   ansible.builtin.assert:
     that:
@@ -19,13 +25,17 @@
       - (traefik_entrypoints | selectattr('name', 'equalto', traefik_acme_http_entrypoint) | first).host_port
         | default((traefik_entrypoints | selectattr('name', 'equalto', traefik_acme_http_entrypoint) | first).port)
         | int == 80
-      - traefik_cert_domains | map(attribute='main') | select('match', '^\\*') | list | length == 0
-      - traefik_cert_domains | map(attribute='sans', default=[]) | flatten | select('match', '^\\*') | list | length == 0
+      - traefik_acme_challenge != 'http'
+        or traefik_cert_domains | map(attribute='main') | select('match', '^\\*') | list | length == 0
+      - traefik_acme_challenge != 'http'
+        or traefik_cert_domains | map(attribute='sans', default=[]) | flatten | select('match', '^\\*') | list | length == 0
     fail_msg: >-
-      HTTP-01 needs traefik_acme_http_entrypoint to name an entrypoint on host
-      port 80, and traefik_cert_domains cannot contain wildcards.
+      HTTP-01 (traefik_acme_challenge http or traefik_acme_http_resolver)
+      needs traefik_acme_http_entrypoint to name an entrypoint on host port
+      80, and with the http challenge traefik_cert_domains cannot contain
+      wildcards.
     quiet: true
-  when: traefik_acme_challenge == 'http'
+  when: traefik_acme_challenge == 'http' or traefik_acme_http_resolver | bool
 
 - name: Check the entrypoints
   ansible.builtin.assert:

@@ -46,6 +46,11 @@ traefik_acme_ca_server: https://acme-v02.api.letsencrypt.org/directory
 #       and reach that entrypoint on port 80.
 traefik_acme_challenge: dns
 traefik_acme_http_entrypoint: web
+# With the dns challenge, true adds a second resolver named http (HTTP-01 on
+# traefik_acme_http_entrypoint, the same account and storage file) for
+# routers that name it, such as hosts outside the DNS provider's zone; the
+# entrypoints keep the dns one. With the http challenge it changes nothing.
+traefik_acme_http_resolver: false
 traefik_dns_provider: hetzner
 traefik_dns_resolvers: [1.1.1.1:53, 9.9.9.9:53]
 traefik_dns_env: {}

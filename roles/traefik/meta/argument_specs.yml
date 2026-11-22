@@ -73,6 +73,15 @@ argument_specs:
       traefik_acme_http_entrypoint:
         type: str
         description: Entrypoint that answers the HTTP-01 challenge; it must exist and listen on host port 80.
+      traefik_acme_http_resolver:
+        type: bool
+        description:
+          - With traefik_acme_challenge dns, adds a second cert resolver named http (HTTP-01 on
+            traefik_acme_http_entrypoint, the same e-mail, ACME directory and storage file) for
+            routers that name it in tls.certresolver, such as hosts outside the DNS provider's zone.
+            The entrypoints keep the dns resolver.
+          - With traefik_acme_challenge http it changes nothing; that resolver already is http.
+          - Needs traefik_acme_email, and traefik_acme_http_entrypoint on host port 80.
       traefik_dns_provider:
         type: str
         description: lego DNS provider for the DNS-01 challenge.

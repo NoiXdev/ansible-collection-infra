@@ -98,4 +98,15 @@ certificatesResolvers:
           - "{{ r }}"
 {% endfor %}
 {% endif %}
+{% if traefik_acme_http_resolver and traefik_acme_challenge != 'http' %}
+  # HTTP-01 next to the default resolver, for routers that name it
+  # (tls.certresolver=http): hosts outside the zone of the DNS provider.
+  http:
+    acme:
+      email: "{{ traefik_acme_email }}"
+      caServer: "{{ traefik_acme_ca_server }}"
+      storage: /acme/acme.json
+      httpChallenge:
+        entryPoint: {{ traefik_acme_http_entrypoint }}
+{% endif %}
 {% endif %}

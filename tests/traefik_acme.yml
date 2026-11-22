@@ -1,0 +1,99 @@
+---
+# The certificate resolvers of the traefik role's static configuration,
+# rendered on the controller with the role's defaults: the DNS-01 resolver
+# alone by default, an HTTP-01 resolver named http next to it with
+# traefik_acme_http_resolver (on traefik_acme_http_entrypoint, the same
+# account and storage file), and with the HTTP-01 challenge the switch changes
+# nothing. Then the role must refuse the switch, before it touches the host,
+# when no entrypoint answers HTTP-01 on port 80.
+- name: Render the certificate resolvers
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [../roles/traefik/defaults/main.yml]
+  vars:
+    acme_template: "{{ playbook_dir }}/../roles/traefik/templates/traefik.yml.j2"
+    acme_base:
+      traefik_acme_email: acme@example.test
+      traefik_acme_ca_server: https://ca.example.test/directory
+    acme_resolver_http:
+      acme:
+        email: acme@example.test
+        caServer: https://ca.example.test/directory
+        storage: /acme/acme.json
+        httpChallenge:
+          entryPoint: web
+    acme_resolver_dns:
+      acme:
+        email: acme@example.test
+        caServer: https://ca.example.test/directory
+        storage: /acme/acme.json
+        dnsChallenge:
+          provider: hetzner
+          resolvers: [1.1.1.1:53, 9.9.9.9:53]
+  tasks:
+    - name: Render the static configuration
+      ansible.builtin.set_fact:
+        acme_rendered: >-
+          {{ acme_rendered | default({}) | combine({item.name: lookup('ansible.builtin.template', acme_template,
+             template_vars=acme_base | combine(item.vars)) | from_yaml}) }}
+      loop:
+        - { name: dns, vars: { traefik_acme_challenge: dns } }
+        - { name: dns_http, vars: { traefik_acme_challenge: dns, traefik_acme_http_resolver: true } }
+        - { name: http, vars: { traefik_acme_challenge: http } }
+        - { name: http_http, vars: { traefik_acme_challenge: http, traefik_acme_http_resolver: true } }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Check the certificate resolvers
+      ansible.builtin.assert:
+        that:
+          - acme_rendered.dns.certificatesResolvers == dict(dns=acme_resolver_dns)
+          - acme_rendered.dns_http.certificatesResolvers == dict(dns=acme_resolver_dns, http=acme_resolver_http)
+          - acme_rendered.http.certificatesResolvers == dict(http=acme_resolver_http)
+          - acme_rendered.http_http == acme_rendered.http
+          # The entrypoints keep the default resolver.
+          - acme_rendered.dns_http.entryPoints == acme_rendered.dns.entryPoints
+          - acme_rendered.dns_http.entryPoints.websecure.http.tls.certResolver == 'dns'
+        fail_msg: >-
+          The certificate resolvers are dns {{ acme_rendered.dns.certificatesResolvers | default('none') }},
+          dns with the HTTP resolver {{ acme_rendered.dns_http.certificatesResolvers | default('none') }},
+          http {{ acme_rendered.http.certificatesResolvers | default('none') }}, http with the HTTP
+          resolver {{ acme_rendered.http_http.certificatesResolvers | default('none') }}.
+
+- name: Refuse the HTTP resolver without an entrypoint on port 80
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Run the role without an entrypoint on port 80
+      block:
+        - name: Run the traefik role
+          ansible.builtin.include_role:
+            name: noixdev.infra.traefik
+          vars:
+            traefik_dir: /opt/traefik-acme-invalid
+            traefik_entrypoints:
+              - { name: web, port: 8080 }
+              - { name: websecure, port: 443, tls: true }
+            traefik_acme_email: acme@example.test
+            traefik_acme_challenge: dns
+            traefik_acme_http_resolver: true
+
+        - name: Fail when the role accepted it
+          ansible.builtin.fail:
+            msg: the traefik role accepted traefik_acme_http_resolver without an entrypoint on port 80
+      rescue:
+        - name: Check the refusal
+          ansible.builtin.assert:
+            that: ansible_failed_result.msg is search('needs traefik_acme_http_entrypoint to name an entrypoint on host port 80')
+            fail_msg: "The role failed for another reason: {{ ansible_failed_result.msg }}"
+
+    - name: Look for the directory of the refused run
+      ansible.builtin.stat:
+        path: /opt/traefik-acme-invalid
+      register: acme_invalid_dir
+
+    - name: Check that the refused run touched nothing
+      ansible.builtin.assert:
+        that: not acme_invalid_dir.stat.exists
+        fail_msg: the traefik role created /opt/traefik-acme-invalid before it refused its settings
