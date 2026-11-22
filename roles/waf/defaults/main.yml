@@ -61,7 +61,7 @@ waf_arguments_limit: 1000
 # what the site settings cannot say. They cannot contain an Include, so the
 # configuration stays in the role's files; operators that read a file or a
 # URL (@pmFromFile, @ipMatchFromFile, SecRemoteRules) are the rules' own
-# business. Rule IDs 9500000-9599999 are the role's.
+# business. Rule IDs 5000000-5099999 are the role's.
 waf_rules_before: ""
 waf_rules_after: ""
 

@@ -181,7 +181,7 @@
   or more, a multipart body that fails strict parsing and an internal error of the engine are
   refused (logged in `detect`). A site's settings follow its `Host` like nginx's server block does,
   with any port or a trailing dot. Raw rules go into `waf_rules_before` and `waf_rules_after` (rule
-  IDs 9500000-9599999 are the role's). The log (`docker logs noixdev-waf`) has one JSON line per
+  IDs 5000000-5099999 are the role's). The log (`docker logs noixdev-waf`) has one JSON line per
   event with the client address, the request line, the status and the matched rules, never request
   headers or bodies; headers and cookies whose names mark credentials (such as `Authorization`,
   `Cookie`, API keys and session cookies) are not inspected, so no rule copies them into the log.

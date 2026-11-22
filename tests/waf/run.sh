@@ -428,7 +428,7 @@ test_traefik() {
     fail "a padded request or a malformed multipart body reached the backend"
   fi
   recorded | grep -qF 'POST /multipart-ok HTTP/1.1' || fail "the well-formed multipart body did not arrive"
-  for id in 9599907 9599908; do
+  for id in 5099907 5099908; do
     audit | grep -qF "\"$id\"" || { audit >&2; fail "the audit log lacks rule $id"; }
   done
 
@@ -490,7 +490,7 @@ test_traefik() {
   expect 200 detect.test '/?file=../../etc/passwd'
   [ "$(audit_lines)" -ge $((before + 3)) ] || { audit >&2; fail "detect.test's attacks were not logged"; }
   expect 200 detect.test "/padded?$(padded exec=/bin/bash)"
-  audit | grep -F '"/padded?' | grep -qF '"9599907"' || { audit >&2; fail "detect.test's padded request was not logged"; }
+  audit | grep -F '"/padded?' | grep -qF '"5099907"' || { audit >&2; fail "detect.test's padded request was not logged"; }
 
   echo "-- a detect site: uploads larger than the WAF's memory pass whole, and are logged"
   # 300 MiB, with a length and chunked. ModSecurity would read such a body
@@ -506,8 +506,8 @@ test_traefik() {
   no_oom
   [ -z "$(h find /opt/waf/spool -type f)" ] || fail "the spool kept a body: $(h find /opt/waf/spool -type f)"
   expect 200 bulk.test /after
-  reported bulk 9599903 --since 10m
-  reported bulk 9599911 --since 10m
+  reported bulk 5099903 --since 10m
+  reported bulk 5099911 --since 10m
   # One event per request: ModSecurity never sees them.
   [ "$(audit | grep -cF '"uri":"/huge"')" = 1 ] || { audit >&2; fail "the upload /huge is not one event"; }
 
@@ -681,7 +681,7 @@ test_report() {
 
   echo "-- the report per site"
   reported detect 932160 --since 10m detect
-  reported bulk 9599903 --since 10m bulk
+  reported bulk 5099903 --since 10m bulk
   if report --since 10m detect | grep -q '^site block '; then
     report --since 10m detect >&2
     fail "the report for site detect lists site block"
@@ -840,9 +840,9 @@ host_nginx() {
   # The probe (/.noix-front-probe) is answered on the inner side: it reaches
   # no app, and no rule of the WAF matches it (the first run's probe, before
   # the inner listener exists, is logged with its 502 and the site rule
-  # 9599906 alone).
+  # 5099906 alone).
   if php_log | grep -qF noix-front-probe; then fail "the WAF probe reached PHP"; fi
-  got="$(audit | grep -F noix-front-probe | grep -o '"ruleId":"[0-9]*"' | grep -v '"9599906"' || true)"
+  got="$(audit | grep -F noix-front-probe | grep -o '"ruleId":"[0-9]*"' | grep -v '"5099906"' || true)"
   [ -z "$got" ] || { audit >&2; fail "a WAF rule matched its probe: $got"; }
   if audit | grep -F noix-front-probe | grep -qF '"http_code":403'; then audit >&2; fail "the WAF refused its probe"; fi
 

@@ -27,7 +27,7 @@ waf_router_priority: 1000
 # mode: off as false; both mean off here. Computed fields, which win over a
 # key of the same name in waf_sites:
 #   index       the entry's place in waf_sites, from 0 (the base of the
-#               site's rule IDs, 9500000 + 100 * index)
+#               site's rule IDs, 5000000 + 100 * index)
 #   host_regex  ^(?:d1|d2)[.]?(?::.*)?$ of the domains, dots escaped:
 #               the Host header (lower-cased first) of a request for the
 #               site, with or without a trailing dot and anything after a
@@ -93,8 +93,8 @@ waf_escaped_dot: '\.'
 waf_url_host: '\2'
 waf_url_port: '\5'
 
-# Rule IDs of a site come from 9500000 + 100 * index (below 100 per site),
-# the role's global rules from 9599900: at most 999 sites.
+# Rule IDs of a site come from 5000000 + 100 * index (below 100 per site),
+# the role's global rules from 5099900: at most 999 sites.
 waf_sites_max: 999
 
 # Patterns of the checks. Paths are prefixes of the normalized path nginx
@@ -231,12 +231,12 @@ waf_crs_content_types:
 waf_audit_relevant_status: "^(?:5|4(?!04))"
 # The role's rule that names the site of each event (its logdata is the
 # site's name), which noix-waf-report groups by.
-waf_site_rule_id: 9599906
+waf_site_rule_id: 5099906
 # The IDs of the events nginx writes for a request a detect site passes
 # without ModSecurity: a body over the inspection limit (the role rule for
 # such a body) and a chunked body.
-waf_body_limit_rule_id: 9599903
-waf_chunked_rule_id: 9599911
+waf_body_limit_rule_id: 5099903
+waf_chunked_rule_id: 5099911
 # Request headers and cookies whose (lower-cased) names contain one of these
 # carry credentials: no rule of the Core Rule Set looks at their values, so
 # none can copy them into the log. Lower case, regex-safe. front: the

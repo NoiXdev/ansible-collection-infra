@@ -38,15 +38,15 @@ SecAuditLogType Serial
 SecAuditLogFormat JSON
 SecAuditLog /dev/stdout
 
-# The role's own rules (9599900-9599999): XML and JSON bodies are parsed into
+# The role's own rules (5099900-5099999): XML and JSON bodies are parsed into
 # arguments, so the Core Rule Set inspects their values (it picks the JSON
 # parser itself only for +json and AWS JSON types, not application/json);
 # a body that cannot be parsed is refused rather than passed uninspected. An
 # empty body (a POST or DELETE without one, but with the content type) has
 # nothing to inspect and passes: the XML parser reports an error for it.
-SecRule REQUEST_HEADERS:Content-Type "@rx ^(?:application(?:/soap\+|/)|text/)xml" "id:9599900,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=XML"
-SecRule REQUEST_HEADERS:Content-Type "@rx ^application/json" "id:9599902,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=JSON"
-SecRule REQBODY_ERROR "!@eq 0" "id:9599901,phase:2,t:none,log,deny,status:400,severity:'CRITICAL',msg:'Failed to parse request body.',chain"
+SecRule REQUEST_HEADERS:Content-Type "@rx ^(?:application(?:/soap\+|/)|text/)xml" "id:5099900,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=XML"
+SecRule REQUEST_HEADERS:Content-Type "@rx ^application/json" "id:5099902,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=JSON"
+SecRule REQBODY_ERROR "!@eq 0" "id:5099901,phase:2,t:none,log,deny,status:400,severity:'CRITICAL',msg:'Failed to parse request body.',chain"
   SecRule REQUEST_BODY_LENGTH "!@eq 0" "t:none"
 # The other body checks of ModSecurity's recommended configuration. Arguments
 # past SecArgumentsLimit are never inspected (ModSecurity drops them), so a
@@ -56,10 +56,10 @@ SecRule REQBODY_ERROR "!@eq 0" "id:9599901,phase:2,t:none,log,deny,status:400,se
 # is refused (multipart parsers differ; the backend's might see other
 # parts). An internal error of ModSecurity (such as a regex over
 # SecPcreMatchLimit) means a rule could not finish: the request is refused.
-SecRule &ARGS "@ge {{ waf_arguments_limit }}" "id:9599907,phase:2,t:none,log,deny,status:400,severity:'CRITICAL',msg:'Failed to fully parse request body due to large argument count'"
-SecRule MULTIPART_STRICT_ERROR "!@eq 0" "id:9599908,phase:2,t:none,log,deny,status:400,severity:'CRITICAL',msg:'Multipart request body failed strict validation: PE %{REQBODY_PROCESSOR_ERROR}, BQ %{MULTIPART_BOUNDARY_QUOTED}, BW %{MULTIPART_BOUNDARY_WHITESPACE}, DB %{MULTIPART_DATA_BEFORE}, DA %{MULTIPART_DATA_AFTER}, HF %{MULTIPART_HEADER_FOLDING}, LF %{MULTIPART_LF_LINE}, SM %{MULTIPART_MISSING_SEMICOLON}, IQ %{MULTIPART_INVALID_QUOTING}, IP %{MULTIPART_INVALID_PART}, IH %{MULTIPART_INVALID_HEADER_FOLDING}, FL %{MULTIPART_FILE_LIMIT_EXCEEDED}'"
-SecRule MULTIPART_UNMATCHED_BOUNDARY "@eq 1" "id:9599909,phase:2,t:none,log,deny,severity:'CRITICAL',msg:'Multipart parser detected a possible unmatched boundary.'"
-SecRule TX:/^MSC_/ "!@streq 0" "id:9599910,phase:2,t:none,log,deny,severity:'CRITICAL',msg:'ModSecurity internal error flagged: %{MATCHED_VAR_NAME}'"
+SecRule &ARGS "@ge {{ waf_arguments_limit }}" "id:5099907,phase:2,t:none,log,deny,status:400,severity:'CRITICAL',msg:'Failed to fully parse request body due to large argument count'"
+SecRule MULTIPART_STRICT_ERROR "!@eq 0" "id:5099908,phase:2,t:none,log,deny,status:400,severity:'CRITICAL',msg:'Multipart request body failed strict validation: PE %{REQBODY_PROCESSOR_ERROR}, BQ %{MULTIPART_BOUNDARY_QUOTED}, BW %{MULTIPART_BOUNDARY_WHITESPACE}, DB %{MULTIPART_DATA_BEFORE}, DA %{MULTIPART_DATA_AFTER}, HF %{MULTIPART_HEADER_FOLDING}, LF %{MULTIPART_LF_LINE}, SM %{MULTIPART_MISSING_SEMICOLON}, IQ %{MULTIPART_INVALID_QUOTING}, IP %{MULTIPART_INVALID_PART}, IH %{MULTIPART_INVALID_HEADER_FOLDING}, FL %{MULTIPART_FILE_LIMIT_EXCEEDED}'"
+SecRule MULTIPART_UNMATCHED_BOUNDARY "@eq 1" "id:5099909,phase:2,t:none,log,deny,severity:'CRITICAL',msg:'Multipart parser detected a possible unmatched boundary.'"
+SecRule TX:/^MSC_/ "!@streq 0" "id:5099910,phase:2,t:none,log,deny,severity:'CRITICAL',msg:'ModSecurity internal error flagged: %{MATCHED_VAR_NAME}'"
 {% if waf_rules_before | length > 0 %}
 
 # waf_rules_before
@@ -71,7 +71,7 @@ SecRule TX:/^MSC_/ "!@streq 0" "id:9599910,phase:2,t:none,log,deny,severity:'CRI
 # and the site's name and inspection limit for the role's rules below.
 {% for site in waf_sites_public %}
 # Site {{ site.name }}
-SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * site.index }},phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.noix_waf_site={{ site.name }},setvar:tx.noix_waf_body_limit={{ site.request_body_limit }},setvar:tx.blocking_paranoia_level={{ site.paranoia }},setvar:tx.detection_paranoia_level={{ site.detection_paranoia }},setvar:tx.inbound_anomaly_score_threshold={{ site.anomaly_inbound }},setvar:tx.outbound_anomaly_score_threshold={{ site.anomaly_outbound }}
+SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 5000000 + 100 * site.index }},phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.noix_waf_site={{ site.name }},setvar:tx.noix_waf_body_limit={{ site.request_body_limit }},setvar:tx.blocking_paranoia_level={{ site.paranoia }},setvar:tx.detection_paranoia_level={{ site.detection_paranoia }},setvar:tx.inbound_anomaly_score_threshold={{ site.anomaly_inbound }},setvar:tx.outbound_anomaly_score_threshold={{ site.anomaly_outbound }}
 {%- if site.allowed_methods | length > 0 -%}
 ,setvar:'tx.allowed_methods={{ (waf_crs_methods + site.allowed_methods) | unique | join(' ') }}'
 {%- endif -%}
@@ -90,14 +90,14 @@ SecRule REQUEST_HEADERS:Host "@rx {{ site.host_regex }}" "id:{{ 9500000 + 100 * 
 # On a detect site nginx sends such a request, and a chunked one, past
 # ModSecurity (which would read the body whole into memory) and logs the
 # event with this rule's ID itself (nginx.conf); the rule is the backstop.
-SecRule TX:noix_waf_body_limit "@gt 0" "id:9599903,phase:1,pass,t:none,log,severity:'NOTICE',msg:'Request body over the inspection limit, not inspected (mode block answers 413)',logdata:'Content-Length %{MATCHED_VAR}, limit %{tx.noix_waf_body_limit}',tag:'noix-waf/body-limit',chain"
+SecRule TX:noix_waf_body_limit "@gt 0" "id:5099903,phase:1,pass,t:none,log,severity:'NOTICE',msg:'Request body over the inspection limit, not inspected (mode block answers 413)',logdata:'Content-Length %{MATCHED_VAR}, limit %{tx.noix_waf_body_limit}',tag:'noix-waf/body-limit',chain"
   SecRule REQUEST_HEADERS:Content-Length "@gt %{tx.noix_waf_body_limit}" "t:none"
 # Every event names its site: when the audit log writes the request (an
 # error status, or a matched rule with a severity, which every logging rule
 # of the Core Rule Set has), one more message carries the site's name. Other
 # requests get no such message, which would make each of them an event.
-SecRule RESPONSE_STATUS "@rx {{ waf_audit_relevant_status }}" "id:9599904,phase:5,pass,nolog,t:none,setvar:tx.noix_waf_event=1"
-SecRule HIGHEST_SEVERITY "@lt 255" "id:9599905,phase:5,pass,nolog,t:none,setvar:tx.noix_waf_event=1"
+SecRule RESPONSE_STATUS "@rx {{ waf_audit_relevant_status }}" "id:5099904,phase:5,pass,nolog,t:none,setvar:tx.noix_waf_event=1"
+SecRule HIGHEST_SEVERITY "@lt 255" "id:5099905,phase:5,pass,nolog,t:none,setvar:tx.noix_waf_event=1"
 SecRule TX:noix_waf_event "@eq 1" "id:{{ waf_site_rule_id }},phase:5,pass,t:none,log,msg:'Site',logdata:'%{tx.noix_waf_site}',tag:'noix-waf/site',chain"
   SecRule TX:noix_waf_site "@rx ." "t:none"
 
