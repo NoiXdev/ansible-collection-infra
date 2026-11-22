@@ -1,0 +1,227 @@
+---
+# Brings Graylog's inputs to graylog_inputs, after a healthy start
+# (graylog_api_url set): the inputs whose title starts with
+# graylog_input_title_prefix are the role's, matched by title to the entries
+# (graylog_inputs_wanted); a missing one is created, one whose configuration
+# changed is updated (the same input, so its id and its messages stay), and
+# one no entry names is deleted. Inputs without the prefix (made in the web
+# interface) are never touched. Whether an input changed is read from
+# graylog_inputs_state (its id and the SHA-256 of the body the role sent),
+# not from Graylog, which does not show a token as it was set. Then waits
+# until every input of the role is RUNNING and fails when one is not. Sets
+# graylog_inputs_applied (name to id). The bodies can hold a token: every
+# task that sends or notes one is no_log.
+
+# Its hashes cover the tokens, so it is read in no_log tasks.
+- name: Read the state of the inputs
+  ansible.builtin.slurp:
+    src: "{{ graylog_inputs_state }}"
+  register: graylog_inputs_state_read
+  failed_when: false
+  no_log: true
+
+# A file that is missing or is not the role's JSON is an empty state: every
+# input is then updated once.
+- name: Note the state of the inputs
+  block:
+    - name: Parse the state of the inputs
+      ansible.builtin.set_fact:
+        graylog_inputs_recorded: "{{ graylog_inputs_json if graylog_inputs_json is mapping else {} }}"
+      vars:
+        graylog_inputs_json: "{{ (graylog_inputs_state_read.content | default('') | b64decode or '{}') | from_json }}"
+      no_log: true
+  rescue:
+    - name: Note a state of the inputs that is not JSON
+      ansible.builtin.set_fact:
+        graylog_inputs_recorded: {}
+
+- name: List the inputs
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    graylog_api_path: /system/inputs
+
+- name: Fail when the inputs cannot be listed
+  ansible.builtin.fail:
+    msg: >-
+      Graylog's API did not list the inputs (GET /api/system/inputs answered
+      {{ graylog_api_result.status | default('nothing') }}); the role changed
+      no input. See docker compose logs graylog in {{ graylog_dir }}.
+  when: graylog_api_result.status | default(-1) != 200 or graylog_api_result.json.inputs is not defined
+
+# For each entry the input it keeps: of the inputs with its title the one
+# graylog_inputs_state names, else the first. apply lists the entries to
+# create (no id) and to update (the id), keep the unchanged ones (name to
+# id), delete the other inputs with the prefix.
+- name: Note what changes
+  ansible.builtin.set_fact:
+    graylog_inputs_plan: >-
+      {%- set existing = graylog_api_result.json.inputs | selectattr('title', 'string')
+                         | selectattr('title', 'match', graylog_input_title_prefix | regex_escape) | list -%}
+      {%- set kept = [] -%}
+      {%- set plan = {'apply': [], 'keep': {}, 'delete': []} -%}
+      {%- for input in graylog_inputs_wanted -%}
+      {%-   set recorded = graylog_inputs_recorded[input.name] | default({}) -%}
+      {%-   set titled = existing | selectattr('title', 'eq', input.body.title) | list -%}
+      {%-   set match = (titled | selectattr('id', 'eq', recorded.id | default('')) | list + titled) | first | default(none) -%}
+      {%-   if match is none -%}
+      {%-     set _ = plan.apply.append({'name': input.name}) -%}
+      {%-   else -%}
+      {%-     set _ = kept.append(match.id) -%}
+      {%-     if recorded.id | default('') == match.id and recorded.sha256 | default('') == input.sha256 -%}
+      {%-       set _ = plan.keep.update({input.name: match.id}) -%}
+      {%-     else -%}
+      {%-       set _ = plan.apply.append({'name': input.name, 'id': match.id}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- for input in existing if input.id not in kept -%}
+      {%-   set _ = plan.delete.append({'id': input.id, 'title': input.title}) -%}
+      {%- endfor -%}
+      {{ plan }}
+
+# First, so that a port they hold is free for the inputs created below.
+- name: Delete the inputs no entry names
+  ansible.builtin.uri:
+    url: "{{ graylog_api_url }}/api/system/inputs/{{ item.id }}"
+    method: DELETE
+    url_username: "{{ graylog_root_username }}"
+    url_password: "{{ graylog_root_password | string }}"
+    force_basic_auth: true
+    headers:
+      X-Requested-By: ansible
+    status_code: [200, 204]
+    timeout: 30
+  loop: "{{ graylog_inputs_plan.delete }}"
+  loop_control:
+    label: "{{ item.title }}"
+  register: graylog_inputs_deleted
+  failed_when: false
+  changed_when: graylog_inputs_deleted.status | default(-1) in [200, 204]
+  no_log: true
+
+- name: Fail when an input could not be deleted
+  ansible.builtin.fail:
+    msg: >-
+      Graylog did not delete the inputs
+      {{ graylog_inputs_undeleted | join(', ') }}, which have the prefix of
+      the role's inputs and are no longer in graylog_inputs. Delete them in
+      the web interface (System, Inputs), or run the role again.
+  vars:
+    graylog_inputs_undeleted: >-
+      {{ graylog_inputs_deleted.results | default([]) | rejectattr('status', 'in', [200, 204])
+         | map(attribute='item.title') | map('to_json') | list }}
+  when: graylog_inputs_undeleted | length > 0
+
+# By name, so that no body reaches the output; no_log, as the result echoes
+# the body. Graylog answers 201 to both (with the id).
+- name: Create and update the inputs
+  ansible.builtin.uri:
+    url: "{{ graylog_api_url }}/api/system/inputs{{ ('/' ~ item.id) if item.id is defined else '' }}"
+    method: "{{ 'PUT' if item.id is defined else 'POST' }}"
+    url_username: "{{ graylog_root_username }}"
+    url_password: "{{ graylog_root_password | string }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+      X-Requested-By: ansible
+    body: "{{ (graylog_inputs_wanted | selectattr('name', 'eq', item.name) | first).body }}"
+    body_format: json
+    status_code: [200, 201]
+    return_content: true
+    timeout: 30
+  loop: "{{ graylog_inputs_plan.apply }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: graylog_inputs_changed
+  failed_when: false
+  changed_when: graylog_inputs_changed.status | default(-1) in [200, 201]
+  no_log: true
+
+- name: Fail when an input could not be created or updated
+  ansible.builtin.fail:
+    msg: >-
+      Graylog refused to create or update the inputs
+      {{ graylog_inputs_refused | join(', ') }} of graylog_inputs (the status
+      and Graylog's message for each; the configuration is not shown, as it
+      can hold a token). The other inputs are as before or changed. Check the
+      options of the entries, then run the role again.
+  vars:
+    graylog_inputs_refused: >-
+      {%- set refused = [] -%}
+      {%- for result in graylog_inputs_changed.results | default([]) if result.status | default(-1) not in [200, 201] -%}
+      {%-   set _ = refused.append(result.item.name ~ ' (' ~ result.status | default('no answer') ~ ': '
+                                   ~ ((result.json | default({})).message | default('') | string | truncate(200, true))
+                                   ~ ')') -%}
+      {%- endfor -%}
+      {{ refused }}
+  when: graylog_inputs_refused | length > 0
+
+- name: Note the inputs of the role
+  ansible.builtin.set_fact:
+    graylog_inputs_applied: >-
+      {%- set applied = {} | combine(graylog_inputs_plan.keep) -%}
+      {%- for result in graylog_inputs_changed.results | default([]) -%}
+      {%-   set _ = applied.update({result.item.name: result.item.id | default((result.json | default({})).id | default(''))}) -%}
+      {%- endfor -%}
+      {{ applied }}
+
+# Mode 0600: the hashes cover the tokens.
+- name: Write the state of the inputs
+  ansible.builtin.copy:
+    dest: "{{ graylog_inputs_state }}"
+    content: >-
+      {%- set state = {} -%}
+      {%- for input in graylog_inputs_wanted -%}
+      {%-   set _ = state.update({input.name: {'id': graylog_inputs_applied[input.name], 'sha256': input.sha256}}) -%}
+      {%- endfor -%}
+      {{ state | to_nice_json(sort_keys=true) }}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+# An input that was created, updated or restarted takes a moment; one that
+# cannot open its port stays FAILED, so the wait ends there too.
+- name: Wait until the inputs of the role are RUNNING
+  ansible.builtin.uri:
+    url: "{{ graylog_api_url }}/api/system/inputstates"
+    url_username: "{{ graylog_root_username }}"
+    url_password: "{{ graylog_root_password | string }}"
+    force_basic_auth: true
+    headers:
+      Accept: application/json
+    return_content: true
+    timeout: 10
+  register: graylog_inputs_states
+  until: >-
+    graylog_inputs_applied.values() | difference(graylog_inputs_states.json.states | default([])
+      | selectattr('state', 'eq', 'RUNNING') | map(attribute='id') | list) | length == 0
+    or graylog_inputs_states.json.states | default([]) | selectattr('id', 'in', graylog_inputs_applied.values())
+       | selectattr('state', 'eq', 'FAILED') | list | length > 0
+  retries: 24
+  delay: 5
+  failed_when: false
+  changed_when: false
+  no_log: true
+  when: graylog_inputs_applied | length > 0
+
+- name: Fail when an input of the role is not RUNNING
+  ansible.builtin.fail:
+    msg: >-
+      The inputs {{ graylog_inputs_down | join(', ') }} of graylog_inputs are
+      not RUNNING in Graylog in {{ graylog_dir }}. An input that cannot open
+      its port is FAILED (another input on the same port and transport, one
+      made in the web interface among them); see the input's messages in the
+      web interface (System, Inputs) and docker compose logs graylog.
+  vars:
+    graylog_inputs_down: >-
+      {%- set states = {} -%}
+      {%- for state in graylog_inputs_states.json.states | default([]) -%}
+      {%-   set _ = states.update({state.id: state.state}) -%}
+      {%- endfor -%}
+      {%- set down = [] -%}
+      {%- for name, id in graylog_inputs_applied | dictsort if states[id] | default('') != 'RUNNING' -%}
+      {%-   set _ = down.append(name ~ ' (' ~ states[id] | default('not started') ~ ')') -%}
+      {%- endfor -%}
+      {{ down }}
+  when: graylog_inputs_down | length > 0

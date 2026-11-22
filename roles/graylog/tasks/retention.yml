@@ -1,0 +1,70 @@
+---
+# Sets the retention of the default index set after a healthy start
+# (graylog_api_url set): a new index every day (graylog_rotation_strategy)
+# and the oldest deleted beyond graylog_retention_days indices
+# (graylog_retention_strategy), with Graylog's classic rotation rather than
+# its data tiering, which keeps messages between a minimum and a maximum age
+# and has no exact number of days. Every other setting of the index set (its
+# shards, replicas and the like, made in the web interface) is sent back as
+# Graylog has it. Changes nothing when the index set already has them.
+
+- name: List the index sets
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    graylog_api_path: /system/indices/index_sets
+
+- name: Note the default index set
+  ansible.builtin.set_fact:
+    graylog_index_set: >-
+      {{ graylog_api_result.json.index_sets | default([]) | selectattr('default', 'defined')
+         | selectattr('default') | first | default({}) }}
+  when: graylog_api_result.status | default(-1) == 200
+
+- name: Fail without the default index set
+  ansible.builtin.fail:
+    msg: >-
+      Graylog's API did not name its default index set (GET
+      /api/system/indices/index_sets answered
+      {{ graylog_api_result.status | default('nothing') }}), so the role
+      cannot set the retention of {{ graylog_retention_days }} days and
+      changed nothing of it. See docker compose logs graylog in
+      {{ graylog_dir }}.
+  when: graylog_index_set | default({}) | length == 0
+
+# The settings the role owns compared one by one: Graylog adds others to the
+# strategies (max_rotation_period, for example).
+- name: Note the retention the role sets
+  ansible.builtin.set_fact:
+    graylog_index_set_wanted: >-
+      {{ graylog_index_set | combine({
+           'use_legacy_rotation': true,
+           'rotation_strategy_class': graylog_rotation_strategy.class,
+           'rotation_strategy': graylog_index_set.rotation_strategy | default({}) | combine(graylog_rotation_strategy.config)
+                                if graylog_index_set.rotation_strategy_class | default('') == graylog_rotation_strategy.class
+                                else graylog_rotation_strategy.config,
+           'retention_strategy_class': graylog_retention_strategy.class,
+           'retention_strategy': graylog_index_set.retention_strategy | default({})
+                                 | combine(graylog_retention_strategy.config, {'max_number_of_indices': graylog_retention_days | int})
+                                 if graylog_index_set.retention_strategy_class | default('') == graylog_retention_strategy.class
+                                 else graylog_retention_strategy.config | combine({'max_number_of_indices': graylog_retention_days | int})}) }}
+
+- name: Set the retention of the default index set
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    graylog_api_method: PUT
+    graylog_api_path: /system/indices/index_sets/{{ graylog_index_set.id }}
+    graylog_api_body: "{{ graylog_index_set_wanted }}"
+  when: graylog_index_set_wanted != graylog_index_set
+
+- name: Fail when the retention was not set
+  ansible.builtin.fail:
+    msg: >-
+      Graylog refused the retention of {{ graylog_retention_days }} days for
+      the default index set {{ graylog_index_set.title | default('') | to_json }}
+      (PUT /api/system/indices/index_sets answered
+      {{ graylog_api_result.status | default('nothing') }}:
+      {{ (graylog_api_result.json | default({})).message | default('') | string | truncate(200, true) }});
+      it keeps the one it had.
+  when:
+    - graylog_index_set_wanted != graylog_index_set
+    - graylog_api_result.status | default(-1) != 200

@@ -2,7 +2,8 @@
 # Checks an installation on the test host as run.sh's settings make it: the
 # containers of the compose project (mongodb, datanode and graylog, running
 # and healthy, with the pinned images, the local log driver whatever the
-# daemon's default, restarted unless stopped and with no published port);
+# daemon's default, restarted unless stopped; the server publishes only the
+# ports of the bound inputs, the others none);
 # the server's environment (the settings the role fixes, the heap, the
 # secrets only as *__FILE, never as values) and the Data Node's (its password
 # secret only as a file, its heap); the mounts (the data subdirectories, the
@@ -10,7 +11,9 @@
 # directory root's 0700 with password_secret and root_password_sha2, each
 # 0600, the versions file; and vm.max_map_count of at least 262144, at
 # runtime and in the role's drop-in.
-# Extra variables: verify_server_heap (default the one of vars.yml).
+# Extra variables: verify_server_heap (default the one of vars.yml) and
+# verify_published, the server's published ports as
+# <address>:<host port>:<container port>/<protocol> (default none).
 - name: Verify
   hosts: all
   gather_facts: false
@@ -24,6 +27,7 @@
       datanode: "{{ verify_defaults.graylog_datanode_image }}:{{ verify_version }}"
       graylog: "{{ verify_defaults.graylog_image }}:{{ verify_version }}"
     verify_server_heap: "{{ graylog_server_heap }}"
+    verify_published: []
     verify_all: "{{ verify_inspect.stdout | from_json }}"
     # Service name to container.
     verify_containers: >-
@@ -79,14 +83,24 @@
           # Never the daemon's default: with GELF to the host's own input,
           # every message would make more.
           - item.value.HostConfig.LogConfig.Type == 'local'
-          - item.value.HostConfig.PortBindings | default({}, true) | length == 0
-          - item.value.NetworkSettings.Ports | default({}, true) | dict2items | selectattr('value') | list | length == 0
+          - verify_bindings | sort == (verify_published if item.key == 'graylog' else []) | sort
         fail_msg: >-
           {{ item.key }} is not {{ verify_images[item.key] }}, running, healthy,
-          restarted unless stopped, logging with local and without a published
-          port: {{ item.value.Config.Image }}, {{ item.value.State.Status }},
+          restarted unless stopped, logging with local and publishing
+          {{ (verify_published if item.key == 'graylog' else []) | sort or 'no port' }}:
+          {{ item.value.Config.Image }}, {{ item.value.State.Status }},
           {{ item.value.State.Health.Status | default('no health') }},
-          {{ item.value.HostConfig.LogConfig.Type }}, {{ item.value.NetworkSettings.Ports }}.
+          {{ item.value.HostConfig.LogConfig.Type }}, {{ verify_bindings | sort }}.
+      vars:
+        # The published ports as <address>:<host port>:<container port>/<protocol>.
+        verify_bindings: >-
+          {%- set found = [] -%}
+          {%- for port, bindings in (item.value.HostConfig.PortBindings | default({}, true)).items() -%}
+          {%-   for binding in bindings | default([], true) -%}
+          {%-     set _ = found.append(binding.HostIp ~ ':' ~ binding.HostPort ~ ':' ~ port) -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {{ found }}
       loop: "{{ verify_containers | dict2items }}"
       loop_control:
         label: "{{ item.key }}"

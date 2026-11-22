@@ -414,9 +414,18 @@
           run without changes; see docker compose logs in {{ graylog_dir }}.
       when: not graylog_healthy
 
-# Reached only by a run that ended healthy, which (re)started Graylog on the
-# compose file and the secrets files as they are: the restart a stopped
-# reconfigure left pending is done.
+# Reached only by a run that ended healthy (installed, reconfigured or
+# without changes): the inputs and the retention are Graylog's own settings,
+# kept through its API on every run.
+- name: Reconcile the inputs
+  ansible.builtin.include_tasks: inputs.yml
+
+- name: Set the retention
+  ansible.builtin.include_tasks: retention.yml
+
+# Graylog was (re)started on the compose file and the secrets files as they
+# are and is healthy: the restart a stopped reconfigure left pending is
+# done.
 - name: Remove the marker of a pending restart
   ansible.builtin.file:
     path: "{{ graylog_restart_marker }}"

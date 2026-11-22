@@ -125,6 +125,23 @@ services:
       start_period: {{ graylog_start_period }}s
       start_interval: 5s
     networks: [default, traefik]
+{# Only the inputs with bind addresses are published, each on those
+    addresses only; the container port is the input's (above 1024). #}
+{% set published = [] %}
+{% for input in graylog_inputs_wanted %}
+{%   for address in input.bind %}
+{%     set _ = published.append({'address': address, 'input': input}) %}
+{%   endfor %}
+{% endfor %}
+{% if published | length > 0 %}
+    ports:
+{%   for entry in published %}
+      - target: {{ entry.input.container_port }}
+        published: {{ q(entry.input.port) }}
+        host_ip: {{ q(entry.address) }}
+        protocol: {{ entry.input.transport }}
+{%   endfor %}
+{% endif %}
     # No published web port: Traefik reaches the server over its network.
     labels:
       - traefik.enable=true
@@ -140,6 +157,27 @@ services:
       - {{ q('traefik.http.routers.' ~ router ~ '.service=' ~ graylog_project) }}
       # Plain HTTP stays on the compose networks; Traefik terminates TLS.
       - {{ q('traefik.http.services.' ~ graylog_project ~ '.loadbalancer.server.port=9000') }}
+{# The inputs with a traefik block, each with a router and a service of its
+    own: gelf_http over HTTP like the web interface, gelf_tcp and syslog_tcp
+    as TCP routers with TLS terminated at Traefik, chosen by the server name
+    the sender gives (SNI). #}
+{% for input in graylog_inputs_wanted if input.traefik %}
+{%   set r = graylog_project ~ '-input-' ~ input.name %}
+{%   set kind = 'http' if input.type == 'gelf_http' else 'tcp' %}
+{%   if kind == 'http' %}
+      - {{ q('traefik.http.routers.' ~ r ~ '.rule=Host(`' ~ input.traefik.hostname ~ '`)') }}
+      - {{ q('traefik.http.routers.' ~ r ~ '.priority=' ~ graylog_traefik_priority) }}
+{%   else %}
+      - {{ q('traefik.tcp.routers.' ~ r ~ '.rule=HostSNI(`' ~ input.traefik.hostname ~ '`)') }}
+      - {{ q('traefik.tcp.routers.' ~ r ~ '.tls=true') }}
+{%   endif %}
+      - {{ q('traefik.' ~ kind ~ '.routers.' ~ r ~ '.entrypoints=' ~ input.traefik.entrypoints | join(',')) }}
+{%   if input.traefik.middlewares | default([]) | length > 0 %}
+      - {{ q('traefik.' ~ kind ~ '.routers.' ~ r ~ '.middlewares=' ~ input.traefik.middlewares | join(',')) }}
+{%   endif %}
+      - {{ q('traefik.' ~ kind ~ '.routers.' ~ r ~ '.service=' ~ r) }}
+      - {{ q('traefik.' ~ kind ~ '.services.' ~ r ~ '.loadbalancer.server.port=' ~ input.container_port) }}
+{% endfor %}
     logging:
       driver: local
     restart: unless-stopped

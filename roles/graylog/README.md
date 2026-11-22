@@ -46,3 +46,38 @@ higher value an operator set is kept.
 | `graylog_health_timeout` | `600` | Seconds to wait until Graylog is healthy |
 | `graylog_rollback_timeout` | the health timeout | Seconds a rollback waits for the previous version |
 | `graylog_restore_interrupted` | `false` | For one run: restore the backup of an update that did not finish |
+
+## Inputs
+
+Each entry of `graylog_inputs` is an input titled `graylog_input_title_prefix`
+plus its name. On every run the role creates the missing ones, updates the
+changed ones (the same input, so its id stays) and deletes the inputs with the
+prefix that no entry names; inputs without the prefix, made in the web
+interface, are never touched. After a change of the prefix the inputs with
+the old one stay, and still hold their ports: delete them in the web
+interface. Every input of the role must be `RUNNING`, or the run fails.
+
+- `bind` publishes the port on those host addresses only, and nothing else
+  restricts who sends: use the host's or the cloud's firewall. A port below
+  1024 is the port plus 10000 inside the container (Graylog does not run as
+  root), so a syslog input on 514 listens on 10514 there.
+- `traefik` routes the input through Traefik: a `gelf_http` input gets an
+  HTTPS router on the host name; `gelf_tcp` and `syslog_tcp` get a TCP router
+  with TLS ended at Traefik, chosen by the server name (SNI) the sender sends.
+  A sender must therefore connect by that host name: one that sends no server
+  name, as when it connects to an IP address, is not routed. Traefik serves
+  the certificate it holds for the name, for example one it obtains for a name
+  listed in the `traefik` role's certificate domains, and else its default
+  one.
+- `token` makes a `gelf_http` input accept only requests with the header
+  `Authorization: Bearer <token>`.
+- `options` sets further settings of the input, by Graylog's names (as
+  `max_message_size`); the address, the port and the token are the role's.
+
+## Retention
+
+The default index set gets a new index every day and deletes the oldest
+beyond `graylog_retention_days` indices, set on every run. The role uses
+Graylog's classic rotation for it, not the data tiering, which keeps messages
+between a minimum and a maximum age. Further index sets, streams, dashboards
+and alerts are made in the web interface.
