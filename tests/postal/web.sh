@@ -1,24 +1,27 @@
 #!/bin/sh
-# Requests to Postal's web server, run inside the runner service (on the
-# Traefik network) by run.sh: its curl talks to web at <address>, its address
-# on that network, port 5000, with Host: postal.test.
-#   web.sh get <address> <path>
+# Requests to Postal's web server with Host: postal.test, at <base>: run.sh
+# runs it inside the runner service (on the Traefik network) against
+# http://<web's address there>:5000, and on the test host against Traefik's
+# ui entrypoint (https://postal.test:8443, Traefik's own certificate).
+#   web.sh get <base> <path>
 #       prints the body, then the status on a line of its own
-#   web.sh login <address>
+#   web.sh login <base>
 #       stdin: the e-mail address on the first line, the password after it
 #       (as it is, without a newline); logs in through the login form and
 #       prints the status of the POST /login on a line of its own, then the
 #       body of GET / and its status on a line of its own
-#   web.sh reset <address>
+#   web.sh reset <base>
 #       stdin: the e-mail address; asks for a password reset mail through
 #       the form and prints the status of the POST /login/reset
 set -eu
 
 action="$1"
-base="http://$2:5000"
+base="$2"
 jar=/tmp/web.jar
+# Each call starts without a session (the test host keeps /tmp).
+rm -f "$jar"
 
-req() { curl --silent --show-error --max-time 120 --header 'Host: postal.test' --cookie "$jar" --cookie-jar "$jar" "$@"; }
+req() { curl --silent --show-error --insecure --max-time 120 --header 'Host: postal.test' --cookie "$jar" --cookie-jar "$jar" "$@"; }
 
 # The CSRF token of the form on the page <path>.
 form_token() {
@@ -46,7 +49,7 @@ case "$action" in
       --data-urlencode "email_address=$email" "$base/login/reset"
     ;;
   *)
-    echo "usage: web.sh get|login|reset <address> [path]" >&2
+    echo "usage: web.sh get|login|reset <base> [path]" >&2
     exit 2
     ;;
 esac

@@ -42,6 +42,27 @@
 #             Postal runs as before
 #   ipv6_off  IPv6 switched off on the test host: the SMTP servers listen on
 #             0.0.0.0 (postal.yml, the sockets) and answer EHLO; back on, on ::
+#   routers   the Traefik routers of web (verify.yml: every traefik.* label):
+#             on the default entrypoints the API (Postal's JSON error without
+#             a key), the JWKS, the login page and tracking on
+#             track.mail.test (Postal's "Hello."), and a client's
+#             X-Postal-Track-Host, in either spelling, never reaches Postal on
+#             the web host name; postal_traefik_ui_middlewares denying
+#             everyone denies the UI while the API and tracking answer; the
+#             API and tracking on websecure with the UI on ui: on websecure
+#             Traefik's 404 for the UI's paths, on ui the login page (the
+#             admin logs in there) and no API, tracking on one more host name
+#             of postal_track_hostnames, and the tracking router sets the
+#             header whatever the client sends
+#   mail      postal_fixture (an organization, a mail server, the verified
+#             domain mail.example.test, an API credential and a route to the
+#             echo endpoint, echo.py, on the test host's loopback): a message
+#             through the API router and one submitted on 587 with an SMTP
+#             credential reach Mailpit (postal_smtp_relays) with a
+#             DKIM-Signature of the signing key (postal._domainkey.rp.mail.test:
+#             the domain's own key needs its DNS checked); a message to
+#             in@routes.mail.test on port 25
+#             reaches the echo endpoint (postal_allowed_request_destinations)
 #   missing_data
 #             the MariaDB data moved away (an unmounted volume): the run
 #             refuses and creates nothing, and compose does not start MariaDB
@@ -207,8 +228,8 @@ verify() {
 }
 
 # start_host <ubuntu>: a fresh systemd host with Docker, Traefik and Mailpit,
-# where postal.test is 127.0.0.1 and web.sh is /root/web.sh. IPv6 is on, as on
-# a server: Postal's SMTP server listens on ::.
+# where postal.test is 127.0.0.1 and web.sh and echo.py are in /root. IPv6 is
+# on, as on a server: Postal's SMTP server listens on ::.
 start_host() {
   local ubuntu="$1"
   host="noixdev-postal-$ubuntu"
@@ -226,6 +247,7 @@ start_host() {
   h rm -f /usr/sbin/policy-rc.d
   h sh -c 'echo "127.0.0.1 postal.test" >>/etc/hosts'
   docker cp "$here/web.sh" "$host:/root/web.sh" >/dev/null
+  docker cp "$here/echo.py" "$host:/root/echo.py" >/dev/null
   secrets=("$db_password" "$admin_password")
 
   echo "== test host (ubuntu $ubuntu)"
@@ -275,11 +297,159 @@ web() {
   local action="$1"
   shift
   hi sh -c 'cd '"$app_dir"' && exec docker compose run --rm --no-deps -T --entrypoint sh runner -c "$(cat /root/web.sh)" web.sh "$@"' \
-    sh "$action" "$(web_ip)" "$@" 2>>"$out/web.log"
+    sh "$action" "http://$(web_ip):5000" "$@" 2>>"$out/web.log"
 }
 # admin_login <email> <password>: logs in through the login form and prints
 # the status of POST /login, then the page / and its status.
 admin_login() { printf '%s\n%s' "$1" "$2" | web login; }
+# ui_login <email> <password>: the same through Traefik's ui entrypoint, from
+# the test host.
+ui_login() { printf '%s\n%s' "$1" "$2" | hi sh /root/web.sh login https://postal.test:8443 2>>"$out/web.log"; }
+
+# A request through Traefik from the test host (HTTPS, Traefik's own
+# certificate), to <name> resolved to 127.0.0.1: prints the body, then the
+# status on a line of its own. request <port> <name> <path> [curl options...];
+# port 443 is websecure, 8443 ui.
+request() {
+  local port="$1" name="$2" path="$3"
+  shift 3
+  h curl -sk --max-time 60 --resolve "$name:$port:127.0.0.1" -w '\n%{http_code}' "$@" "https://$name:$port$path" || true
+}
+# expect_answer <status> <body text> <port> <name> <path> [curl options...]:
+# the status and a body that holds the text.
+expect_answer() {
+  local status="$1" text="$2" answer
+  shift 2
+  answer="$(request "$@")"
+  { [ "${answer##*$'\n'}" = "$status" ] && [[ "${answer%$'\n'*}" == *"$text"* ]]; } \
+    || fail "https://$2:$1$3 answered ${answer##*$'\n'} ($(printf '%s' "${answer%$'\n'*}" | head -c 200)), not $status with: $text"
+}
+# The same, retried while Traefik picks up new labels.
+wait_answer() {
+  local answer
+  for _ in $(seq 60); do
+    answer="$(request "${@:3}")"
+    { [ "${answer##*$'\n'}" = "$1" ] && [[ "${answer%$'\n'*}" == *"$2"* ]]; } && return 0
+    sleep 2
+  done
+  expect_answer "$@"
+}
+# Traefik's own 403 of the ipAllowList middleware (deny@file): the body is
+# Forbidden. expect_denied <port> <name> <path> [curl options...].
+expect_denied() {
+  local answer
+  answer="$(request "$@")"
+  [ "$answer" = $'Forbidden\n403' ] || fail "https://$2:$1$3 was not denied by Traefik: ${answer##*$'\n'} $(printf '%s' "${answer%$'\n'*}" | head -c 200)"
+}
+wait_denied() {
+  for _ in $(seq 60); do
+    [ "$(request "$@")" = $'Forbidden\n403' ] && return 0
+    sleep 2
+  done
+  expect_denied "$@"
+}
+# The answers of the routers: the sending API without a key (Postal's JSON
+# error, which it sends with 200), the login page of the UI, and Postal's
+# tracking server, which answers Hello. on every path it does not know.
+api_refused() { expect_answer 200 '"code":"AccessDenied"' 443 postal.test /api/v1/send/message -X POST -H 'Content-Type: application/json' --data '{}' "$@"; }
+login_page() { expect_answer 200 'name="email_address"' "$@"; }
+tracking() { expect_answer 200 'Hello.' "$@"; }
+
+# postal_fixture: an organization (noix) with a mail server (test), the
+# verified domain mail.example.test (Postal makes its DKIM key), an HTTP
+# endpoint at the echo endpoint (start_echo) and a route to it that takes
+# in@routes.mail.test (a route's token at the route domain; in@mail.example.test
+# too), and an API credential; prints the credential's key. Made once,
+# afterwards found again.
+postal_fixture() {
+  postal_rails '
+user = User.order(:id).first or raise "Postal has no user"
+org = Organization.find_by(permalink: "noix") || Organization.create!(name: "Noix", permalink: "noix", owner: user)
+server = org.servers.find_by(permalink: "test") || org.servers.create!(name: "Test", permalink: "test", mode: "Live")
+domain = server.domains.find_by(name: "mail.example.test") ||
+         server.domains.create!(name: "mail.example.test", verification_method: "DNS")
+domain.update!(verified_at: Time.now) unless domain.verified?
+endpoint = server.http_endpoints.find_by(name: "echo") ||
+           server.http_endpoints.create!(name: "echo", url: "http://127.0.0.1:8090/", encoding: "BodyAsJSON", format: "Hash")
+server.routes.find_by(token: "in") ||
+  server.routes.create!(name: "in", domain: domain, token: "in", mode: "Endpoint", endpoint: endpoint, spam_mode: "Mark")
+credential = server.credentials.find_by(type: "API", name: "fixture") || server.credentials.create!(type: "API", name: "fixture")
+puts credential.key' | tail -n 1
+}
+# postal_smtp_key: an SMTP credential of the fixture's mail server; prints its
+# key (the password of SMTP AUTH).
+postal_smtp_key() {
+  postal_rails '
+server = Organization.find_by!(permalink: "noix").servers.find_by!(permalink: "test")
+credential = server.credentials.find_by(type: "SMTP", name: "fixture") || server.credentials.create!(type: "SMTP", name: "fixture")
+puts credential.key' | tail -n 1
+}
+# The echo endpoint (echo.py) on the test host's 127.0.0.1:8090, storing each
+# POST body in /root/echo.
+start_echo() {
+  h systemctl is-active -q postal-echo && return 0
+  h systemd-run --quiet --unit=postal-echo python3 /root/echo.py --dir /root/echo
+}
+# wait_echo <text>: waits for a body that holds the text and prints it.
+wait_echo() {
+  local file
+  for _ in $(seq 90); do
+    file="$(h sh -c 'grep -lF -- "$1" /root/echo/*.body 2>/dev/null | head -n 1' sh "$1" || true)"
+    [ -n "$file" ] && { h cat "$file"; return 0; }
+    sleep 2
+  done
+  fail "no request with $1 reached the echo endpoint; Postal's newest message: $(last_deliveries)"
+}
+# wait_mail <subject>: waits for a message with the subject in Mailpit and
+# prints its raw text.
+wait_mail() {
+  local id
+  for _ in $(seq 90); do
+    id="$(h curl -s --max-time 30 --get --data-urlencode "query=subject:$1" http://127.0.0.1:8025/api/v1/search \
+      | python3 -c 'import json, sys; found = json.load(sys.stdin)["messages"]; print(found[0]["ID"] if found else "")')"
+    [ -n "$id" ] && { h curl -s --max-time 30 "http://127.0.0.1:8025/api/v1/message/$id/raw"; return 0; }
+    sleep 2
+  done
+  fail "no message with the subject $1 reached Mailpit; Postal's newest message: $(last_deliveries)"
+}
+# The status and the delivery attempts of the newest message of the fixture's
+# mail server.
+last_deliveries() {
+  postal_rails '
+message = Organization.find_by!(permalink: "noix").servers.find_by!(permalink: "test")
+  .message_db.messages(order: "id", direction: "desc", limit: 1).first
+puts message ? "#{message.subject}: #{message.status}" : "none"
+message&.deliveries&.each { |delivery| puts "#{delivery.status}: #{delivery.details} #{delivery.output}" }' || true
+}
+# The DNS name of the key of the message's DKIM-Signature,
+# <s>._domainkey.<d> (empty without one): dkim_key_name <raw message on
+# stdin>.
+dkim_key_name() {
+  python3 -c '
+import email, re, sys
+signature = " ".join(email.message_from_string(sys.stdin.read()).get("DKIM-Signature", "").split())
+tags = dict(re.findall(r"(?:^|;)\s*([a-z]+)=([^;]*)", signature))
+print(tags["s"].strip() + "._domainkey." + tags["d"].strip() if "s" in tags and "d" in tags else "")'
+}
+# smtp_send <port> <from> <to> <subject>: a message over SMTP from the test
+# host; a key on stdin logs in first (AUTH PLAIN; Postal takes the key as the
+# password and ignores the user name).
+smtp_send() {
+  hi python3 -c '
+import smtplib, sys
+from email.message import EmailMessage
+port, sender, rcpt, subject = sys.argv[1:]
+key = sys.stdin.read()
+message = EmailMessage()
+message["From"], message["To"], message["Subject"] = sender, rcpt, subject
+message.set_content("A message of the postal suite.\n")
+with smtplib.SMTP("127.0.0.1", int(port), timeout=120) as smtp:
+    smtp.ehlo("client.example.test")
+    if key:
+        smtp.user, smtp.password = "noix", key
+        smtp.auth("PLAIN", smtp.auth_plain)
+    smtp.send_message(message)' "$@"
+}
 
 # Adds what the install generated, the Rails secret and a line of the private
 # part of the signing key, to the secrets no output may hold.
@@ -622,10 +792,125 @@ test_mountpoint() {
   h test ! -e /opt/postal-mountpoint || fail "the refused run created /opt/postal-mountpoint"
 }
 
+test_routers() {
+  local answer
+  echo "== routers (ubuntu $1)"
+  ensure_installed routers
+
+  # The defaults: every router on Traefik's default entrypoints (websecure),
+  # without an entrypoints label.
+  install_converge_unchanged
+  if h grep -qF '.entrypoints=' "$app_dir/compose.yaml"; then fail "the compose file names entrypoints without postal_traefik_*entrypoints"; fi
+  verify
+  wait_answer 200 'name="email_address"' 443 postal.test /login
+  api_refused
+  expect_answer 200 '"keys"' 443 postal.test /.well-known/jwks.json
+  tracking 443 track.mail.test /
+  # A client's X-Postal-Track-Host (either spelling) never reaches Postal
+  # through the routers of the web host name.
+  login_page 443 postal.test /login -H 'X-Postal-Track-Host: 1'
+  login_page 443 postal.test /login -H 'X_Postal_Track_Host: 1'
+  api_refused -H 'X-Postal-Track-Host: 1'
+  api_refused -H 'X_Postal_Track_Host: 1'
+
+  # The UI behind a middleware that denies everyone: on the same entrypoint
+  # the API and tracking still answer.
+  echo "== routers: the UI denied (ubuntu $1)"
+  local deny='{"postal_traefik_ui_middlewares": ["deny@file"]}'
+  install_converge -e "$deny"
+  verify -e verify_ui_middlewares=deny@file
+  wait_denied 443 postal.test /login
+  expect_denied 443 postal.test /
+  api_refused
+  expect_answer 200 '"keys"' 443 postal.test /.well-known/jwks.json
+  tracking 443 track.mail.test /
+  install_converge_unchanged -e "$deny"
+
+  # The split of the playbook: the API and tracking on websecure, the UI on
+  # its own entrypoint (ui stands in for one on the tailnet), and one more
+  # tracking host name. On websecure no router takes the UI's paths, so
+  # Traefik answers with its own 404; on ui the login page answers, and the
+  # admin logs in there.
+  echo "== routers: the UI on its own entrypoint (ubuntu $1)"
+  local split='{"postal_traefik_entrypoints": ["websecure"], "postal_traefik_ui_entrypoints": ["ui"], "postal_track_hostnames": ["click.example.test"]}'
+  install_converge -e "$split"
+  verify -e verify_entrypoints=websecure -e verify_ui_entrypoints=ui -e verify_track_hostnames=click.example.test
+  wait_answer 200 'name="email_address"' 8443 postal.test /login
+  expect_answer 404 '404 page not found' 443 postal.test /login
+  expect_answer 404 '404 page not found' 443 postal.test /
+  api_refused
+  expect_answer 200 '"keys"' 443 postal.test /.well-known/jwks.json
+  expect_answer 404 '404 page not found' 8443 postal.test /api/v1/send/message
+  login_page 8443 postal.test /login -H 'X-Postal-Track-Host: 1'
+  login_page 8443 postal.test /login -H 'X_Postal_Track_Host: 1'
+  tracking 443 track.mail.test /
+  tracking 443 click.example.test /
+  # The tracking router sets the header whatever the client sends.
+  tracking 443 track.mail.test / -H 'X-Postal-Track-Host: 0'
+  expect_answer 404 '404 page not found' 8443 track.mail.test /
+  answer="$(ui_login "$admin_email" "$admin_password")"
+  [ "$(printf '%s\n' "$answer" | head -n 1)" = 302 ] || fail "the login on ui was not redirected: $(printf '%s' "$answer" | head -c 300)"
+  [ "${answer##*$'\n'}" = 200 ] || fail "/ on ui after the login answered ${answer##*$'\n'}"
+  [[ "$answer" == *'Welcome to Postal, Noix'* ]] || fail "/ on ui after the login is not Postal's start page: $(printf '%s' "$answer" | head -c 300)"
+  install_converge_unchanged -e "$split"
+
+  # Back to the defaults.
+  install_converge
+  verify
+  wait_answer 200 'name="email_address"' 443 postal.test /login
+  install_converge_unchanged
+}
+
+test_mail() {
+  local key smtp_key subject raw body
+  echo "== mail (ubuntu $1)"
+  ensure_installed mail
+  start_echo
+  key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  [ "${#key}" = 24 ] || fail "the fixture printed no API key: $(tail -n 20 "$out/rails.log")"
+  smtp_key="$(postal_smtp_key)" || fail "the SMTP credential failed: $(tail -n 20 "$out/rails.log")"
+  [ "${#smtp_key}" = 24 ] || fail "no SMTP key: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$key" "$smtp_key")
+  # Made once: a second call finds the same.
+  [ "$(postal_fixture)" = "$key" ] || fail "a second postal_fixture made another API credential"
+
+  # Through the API router with the key: relayed to Mailpit
+  # (postal_smtp_relays, vars.yml) and signed. The domain's DNS is not
+  # checked, so Postal signs with the signing key of the role, whose record
+  # the install prints (postal._domainkey.rp.mail.test).
+  echo "== mail: the API (ubuntu $1)"
+  subject="noixapi$(openssl rand -hex 4)"
+  body="$(request 443 postal.test /api/v1/send/message -X POST -H 'Content-Type: application/json' -H "X-Server-API-Key: $key" \
+    --data '{"to": ["someone@example.test"], "from": "test@mail.example.test", "subject": "'"$subject"'", "plain_body": "A message of the postal suite."}')"
+  [[ "$body" == *'"status":"success"'* ]] || fail "the API did not take the message: $(printf '%s' "$body" | head -c 300)"
+  raw="$(wait_mail "$subject")"
+  [ "$(dkim_key_name <<<"$raw")" = postal._domainkey.rp.mail.test ] \
+    || fail "the message from the API is not signed with postal._domainkey.rp.mail.test: $(printf '%s' "$raw" | head -c 600)"
+
+  # Submitted on 587 with the SMTP credential.
+  echo "== mail: submission (ubuntu $1)"
+  subject="noixsub$(openssl rand -hex 4)"
+  printf '%s' "$smtp_key" | smtp_send 587 test@mail.example.test someone@example.test "$subject" \
+    || fail "the submission on 587 was refused"
+  raw="$(wait_mail "$subject")"
+  [ "$(dkim_key_name <<<"$raw")" = postal._domainkey.rp.mail.test ] \
+    || fail "the submitted message is not signed with postal._domainkey.rp.mail.test: $(printf '%s' "$raw" | head -c 600)"
+
+  # To the route on port 25, without a login: the worker posts it to the echo
+  # endpoint on the test host's loopback, which
+  # postal_allowed_request_destinations (vars.yml) lets it reach.
+  echo "== mail: a route (ubuntu $1)"
+  subject="noixroute$(openssl rand -hex 4)"
+  smtp_send 25 sender@example.test in@routes.mail.test "$subject" </dev/null || fail "port 25 refused the message to in@routes.mail.test"
+  body="$(wait_echo "$subject")"
+  [[ "$body" == *'"rcpt_to":"in@mail.example.test"'* ]] || fail "the echo endpoint got no message for the route: $(printf '%s' "$body" | head -c 300)"
+  expect_clean
+}
+
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure takeover ipv6_off missing_data mountpoint"
+all_scenarios="refusals install noop_down reconfigure takeover ipv6_off routers mail missing_data mountpoint"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -637,6 +922,8 @@ for ubuntu in $releases; do
       reconfigure) test_reconfigure "$ubuntu" ;;
       takeover) test_takeover "$ubuntu" ;;
       ipv6_off) test_ipv6_off "$ubuntu" ;;
+      routers) test_routers "$ubuntu" ;;
+      mail) test_mail "$ubuntu" ;;
       missing_data) test_missing_data "$ubuntu" ;;
       mountpoint) test_mountpoint "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;

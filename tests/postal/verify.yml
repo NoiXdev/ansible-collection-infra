@@ -9,12 +9,16 @@
 # files: the compose file 0644, the config directory 0750 root:999,
 # postal.yml and signing.key each 0440 root:999, signing.key a 2048-bit RSA
 # key, postal.yml with the values the role owns and the smtp section of
-# postal_mail, and the database target.
+# postal_mail, and the database target; the Traefik labels of web (every
+# traefik.* label, exactly).
 # Extra variables: verify_submission (default true: the submission service
 # runs), verify_mail_host and verify_mail_port (postal_mail's host and port;
 # empty host: the role writes no host), verify_spam_threshold (the
 # default_spam_threshold the run set, empty for none), verify_smtp_bind (the
-# address of the SMTP servers: :: with IPv6, else 0.0.0.0).
+# address of the SMTP servers: :: with IPv6, else 0.0.0.0), and the Traefik
+# settings of the run: verify_entrypoints, verify_ui_entrypoints and
+# verify_ui_middlewares (comma-separated, empty: none) and
+# verify_track_hostnames (the tracking host names besides track.mail.test).
 - name: Verify
   hosts: all
   gather_facts: false
@@ -28,6 +32,10 @@
     verify_mail_port: 25
     verify_spam_threshold: ""
     verify_smtp_bind: "::"
+    verify_entrypoints: ""
+    verify_ui_entrypoints: ""
+    verify_ui_middlewares: ""
+    verify_track_hostnames: ""
     verify_services: "{{ ['mariadb', 'smtp', 'web', 'worker'] + (['submission'] if verify_submission | bool else []) }}"
     verify_all: "{{ verify_inspect.stdout | from_json }}"
     # One container per service (the worker has one replica).
@@ -88,6 +96,56 @@
           {{ verify_web.NetworkSettings.Ports }}, {{ verify_web.Config.Cmd }}.
       vars:
         verify_web: "{{ verify_by_service.web }}"
+
+    # Empty entrypoints mean Traefik's default entrypoints: no label.
+    - name: Check the Traefik labels of web
+      ansible.builtin.assert:
+        that: verify_labels == verify_expected
+        fail_msg: "web's Traefik labels are {{ verify_labels }}, not {{ verify_expected }}."
+      vars:
+        verify_labels: >-
+          {{ verify_by_service.web.Config.Labels | dict2items | selectattr('key', 'match', '^traefik[.]') | items2dict }}
+        verify_track_rule: >-
+          {%- set rules = [] -%}
+          {%- for name in ['track.mail.test'] + (verify_track_hostnames | split(',') | select | list) -%}
+          {%-   set _ = rules.append('Host(`' ~ name ~ '`)') -%}
+          {%- endfor -%}
+          {{ rules | join(' || ') }}
+        verify_api: "PathPrefix(`/api/`) || Path(`/.well-known/jwks.json`)"
+        verify_routers:
+          - name: postal-api
+            rule: "Host(`postal.test`) && ({{ verify_api }})"
+            entrypoints: "{{ verify_entrypoints }}"
+            priority: "101"
+            middlewares: postal-strip-track
+          - name: postal-ui
+            rule: "Host(`postal.test`) && !({{ verify_api }})"
+            entrypoints: "{{ verify_ui_entrypoints }}"
+            priority: "100"
+            middlewares: "{{ (['postal-strip-track'] + (verify_ui_middlewares | split(',') | select | list)) | join(',') }}"
+          - name: postal-track
+            rule: "{{ verify_track_rule }}"
+            entrypoints: "{{ verify_entrypoints }}"
+            priority: "101"
+            middlewares: postal-set-track
+        verify_expected: >-
+          {%- set found = {
+            'traefik.enable': 'true',
+            'traefik.docker.network': 'proxy',
+            'traefik.http.middlewares.postal-strip-track.headers.customrequestheaders.X-Postal-Track-Host': '',
+            'traefik.http.middlewares.postal-strip-track.headers.customrequestheaders.X_Postal_Track_Host': '',
+            'traefik.http.middlewares.postal-set-track.headers.customrequestheaders.X-Postal-Track-Host': '1',
+            'traefik.http.services.postal.loadbalancer.server.port': '5000',
+          } -%}
+          {%- for r in verify_routers -%}
+          {%-   set prefix = 'traefik.http.routers.' ~ r.name -%}
+          {%-   set _ = found.update({prefix ~ '.rule': r.rule, prefix ~ '.priority': r.priority,
+                                     prefix ~ '.middlewares': r.middlewares, prefix ~ '.service': 'postal'}) -%}
+          {%-   if r.entrypoints | length > 0 -%}
+          {%-     set _ = found.update({prefix ~ '.entrypoints': r.entrypoints}) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ found }}
 
     - name: Check the services on the host's network
       ansible.builtin.assert:
@@ -212,6 +270,8 @@
           - verify_config.dns.return_path_domain == 'rp.mail.test'
           - verify_config.dns.mx_records == ['mx.mail.test']
           - verify_config.postal.default_spam_threshold | default('') | string == verify_spam_threshold | string
+          - verify_config.postal.smtp_relays == ['smtp://localhost:1025']
+          - verify_config.postal.allowed_request_destinations == ['127.0.0.1']
           - verify_smtp_plain == verify_smtp_expected
           - (verify_config.smtp.username | default('')) == ''
           - (verify_config.smtp.password | default('')) == ''
@@ -223,6 +283,9 @@
           with the prefix {{ verify_config.message_db.database_name_prefix | default('') }},
           the spam threshold {{ verify_config.postal.default_spam_threshold | default('none') }},
           the SMTP address {{ verify_config.smtp_server.default_bind_address | default('') }},
+          the relays {{ verify_config.postal.smtp_relays | default('') }}, the
+          allowed request destinations
+          {{ verify_config.postal.allowed_request_destinations | default('') }},
           a Rails secret of 128 characters), or its smtp section is
           {{ verify_smtp_plain }}, not {{ verify_smtp_expected }}.
       vars:

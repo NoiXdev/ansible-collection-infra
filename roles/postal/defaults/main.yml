@@ -31,14 +31,18 @@ postal_dns_domain: ""
 postal_dns: {}
 
 # Traefik: the external network, its fixed address (the proxy Postal trusts
-# for X-Forwarded-For) and the entrypoints of the routers. Three routers on
-# postal_web_hostname, at postal_traefik_priority:
-#   <project>-api    /api/ and the JWKS, on postal_traefik_entrypoints with
-#                    postal_traefik_middlewares
-#   <project>-ui     everything else, on postal_traefik_ui_entrypoints with
+# for X-Forwarded-For) and the entrypoints of the routers (empty: Traefik's
+# default entrypoints). Three routers, at postal_traefik_priority (the API and
+# tracking one above):
+#   <project>-api    /api/ and the JWKS of postal_web_hostname, on
+#                    postal_traefik_entrypoints with postal_traefik_middlewares
+#   <project>-ui     everything else of postal_web_hostname, on
+#                    postal_traefik_ui_entrypoints with
 #                    postal_traefik_ui_middlewares
 #   <project>-track  the tracking domains, on postal_traefik_entrypoints with
 #                    postal_traefik_track_middlewares
+# The API and UI routers drop a client's X-Postal-Track-Host; the tracking
+# router sets it.
 postal_traefik_network: proxy
 postal_traefik_address: 172.31.255.254
 postal_traefik_entrypoints: []

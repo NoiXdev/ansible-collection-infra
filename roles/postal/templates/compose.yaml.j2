@@ -15,6 +15,33 @@
 {{ ' ' * indent }}    create_host_path: false
 {%- endmacro %}
 {%- set own_db = postal_database == 'mariadb' -%}
+{#- The routers of web: the public API (and the key of the webhook
+    signatures), the UI on entrypoints of its own (everything else of the web
+    host name) and tracking on the role-known tracking host and
+    postal_track_hostnames. Postal answers as its tracking server whenever a
+    request carries X-Postal-Track-Host: 1, so the routers of the web host
+    name drop a client-sent one (Puma reads the spelling with underscores as
+    the same header) and only the tracking router sets it. -#}
+{%- set router = postal_project -%}
+{%- set host_rule = 'Host(`' ~ postal_web_hostname ~ '`)' -%}
+{%- set api_paths = 'PathPrefix(`/api/`) || Path(`/.well-known/jwks.json`)' -%}
+{%- set track_rules = [] -%}
+{%- for name in ([postal_dns_settings.track_domain] + postal_track_hostnames) | map('string') | unique -%}
+{%-   set _ = track_rules.append('Host(`' ~ name ~ '`)') -%}
+{%- endfor -%}
+{%- set strip = router ~ '-strip-track' -%}
+{%- set set_track = router ~ '-set-track' -%}
+{%- set routers = [
+  {'name': router ~ '-api', 'rule': host_rule ~ ' && (' ~ api_paths ~ ')',
+   'entrypoints': postal_traefik_entrypoints, 'priority': postal_traefik_priority | int + 1,
+   'middlewares': [strip] + postal_traefik_middlewares},
+  {'name': router ~ '-ui', 'rule': host_rule ~ ' && !(' ~ api_paths ~ ')',
+   'entrypoints': postal_traefik_ui_entrypoints, 'priority': postal_traefik_priority | int,
+   'middlewares': [strip] + postal_traefik_ui_middlewares},
+  {'name': router ~ '-track', 'rule': track_rules | join(' || '),
+   'entrypoints': postal_traefik_entrypoints, 'priority': postal_traefik_priority | int + 1,
+   'middlewares': [set_track] + postal_traefik_track_middlewares},
+] -%}
 # Managed by the noixdev.infra.postal role; changes are overwritten.
 
 # What every Postal service shares: the image (linux/amd64 only; the role
@@ -84,11 +111,30 @@ services:
 
 {% endif %}
   # The web interface, the API and tracking, on 0.0.0.0:5000 (postal.yml) of
-  # the project network and the Traefik network; no published port.
+  # the project network and the Traefik network; no published port: Traefik
+  # reaches it over its network.
   web:
     <<: *postal
     command: [postal, web-server]
     networks: [default, traefik]
+    labels:
+      - traefik.enable=true
+      - {{ q('traefik.docker.network=' ~ postal_traefik_network) }}
+      # An empty value removes the header.
+      - {{ q('traefik.http.middlewares.' ~ strip ~ '.headers.customrequestheaders.X-Postal-Track-Host=') }}
+      - {{ q('traefik.http.middlewares.' ~ strip ~ '.headers.customrequestheaders.X_Postal_Track_Host=') }}
+      - {{ q('traefik.http.middlewares.' ~ set_track ~ '.headers.customrequestheaders.X-Postal-Track-Host=1') }}
+{% for r in routers %}
+      - {{ q('traefik.http.routers.' ~ r.name ~ '.rule=' ~ r.rule) }}
+{%   if r.entrypoints | length > 0 %}
+      - {{ q('traefik.http.routers.' ~ r.name ~ '.entrypoints=' ~ r.entrypoints | join(',')) }}
+{%   endif %}
+      - {{ q('traefik.http.routers.' ~ r.name ~ '.priority=' ~ r.priority) }}
+      - {{ q('traefik.http.routers.' ~ r.name ~ '.middlewares=' ~ r.middlewares | join(',')) }}
+      - {{ q('traefik.http.routers.' ~ r.name ~ '.service=' ~ router) }}
+{% endfor %}
+      # Plain HTTP stays on the compose networks; Traefik terminates TLS.
+      - {{ q('traefik.http.services.' ~ router ~ '.loadbalancer.server.port=5000') }}
 
   # The SMTP server on the host's network, so that it sees the real client
   # addresses; its health server on 127.0.0.1.

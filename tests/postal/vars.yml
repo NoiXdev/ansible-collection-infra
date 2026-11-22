@@ -39,3 +39,10 @@ postal_dns_domain: mail.test
 postal_skip_arch_check: true
 # Postal's Rails processes start slowly under emulation.
 postal_health_timeout: 900
+# Outgoing mail goes to Mailpit on the test host's loopback (the worker is on
+# the host's network), and the routes' HTTP endpoint is run.sh's echo
+# endpoint there, which Postal reaches only when it is allowed. Postal looks a
+# relay up in DNS alone (no IP address, no /etc/hosts): the test host's
+# resolver answers localhost with 127.0.0.1.
+postal_smtp_relays: [smtp://localhost:1025]
+postal_allowed_request_destinations: [127.0.0.1]
