@@ -1,0 +1,6 @@
+---
+# A placeholder: the install, the update and the rest of the role come with
+# the next tasks of the plan; until then the role ends after its checks.
+- name: Report that nothing is installed yet
+  ansible.builtin.debug:
+    msg: The settings of Graylog are valid; this version of the role installs nothing yet.

@@ -1,0 +1,57 @@
+---
+# Mode 0644: it holds no secret, which reach the containers as files of
+# graylog_secrets_dir.
+graylog_compose_file: "{{ graylog_dir }}/compose.yaml"
+# Mode 0700. Mode 0600 files: password_secret, root_password_sha2 and
+# root_password (only if the API helper needs it on the host).
+graylog_secrets_dir: "{{ graylog_dir }}/secrets"
+# Mode 0600: for each input of the role its Graylog id and a SHA-256 of the
+# configuration applied, so that a changed entry is found without asking
+# Graylog for every setting.
+graylog_inputs_state: "{{ graylog_dir }}/inputs.json"
+
+# The subdirectories of graylog_data_dir whose absence means the data is
+# missing (an unmounted volume): only install creates them.
+graylog_data_subdirs: [mongodb, datanode, graylog, backups]
+graylog_backup_dir: "{{ graylog_data_dir }}/backups"
+# Written after a failed update; that version is not tried again while it
+# exists.
+graylog_marker_file: "{{ graylog_dir }}/update-failed"
+# Written before an install creates anything and removed once Graylog is
+# healthy; while it exists every run refuses.
+graylog_install_marker: "{{ graylog_dir }}/install-incomplete"
+# Written before the first change of an update and removed once it is healthy
+# or rolled back; a run that stopped in between leaves it for the next run.
+graylog_update_marker: "{{ graylog_dir }}/update-in-progress"
+# The installed Graylog and MongoDB versions and a SHA-256 of the password
+# secret (never the secret itself), so that a changed secret is refused.
+graylog_versions_file: "{{ graylog_dir }}/versions"
+
+# The oldest release the role runs.
+graylog_min_version: 7.0.0
+# MongoDB majors the role runs.
+graylog_mongodb_majors: ["7", "8"]
+
+# The input types: Graylog's class and the transport the port is published
+# on.
+graylog_input_types:
+  gelf_udp: {class: org.graylog2.inputs.gelf.udp.GELFUDPInput, transport: udp}
+  gelf_tcp: {class: org.graylog2.inputs.gelf.tcp.GELFTCPInput, transport: tcp}
+  gelf_http: {class: org.graylog2.inputs.gelf.http.GELFHttpInput, transport: tcp}
+  syslog_udp: {class: org.graylog2.inputs.syslog.udp.SyslogUDPInput, transport: udp}
+  syslog_tcp: {class: org.graylog2.inputs.syslog.tcp.SyslogTCPInput, transport: tcp}
+# The keys of an input and of its traefik block.
+graylog_input_keys: [name, type, port, bind, traefik, token, options]
+graylog_input_traefik_keys: [hostname, entrypoints, middlewares]
+
+# The settings the role sets itself; graylog_env must not hold them, nor a
+# key with one of the prefixes or the suffix below.
+graylog_env_owned:
+  - GRAYLOG_PASSWORD_SECRET
+  - GRAYLOG_ROOT_PASSWORD_SHA2
+  - GRAYLOG_ROOT_USERNAME
+  - GRAYLOG_HTTP_EXTERNAL_URI
+  - GRAYLOG_MONGODB_URI
+  - GRAYLOG_SERVER_JAVA_OPTS
+graylog_env_owned_prefixes: [GRAYLOG_ROOT_, GRAYLOG_DATANODE_]
+graylog_env_owned_suffix: __FILE

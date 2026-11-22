@@ -1,0 +1,81 @@
+---
+# Graylog release (tag of docker.io/graylog/graylog and of the Data Node,
+# X.Y.Z without a v); 7.0.0 or newer. Server and Data Node always run the
+# same version. No latest and no moving tags.
+graylog_version: 7.2.2
+graylog_image: docker.io/graylog/graylog
+graylog_datanode_image: docker.io/graylog/graylog-datanode
+# MongoDB holds Graylog's configuration (X.Y.Z, major 7 or 8).
+graylog_mongodb_image: docker.io/library/mongo
+graylog_mongodb_version: 8.0.38
+
+# Directory of the compose project (compose.yaml, the secrets, markers).
+# Its basename is the compose project name.
+graylog_dir: /opt/graylog
+graylog_project: graylog
+# The data: one subdirectory each for MongoDB, the Data Node (the search
+# index), Graylog's journal and the backups. It can be a mountpoint of its
+# own (a block volume).
+graylog_data_dir: "{{ graylog_dir }}/data"
+graylog_data_dir_mountpoint: false
+
+# The web interface, only through Traefik: graylog_hostname is required.
+# graylog_url is the origin the browsers and the inputs' links see
+# (http_external_uri).
+graylog_hostname: ""
+graylog_url: https://{{ graylog_hostname }}
+# Traefik: external network and entrypoints of the router; empty entrypoints
+# use Traefik's default ones. Keep the priority above catch-all routers such
+# as the traefik role's error pages routes.
+graylog_traefik_network: proxy
+graylog_traefik_entrypoints: []
+graylog_traefik_middlewares: []
+graylog_traefik_priority: 100
+
+# The root user of the web interface. Both secrets are required: the role
+# keeps only the SHA-256 of the password on the host, and the password
+# secret (16 characters or more) is shared by the server and the Data Node.
+# Keep them in a vault.
+graylog_root_username: admin
+graylog_root_password: ""
+graylog_password_secret: ""
+
+# Memory: the JVM heaps of the server and of the Data Node (the search
+# engine, which also wants as much again for the file system cache), and
+# MongoDB's cache in GB.
+graylog_server_heap: 1g
+graylog_datanode_heap: 2g
+graylog_mongodb_cache_gb: 0.5
+
+# The inputs the role keeps (name, type, port, bind, traefik, token,
+# options; see meta/argument_specs.yml). An input is not published on the
+# host until bind lists addresses.
+graylog_inputs:
+  - name: gelf-udp
+    type: gelf_udp
+    port: 12201
+    bind: []
+  - name: syslog-udp
+    type: syslog_udp
+    port: 1514
+    bind: []
+# The title of an input in Graylog is this prefix plus its name; inputs
+# without the prefix (made in the web interface) are never touched.
+graylog_input_title_prefix: "ansible: "
+
+# Days the default index set keeps messages (daily rotation).
+graylog_retention_days: 30
+
+# More settings for the Graylog server (GRAYLOG_* environment variables); the
+# ones the role sets itself are refused.
+graylog_env: {}
+
+# Updates: copy the Data Node's index before updating (a rollback needs it),
+# the number of backups kept, and the seconds to wait for a healthy Graylog
+# after an update and after a rollback.
+graylog_update_backup_logs: true
+graylog_backups_keep: 2
+graylog_health_timeout: 600
+graylog_rollback_timeout: "{{ graylog_health_timeout }}"
+# For one run: restore the backup of an update that did not finish.
+graylog_restore_interrupted: false

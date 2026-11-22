@@ -1,0 +1,157 @@
+---
+argument_specs:
+  main:
+    short_description: Graylog in Docker Compose, behind Traefik
+    # The required settings are not required here: the role's own checks
+    # name them when they are missing.
+    options:
+      graylog_version:
+        type: str
+        description: >-
+          Graylog and Data Node image tag (X.Y.Z, no v, no latest); 7.0.0 or
+          newer.
+      graylog_image:
+        type: str
+        description: Graylog server image without its tag.
+      graylog_datanode_image:
+        type: str
+        description: Graylog Data Node image without its tag.
+      graylog_mongodb_image:
+        type: str
+        description: MongoDB image without its tag.
+      graylog_mongodb_version:
+        type: str
+        description: MongoDB image tag (X.Y.Z, major 7 or 8).
+      graylog_dir:
+        type: path
+        description: >-
+          Directory of the compose project (compose.yaml, the secrets,
+          markers).
+      graylog_project:
+        type: str
+        description: Compose project name.
+      graylog_data_dir:
+        type: path
+        description: >-
+          Directory of the data (MongoDB, the Data Node, Graylog's journal,
+          the backups); can be a mountpoint of its own.
+      graylog_data_dir_mountpoint:
+        type: bool
+        description: Fail every run unless graylog_data_dir is a mountpoint.
+      graylog_hostname:
+        type: str
+        description: Host name of the Traefik router of the web interface (required).
+      graylog_url:
+        type: str
+        description: Origin the web interface is reached at, without a path (http_external_uri).
+      graylog_traefik_network:
+        type: str
+        description: External network Traefik routes on.
+      graylog_traefik_entrypoints:
+        type: list
+        elements: str
+        description: Traefik entrypoints of the router; empty uses Traefik's default ones.
+      graylog_traefik_middlewares:
+        type: list
+        elements: str
+        description: Traefik middlewares (name@provider) of the router, such as an IP allowlist.
+      graylog_traefik_priority:
+        type: int
+        description: Priority of the router. Keep it above catch-all routers.
+      graylog_root_username:
+        type: str
+        description: User name of the root user of the web interface.
+      graylog_root_password:
+        type: str
+        no_log: true
+        description: >-
+          Password of the root user (required). The host keeps only its
+          SHA-256. Keep it in a vault.
+      graylog_password_secret:
+        type: str
+        no_log: true
+        description: >-
+          Secret of the server and the Data Node (required, 16 characters or
+          more). Keep it in a vault. Changing it on an installation is
+          refused.
+      graylog_server_heap:
+        type: str
+        description: JVM heap of the Graylog server (a number and m or g, as 1g).
+      graylog_datanode_heap:
+        type: str
+        description: JVM heap of the Data Node (a number and m or g, as 2g).
+      graylog_mongodb_cache_gb:
+        type: float
+        description: Size of the WiredTiger cache of MongoDB in GB.
+      graylog_inputs:
+        type: list
+        elements: dict
+        description: >-
+          The inputs the role keeps. Port and transport (UDP or TCP) of the
+          entries must be unique; one UDP and one TCP input may share a port.
+        options:
+          name:
+            type: str
+            description: >-
+              Name of the input (lowercase letters, digits and -, unique); its
+              title in Graylog is graylog_input_title_prefix plus the name.
+          type:
+            type: str
+            description: gelf_udp, gelf_tcp, gelf_http, syslog_udp or syslog_tcp (checked by the role).
+          port:
+            type: int
+            description: Host port of the input (a container port below 1024 is mapped above it).
+          bind:
+            type: list
+            elements: str
+            description: Host addresses the port is published on; empty publishes nothing.
+          traefik:
+            type: dict
+            description: >-
+              Route the input through Traefik (gelf_http, gelf_tcp and
+              syslog_tcp only): hostname and entrypoints are required.
+            options:
+              hostname:
+                type: str
+                description: Host name of the router.
+              entrypoints:
+                type: list
+                elements: str
+                description: Traefik entrypoints of the router.
+              middlewares:
+                type: list
+                elements: str
+                description: Traefik middlewares (name@provider) of the router.
+          token:
+            type: str
+            no_log: true
+            description: Bearer token a gelf_http input requires; empty accepts every sender.
+          options:
+            type: dict
+            description: More settings of the input (plain values), passed on to Graylog.
+      graylog_input_title_prefix:
+        type: str
+        description: Prefix of the title of the inputs the role manages.
+      graylog_retention_days:
+        type: int
+        description: Days the default index set keeps messages.
+      graylog_env:
+        type: dict
+        description: >-
+          More settings for the Graylog server (GRAYLOG_* environment
+          variables); the settings the role sets itself are refused.
+      graylog_update_backup_logs:
+        type: bool
+        description: Copy the Data Node's index before an update (a rollback needs it).
+      graylog_backups_keep:
+        type: int
+        description: Number of backups taken before updates that are kept.
+      graylog_health_timeout:
+        type: int
+        description: Seconds to wait until Graylog is healthy.
+      graylog_rollback_timeout:
+        type: int
+        description: Seconds a rollback waits for the previous version.
+      graylog_restore_interrupted:
+        type: bool
+        description: For one run, restore the backup of an update that did not finish.

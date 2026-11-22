@@ -27,7 +27,7 @@ UBUNTU=24.04 tests/services/run.sh  # the service roles, on their own (also UBUN
 
 `tests/all.sh` runs the suites `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
 `host` (`tests/host/run.sh` on Ubuntu 24.04 and 26.04, set `HOST_UBUNTU` for fewer),
-`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow`, `cloudpanel`, `pulsix_agent`, `backrest`, `vaultwarden`, `waf` and `varnish` (`tests/<suite>/run.sh`). It stops at
+`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow`, `cloudpanel`, `pulsix_agent`, `backrest`, `vaultwarden`, `waf`, `varnish` and `graylog` (`tests/<suite>/run.sh`). It stops at
 the first failing suite unless you pass `--keep-going`, and ends with a summary of each
 suite's result and runtime; the output of each suite is also in
 `tests/output/all/<suite>.log`. `--summary FILE` writes a machine-readable summary, one line
@@ -50,6 +50,9 @@ checks Ubuntu 24.04 and 26.04 in one entry (`VARNISH_UBUNTU` for fewer): the cac
 a small backend behind Varnish, the `nginx` and `waf` scenarios run the php, varnish, nginx and
 waf roles on one host with Docker inside (WebSocket upgrades, the path around a stopped Varnish,
 the nginx run's refusals). The
+`graylog` suite runs Graylog with Traefik on a systemd test host with Docker inside and checks
+Ubuntu 24.04 and 26.04 in one entry (`GRAYLOG_UBUNTU` for fewer, `NOIXDEV_INFRA_GRAYLOG_TESTS`
+picks scenarios). The
 `mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
 (`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `tandoor` about 2 GB and `n8n` about 3 GB of images, `cloudpanel` runs CloudPanel's real installer.

@@ -1,0 +1,337 @@
+---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
+- name: Check that graylog_hostname is set
+  ansible.builtin.assert:
+    that: graylog_hostname | default('') | string is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+    fail_msg: >-
+      graylog_hostname is required and must be a host name: the web interface
+      is reached only through Traefik at that name. The role changes nothing.
+    quiet: true
+
+# The two secrets: no_log hides the task's result, and so its message, hence
+# the rescue with a message of its own that quotes nothing of the value.
+- name: Check that graylog_root_password is set
+  block:
+    - name: Check graylog_root_password
+      ansible.builtin.assert:
+        that: graylog_root_password | default('') | string | length > 0
+      no_log: true
+  rescue:
+    - name: Fail without graylog_root_password
+      ansible.builtin.fail:
+        msg: >-
+          graylog_root_password is required: the password of the root user of
+          the web interface (the host keeps only its SHA-256). Keep it in a
+          vault. The role changes nothing.
+
+- name: Check graylog_password_secret
+  block:
+    - name: Check that graylog_password_secret is set and long enough
+      ansible.builtin.assert:
+        that: graylog_password_secret | default('') | string | length >= 16
+      no_log: true
+  rescue:
+    - name: Fail without a usable graylog_password_secret
+      ansible.builtin.fail:
+        msg: >-
+          graylog_password_secret is required and must be at least 16
+          characters: the secret the Graylog server and the Data Node encrypt
+          their stored values with. Keep it in a vault. The value is not
+          shown. The role changes nothing.
+
+- name: Check graylog_version
+  ansible.builtin.assert:
+    that:
+      - graylog_version | string is match('^\d+\.\d+\.\d+$')
+      - graylog_version | string is version(graylog_min_version, '>=')
+    fail_msg: >-
+      graylog_version {{ graylog_version }} is not a release the role runs:
+      it must look like X.Y.Z (no v, no latest, no moving tag) and be
+      {{ graylog_min_version }} or newer. The role changes nothing.
+    quiet: true
+
+- name: Check graylog_mongodb_version
+  ansible.builtin.assert:
+    that:
+      - graylog_mongodb_version | string is match('^\d+\.\d+\.\d+$')
+      - graylog_mongodb_version | string | split('.') | first in graylog_mongodb_majors
+    fail_msg: >-
+      graylog_mongodb_version {{ graylog_mongodb_version }} is not a release
+      the role runs: it must look like X.Y.Z (no latest, no moving tag) with
+      the major {{ graylog_mongodb_majors | join(' or ') }}. The role changes
+      nothing.
+    quiet: true
+
+# The names end up in compose, Traefik rules and docker filters unquoted.
+- name: Check the Graylog settings
+  ansible.builtin.assert:
+    that:
+      - graylog_image | length > 0
+      - graylog_datanode_image | length > 0
+      - graylog_mongodb_image | length > 0
+      - graylog_dir is match('^/')
+      - graylog_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - graylog_data_dir is match('^/')
+      - graylog_url is match('^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$')
+      - graylog_traefik_network is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - graylog_traefik_entrypoints | reject('match', '^[A-Za-z0-9][A-Za-z0-9_-]*$') | list | length == 0
+      - graylog_traefik_middlewares | reject('match', '^[A-Za-z0-9][A-Za-z0-9_.@-]*$') | list | length == 0
+      - graylog_traefik_priority | int >= 1
+      - graylog_root_username is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - graylog_input_title_prefix | string | length > 0
+      - graylog_retention_days | int >= 1
+      - graylog_backups_keep | int >= 1
+      - graylog_health_timeout | int > 0
+      - graylog_rollback_timeout | int > 0
+    fail_msg: >-
+      graylog_dir and graylog_data_dir must be absolute paths, graylog_project
+      only lowercase letters, digits, - and _; graylog_url an http(s) origin
+      without a path; graylog_traefik_network a network name,
+      graylog_traefik_entrypoints entrypoint names and
+      graylog_traefik_middlewares middleware names (name@provider);
+      graylog_root_username a plain user name; graylog_image,
+      graylog_datanode_image, graylog_mongodb_image and
+      graylog_input_title_prefix must be set; graylog_traefik_priority,
+      graylog_retention_days, graylog_backups_keep, graylog_health_timeout
+      and graylog_rollback_timeout must be positive. The role changes
+      nothing.
+    quiet: true
+
+# The backup binds files below the data directory into one-off containers
+# with docker run --mount, whose source ends at the first comma.
+- name: Check that graylog_data_dir has no comma
+  ansible.builtin.assert:
+    that: "',' not in graylog_data_dir"
+    fail_msg: >-
+      graylog_data_dir {{ graylog_data_dir }} holds a comma, which the role
+      cannot pass to Docker as the source of a mount (the backup before an
+      update binds files below it). Use a path without a comma. The role
+      changes nothing.
+    quiet: true
+
+# Sizes end up in JVM options and in MongoDB's configuration.
+- name: Check the memory settings
+  ansible.builtin.assert:
+    that:
+      - graylog_server_heap | string is match('^[1-9][0-9]*[mg]$')
+      - graylog_datanode_heap | string is match('^[1-9][0-9]*[mg]$')
+      - graylog_mongodb_cache_gb | string is match('^[0-9]+(\.[0-9]+)?$')
+      - graylog_mongodb_cache_gb | float >= 0.25
+    fail_msg: >-
+      graylog_server_heap and graylog_datanode_heap must be a whole number
+      and m or g (as 512m or 2g, not 1GB), and graylog_mongodb_cache_gb a
+      number of GB of at least 0.25. The role changes nothing.
+    quiet: true
+
+- name: Check the switches
+  ansible.builtin.assert:
+    that:
+      - graylog_data_dir_mountpoint is boolean
+      - graylog_update_backup_logs is boolean
+      - graylog_restore_interrupted is boolean
+    fail_msg: >-
+      graylog_data_dir_mountpoint, graylog_update_backup_logs and
+      graylog_restore_interrupted must be true or false. The role changes
+      nothing.
+    quiet: true
+
+# The inputs: the list first, then each entry (a loop over indices, so that
+# no token reaches the loop's output), then the entries together.
+- name: Check that graylog_inputs is a list of mappings
+  ansible.builtin.assert:
+    that:
+      - graylog_inputs is sequence
+      - graylog_inputs is not string
+      - graylog_inputs is not mapping
+      - graylog_inputs | reject('mapping') | list | length == 0
+    fail_msg: >-
+      graylog_inputs must be a list of mappings with the keys
+      {{ graylog_input_keys | join(', ') }}. The role changes nothing.
+    quiet: true
+
+- name: Check the keys of the inputs
+  ansible.builtin.assert:
+    that:
+      - graylog_inputs[input_index].keys() | difference(graylog_input_keys) | length == 0
+      - graylog_inputs[input_index].name | default('') | string is match('^[a-z0-9][a-z0-9-]*$')
+      - graylog_inputs[input_index].type | default('') in graylog_input_types
+      - graylog_inputs[input_index].port | default('') | string is match('^[0-9]+$')
+      - graylog_inputs[input_index].port | default(0) | int >= 1
+      - graylog_inputs[input_index].port | default(0) | int <= 65535
+    fail_msg: >-
+      Input number {{ input_index + 1 }} of graylog_inputs is not valid: it
+      takes only the keys {{ graylog_input_keys | join(', ') }}; name
+      (lowercase letters, digits and -), type
+      ({{ graylog_input_types.keys() | list | join(', ') }}) and port (1 to
+      65535) are required. The role changes nothing.
+    quiet: true
+  loop: "{{ range(graylog_inputs | length) | list }}"
+  loop_control:
+    loop_var: input_index
+
+- name: Check the bind addresses of the inputs
+  ansible.builtin.assert:
+    that:
+      - graylog_inputs[input_index].bind | default([]) is sequence
+      - graylog_inputs[input_index].bind | default([]) is not string
+      - graylog_inputs[input_index].bind | default([]) | reject('match', '^[0-9A-Fa-f.:]+$') | list | length == 0
+    fail_msg: >-
+      The input {{ graylog_inputs[input_index].name }}: bind must be a list of
+      host addresses (an empty list publishes nothing). The role changes
+      nothing.
+    quiet: true
+  loop: "{{ range(graylog_inputs | length) | list }}"
+  loop_control:
+    loop_var: input_index
+
+# Traefik's UDP routers take neither TLS nor middlewares.
+- name: Check that only TCP inputs have a Traefik block
+  ansible.builtin.assert:
+    that: graylog_input_types[graylog_inputs[input_index].type].transport == 'tcp'
+    fail_msg: >-
+      The input {{ graylog_inputs[input_index].name }} is a UDP input and has
+      a traefik block: traefik is for the TCP types (gelf_http, gelf_tcp,
+      syslog_tcp) only, as Traefik's UDP routers take no TLS and no
+      middlewares. The role changes nothing.
+    quiet: true
+  loop: "{{ range(graylog_inputs | length) | list }}"
+  loop_control:
+    loop_var: input_index
+  when: graylog_inputs[input_index].traefik is defined
+
+- name: Check the Traefik blocks of the inputs
+  ansible.builtin.assert:
+    that:
+      - graylog_inputs[input_index].traefik is mapping
+      - graylog_inputs[input_index].traefik.keys() | difference(graylog_input_traefik_keys) | length == 0
+      - graylog_inputs[input_index].traefik.hostname | default('') | string is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+      - graylog_inputs[input_index].traefik.entrypoints | default([]) | length > 0
+      - graylog_inputs[input_index].traefik.entrypoints | default([]) | reject('match', '^[A-Za-z0-9][A-Za-z0-9_-]*$') | list | length == 0
+      - graylog_inputs[input_index].traefik.middlewares | default([]) | reject('match', '^[A-Za-z0-9][A-Za-z0-9_.@-]*$') | list | length == 0
+    fail_msg: >-
+      The input {{ graylog_inputs[input_index].name }}: traefik takes
+      hostname and entrypoints (both required, entrypoints not empty) and
+      middlewares (name@provider). The role changes nothing.
+    quiet: true
+  loop: "{{ range(graylog_inputs | length) | list }}"
+  loop_control:
+    loop_var: input_index
+  when: graylog_inputs[input_index].traefik is defined
+
+# The message quotes nothing of the token.
+- name: Check the tokens of the inputs
+  block:
+    - name: Check the token of each input
+      ansible.builtin.assert:
+        that:
+          - graylog_inputs[input_index].type == 'gelf_http'
+          - graylog_inputs[input_index].token | string | length > 0
+      loop: "{{ range(graylog_inputs | length) | list }}"
+      loop_control:
+        loop_var: input_index
+      when: graylog_inputs[input_index].token is defined
+      no_log: true
+  rescue:
+    - name: Fail with a token that does not belong to its input
+      ansible.builtin.fail:
+        msg: >-
+          An input of graylog_inputs has a token that is empty or belongs to
+          an input that is not a gelf_http one: only gelf_http inputs take a
+          token. The value is not shown. The role changes nothing.
+
+- name: Check the options of the inputs
+  ansible.builtin.assert:
+    that:
+      - graylog_inputs[input_index].options is mapping
+      - graylog_inputs[input_index].options.keys() | reject('match', '^[a-z][a-z0-9_]*$') | list | length == 0
+      - graylog_inputs[input_index].options.values() | select('none') | list | length == 0
+      - graylog_inputs[input_index].options.values() | select('mapping') | list | length == 0
+      - graylog_inputs[input_index].options.values() | reject('string') | select('iterable') | list | length == 0
+    fail_msg: >-
+      The input {{ graylog_inputs[input_index].name }}: options must be a
+      mapping of setting names (lowercase letters, digits and _) to plain
+      values (a string, number or boolean), not lists, mappings or null. The
+      role changes nothing.
+    quiet: true
+  loop: "{{ range(graylog_inputs | length) | list }}"
+  loop_control:
+    loop_var: input_index
+  when: graylog_inputs[input_index].options is defined
+
+- name: Check that the names of the inputs are unique
+  ansible.builtin.assert:
+    that: graylog_inputs | map(attribute='name') | list | length == graylog_inputs | map(attribute='name') | unique | list | length
+    fail_msg: >-
+      graylog_inputs names an input more than once
+      ({{ graylog_inputs | map(attribute='name') | list | join(', ') }}):
+      names must be unique, as they identify the inputs. The role changes
+      nothing.
+    quiet: true
+
+# One UDP and one TCP input may share a port; two of one transport may not.
+- name: Check that no port is published twice per transport
+  ansible.builtin.assert:
+    that: graylog_input_ports | length == graylog_input_ports | unique | list | length
+    fail_msg: >-
+      graylog_inputs uses a port twice for the same transport
+      ({{ graylog_input_ports | join(', ') }}): one UDP and one TCP input may
+      share a port, two UDP or two TCP inputs may not. The role changes
+      nothing.
+    quiet: true
+  vars:
+    graylog_input_ports: >-
+      {%- set ports = [] -%}
+      {%- for input in graylog_inputs -%}
+      {%- set _ = ports.append((input.port | string) ~ '/' ~ graylog_input_types[input.type].transport) -%}
+      {%- endfor -%}
+      {{ ports }}
+
+- name: Check graylog_env
+  ansible.builtin.assert:
+    that:
+      - graylog_env is mapping
+      - graylog_env.keys() | reject('match', '^GRAYLOG_[A-Z0-9_]+$') | list | length == 0
+      - graylog_env.values() | select('mapping') | list | length == 0
+      - graylog_env.values() | reject('string') | select('iterable') | list | length == 0
+      - graylog_owned | length == 0
+    fail_msg: >-
+      graylog_env keys must be environment variable names starting with
+      GRAYLOG_ (uppercase letters, digits and _) with plain values, and the
+      role sets these itself: {{ graylog_env_owned | join(', ') }} (and every
+      {{ graylog_env_owned_prefixes | join('*, ') }}* and *{{ graylog_env_owned_suffix }}
+      key). Use the role's variables instead (graylog_root_username,
+      graylog_root_password, graylog_password_secret, graylog_url,
+      graylog_server_heap, ...). The role changes nothing.
+    quiet: true
+  vars:
+    graylog_owned: >-
+      {{ (graylog_env if graylog_env is mapping else {}).keys()
+         | select('in', graylog_env_owned)
+         | union((graylog_env if graylog_env is mapping else {}).keys()
+                 | select('match', '^(' ~ graylog_env_owned_prefixes | join('|') ~ ')'))
+         | union((graylog_env if graylog_env is mapping else {}).keys()
+                 | select('search', graylog_env_owned_suffix ~ '$'))
+         | sort }}
+
+# A key left empty in YAML (KEY:) is null, which would reach Graylog as the
+# text None. The message names the keys, not the values.
+- name: Check that graylog_env has a value for every key
+  ansible.builtin.assert:
+    that: graylog_env_null | length == 0
+    fail_msg: >-
+      graylog_env has no value for {{ graylog_env_null | join(', ') }} (null,
+      as a key left empty in YAML is), which would reach Graylog as the text
+      None. Set a value, '' for an empty one, or remove the key. The role
+      changes nothing.
+    quiet: true
+  vars:
+    graylog_env_null: "{{ graylog_env | dict2items | selectattr('value', 'none') | map(attribute='key') | sort }}"
+
+# Replaced by the install, update and reconfigure of the next tasks.
+- name: Install Graylog
+  ansible.builtin.include_tasks: install.yml

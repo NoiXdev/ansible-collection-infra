@@ -1,0 +1,28 @@
+---
+# The test host: Docker and Traefik, and what run.sh calls on the host. The
+# graylog role runs only when run.sh passes test_graylog=true.
+- name: Converge
+  hosts: all
+  vars_files: [vars.yml]
+  pre_tasks:
+    # The base role installs ca-certificates and curl on the servers; the test
+    # image has neither.
+    - name: Install the packages the tests call
+      ansible.builtin.apt:
+        name: [ca-certificates, curl]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+  tasks:
+    - name: Run the docker role
+      ansible.builtin.include_role:
+        name: noixdev.infra.docker
+
+    - name: Run the traefik role
+      ansible.builtin.include_role:
+        name: noixdev.infra.traefik
+
+    - name: Run the graylog role
+      ansible.builtin.include_role:
+        name: noixdev.infra.graylog
+      when: test_graylog | default(false) | bool

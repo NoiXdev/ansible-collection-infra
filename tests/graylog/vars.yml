@@ -1,0 +1,38 @@
+---
+# Test-only values; nothing here is a secret. run.sh generates the passwords
+# and keys of each run (role-vars.json).
+traefik_dir: /opt/traefik
+# Plain HTTP and HTTPS on the test host's loopback, HTTPS the routers'
+# default, as on a server. The ACME server does not exist, so Traefik serves
+# its own self-signed certificate, which the tests accept (curl -k). logs-tls
+# is the TCP entrypoint of the inputs that go through Traefik with TLS.
+traefik_entrypoints:
+  - name: web
+    port: 80
+    bind: [127.0.0.1]
+  - name: websecure
+    port: 443
+    bind: [127.0.0.1]
+    tls: true
+    as_default: true
+  - name: logs-tls
+    port: 6514
+    protocol: tcp
+    bind: [127.0.0.1]
+traefik_acme_email: acme@example.test
+traefik_acme_challenge: http
+traefik_acme_ca_server: https://127.0.0.1:9/directory
+# A middleware that denies every client (192.0.2.1 is a documentation
+# address).
+traefik_dynamic_files:
+  deny.yml:
+    http:
+      middlewares:
+        deny:
+          ipAllowList:
+            sourceRange: [192.0.2.1/32]
+
+graylog_hostname: graylog.test
+# Small heaps: the test host shares its memory with the Docker daemon.
+graylog_server_heap: 512m
+graylog_datanode_heap: 1g
