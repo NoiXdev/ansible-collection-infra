@@ -132,8 +132,7 @@
           {%- set found = {
             'traefik.enable': 'true',
             'traefik.docker.network': 'proxy',
-            'traefik.http.middlewares.postal-strip-track.headers.customrequestheaders.X-Postal-Track-Host': '',
-            'traefik.http.middlewares.postal-strip-track.headers.customrequestheaders.X_Postal_Track_Host': '',
+            'traefik.http.middlewares.postal-strip-track.headers.customrequestheaders.X-Postal-Track-Host': '0',
             'traefik.http.middlewares.postal-set-track.headers.customrequestheaders.X-Postal-Track-Host': '1',
             'traefik.http.services.postal.loadbalancer.server.port': '5000',
           } -%}

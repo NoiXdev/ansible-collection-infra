@@ -46,8 +46,10 @@
 #             on the default entrypoints the API (Postal's JSON error without
 #             a key), the JWKS, the login page and tracking on
 #             track.mail.test (Postal's "Hello."), and a client's
-#             X-Postal-Track-Host, in either spelling, never reaches Postal on
-#             the web host name; postal_traefik_ui_middlewares denying
+#             X-Postal-Track-Host, in any of the eight spellings Puma reads
+#             as it, alone or next to the all-dash one, never reaches Postal
+#             on the web host name (the login page and the API on websecure,
+#             and on ui once the UI is there); postal_traefik_ui_middlewares denying
 #             everyone denies the UI while the API and tracking answer; the
 #             API and tracking on websecure with the UI on ui: on websecure
 #             Traefik's 404 for the UI's paths, on ui the login page (the
@@ -354,6 +356,26 @@ wait_denied() {
 api_refused() { expect_answer 200 '"code":"AccessDenied"' 443 postal.test /api/v1/send/message -X POST -H 'Content-Type: application/json' --data '{}' "$@"; }
 login_page() { expect_answer 200 'name="email_address"' "$@"; }
 tracking() { expect_answer 200 'Hello.' "$@"; }
+# The eight spellings of X-Postal-Track-Host that Puma reads as that header:
+# each of its three separators a dash or an underscore.
+track_spellings() {
+  local a b c
+  for a in - _; do for b in - _; do for c in - _; do
+    printf 'X%sPostal%sTrack%sHost\n' "$a" "$b" "$c"
+  done; done; done
+}
+# expect_no_client_track <UI port>: no spelling of the tracking header, alone
+# or next to the all-dash one, makes Postal answer as its tracking server on
+# the login page (on the UI port) or the API (on websecure).
+expect_no_client_track() {
+  local name
+  while IFS= read -r name; do
+    login_page "$1" postal.test /login -H "$name: 1"
+    login_page "$1" postal.test /login -H 'X-Postal-Track-Host: 1' -H "$name: 1"
+    api_refused -H "$name: 1"
+    api_refused -H 'X-Postal-Track-Host: 1' -H "$name: 1"
+  done < <(track_spellings)
+}
 
 # postal_fixture: an organization (noix) with a mail server (test), the
 # verified domain mail.example.test (Postal makes its DKIM key), an HTTP
@@ -806,12 +828,7 @@ test_routers() {
   api_refused
   expect_answer 200 '"keys"' 443 postal.test /.well-known/jwks.json
   tracking 443 track.mail.test /
-  # A client's X-Postal-Track-Host (either spelling) never reaches Postal
-  # through the routers of the web host name.
-  login_page 443 postal.test /login -H 'X-Postal-Track-Host: 1'
-  login_page 443 postal.test /login -H 'X_Postal_Track_Host: 1'
-  api_refused -H 'X-Postal-Track-Host: 1'
-  api_refused -H 'X_Postal_Track_Host: 1'
+  expect_no_client_track 443
 
   # The UI behind a middleware that denies everyone: on the same entrypoint
   # the API and tracking still answer.
@@ -841,8 +858,8 @@ test_routers() {
   api_refused
   expect_answer 200 '"keys"' 443 postal.test /.well-known/jwks.json
   expect_answer 404 '404 page not found' 8443 postal.test /api/v1/send/message
-  login_page 8443 postal.test /login -H 'X-Postal-Track-Host: 1'
-  login_page 8443 postal.test /login -H 'X_Postal_Track_Host: 1'
+  expect_no_client_track 8443
+  expect_answer 404 '404 page not found' 8443 postal.test /api/v1/send/message -H 'X-Postal_Track-Host: 1'
   tracking 443 track.mail.test /
   tracking 443 click.example.test /
   # The tracking router sets the header whatever the client sends.

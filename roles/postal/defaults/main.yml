@@ -41,8 +41,8 @@ postal_dns: {}
 #                    postal_traefik_ui_middlewares
 #   <project>-track  the tracking domains, on postal_traefik_entrypoints with
 #                    postal_traefik_track_middlewares
-# The API and UI routers drop a client's X-Postal-Track-Host; the tracking
-# router sets it.
+# The API and UI routers set X-Postal-Track-Host to 0, so that no client
+# spelling of it reaches Postal; the tracking router sets it to 1.
 postal_traefik_network: proxy
 postal_traefik_address: 172.31.255.254
 postal_traefik_entrypoints: []

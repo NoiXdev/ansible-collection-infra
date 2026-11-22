@@ -19,9 +19,11 @@
     signatures), the UI on entrypoints of its own (everything else of the web
     host name) and tracking on the role-known tracking host and
     postal_track_hostnames. Postal answers as its tracking server whenever a
-    request carries X-Postal-Track-Host: 1, so the routers of the web host
-    name drop a client-sent one (Puma reads the spelling with underscores as
-    the same header) and only the tracking router sets it. -#}
+    request carries X-Postal-Track-Host: 1, and Puma reads every spelling of
+    it with dashes or underscores as that header unless the all-dash one is
+    there. So the routers of the web host name set the all-dash one to 0,
+    which outweighs any spelling a client sends, and only the tracking router
+    sets it to 1. -#}
 {%- set router = postal_project -%}
 {%- set host_rule = 'Host(`' ~ postal_web_hostname ~ '`)' -%}
 {%- set api_paths = 'PathPrefix(`/api/`) || Path(`/.well-known/jwks.json`)' -%}
@@ -120,9 +122,7 @@ services:
     labels:
       - traefik.enable=true
       - {{ q('traefik.docker.network=' ~ postal_traefik_network) }}
-      # An empty value removes the header.
-      - {{ q('traefik.http.middlewares.' ~ strip ~ '.headers.customrequestheaders.X-Postal-Track-Host=') }}
-      - {{ q('traefik.http.middlewares.' ~ strip ~ '.headers.customrequestheaders.X_Postal_Track_Host=') }}
+      - {{ q('traefik.http.middlewares.' ~ strip ~ '.headers.customrequestheaders.X-Postal-Track-Host=0') }}
       - {{ q('traefik.http.middlewares.' ~ set_track ~ '.headers.customrequestheaders.X-Postal-Track-Host=1') }}
 {% for r in routers %}
       - {{ q('traefik.http.routers.' ~ r.name ~ '.rule=' ~ r.rule) }}
