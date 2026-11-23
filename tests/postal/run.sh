@@ -47,8 +47,9 @@
 #             the keys but a root that has a password: refused once MariaDB
 #             runs, the files and containers the run made gone again, root
 #             and the password of Postal's user (the run had another)
-#             unchanged; with the old files back Postal runs as before, with
-#             its signing key
+#             unchanged; then that data with the keys taken over (postal
+#             upgrade, not initialize, the signing key unchanged, the admin
+#             alone)
 #   takeover  an installation with the fixture and a message through the
 #             API, dumped (mariadb-dump --databases, .sql.gz) and its keys
 #             noted, then postal_dir wiped: an install with
@@ -1223,12 +1224,17 @@ test_takeover_refusals() {
   expect_in_log "postal_import_dump is set, but the own MariaDB in $app_dir/data/mariadb already holds postal"
   expect_data_untouched
 
-  # With the old files back Postal runs as before, with its signing key.
-  put_files_back
-  compose up -d >/dev/null 2>&1
-  install_converge_unchanged
-  [ "$(h sha256sum "$app_dir/config/signing.key" | cut -d' ' -f1)" = "$key_sum" ] || fail "the refused takeovers changed signing.key"
-  [ "$(postal_rails 'puts User.count')" = 1 ] || fail "the admin is gone after the refused takeovers"
+  # With the keys the same data is taken over: postal upgrade, not
+  # initialize, the signing key the one given, the admin alone.
+  echo "== takeover_refusals: the data with the keys (ubuntu $1)"
+  h rm -rf /root/aside
+  install_converge -e "@$out/takeover-vars.json"
+  expect_task 'Upgrade the database' changed
+  expect_task 'Initialize the database' skipping
+  expect_in_log 'The role took over the Postal databases there'
+  install_converge_unchanged -e "@$out/takeover-vars.json"
+  [ "$(h sha256sum "$app_dir/config/signing.key" | cut -d' ' -f1)" = "$key_sum" ] || fail "the takeover of the data changed signing.key"
+  [ "$(postal_rails 'puts User.count')" = 1 ] || fail "the takeover of the data has not exactly the old admin"
 }
 
 test_takeover() {
