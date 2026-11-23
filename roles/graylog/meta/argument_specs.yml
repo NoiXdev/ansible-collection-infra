@@ -100,7 +100,7 @@ argument_specs:
             description: gelf_udp, gelf_tcp, gelf_http, syslog_udp or syslog_tcp (checked by the role).
           port:
             type: int
-            description: Host port of the input (a container port below 1024 is mapped above it).
+            description: Host port of the input (below 1024 the port plus 10000 in the container; not 9000 for TCP, the server's API).
           bind:
             type: list
             elements: str

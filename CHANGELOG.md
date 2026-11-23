@@ -25,9 +25,11 @@
   left alone: `bind` publishes a port on given host addresses only; `traefik` routes a `gelf_http`
   input over HTTPS by its host name and a `gelf_tcp` or `syslog_tcp` input over TLS by its server
   name, with `sni: '*'` for senders that connect to an IP address (on an entrypoint of its own);
-  `token` makes a `gelf_http` input take only `Authorization: Bearer <token>`. Every input must
-  run, or the run fails. The default index set rotates daily and keeps `graylog_retention_days`
-  (default 30) indices. The containers log with the `local` driver, so a daemon that sends its
+  `token` makes a `gelf_http` input take only `Authorization: Bearer <token>`. Two inputs of one
+  transport on one port in the container (a port below 1024 is the port plus 10000 there) and a
+  TCP input on the server's port 9000 are refused. Every input must run, or the run fails. The
+  default index set rotates daily and keeps `graylog_retention_days` (default 30) indices. The
+  containers log with the `local` driver, so a daemon that sends its
   logs to Graylog does not send Graylog's own. The role writes a sysctl drop-in for
   `vm.max_map_count` (at least 262144, a higher value kept). Before an update the role checks the
   free space for its backup and a rollback, then takes a backup in

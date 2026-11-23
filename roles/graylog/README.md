@@ -63,7 +63,9 @@ second run.
 - `bind` publishes the port on those host addresses only, and nothing else
   restricts who sends: use the host's or the cloud's firewall. A port below
   1024 is the port plus 10000 inside the container (Graylog does not run as
-  root), so a syslog input on 514 listens on 10514 there.
+  root), so a syslog input on 514 listens on 10514 there, and 514 and 10514
+  of one transport are refused together. A TCP input on 9000 is refused: the
+  server's web interface and API listen there.
 - `traefik` routes the input through Traefik: a `gelf_http` input gets an
   HTTPS router on the host name; `gelf_tcp` and `syslog_tcp` get a TCP router
   with TLS ended at Traefik, chosen by the server name (SNI) the sender sends,

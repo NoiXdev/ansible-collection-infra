@@ -311,23 +311,39 @@
     quiet: true
 
 # One UDP and one TCP input may share a port; two of one transport may not.
-# Compared as numbers, so that "012201" and 12201 are the same port.
-- name: Check that no port is published twice per transport
+# Compared as numbers, so that "012201" and 12201 are the same port, and as
+# the container's ports, so that 514 and 10514 are too.
+- name: Check that no port is used twice per transport
   ansible.builtin.assert:
     that: graylog_input_ports | length == graylog_input_ports | unique | list | length
     fail_msg: >-
       graylog_inputs uses a port twice for the same transport
-      ({{ graylog_input_ports | join(', ') }}): one UDP and one TCP input may
-      share a port, two UDP or two TCP inputs may not. The role changes
-      nothing.
+      (in the container {{ graylog_input_ports | join(', ') }}): one UDP and
+      one TCP input may share a port, two UDP or two TCP inputs may not, and
+      a port below 1024 is the port plus 10000 in the container. The role
+      changes nothing.
     quiet: true
   vars:
     graylog_input_ports: >-
-      {%- set ports = [] -%}
-      {%- for input in graylog_inputs -%}
-      {%- set _ = ports.append((input.port | int | string) ~ '/' ~ graylog_input_types[input.type].transport) -%}
-      {%- endfor -%}
-      {{ ports }}
+      {{ graylog_inputs_wanted | map(attribute='container_port') | map('string')
+         | zip(graylog_inputs_wanted | map(attribute='transport')) | map('join', '/') | list }}
+
+# The server's web interface and API listen on 9000 in the container: a TCP
+# input there would publish them on its bind addresses, past Traefik.
+- name: Refuse a TCP input on the server's port
+  ansible.builtin.assert:
+    that: graylog_inputs_on_api_port | length == 0
+    fail_msg: >-
+      The inputs {{ graylog_inputs_on_api_port | join(', ') }} of
+      graylog_inputs use TCP port 9000: port 9000 is the server's web
+      interface and API in the container, and such an input would publish
+      them on its addresses, past Traefik. Use another port. The role changes
+      nothing.
+    quiet: true
+  vars:
+    graylog_inputs_on_api_port: >-
+      {{ graylog_inputs_wanted | selectattr('transport', 'eq', 'tcp') | selectattr('container_port', 'eq', 9000)
+         | map(attribute='name') | list }}
 
 - name: Check graylog_env
   ansible.builtin.assert:

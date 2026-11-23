@@ -10,8 +10,9 @@
 #             unknown type, a bad or a duplicate name, two inputs on one port
 #             and transport, also spelled "012201" and 12201, traefik on a
 #             UDP input or without entrypoints, a token on a syslog input or
-#             a null one, options with a list; bad graylog_env keys and a
-#             null value)
+#             a null one, options with a list, 514 and 10514 (one port in the
+#             container), a TCP input on the server's API port 9000; bad
+#             graylog_env keys and a null value)
 #   install   a fresh install (verify.yml: MongoDB, the Data Node and the
 #             server healthy with the pinned images, the local log driver
 #             and no published port, the secrets only as *__FILE, the heaps,
@@ -60,11 +61,13 @@
 #             the new port), the syslog_tcp entry removed (the input
 #             deleted), the syslog_udp input on 514 (published from 10514 in
 #             the container), a new token (the old one refused), a retention
-#             of 7 days; an input made through the API without the prefix
-#             survives two runs; the gelf_tcp input moved onto the port of the
-#             server's API (9000): the run waits for the restarted input, not
-#             the state from before the change, and fails naming it FAILED;
-#             then back to the default inputs
+#             of 7 days; a GELF TCP input made through the API without the
+#             prefix survives two runs; the gelf_tcp input moved onto the
+#             port of the server's API (9000) refused, nothing published;
+#             the gelf_tcp input moved onto the other input's port: the run
+#             waits for the restarted input, not the state from before the
+#             change, and fails naming it FAILED; then back to the default
+#             inputs
 #   update    an installation of the previous release (7.2.1, MongoDB
 #             7.0.48) with inputs of its own and a message, a jump to
 #             MongoDB 9 and an update with a new root password refused
@@ -89,8 +92,8 @@
 #             set aside, update-failed naming the versions; a run with them
 #             refused before any change; a run with the installed versions
 #             removes the marker; then an update whose new input cannot
-#             start (GELF over TCP on the server's API port) rolled back the
-#             same way
+#             start (GELF over TCP on the port of a TCP input without the
+#             prefix) rolled back the same way
 #   interrupted
 #             an install stopped before it completed refused; on an
 #             installation of the previous release, graylog_restore_interrupted
@@ -591,6 +594,13 @@ test_refusals() {
   # The same port spelled another way.
   refused 'uses a port twice for the same transport' \
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": "012201"}, {"name": "b", "type": "gelf_udp", "port": 12201}]}'
+  # A port below 1024 is the port plus 10000 in the container: 514 and 10514
+  # are one port there.
+  refused 'uses a port twice for the same transport' \
+    -e '{"graylog_inputs": [{"name": "a", "type": "syslog_udp", "port": 514}, {"name": "b", "type": "gelf_udp", "port": 10514}]}'
+  # A TCP input on the server's API port would publish the API.
+  refused 'port 9000 is the server' \
+    -e '{"graylog_inputs": [{"name": "a", "type": "gelf_tcp", "port": 9000}]}'
   refused 'is a UDP input and has a traefik block' \
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": 12201, "traefik": {"hostname": "a.test", "entrypoints": ["websecure"]}}]}'
   refused 'only gelf_http inputs take a token' \
@@ -801,7 +811,7 @@ test_reconcile() {
   expect_input syslog-tcp 1515 >/dev/null
   # An input of someone else: no prefix.
   api /system/inputs -X POST -H 'Content-Type: application/json' \
-    -d '{"title": "manual gelf", "type": "org.graylog2.inputs.gelf.udp.GELFUDPInput", "global": true,
+    -d '{"title": "manual gelf", "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput", "global": true,
          "configuration": {"bind_address": "0.0.0.0", "port": 12299, "recv_buffer_size": 262144}}' >/dev/null
   local lines
   lines="$(inputs_lines)"
@@ -829,12 +839,22 @@ test_reconcile() {
   lines="$(inputs_lines)"
   printf '%s\n' "$lines" | grep -qF "$manual_id manual gelf|" || fail "the input without the prefix was removed"
 
-  # The gelf_tcp input moved onto the port of the server's API: Graylog
-  # restarts it after the change, and the new one cannot open its port. The
-  # first answer after the change can still be the RUNNING input from before
-  # it, which must not count. Graylog 7.2.2 restarts the input at once, so
-  # this does not force that race; it pins the failure being reported.
-  write_inputs_vars clash-vars.json "$(inputs_json 9000 0 514)" "$new_gelf_token"
+  # The gelf_tcp input moved onto the port of the server's API, published on
+  # the host's address: refused before any change, so the API is not
+  # published past Traefik.
+  write_inputs_vars api-port-vars.json "$(inputs_json 9000 0 514)" "$new_gelf_token"
+  role_converge_fails -e "@$out/api-port-vars.json" -e graylog_retention_days=7
+  expect_in_log "port 9000 is the server"
+  verify -e "@$out/reconcile-published.json"
+
+  # The gelf_tcp input moved onto the port of the TCP input without the
+  # prefix: Graylog restarts it after the change, and the new one cannot
+  # open its port (a clash over UDP would not fail: Graylog binds UDP
+  # inputs with SO_REUSEPORT). The first answer after the change can still
+  # be the RUNNING input from before it, which must not count. Graylog
+  # 7.2.2 restarts the input at once, so this does not force that race; it
+  # pins the failure being reported.
+  write_inputs_vars clash-vars.json "$(inputs_json 12299 0 514)" "$new_gelf_token"
   role_converge_fails -e "@$out/clash-vars.json" -e graylog_retention_days=7
   expect_in_log "The inputs gelf-tcp (FAILED) of graylog_inputs are not RUNNING"
   role_converge "reconcile after the port clash" -e "@$out/reconcile-vars.json" -e graylog_retention_days=7
@@ -1076,18 +1096,21 @@ test_failed_update() {
   up_converge_unchanged "another version" "${old_args[@]}"
 
   # An input that cannot start after the new versions are healthy (GELF over
-  # TCP on the port of the server's API) fails the update too.
+  # TCP on the port of a TCP input without the prefix) fails the update too.
   echo "== failed_update: an input that fails after the update (ubuntu $1)"
-  write_inputs_vars clash-inputs.json "$(update_inputs_json | sed 's/}]$/}, {"name": "gelf-tcp", "type": "gelf_tcp", "port": 9000}]/')" ''
+  api /system/inputs -X POST -H 'Content-Type: application/json' \
+    -d '{"title": "manual gelf", "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput", "global": true,
+         "configuration": {"bind_address": "0.0.0.0", "port": 12299, "recv_buffer_size": 262144}}' >/dev/null
+  write_inputs_vars clash-inputs.json "$(update_inputs_json | sed 's/}]$/}, {"name": "gelf-clash", "type": "gelf_tcp", "port": 12299}]/')" ''
   up_converge_fails -e "@$out/clash-inputs.json"
   expect_in_log "update from $old_version to $new_version in $app_dir failed"
-  expect_in_log "gelf-tcp (FAILED)"
+  expect_in_log "gelf-clash (FAILED)"
   expect_in_log "was rolled back: Graylog $old_version with MongoDB $old_mongodb runs again"
   [ "$(service_line graylog)" = "docker.io/graylog/graylog:$old_version running healthy" ] \
     || fail "the server after the rollback of the failed input: $(service_line graylog)"
   h grep -qx "failed_version: $new_version" "$failed_marker" || fail "the marker does not name $new_version: $(h cat "$failed_marker")"
   expect_no_progress "after the rollback of the failed input"
-  expect_no_input gelf-tcp
+  expect_no_input gelf-clash
   expect_data_kept "after the rollback of the failed input"
   remove_installation
 }
