@@ -5,7 +5,8 @@
 # run.sh starts it), and the suite's own plugin noix-test from
 # fixtures/plugins/noix-test (relative to the playbook, as a role's src). A
 # site of the traefik scenario's Traefik for each: cloud with the Nextcloud
-# plugin, own with noix-test and a setting, plain with neither.
+# plugin, own with noix-test and a setting, bare with noix-test and none
+# (it gets the plugin's default), plain with neither.
 test_plugin_server: https://plugins.test:8443
 waf_plugins:
   - name: nextcloud-rule-exclusions
@@ -35,5 +36,12 @@ waf_sites:
     plugin_settings:
       noix-test:
         greeting: hi
+    routers:
+      - entrypoints: [web]
+  - name: bare
+    domains: [bare.test]
+    backend: http://whoami:80
+    mode: block
+    plugins: [noix-test]
     routers:
       - entrypoints: [web]

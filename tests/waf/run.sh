@@ -838,8 +838,27 @@ bad_plugin() {
   printf '{"waf_plugins": [{"name": "bad", "src": "%s"}]}' "$out/plugin-src/$1"
 }
 
+# plugin_sites <own's extra members> <bare's extra members>: the sites of
+# plugins.yml as a waf_sites override, for the runs that change which site
+# lists noix-test (the members are JSON, "" for none).
+plugin_sites() {
+  local own="${1:+, $1}" bare="${2:+, $2}"
+  printf '{"waf_sites": [
+    {"name": "cloud", "domains": ["cloud.test"], "backend": "http://whoami:80", "mode": "block",
+     "plugins": ["nextcloud-rule-exclusions"], "routers": [{"entrypoints": ["web"]}]},
+    {"name": "plain", "domains": ["plain.test"], "backend": "http://whoami:80", "mode": "block",
+     "routers": [{"entrypoints": ["web"]}]},
+    {"name": "own", "domains": ["own.test"], "backend": "http://whoami:80", "mode": "block",
+     "routers": [{"entrypoints": ["web"]}]%s},
+    {"name": "bare", "domains": ["bare.test"], "backend": "http://whoami:80", "mode": "block",
+     "routers": [{"entrypoints": ["web"]}]%s}]}' "$own" "$bare"
+}
+# plugin_includes: the basenames of the Include lines of the running
+# modsecurity.conf, in order.
+plugin_includes() { h grep '^Include ' /opt/waf/modsecurity.conf | sed 's#.*/##' | tr '\n' ' '; }
+
 test_plugins() {
-  local mtime propfind
+  local mtime propfind includes fixture want sums
   echo "== plugins (ubuntu $1)"
   serve_plugins
   converge "${plugins_args[@]}" -e test_waf=false
@@ -857,9 +876,12 @@ test_plugins() {
     -e "$(one_site '')" -e "$(bad_plugin id-range 'SecAction "id:1234,phase:1,pass,nolog"')"
 
   echo "-- refused plugin archives, after the download"
-  refused_cached plugin-checksum "did not match 0000000000000000000000000000000000000000000000000000000000000000; it was $nextcloud_sha" \
+  refused_cached plugin-checksum "waf: plugin nextcloud-rule-exclusions: the archive at $nextcloud_url does not have sha256 0000000000000000000000000000000000000000000000000000000000000000" \
     -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\",
          \"sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"}, $noix_test_plugin]}"
+  refused_cached plugin-download 'waf: plugin nextcloud-rule-exclusions: Request failed: HTTP Error 404' \
+    -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"https://plugins.test:8443/missing.tar.gz\",
+         \"sha256\": \"$nextcloud_sha\"}, $noix_test_plugin]}"
   refused_cached plugin-no-files 'waf: plugin x: has no x-config.conf, x-before.conf or x-after.conf' \
     -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"},
          {\"name\": \"x\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"}, $noix_test_plugin]}"
@@ -875,7 +897,7 @@ test_plugins() {
   mtime="$(h stat -c %Y "$nextcloud_cache")"
   converge_unchanged "${plugins_args[@]}"
   [ "$(h stat -c %Y "$nextcloud_cache")" = "$mtime" ] || fail "the second run downloaded the plugin archive again"
-  for name in cloud plain own; do await 200 "$name.test" /; done
+  for name in cloud plain own bare; do await 200 "$name.test" /; done
 
   echo "-- the Nextcloud plugin, for its site only"
   # A WebDAV listing: the Core Rule Set alone refuses the method (911100);
@@ -890,13 +912,32 @@ test_plugins() {
   expect 403 own.test '/?noixprobe=hi'
   expect 200 own.test '/?noixprobe=hello'
   expect 403 own.test '/?noixafter=1'
+  # bare.test lists the plugin without a setting: its greeting is the
+  # plugin's own default (hello), set by the -config file after the site's
+  # Host rule. Only a -config file included in that place gives 403.
+  expect 403 bare.test '/?noixprobe=hello'
+  expect 200 bare.test '/?noixprobe=hi'
+
+  echo "-- the plugins' files are included in CRS's order"
+  includes="$(plugin_includes)"
+  [ "$includes" = 'crs-setup.conf nextcloud-rule-exclusions-config.conf noix-test-config.conf nextcloud-rule-exclusions-before.conf noix-test-before.conf *.conf noix-test-after.conf ' ] \
+    || fail "modsecurity.conf includes, in order: $includes"
+
+  echo "-- a plugin's text is not templated"
+  fixture="$here/fixtures/plugins/noix-test/plugins/noix-test-before.conf"
+  grep -qF '{{ noix }} {% noix %} {# noix #}' "$fixture" || fail "the fixture lost its Jinja-looking line"
+  want="$(hi sha256sum <"$fixture" | cut -d' ' -f1)"
+  for file in /opt/waf/plugins/noix-test-before.conf /opt/waf/staged/plugins/noix-test-before.conf; do
+    [ "$(h sha256sum "$file" | cut -d' ' -f1)" = "$want" ] || fail "$file is not the fixture, byte for byte"
+  done
 
   echo "-- no other site runs a plugin, nor a Host of no site"
-  # 9590010 does not check its switch; the site rule removes it.
+  # 9590010 does not check its switch; the site rule removes it (bare.test
+  # lists the plugin and does run it).
   expect 200 plain.test '/?noixprobe=hello'
   expect 200 plain.test '/?noixafter=1'
   [ "$(direct unknown.test '/?noixprobe=hello')" = 421 ] || fail "an unknown host did not answer 421"
-  if audit | grep -F 'noixprobe=hello' | grep -qF '"9590010"'; then
+  if audit | grep -F '"hostname":"plain.test"' | grep -F 'noixprobe=hello' | grep -qF '"9590010"'; then
     audit >&2
     fail "rule 9590010 ran for a site without noix-test"
   fi
@@ -906,8 +947,23 @@ test_plugins() {
     | grep -qF 'ctl:ruleRemoveById=9590001-9590020' || fail "rule 5099912 does not remove every plugin's rules"
 
   echo "-- a plugin rule never sees a credential"
-  expect 200 own.test / -H 'X-Secret-Token: tokenvalue123'
-  if h docker logs "$waf" 2>&1 | grep -F tokenvalue123; then fail "the WAF's log holds a credential"; fi
+  expect 200 own.test '/?mark=ownsecret' -H 'X-Secret-Token: tokenvalue123'
+  expect 200 plain.test '/?mark=plainsecret' -H 'X-Secret-Token: whatever'
+  if h docker logs "$waf" 2>&1 | grep -F -e tokenvalue123 -e whatever; then fail "the WAF's log holds a credential"; fi
+  # The credential exclusion keeps 9590011 from ever matching a credential
+  # header; 9590012 (phase 1, any X-Noix-Mark header) shows the phase 1 rules:
+  # logged for the site that lists the plugin, removed for one that does not.
+  if audit | grep -F 'mark=ownsecret' | grep -qF '"9590011"'; then
+    audit >&2
+    fail "rule 9590011 matched a credential header"
+  fi
+  expect 200 own.test '/?mark=ownmark' -H 'X-Noix-Mark: 1'
+  expect 200 plain.test '/?mark=plainmark' -H 'X-Noix-Mark: 1'
+  audit | grep -F 'mark=ownmark' | grep -qF '"9590012"' || { audit >&2; fail "rule 9590012 did not run for own.test"; }
+  if audit | grep -F 'mark=plainmark' | grep -qF '"9590012"'; then
+    audit >&2
+    fail "phase 1 rule 9590012 ran for a site without noix-test"
+  fi
 
   echo "-- check mode: nothing to change; a plugin not in the cache is a change, not a download"
   checks_unchanged plugins-check "${plugins_args[@]}"
@@ -926,6 +982,38 @@ test_plugins() {
   h test ! -e "$nextcloud_cache" || fail "check mode downloaded the plugin archive"
   converge "${plugins_args[@]}"
   h test -e "$nextcloud_cache" || fail "the run did not download the plugin archive again"
+
+  echo "-- a plugin that passes the checker but not nginx -t changes nothing"
+  # (ModSecurity 3.0.17 ignores an unknown operator; an unknown transformation is a parse error.)
+  mkdir -p "$out/plugin-src/broken"
+  printf '%s\n' 'SecRule ARGS "@streq x" "id:9591000,phase:2,pass,nolog,t:nosuchtransform"' >"$out/plugin-src/broken/broken-before.conf"
+  sums="$(h sh -c 'sha256sum /opt/waf/modsecurity.conf /opt/waf/plugins/*')"
+  role_fails plugin-nginx-t "${plugins_args[@]}" \
+    -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"},
+         $noix_test_plugin, {\"name\": \"broken\", \"src\": \"$out/plugin-src/broken\"}]}"
+  expect_in_log plugin-nginx-t 'nginx -t refused the new settings'
+  expect 403 own.test '/?noixprobe=hi'
+  [ "$(h sh -c 'sha256sum /opt/waf/modsecurity.conf /opt/waf/plugins/*')" = "$sums" ] \
+    || fail "the run nginx -t refused changed the WAF's files"
+
+  echo "-- noix-test off for own: its rules stop there, and only there"
+  converge "${plugins_args[@]}" -e "$(plugin_sites '' '"plugins": ["noix-test"]')"
+  expect 200 own.test '/?noixprobe=hi'
+  expect 200 own.test '/?noixafter=1'
+  expect 403 bare.test '/?noixprobe=hello'
+
+  echo "-- noix-test removed: its files and every trace in modsecurity.conf are gone"
+  converge "${plugins_args[@]}" -e "$(plugin_sites '' '')" \
+    -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"}]}"
+  h test ! -e /opt/waf/plugins/noix-test-before.conf || fail "noix-test-before.conf is still in place"
+  h sh -c 'ls /opt/waf/plugins /opt/waf/staged/plugins' | grep -F noix-test && fail "a file of noix-test is still in place or staged"
+  [ "$(h grep -c noix-test /opt/waf/modsecurity.conf || true)" = 0 ] || fail "modsecurity.conf still names noix-test"
+  expect 200 own.test '/?noixprobe=hello'
+  expect 200 bare.test '/?noixprobe=hello'
+  expect 200 cloud.test /remote.php/dav/files/u/ -X PROPFIND -H 'Depth: 1' -H 'Content-Type: application/xml' \
+    -H 'Expect:' --data-binary "$propfind"
+  converge_unchanged "${plugins_args[@]}" -e "$(plugin_sites '' '')" \
+    -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"}]}"
 
   h systemctl stop noix-plugin-server >/dev/null 2>&1 || true
 }
