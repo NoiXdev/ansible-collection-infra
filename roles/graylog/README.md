@@ -23,7 +23,7 @@ higher value an operator set is kept.
 | `graylog_mongodb_version` | `8.0.38` | MongoDB release, `X.Y.Z`, major 7 or 8 |
 | `graylog_image`, `graylog_datanode_image`, `graylog_mongodb_image` | Docker Hub repositories | Images without their tags |
 | `graylog_dir` | `/opt/graylog` | The compose project: compose file, secrets, markers |
-| `graylog_data_dir` | `<graylog_dir>/data` | The data and the backups; no comma in the path |
+| `graylog_data_dir` | `<graylog_dir>/data` | The data and the backups |
 | `graylog_data_dir_mountpoint` | `false` | Refuse every run while the data directory is not a mountpoint |
 | `graylog_hostname` | required | The host name Traefik routes to the web interface |
 | `graylog_url` | `https://<hostname>` | The origin the browsers see |
@@ -71,6 +71,10 @@ second run.
   sends no server name, needs `sni: '*'` on an entrypoint of its own;
   otherwise Traefik drops its messages without an error. An entrypoint with
   a `'*'` route serves that one input only, and the role refuses to share it.
+  Never give a `'*'` route the web interface's entrypoint, named in
+  `graylog_traefik_entrypoints` or one of Traefik's default ones when that
+  is empty: the role refuses only the named ones, and a catch-all there
+  takes the web interface's TLS connections.
 - A TCP route serves the certificate Traefik holds for the server name, for
   example one it obtains for a name listed in the `traefik` role's
   certificate domains, else Traefik's default one; a `'*'` route serves the
@@ -87,3 +91,65 @@ beyond `graylog_retention_days` indices, set on every run. The role uses
 Graylog's classic rotation for it, not the data tiering, which keeps messages
 between a minimum and a maximum age. Further index sets, streams, dashboards
 and alerts are made in the web interface.
+
+## Updates and rollback
+
+A new `graylog_version` or `graylog_mongodb_version` is an update. Before it
+changes anything the role checks:
+
+- **Free space.** There must be room for the backup and for a rollback. The
+  backup directory needs the database's files and, with
+  `graylog_update_backup_logs`, the Data Node's data. A rollback copies that
+  data once more next to the data directory. If both are on one file system,
+  the sizes add up. The check measures the file system of `graylog_data_dir`,
+  so keep the Data Node's subdirectory on it: if it is a mount of its own,
+  the rollback's moves become copies that the check does not count.
+- **Refusals.** A downgrade of Graylog or of MongoDB is refused. So is an
+  update together with a new root password: change one per run.
+
+The update then runs in this order:
+
+1. It writes `update-in-progress`.
+2. It stops the server and the Data Node.
+3. It dumps the database and reads the dump back.
+4. It copies the Data Node's data, unless `graylog_update_backup_logs` is
+   false.
+5. It starts the new versions in the order MongoDB, Data Node, server.
+6. It checks the health, the inputs and the retention.
+7. After a MongoDB major, it raises the `featureCompatibilityVersion`, last of
+   all.
+
+The backup is
+`<graylog_data_dir>/backups/<UTC time>-<from>-to-<to>/` with the compose file,
+the secrets, `inputs.json`, the versions file, `mongodb.archive` and
+`datanode/`. The newest `graylog_backups_keep` are kept.
+
+A failed check rolls back:
+
+1. It puts back the compose file, the secrets and the versions file.
+2. It drops the database and loads the dump.
+3. It moves the Data Node's data aside to `<backup>-failed` and puts the copy
+   in its place.
+4. It starts the previous versions and checks them the same way.
+
+`update-failed` then refuses those versions until another one is pinned.
+If the rollback fails too, the marker refuses every version until someone
+steps in (the error and a manual restore are in its message).
+
+Without the copy of the Data Node's data, the rollback restores the rest and
+starts the previous Data Node on the data the new one migrated, which it may
+not open. The role never moves or wipes log data to get past that, so
+turning the copy off can end in a host that is refused until it is restored by
+hand. The `<backup>-failed` directories are never pruned. Each holds the
+data of one failed attempt; remove them once you no longer need them.
+
+A run that stops during an update (a lost connection, a killed play) leaves
+`update-in-progress`:
+
+- **Stopped during the backup.** Nothing had changed. The next run removes the
+  partial backup and updates again.
+- **Stopped after the backup.** The next run refuses, naming both versions
+  and the backup. Graylog may run either version or neither. Set
+  `graylog_restore_interrupted: true` for one run to restore the backup
+  without updating, then remove the variable; the next run updates again.
+  Or remove the marker with its copies to keep Graylog as it is.

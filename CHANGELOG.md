@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- `graylog`: new role that runs Graylog (`graylog_version`, pinned, 7.0.0 or newer, default 7.2.2)
+  with its Data Node and MongoDB (`graylog_mongodb_version`, major 7 or 8, default 8.0.38) as one
+  compose project in `graylog_dir` (default `/opt/graylog`), with the web interface behind Traefik
+  and no published web port. It needs Docker. `graylog_hostname`, `graylog_root_password` and
+  `graylog_password_secret` (16 characters or more) are required; the secrets reach the
+  containers as `0600` files, never the compose file, the output or a process list, and a
+  `graylog_password_secret` other than the installation's is refused. The first start sets up the
+  Data Node without the preflight web interface. `graylog_inputs` (default GELF over UDP on 12201
+  and syslog over UDP on 1514) are created, updated in place and deleted by their title prefix
+  (`graylog_input_title_prefix`) through Graylog's API, and inputs made in the web interface are
+  left alone: `bind` publishes a port on given host addresses only; `traefik` routes a `gelf_http`
+  input over HTTPS by its host name and a `gelf_tcp` or `syslog_tcp` input over TLS by its server
+  name, with `sni: '*'` for senders that connect to an IP address (on an entrypoint of its own);
+  `token` makes a `gelf_http` input take only `Authorization: Bearer <token>`. Every input must
+  run, or the run fails. The default index set rotates daily and keeps `graylog_retention_days`
+  (default 30) indices. The containers log with the `local` driver, so a daemon that sends its
+  logs to Graylog does not send Graylog's own. The role writes a sysctl drop-in for
+  `vm.max_map_count` (at least 262144, a higher value kept). Before an update the role checks the
+  free space for its backup and a rollback, then takes a backup in
+  `<graylog_data_dir>/backups/` (the compose file, the secrets, the state of the inputs, a
+  `mongodump` read back, and with `graylog_update_backup_logs`, default on, a copy of the Data
+  Node's data), keeping the newest `graylog_backups_keep`; MongoDB's
+  `featureCompatibilityVersion` is raised only once the new versions are healthy. A failed update
+  is rolled back (`graylog_rollback_timeout`) and writes `update-failed`, which blocks those
+  versions; after a rollback that failed too it blocks every version until restored by hand. A
+  downgrade, and an update together with a new root password, are refused. A run that stopped
+  during an update leaves `update-in-progress`: stopped during the backup, the next run cleans up
+  and updates; stopped after it, every run refuses until `graylog_restore_interrupted: true`
+  restores the backup for one run or the marker is removed. A failed install leaves
+  `install-incomplete`, and an installation without its data (`graylog_data_dir_mountpoint` for a
+  volume) is refused.
 - `anubis`: redirect mode for traefik mode. Set `anubis_public_url` to the Anubis host's own URL
   (`https://anubis.example.test`, `https://` only, no path or trailing slash) and Anubis answers
   the challenge on that host and sends the browser back to the protected one, so 401s from
