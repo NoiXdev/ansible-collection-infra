@@ -179,6 +179,36 @@
 #             keys of the installation postal upgrade, the old rp. DKIM
 #             record, the admin, the fixture's credential and message, and a
 #             message through the API
+#   postal_dump
+#             postal-dump (0700 root) by hand twice: two complete
+#             directories (a complete dump of the main and of the message
+#             database, postal.yml and signing.key); killed with SIGKILL
+#             once it made <dir>.tmp, only that is left, and the next run
+#             replaces it
+#   update    from 3.4.0 with the fixture and a message to the default
+#             3.5.0: postal upgrade, web on the new image, a backup with the
+#             compose file, the configuration and the databases (one complete
+#             dump each, root's, mode 0700), the data still there, the API
+#             sends; a downgrade refused without a change; a further update
+#             with postal_backups_keep 1 prunes the older backup
+#   failed_update
+#             to an image that exits (busybox tagged as the new version):
+#             rolled back, 3.4.0 healthy with the data, update-failed names
+#             the version, which a run with it is refused for without a
+#             change; a run with another version removes the marker
+#   broken_db to a release whose migration drops the servers table (Postal's
+#             image with an entrypoint of the test): the database check
+#             fails, rolled back, the servers table and the data back
+#   interrupted
+#             postal_restore_interrupted without an interrupted update
+#             refused; a converge killed once the compose file names the new
+#             version: refused naming both versions without a change, then
+#             postal_restore_interrupted puts 3.4.0 back with the data; a
+#             converge killed during the backup: the next run removes the
+#             partial backup and updates
+#   no_space  a backup directory (a tmpfs of 64 KB) with less space than the
+#             databases: the update refused before any change, no service
+#             restarted
 # Postal's image is linux/amd64 only, so on a machine that is not amd64 (an
 # arm64 Mac, for example) it runs under emulation (Docker Desktop's Rosetta or
 # QEMU) inside the test host; every scenario but the arch refusal sets
@@ -2208,10 +2238,295 @@ test_install_external() {
   h sh -c 'grep -v " db.example.test$" /etc/hosts >/root/hosts.new; cat /root/hosts.new >/etc/hosts; rm /root/hosts.new'
 }
 
+# The update scenarios: from old_version, installed with the fixture and a
+# message, to new_version (the role's default) and to versions of test_repo
+# tagged on the test host. Each ends without an installation, as the others
+# would take it for theirs.
+old_version=3.4.0
+new_version=3.5.0
+next_version=3.5.1
+postal_repo=ghcr.io/postalserver/postal
+test_repo=test.invalid/postal
+backups="$app_dir/data/backups"
+marker="$app_dir/update-failed"
+progress="$app_dir/update-in-progress"
+busybox=busybox:1.37.0
+
+# The names of the complete backups, oldest first.
+complete_backups() {
+  h sh -c "ls -1 $backups 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z-[0-9.]+-to-[0-9.]+\$' || true"
+}
+# The image web runs.
+web_image() { h docker inspect --format '{{.Config.Image}}' "$(container web)"; }
+# ensure_old_installed <scenario>: a fresh installation of old_version with
+# the fixture (fixture_key) and a message through the API (old_subject).
+ensure_old_installed() {
+  remove_installation
+  echo "== install of $old_version for $1"
+  install_converge -e "postal_version=$old_version"
+  note_generated
+  fixture_key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$fixture_key")
+  old_subject="noixupd$(openssl rand -hex 4)"
+  api_send "$fixture_key" "$old_subject"
+  wait_mail "$old_subject" >/dev/null
+}
+# expect_data <what>: the admin, the fixture's server and the message are
+# there.
+expect_data() {
+  [ "$(postal_rails 'puts User.count')" = 1 ] || fail "$1: Postal has not exactly the admin"
+  [ "$(postal_rails 'puts Server.count')" = 1 ] || fail "$1: the fixture's server is gone"
+  [ "$(messages_with "$old_subject")" = 1 ] || fail "$1: the message $old_subject is gone"
+}
+# expect_backup <dir>: the compose file, the configuration and the databases
+# (one complete dump of the main and of the message database, with
+# postal.yml and signing.key) of a backup, all root's.
+expect_backup() {
+  local file
+  [ "$(h stat -c '%a %U' "$1")" = '700 root' ] || fail "the backup $1 is not root's with mode 0700"
+  for file in compose.yaml config/postal.yml config/signing.key databases/postal.yml databases/signing.key; do
+    h test -s "$1/$file" || fail "the backup $1 lacks $file"
+  done
+  [ "$(h sh -c "cd $1/databases && ls *.sql")" = "$(printf 'postal-server-1.sql\npostal.sql')" ] \
+    || fail "the backup $1 has not one dump per database: $(h ls "$1/databases")"
+  for file in postal.sql postal-server-1.sql; do
+    h sh -c "tail -n 1 $1/databases/$file | grep -q '^-- Dump completed'" || fail "the dump $file of $1 is not complete"
+  done
+}
+
+test_update() {
+  local backup
+  echo "== update (ubuntu $1)"
+  ensure_old_installed update
+  install_converge
+  expect_task "Migrate the databases to Postal $new_version" changed
+  [ "$(web_image)" = "$postal_repo:$new_version" ] || fail "web runs $(web_image) after the update"
+  backup="$backups/$(complete_backups | tail -n 1)"
+  [[ "$backup" == *"-$old_version-to-$new_version" ]] || fail "no backup of the update: $(complete_backups)"
+  expect_backup "$backup"
+  h test ! -e "$progress" || fail "the update left $progress"
+  expect_data "after the update"
+  api_send "$fixture_key" "noixnew$(openssl rand -hex 4)"
+  install_converge_unchanged
+
+  # Postal cannot migrate its databases down.
+  echo "== update: a downgrade (ubuntu $1)"
+  note_untouched
+  install_converge_fails -e "postal_version=$old_version"
+  expect_in_log "postal_version $old_version is lower than the installed version $new_version"
+  expect_untouched
+
+  # The newest postal_backups_keep stay.
+  echo "== update: pruning (ubuntu $1)"
+  h docker tag "$postal_repo:$new_version" "$test_repo:$next_version"
+  install_converge -e "postal_image=$test_repo" -e "postal_version=$next_version" -e postal_backups_keep=1
+  h test ! -e "$backup" || fail "the older backup $backup was not pruned"
+  [ "$(complete_backups | wc -l | tr -d ' ')" = 1 ] || fail "postal_backups_keep 1 kept more: $(complete_backups)"
+  complete_backups | grep -q -- "-$new_version-to-$next_version\$" || fail "the newest backup is not the one kept: $(complete_backups)"
+  expect_data "after the second update"
+  remove_installation
+  h docker rmi "$test_repo:$next_version" >/dev/null
+}
+
+# expect_rolled_back <what>: the run failed with the rollback, old_version
+# runs healthy with the data, update-failed names the version.
+expect_rolled_back() {
+  expect_in_log "and was rolled back: Postal $old_version runs again, healthy"
+  [ "$(web_image)" = "$postal_repo:$old_version" ] || fail "$1: web runs $(web_image) after the rollback"
+  h grep -q "^failed_version: $2\$" "$marker" || fail "$1: $marker does not name $2: $(h cat "$marker" 2>&1)"
+  h grep -q "^rolled_back_to: $old_version\$" "$marker" || fail "$1: $marker does not record the rollback"
+  h test ! -e "$progress" || fail "$1: the rollback left $progress"
+  expect_data "$1"
+}
+
+test_failed_update() {
+  echo "== failed_update (ubuntu $1): an image that exits"
+  ensure_old_installed failed_update
+  h docker pull -q --platform linux/amd64 "$busybox" >/dev/null
+  h docker tag "$busybox" "$test_repo:$new_version"
+  install_converge_fails -e "postal_image=$test_repo" -e postal_health_timeout=60
+  expect_rolled_back "an image that exits" "$new_version"
+
+  # The failed version is refused until another is pinned, which removes
+  # the marker.
+  echo "== failed_update: the failed version refused (ubuntu $1)"
+  note_untouched
+  install_converge_fails -e "postal_image=$test_repo"
+  expect_in_log "$marker exists: the Postal update to $new_version failed"
+  expect_in_log "rolled back to $old_version"
+  expect_untouched
+  install_converge -e "postal_version=$old_version"
+  h test ! -e "$marker" || fail "a successful run with $old_version kept the marker"
+  install_converge_unchanged -e "postal_version=$old_version"
+  remove_installation
+  h docker rmi "$test_repo:$new_version" >/dev/null
+}
+
+# A release whose migration breaks a table: Postal's image of new_version
+# with an entrypoint that, for postal upgrade, migrates and then drops the
+# servers table (the test's fault), tagged as test_repo's new_version.
+make_breaking_image() {
+  local entry
+  h docker pull -q --platform linux/amd64 "$postal_repo:$new_version" >/dev/null
+  entry="$(h docker image inspect --format '{{join .Config.Entrypoint " "}}' "$postal_repo:$new_version")"
+  h sh -c 'rm -rf /root/breaking && mkdir /root/breaking'
+  hi sh -c 'cat >/root/breaking/entry.sh' <<EOF
+#!/bin/sh
+# The fault of the postal suite: postal upgrade, then the servers table dropped.
+if [ "\$1 \$2" = "postal upgrade" ]; then
+  $entry "\$@" || exit
+  exec $entry bundle exec rails runner 'ActiveRecord::Base.connection.execute("DROP TABLE servers")'
+fi
+exec $entry "\$@"
+EOF
+  printf 'FROM %s:%s\nCOPY --chmod=0755 entry.sh /noix-entry.sh\nENTRYPOINT ["/noix-entry.sh"]\n' "$postal_repo" "$new_version" \
+    | hi sh -c 'cat >/root/breaking/Dockerfile'
+  h docker build -q --platform linux/amd64 -t "$test_repo:$new_version" /root/breaking >/dev/null
+}
+
+test_broken_db() {
+  echo "== broken_db (ubuntu $1)"
+  ensure_old_installed broken_db
+  make_breaking_image
+  install_converge_fails -e "postal_image=$test_repo"
+  expect_in_log 'the users and servers tables'
+  expect_rolled_back "a broken database" "$new_version"
+  h rm "$marker"
+  remove_installation
+  h docker rmi "$test_repo:$new_version" >/dev/null
+}
+
+# A converge stopped as a dropped SSH session or a reboot stops it: the role
+# with the settings of an installation, in the background in a process group
+# of its own, killed with SIGKILL (the whole group) once the shell condition
+# holds on the test host; then waits until no module of it runs there any
+# more. Its output goes to converge.log, which must hold no test secret:
+# play_killed <condition> [-e ...].
+play_killed() {
+  local condition="$1" pid
+  shift
+  set -m
+  ansible-playbook -v -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" \
+    -e "@$out/role-vars.json" -e "$(db_vars)" -e "@$out/admin-vars.json" "$@" >"$out/converge.log" 2>&1 &
+  pid=$!
+  set +m
+  for _ in $(seq 1800); do
+    if h sh -c "$condition" >/dev/null 2>&1; then
+      kill -9 -- "-$pid"
+      wait "$pid" || true
+      expect_no_secrets "$out/converge.log" "the output of the killed converge"
+      wait_modules
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      tail -n 40 "$out/converge.log" >&2
+      fail "the converge ended before it was killed at: $condition"
+    fi
+    sleep 0.5
+  done
+  kill -9 -- "-$pid" 2>/dev/null || true
+  wait "$pid" || true
+  fail "the converge did not reach within the wait: $condition"
+}
+# Waits until no Ansible module runs on the test host for five seconds.
+wait_modules() {
+  local quiet=0
+  for _ in $(seq 300); do
+    if h pgrep -f '[A]nsiballZ_' >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+    [ "$quiet" -lt 5 ] || return 0
+    sleep 1
+  done
+  fail "an Ansible module still runs on the test host after 300 seconds"
+}
+
+test_interrupted() {
+  echo "== interrupted (ubuntu $1)"
+  ensure_old_installed interrupted
+
+  # The variable without an interrupted update.
+  note_untouched
+  install_converge_fails -e "postal_version=$old_version" -e postal_restore_interrupted=true
+  expect_in_log "postal_restore_interrupted is set, but there is no interrupted update in $app_dir"
+  expect_untouched
+
+  # Killed once the compose file names the new version: refused naming both
+  # versions; postal_restore_interrupted puts the backup back.
+  echo "== interrupted: after the backup (ubuntu $1)"
+  play_killed "grep -qF ':$new_version\"' $app_dir/compose.yaml && test -e $progress"
+  note_untouched
+  install_converge_fails
+  expect_in_log "the Postal update from $old_version to $new_version did not finish"
+  expect_untouched
+  install_converge -e postal_restore_interrupted=true
+  expect_in_log "runs $old_version again"
+  [ "$(web_image)" = "$postal_repo:$old_version" ] || fail "web runs $(web_image) after the restore"
+  h test ! -e "$progress" || fail "the restore left $progress"
+  expect_data "after the restore"
+  install_converge_unchanged -e "postal_version=$old_version"
+
+  # Killed during the backup: the next run removes the partial backup and
+  # updates.
+  echo "== interrupted: during the backup (ubuntu $1)"
+  play_killed "ls -d $backups/*.partial"
+  install_converge
+  [ "$(web_image)" = "$postal_repo:$new_version" ] || fail "web runs $(web_image) after the update"
+  [ -z "$(h sh -c "ls -d $backups/*.partial 2>/dev/null || true")" ] || fail "a partial backup is left: $(h ls -A "$backups")"
+  h test ! -e "$progress" || fail "the update left $progress"
+  expect_data "after the interrupted backup"
+  remove_installation
+}
+
+# A backup directory with less space than the databases: refused before
+# Postal stops.
+test_no_space() {
+  echo "== no_space (ubuntu $1)"
+  ensure_old_installed no_space
+  h mkdir -p "$backups"
+  h mount -t tmpfs -o size=64k tmpfs "$backups"
+  note_starts
+  note_untouched
+  install_converge_fails
+  h umount "$backups"
+  expect_in_log 'MB free. The role changes nothing; Postal keeps running.'
+  expect_untouched
+  expect_restarted
+  remove_installation
+}
+
+# postal-dump by hand: two complete directories; killed with SIGKILL in the
+# middle only <dir>.tmp is left, which the next run replaces.
+test_postal_dump() {
+  local dir
+  echo "== postal_dump (ubuntu $1)"
+  ensure_installed postal_dump
+  postal_fixture >/dev/null
+  [ "$(h stat -c '%a %U' /usr/local/sbin/postal-dump)" = '700 root' ] || fail "postal-dump is not root's with mode 0700"
+  for dir in /root/dump-a /root/dump-b; do
+    h rm -rf "$dir" "$dir.tmp"
+    h /usr/local/sbin/postal-dump "$dir" || fail "postal-dump $dir failed"
+    [ "$(h sh -c "cd $dir && ls")" = "$(printf 'postal-server-1.sql\npostal.sql\npostal.yml\nsigning.key')" ] \
+      || fail "postal-dump $dir wrote: $(h ls "$dir")"
+    h sh -c "tail -n 1 $dir/postal.sql | grep -q '^-- Dump completed'" || fail "the dump in $dir is not complete"
+  done
+  h rm -rf /root/dump-c /root/dump-c.tmp
+  # In a process group of its own, killed as a whole once it made <dir>.tmp
+  # (each dump runs through docker compose exec, which takes a while).
+  h bash -c 'setsid /usr/local/sbin/postal-dump /root/dump-c & pid=$!
+    for _ in $(seq 300); do [ -d /root/dump-c.tmp ] && break; sleep 0.1; done
+    kill -9 -- "-$pid"; wait "$pid" || true'
+  h test ! -e /root/dump-c || fail "the killed postal-dump left /root/dump-c"
+  h test -d /root/dump-c.tmp || fail "the killed postal-dump left no /root/dump-c.tmp"
+  h /usr/local/sbin/postal-dump /root/dump-c || fail "postal-dump after the killed one failed"
+  h test ! -e /root/dump-c.tmp || fail "postal-dump left /root/dump-c.tmp"
+  h test -s /root/dump-c/postal.sql || fail "postal-dump after the killed one wrote no dump"
+  h rm -rf /root/dump-a /root/dump-b /root/dump-c
+}
+
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure takeover_refusals takeover row_format custom_names ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external"
+all_scenarios="refusals install noop_down reconfigure takeover_refusals takeover row_format custom_names ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external postal_dump update failed_update broken_db interrupted no_space"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -2238,6 +2553,12 @@ for ubuntu in $releases; do
       spam) test_spam "$ubuntu" ;;
       oidc_gelf) test_oidc_gelf "$ubuntu" ;;
       install_external) test_install_external "$ubuntu" ;;
+      postal_dump) test_postal_dump "$ubuntu" ;;
+      update) test_update "$ubuntu" ;;
+      failed_update) test_failed_update "$ubuntu" ;;
+      broken_db) test_broken_db "$ubuntu" ;;
+      interrupted) test_interrupted "$ubuntu" ;;
+      no_space) test_no_space "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

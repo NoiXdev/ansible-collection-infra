@@ -1,0 +1,145 @@
+---
+# Rolls Postal back to the backup postal_backup (snapshot.yml), with nothing
+# else than that variable and postal_installed_version (the version it
+# holds) from its includer: every container of the project stopped; the
+# compose file and the configuration put back from the backup; with the own
+# MariaDB its container started again (the previous compose file first);
+# every message database dropped and every table (and view) of the main one,
+# so that nothing the failed version's migrations made stays, then each dump
+# loaded; the previous Postal started and checked with health.yml, the waits
+# bounded by postal_rollback_timeout. Never fails by itself: postal_healthy
+# says whether Postal is healthy again, postal_restore_error what failed.
+
+- name: Roll back to the backup
+  block:
+    # All of it: the failed version must not write to the database while it
+    # is restored.
+    - name: Stop Postal for the rollback
+      ansible.builtin.command:
+        argv: [docker, compose, stop]
+        chdir: "{{ postal_dir }}"
+      changed_when: true
+
+    # Then every other container of the project that still runs (one of a
+    # service the compose file on disk does not name, or a one-off runner).
+    - name: Find the containers of Postal that still run
+      ansible.builtin.command:
+        argv: [docker, ps, --quiet, --filter, "label=com.docker.compose.project={{ postal_project }}"]
+      register: postal_still_running
+      changed_when: false
+
+    # One that is gone since docker ps needs no stop; any other error fails
+    # the rollback: a container may still run and write to the database.
+    - name: Stop the containers of Postal that still run
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'stop'] + postal_still_running.stdout_lines }}"
+      register: postal_stopped
+      changed_when: true
+      failed_when: >-
+        postal_stopped.rc != 0
+        and (postal_stopped.stderr_lines | length == 0
+             or postal_stopped.stderr_lines | reject('search', 'No such container') | list | length > 0)
+      when: postal_still_running.stdout_lines | length > 0
+
+    # The configuration files in place, the directory itself kept (the
+    # containers bind it): no_log, with a failure message of its own.
+    - name: Put the previous compose file and configuration back
+      block:
+        - name: Put the previous compose file back
+          ansible.builtin.copy:
+            src: "{{ postal_backup }}/compose.yaml"
+            dest: "{{ postal_compose_file }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0644"
+          no_log: true
+
+        - name: Put the previous configuration back
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              copy={{ (postal_backup ~ '/config') | quote }}
+              dir={{ postal_config_dir | quote }}
+              test -d "$copy"
+              mkdir -p "$dir"
+              find "$dir" -mindepth 1 -delete
+              cp -a "$copy/." "$dir/"
+              chown --reference="$copy" "$dir"
+              chmod --reference="$copy" "$dir"
+          changed_when: true
+          no_log: true
+      rescue:
+        - name: Fail on the previous compose file or configuration
+          ansible.builtin.fail:
+            msg: >-
+              Putting the compose file or the configuration of {{ postal_backup }}
+              back into {{ postal_dir }} failed ({{ ansible_failed_task.name }});
+              the error is not shown, as it can quote a secret. Check the
+              backup and that {{ postal_dir }} is writable and has space.
+
+    - name: Start the previous MariaDB
+      community.docker.docker_compose_v2:
+        project_src: "{{ postal_dir }}"
+        services: [mariadb]
+        state: present
+        pull: missing
+        wait: true
+        wait_timeout: "{{ postal_rollback_timeout | int }}"
+      when: postal_database == 'mariadb'
+
+    # The drops are made by the server from its own lists (the names quoted
+    # with backticks), the dumps loaded one by one; the client stops at the
+    # first error. With the own MariaDB as root over its socket, with the
+    # external one as Postal's user (postal_dump_cnf_file).
+    - name: Put the databases back
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          main={{ postal_db_name | quote }}
+          prefix={{ postal_message_db_prefix | quote }}
+          backup={{ (postal_backup ~ '/databases') | quote }}
+          {{ postal_sql_functions | indent(10) }}
+          test -s "$backup/$main.sql"
+          drops="$(sql --batch --skip-column-names --execute="
+            SELECT CONCAT('DROP DATABASE \`', REPLACE(schema_name, '\`', '\`\`'), '\`;')
+              FROM information_schema.schemata
+             WHERE LEFT(schema_name, CHAR_LENGTH('$prefix') + 1) = '$prefix-';
+            SELECT CONCAT('DROP ', IF(table_type = 'VIEW', 'VIEW', 'TABLE'), ' \`', REPLACE(table_name, '\`', '\`\`'), '\`;')
+              FROM information_schema.tables
+             WHERE table_schema = '$main'")"
+          printf 'SET FOREIGN_KEY_CHECKS = 0;\nCREATE DATABASE IF NOT EXISTS `%s`;\nUSE `%s`;\n%s\n' "$main" "$main" "$drops" \
+            | sql --batch
+          for file in "$backup"/*.sql; do
+            sql --batch <"$file"
+          done
+        chdir: "{{ postal_dir }}"
+      changed_when: true
+
+    # The restored databases hold the previous version's schema, so nothing
+    # migrates.
+    - name: Start the previous Postal
+      community.docker.docker_compose_v2:
+        project_src: "{{ postal_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that the previous Postal is healthy
+      ansible.builtin.include_tasks: health.yml
+      vars:
+        postal_health_wait: "{{ postal_rollback_timeout }}"
+
+    - name: Note the rollback
+      ansible.builtin.set_fact:
+        postal_restore_error: >-
+          {{ '' if postal_healthy
+             else 'Postal ' ~ postal_installed_version | default('?') ~ ' is not healthy within '
+                  ~ postal_rollback_timeout ~ ' seconds (' ~ postal_health_lines | join('; ') ~ ')' }}
+
+  rescue:
+    - name: Note the failed rollback
+      ansible.builtin.set_fact:
+        postal_healthy: false
+        postal_restore_error: "{{ postal_failure | trim }}"

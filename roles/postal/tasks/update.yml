@@ -1,0 +1,345 @@
+---
+# The pin is newer than the installed version. The new image first (a failed
+# pull changes nothing) and the free space of the backup (short, the run
+# fails before any change); then the Postal services stopped one by one
+# (worker, smtp, submission, web: SIGTERM and Postal's grace period; the own
+# MariaDB keeps running for the dump), the backup (snapshot.yml), the
+# compose file and the configuration written with the new version, SMTP TLS
+# (tls.yml), postal upgrade with the new image, Postal started and checked
+# (health.yml: the containers, Postal's health servers, the login page, EHLO
+# and the database check), and the backups pruned to the newest
+# postal_backups_keep. A failure before the backup is complete removes the
+# partial backup, starts Postal as it was and fails. After it, restore.yml
+# rolls back to the backup, postal_marker_file names the failed version, and
+# the run fails.
+# From the first change on, postal_update_marker says how far the update got
+# (step backup, then step update with the backup), with a copy of the
+# compose file and of the configuration directory it replaces; it is removed
+# once the update is healthy, or after the recovery or the rollback, so that
+# only a run that stopped leaves it (the marker before its copies: a run
+# stopped in between leaves only the marker, never a copy without it).
+
+# Before the first change, outside the block: a refusal or a failed pull
+# leaves Postal as it runs (the space first: a refused run pulls nothing).
+# The size of the databases as the server counts it, as Postal's user
+# (no_log: the password goes through stdin; the next task names the
+# error).
+- name: Read the size of the databases
+  ansible.builtin.command:
+    argv: >-
+      {{ postal_db_client
+         + ['--execute=SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.tables'
+            ~ " WHERE table_schema = '" ~ postal_db_name ~ "'"
+            ~ " OR LEFT(table_schema, " ~ (postal_message_db_prefix | length + 1) ~ ") = '"
+            ~ postal_message_db_prefix ~ "-'"] }}
+    chdir: "{{ postal_dir }}"
+    stdin: "{{ postal_db_password }}"
+    stdin_add_newline: false
+  register: postal_db_size
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Fail when the size of the databases cannot be read
+  ansible.builtin.fail:
+    msg: >-
+      Reading the size of Postal's databases for the backup before the
+      update failed
+      ({{ ((postal_db_size.stderr | default('') | trim).splitlines() or ['exit code ' ~ postal_db_size.rc | default('?') | string]) | last }}).
+      The role changes nothing.
+  when: postal_db_size.rc != 0
+
+# The backup directory when it exists (it can be a mount of its own),
+# else postal_data_dir, below which it is made.
+- name: Read the free space of the backup directory
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      dir={{ postal_backup_dir | quote }}
+      [ -d "$dir" ] || dir={{ postal_data_dir | quote }}
+      df --output=avail -B1 "$dir" | tail -n 1
+  register: postal_backup_free
+  changed_when: false
+
+- name: Refuse an update without the space for its backup
+  ansible.builtin.fail:
+    msg: >-
+      The backup before the update from {{ postal_installed_version }} to
+      {{ postal_version }} needs about {{ postal_backup_needed_mb }} MB
+      (Postal's databases, {{ (postal_db_size.stdout | trim | int / 1048576) | round(1) }} MB,
+      and a margin of 20 %), but {{ postal_backup_dir }} has
+      {{ (postal_backup_free.stdout | trim | int / 1048576) | round(1) }} MB free.
+      The role changes nothing; Postal keeps running. Free space there (or
+      remove older backups of {{ postal_backup_dir }}), then run the role
+      again.
+  vars:
+    postal_backup_needed_mb: "{{ (postal_db_size.stdout | trim | int * 1.2 / 1048576) | round(1) }}"
+  when: postal_backup_free.stdout | trim | int < postal_db_size.stdout | trim | int * 1.2
+
+- name: Look for the image of Postal {{ postal_version }}
+  ansible.builtin.command:
+    argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ postal_image }}:{{ postal_version }}"]
+  register: postal_new_image_local
+  changed_when: false
+  failed_when: false
+
+- name: Pull Postal {{ postal_version }}
+  ansible.builtin.command:
+    argv: [docker, pull, --quiet, --platform, linux/amd64, "{{ postal_image }}:{{ postal_version }}"]
+  changed_when: true
+  when: postal_new_image_local.rc != 0
+
+- name: Update Postal
+  vars:
+    postal_update_marker_content: |
+      # Written by the noixdev.infra.postal role while it updates Postal, and
+      # removed once the update is healthy or rolled back. A run that finds
+      # it refuses until it is dealt with.
+      {{ {'from_version': postal_installed_version, 'to_version': postal_version, 'step': postal_update_step}
+         | combine({'backup': postal_backup} if postal_update_step == 'update' else {})
+         | combine({'time': postal_update_started})
+         | to_nice_yaml(sort_keys=false) }}
+  block:
+    - name: Install the backup script
+      ansible.builtin.include_tasks: dump.yml
+
+    - name: Note when the update starts
+      ansible.builtin.set_fact:
+        postal_update_started: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    # Right before the first change of Postal. The marker first: a run
+    # stopped before the copies are written leaves the marker, which the next
+    # run cleans up with them, but never a copy without a marker.
+    - name: Write the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ postal_update_marker }}"
+        content: "{{ postal_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        postal_update_step: backup
+
+    # The configuration holds every secret: no_log, with a failure message of
+    # its own.
+    - name: Keep the compose file and the configuration from before the update
+      block:
+        - name: Keep the compose file from before the update
+          ansible.builtin.copy:
+            dest: "{{ postal_update_marker_compose }}"
+            content: "{{ postal_compose_before }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+
+        - name: Keep the configuration from before the update
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              copy={{ postal_update_marker_config | quote }}
+              rm -rf "$copy"
+              cp -a {{ postal_config_dir | quote }} "$copy"
+          changed_when: true
+          no_log: true
+      rescue:
+        - name: Fail on the copies from before the update
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ postal_update_marker_compose }} or
+              {{ postal_update_marker_config }}, the copies of the compose file
+              and the configuration from before the update, failed
+              ({{ ansible_failed_task.name }}); the error is not shown, as it
+              can quote a secret. Check that {{ postal_dir }} is writable and
+              has space, then run the role again.
+
+    # One by one, each with SIGTERM and the grace period of the compose file:
+    # the worker first (nothing new is sent), web last (the API stays up
+    # until then). Nothing writes to the databases during the backup.
+    - name: Stop Postal for the update
+      ansible.builtin.command:
+        argv: [docker, compose, stop, "{{ item }}"]
+        chdir: "{{ postal_dir }}"
+      loop: "{{ postal_stop_order }}"
+      changed_when: true
+
+    - name: Back up the databases and the configuration
+      ansible.builtin.include_tasks: snapshot.yml
+
+    # From here on the compose file, the configuration and the databases
+    # change; the backup holds them as they were.
+    - name: Note the backup in the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ postal_update_marker }}"
+        content: "{{ postal_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        postal_update_step: update
+
+    - name: Write the compose file with Postal {{ postal_version }}
+      ansible.builtin.copy:
+        dest: "{{ postal_compose_file }}"
+        content: "{{ postal_compose }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Write the configuration
+      ansible.builtin.include_tasks: config.yml
+
+    - name: Set up SMTP TLS
+      ansible.builtin.include_tasks: tls.yml
+
+    # The migrations of the new version, before any of its services starts.
+    - name: Migrate the databases to Postal {{ postal_version }}
+      ansible.builtin.command:
+        argv: "{{ postal_runner + ['runner', 'postal', 'upgrade'] }}"
+        chdir: "{{ postal_dir }}"
+      changed_when: true
+
+    - name: Start Postal {{ postal_version }}
+      community.docker.docker_compose_v2:
+        project_src: "{{ postal_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check the health of Postal {{ postal_version }}
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Postal is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Postal {{ postal_version }} is not healthy within
+          {{ postal_health_timeout }} seconds
+          ({{ postal_health_lines | join('; ') }})
+      when: not postal_healthy
+
+  rescue:
+    - name: Note what failed
+      ansible.builtin.set_fact:
+        postal_update_error: "{{ postal_failure | trim }}"
+
+    - name: Recover from a failure before the backup was complete
+      when: postal_backup is not defined
+      block:
+        - name: Remove the partial backup
+          ansible.builtin.file:
+            path: "{{ postal_backup_next }}.partial"
+            state: absent
+          when: postal_backup_next is defined
+
+        # The compose file and the configuration are still the ones the run
+        # started with.
+        - name: Start Postal again
+          block:
+            - name: Start the installed Postal again
+              community.docker.docker_compose_v2:
+                project_src: "{{ postal_dir }}"
+                state: present
+          rescue:
+            - name: Note the failed start
+              ansible.builtin.set_fact:
+                postal_restart_error: "{{ postal_failure | trim }}"
+
+        # Nothing but the partial backup had changed.
+        - name: Remove the marker of the update that failed before the backup
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ postal_update_marker_files }}"
+
+        - name: Fail when the update failed before the backup
+          ansible.builtin.fail:
+            msg: >-
+              The Postal update from {{ postal_installed_version }} to
+              {{ postal_version }} in {{ postal_dir }} failed before anything
+              changed ({{ postal_update_error }}).
+              {{ ('Postal ' ~ postal_installed_version ~ ' was started again; run the role again'
+                  ~ ' once the cause is fixed.')
+                 if postal_restart_error is not defined
+                 else ('Starting Postal ' ~ postal_installed_version ~ ' again failed too ('
+                       ~ postal_restart_error ~ '); start it with docker compose up -d in '
+                       ~ postal_dir ~ '.') }}
+
+    - name: Roll back to the backup
+      ansible.builtin.include_tasks: restore.yml
+
+    # Written whether or not the rollback worked: the failed version is not
+    # tried again on the next run.
+    - name: Write the marker of the failed update
+      ansible.builtin.copy:
+        dest: "{{ postal_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.postal role: the update to
+          # failed_version failed. The role does not try that version again
+          # while this file exists (no version at all when rolled_back_to is
+          # null: the rollback failed too); remove it to retry.
+          {{ {'failed_version': postal_version,
+              'rolled_back_to': postal_installed_version if postal_healthy else none,
+              'backup': postal_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')}
+             | combine({} if postal_healthy else {'restore_error': postal_restore_error})
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    # After update-failed: a run stopped before leaves this marker, and the
+    # next one refuses as for an update that did not finish.
+    - name: Remove the marker of the rolled back update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ postal_update_marker_files }}"
+
+    - name: Fail with the rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Postal update from {{ postal_installed_version }} to
+          {{ postal_version }} in {{ postal_dir }} failed
+          ({{ postal_update_error }}) and was rolled back: Postal
+          {{ postal_installed_version }} runs again, healthy, with the compose
+          file, the configuration and the databases of the backup
+          {{ postal_backup }}. The role does not try {{ postal_version }} again
+          while {{ postal_marker_file }} exists: remove it to retry (rm
+          {{ postal_marker_file }}), or set postal_version to another version.
+      when: postal_healthy
+
+    - name: Fail with the failed rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Postal update from {{ postal_installed_version }} to
+          {{ postal_version }} in {{ postal_dir }} failed
+          ({{ postal_update_error }}), and rolling back to
+          {{ postal_installed_version }} failed too ({{ postal_restore_error }}),
+          so Postal may be down. {{ postal_restore_hint }}
+          {{ postal_marker_file }} refuses every version; remove it once Postal
+          runs again.
+
+# Only after a successful update (the rescue always fails), and outside the
+# block, so that nothing after the health check can roll it back.
+- name: Remove the marker of the update in progress
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ postal_update_marker_files }}"
+
+# Only after a successful update; the names start with the time, so they
+# sort by age.
+- name: Find the backups
+  ansible.builtin.find:
+    paths: "{{ postal_backup_dir }}"
+    file_type: directory
+    patterns: ["{{ postal_backup_pattern }}"]
+    use_regex: true
+  register: postal_backups
+
+- name: Remove the oldest backups
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (postal_backups.files | map(attribute='path') | sort)[: -(postal_backups_keep | int)] }}"

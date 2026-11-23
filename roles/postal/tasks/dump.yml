@@ -1,0 +1,31 @@
+---
+# The backup script postal-dump (postal_dump_script_file, 0700 root), which
+# the update's backup runs and backrest can run (dump.type: command). With
+# the external MariaDB it logs in from a one-off client container of the
+# server's release series with postal_dump_cnf_file (0600 root: Postal's
+# user and password, which the task writes no_log); with the own MariaDB as
+# root over the socket of its container, without that file.
+
+- name: Write the login of the backup script
+  ansible.builtin.copy:
+    dest: "{{ postal_dump_cnf_file }}"
+    content: "{{ postal_dump_cnf }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: postal_database == 'mariadb_external'
+
+- name: Remove the login of the backup script
+  ansible.builtin.file:
+    path: "{{ postal_dump_cnf_file }}"
+    state: absent
+  when: postal_database == 'mariadb'
+
+- name: Install the backup script
+  ansible.builtin.copy:
+    dest: "{{ postal_dump_script_file }}"
+    content: "{{ postal_dump_script }}"
+    owner: root
+    group: root
+    mode: "0700"

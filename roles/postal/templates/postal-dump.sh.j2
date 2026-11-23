@@ -1,0 +1,68 @@
+#!/bin/sh
+# Managed by the noixdev.infra.postal role; changes are overwritten.
+# postal-dump <dir>: a backup of Postal in {{ postal_dir }} that the role
+# makes before an update and that backrest can run (dump.type: command,
+# output: <dir>). It writes into <dir>.tmp, which it removes first:
+#   <database>.sql  mariadb-dump --single-transaction --routines --databases
+#                   of {{ postal_db_name }} and of every
+#                   {{ postal_message_db_prefix }}-* database, one file each,
+#                   read back (not empty, the trailer "-- Dump completed"
+#                   last)
+#   postal.yml      Postal's configuration (every secret of the installation)
+#   signing.key     the private key of the published DKIM record
+# and renames it to <dir> once all of it is complete (an older <dir> goes
+# then), so <dir> is always a complete backup; a run that fails or is killed
+# leaves <dir>.tmp at most, which the next run replaces. Exits non-zero on any
+# error. The files are root's, mode 0600 (0700 for the directory).
+set -eu
+umask 077
+
+if [ "$#" -ne 1 ] || [ -z "$1" ]; then
+  echo "usage: postal-dump <dir>" >&2
+  exit 2
+fi
+dir="${1%/}"
+case "$dir" in
+  /*) ;;
+  *) dir="$(pwd)/$dir" ;;
+esac
+tmp="$dir.tmp"
+main={{ postal_db_name | quote }}
+prefix={{ postal_message_db_prefix | quote }}
+config={{ postal_config_dir | quote }}
+
+cd {{ postal_dir | quote }}
+{{ postal_sql_functions }}
+
+rm -rf "$tmp"
+mkdir -p "$(dirname "$dir")"
+mkdir -m 0700 "$tmp"
+
+# Assigned first: set -e does not stop on a failed list of a for loop.
+dbs="$(sql --batch --skip-column-names --execute='SHOW DATABASES')"
+found=
+for db in $dbs; do
+  case "$db" in
+    "$main" | "$prefix"-*) ;;
+    *) continue ;;
+  esac
+  dump "$db" >"$tmp/$db.sql"
+  if [ ! -s "$tmp/$db.sql" ] || ! tail -n 1 "$tmp/$db.sql" | grep -q '^-- Dump completed'; then
+    echo "Error: the dump of $db is incomplete" >&2
+    exit 1
+  fi
+  if [ "$db" = "$main" ]; then found=1; fi
+done
+if [ -z "$found" ]; then
+  echo "Error: the database $main does not exist" >&2
+  exit 1
+fi
+cp "$config/postal.yml" "$config/signing.key" "$tmp/"
+
+# The new backup in place of an older one of that name, never half of either.
+if [ -e "$dir" ]; then
+  rm -rf "$dir.old"
+  mv "$dir" "$dir.old"
+fi
+mv "$tmp" "$dir"
+rm -rf "$dir.old"

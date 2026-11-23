@@ -1,5 +1,8 @@
 ---
 # Reads the host and sets postal_state:
+#   restore_interrupted
+#                an update did not finish and postal_restore_interrupted
+#                asks to restore its backup
 #   install      no compose file
 #   update       postal_version is newer than the installed version
 #   reconfigure  the compose file or mariadb.cnf the role writes differs from
@@ -31,15 +34,21 @@
 # postal_data_dir_mountpoint), an installation of another database mode, an
 # external installation of another server, an installation without its data
 # subdirectories (an unmounted volume), a compose file that is not YAML, an
-# install that did not complete (its marker), a compose file without a Postal
-# version, a downgrade, an installation without its signing key when
+# install that did not complete (its marker), after a failed rollback every
+# version and else the version of a failed update (postal_marker_file), a
+# marker of an update in progress the role did not write, an update that did
+# not finish (unless postal_restore_interrupted asks to restore it, and its
+# backup is there), postal_restore_interrupted without one, a compose file
+# without a Postal version, a downgrade, an installation without its signing key when
 # postal_signing_key is empty, with postal_smtp_tls files certificate files
 # that are missing or do not load with their key, with the external
 # MariaDB what external.yml refuses, and on an install a postal_import_dump
 # that is no file, a dump to load into an own MariaDB that holds Postal's
 # databases, and a takeover (Postal's schema in the database, or a dump to
 # load) without postal_signing_key or postal_rails_secret_key. It changes
-# nothing.
+# nothing but what an update stopped during its backup left (the partial
+# backup and the marker) and the copies of an update in progress without
+# its marker.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -176,6 +185,147 @@
 # A file that is not YAML gets a message of its own, without the parser's
 # error (it can quote a line). One that is YAML but not a mapping parses as
 # empty and names no version, which is refused below.
+# Written by update.yml after a failed update; it names the failed version.
+# Not secret: the versions, the backup, the time and the error.
+- name: Read the marker of a failed update
+  ansible.builtin.slurp:
+    src: "{{ postal_marker_file }}"
+  register: postal_marker_read
+  failed_when: false
+
+# Left by a run that stopped during an update (update.yml). Not secret: the
+# versions, the step, the backup and the time.
+- name: Read the marker of an update in progress
+  ansible.builtin.slurp:
+    src: "{{ postal_update_marker }}"
+  register: postal_update_marker_read
+  failed_when: false
+
+# Whether it exists, which a read that failed does not tell.
+- name: Look for the marker of an update in progress
+  ansible.builtin.stat:
+    path: "{{ postal_update_marker }}"
+    get_checksum: false
+  register: postal_update_marker_stat
+
+- name: Note that no update is in progress
+  ansible.builtin.set_fact:
+    postal_update_in_progress: {}
+
+# A marker that is not YAML parses to nothing and is refused below, as is one
+# that exists but cannot be read (a directory). It holds no secret: the
+# copies of the compose file and the configuration are never read here.
+- name: Note a marker of an update in progress that cannot be read
+  ansible.builtin.set_fact:
+    postal_update_in_progress: {step: null}
+  when:
+    - postal_update_marker_stat.stat.exists
+    - postal_update_marker_read.content is not defined
+
+- name: Check the marker of an update in progress
+  when: postal_update_marker_read.content is defined
+  block:
+    - name: Parse the marker of the update in progress
+      ansible.builtin.set_fact:
+        postal_update_in_progress: >-
+          {{ postal_update_marker_yaml if postal_update_marker_yaml is mapping else {'step': none} }}
+      vars:
+        postal_update_marker_yaml: "{{ postal_update_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Note a marker of an update in progress that is not YAML
+      ansible.builtin.set_fact:
+        postal_update_in_progress: {step: null}
+
+# A marker that is not YAML cannot say which version failed.
+- name: Check the marker of a failed update
+  when: postal_marker_read.content is defined
+  block:
+    - name: Parse the marker of a failed update
+      ansible.builtin.set_fact:
+        postal_marker: "{{ postal_marker_yaml if postal_marker_yaml is mapping else {} }}"
+      vars:
+        postal_marker_yaml: "{{ postal_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Fail on a marker of a failed update that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ postal_marker_file }} exists, but it is not YAML, so the role
+          cannot tell which Postal update failed and changes nothing. Check
+          Postal, then remove the file (rm {{ postal_marker_file }}).
+
+# update-failed of the same backup was written by the rescue of this update,
+# which was stopped before it removed the marker of the update in progress:
+# the rollback ran, and update-failed decides below. An update-failed of
+# another backup is left from an earlier update that was rolled back, so
+# this marker is checked as without one. So is a marker with step backup:
+# the compose file is as before the update, and it is cleaned up as without
+# update-failed.
+- name: Compare the backups of the two markers
+  ansible.builtin.set_fact:
+    postal_update_rolled_back: >-
+      {{ postal_marker_read.content is defined
+         and postal_update_in_progress.step | default(none) == 'update'
+         and postal_update_in_progress.backup | default('', true) | string is match('^/')
+         and (postal_marker.backup | default('', true) | string) == (postal_update_in_progress.backup | string) }}
+
+# When update-failed refuses this run, the marker of the update in progress
+# it records goes first: nothing needs it (the rollback ran), and once
+# update-failed is removed as its refusal says, the next run would take it
+# for an update that did not finish.
+- name: Remove the marker of an update in progress beside the failed update that refuses this run
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ postal_update_marker_files }}"
+  when:
+    - postal_update_rolled_back | bool
+    - >-
+      not postal_marker.rolled_back_to | default(none)
+      or (postal_marker.failed_version | default(postal_version) | string) == postal_version | string
+
+- name: Note that the rolled back update is not in progress
+  ansible.builtin.set_fact:
+    postal_update_in_progress: {}
+  when: postal_update_rolled_back | bool
+
+# The rollback failed (or the marker does not say it worked): the databases
+# may be empty or half restored, and the backup holds them. Any version would
+# back up those databases, come up and remove the marker, the last pointer to
+# the real backup, so every version is refused, before the version checks.
+- name: Refuse every version after a failed rollback
+  ansible.builtin.fail:
+    msg: >-
+      {{ postal_marker_file }} exists: the Postal update to
+      {{ postal_marker.failed_version | default('?') }} failed on
+      {{ postal_marker.time | default('?') }}, and rolling back failed too
+      ({{ postal_marker.restore_error | default('?') }}). The databases may be
+      empty or half restored; they are in the backup {{ postal_backup }}. The
+      role refuses every version and changes nothing until Postal is
+      restored. {{ postal_restore_hint }} Then check Postal (log in, open a
+      server) and remove the marker (rm {{ postal_marker_file }}).
+      {{ postal_marker_restore_note }}
+  vars:
+    postal_backup: "{{ postal_marker.backup | default('?', true) }}"
+  when:
+    - postal_marker_read.content is defined
+    - not postal_marker.rolled_back_to | default(none)
+
+# A marker that names no version blocks every version.
+- name: Refuse the version of a failed update
+  ansible.builtin.fail:
+    msg: >-
+      {{ postal_marker_file }} exists: the Postal update to {{ postal_version }}
+      failed on {{ postal_marker.time | default('?') }} (rolled back to
+      {{ postal_marker.rolled_back_to }}; backup
+      {{ postal_marker.backup | default('?') }}). The role does not try
+      {{ postal_version }} again and changes nothing while the marker names
+      it. To try again, remove it (rm {{ postal_marker_file }}); or set
+      postal_version to another version, and the marker is removed once a
+      run with it succeeds. {{ postal_marker_restore_note }}
+  when:
+    - postal_marker_read.content is defined
+    - (postal_marker.failed_version | default(postal_version) | string) == postal_version | string
+
 - name: Check that the compose file is YAML
   block:
     - name: Parse the compose file
@@ -206,6 +356,92 @@
       {{ postal_dir }} did not complete. The role changes nothing.
       {{ postal_install_hint }}
   when: postal_install_marker_stat.stat.exists
+
+- name: Refuse a marker of an update in progress the role did not write
+  ansible.builtin.fail:
+    msg: >-
+      {{ postal_update_marker }} exists, but it is not YAML or lacks step or
+      to_version (or, with step update, backup), so the role cannot tell how
+      far the Postal update in {{ postal_dir }} got and changes nothing.
+      Check Postal, then remove it with its copies (rm -r
+      {{ postal_update_marker_files | join(' ') }}).
+  when:
+    - postal_update_in_progress | length > 0
+    - >-
+      postal_update_in_progress.step | default(none) not in ['backup', 'update']
+      or not postal_update_in_progress.to_version | default('', true) | string is match('^\d+\.\d+\.\d+$')
+      or (postal_update_in_progress.step == 'update'
+          and not postal_update_in_progress.backup | default('', true) | string is match('^/'))
+
+# Step update: the compose file and the configuration may be the new
+# version's, the databases migrated or half migrated, and Postal may run
+# either version or neither. Rolling back on its own would lose the mail of
+# since, if the update had in fact finished and only the marker's removal
+# was lost; the operator decides.
+- name: Refuse to run after an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      {{ postal_update_marker }} exists: the Postal update from
+      {{ postal_update_in_progress.from_version | default('?') }} to
+      {{ postal_update_in_progress.to_version }} did not finish (the run
+      that started it on {{ postal_update_in_progress.time | default('?') }}
+      stopped after its backup), and the backup from before it is
+      {{ postal_update_in_progress.backup }}. Postal in {{ postal_dir }} may
+      run either version or neither, with databases the new version may
+      have migrated; the role changes nothing. To go back to
+      {{ postal_update_in_progress.from_version | default('?') }}, set
+      postal_restore_interrupted: true for one run to restore it (the compose
+      file, the configuration and the databases from the backup), or remove
+      {{ postal_update_marker }} to keep Postal as it is now, then check it
+      and run the role again.
+  when:
+    - postal_update_in_progress.step | default(none) == 'update'
+    - not postal_restore_interrupted | bool
+
+- name: Look for what the restore of the interrupted update needs
+  ansible.builtin.stat:
+    path: "{{ postal_update_in_progress.backup }}/{{ item }}"
+    get_checksum: false
+  loop: [compose.yaml, config, "databases/{{ postal_db_name }}.sql"]
+  register: postal_restore_needs
+  when:
+    - postal_update_in_progress.step | default(none) == 'update'
+    - postal_restore_interrupted | bool
+
+- name: Refuse a restore without its backup
+  ansible.builtin.fail:
+    msg: >-
+      postal_restore_interrupted is set to restore the backup
+      {{ postal_update_in_progress.backup }} of the interrupted Postal
+      update from {{ postal_update_in_progress.from_version | default('?') }}
+      to {{ postal_update_in_progress.to_version }}, but it lacks
+      {{ postal_restore_missing | join(', ') }}, so the role cannot restore it
+      and changes nothing. {{ postal_restore_hint }} Then remove
+      {{ postal_update_marker }} and run the role again without the
+      variable.
+  vars:
+    postal_backup: "{{ postal_update_in_progress.backup }}"
+    postal_restore_missing: >-
+      {{ postal_restore_needs.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+  when:
+    - postal_update_in_progress.step | default(none) == 'update'
+    - postal_restore_interrupted | bool
+    - postal_restore_missing | length > 0
+
+# A variable left set must never turn a later interruption into a rollback
+# of its own. An update stopped during its backup changed nothing to restore.
+- name: Refuse postal_restore_interrupted without an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      postal_restore_interrupted is set, but there is no interrupted update in
+      {{ postal_dir }}; remove the variable{{ (' (' ~ postal_update_marker
+      ~ ' records an update that stopped during its backup, before anything changed;'
+      ~ ' the next run without the variable cleans it up and updates)')
+      if postal_update_in_progress.step | default(none) == 'backup' else '' }}.
+      The role changes nothing.
+  when:
+    - postal_restore_interrupted | bool
+    - postal_update_in_progress.step | default(none) != 'update'
 
 - name: Note the installed version
   ansible.builtin.set_fact:
@@ -682,6 +918,46 @@
 # stopped in between leaves files that equal the settings while the
 # containers still run with the old ones (Postal reads them on start only),
 # so the next run restarts them.
+# After every refusal. Step backup: the compose file, the configuration and
+# the databases are as before the update, and the Postal services stopped;
+# the run goes on as any other, which with the same postal_version tries the
+# update again and starts Postal. A backup being made is below
+# <name>.partial, which only an interrupted backup leaves.
+- name: Find the partial backups of an update stopped during its backup
+  ansible.builtin.find:
+    paths: "{{ postal_backup_dir }}"
+    file_type: directory
+    patterns: ["{{ postal_backup_partial_pattern }}"]
+    use_regex: true
+  register: postal_partial_backups
+  when: postal_update_in_progress.step | default(none) == 'backup'
+
+- name: Remove what an update stopped during its backup left
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (postal_partial_backups.files | default([]) | map(attribute='path') | sort) + postal_update_marker_files }}"
+  when: postal_update_in_progress.step | default(none) == 'backup'
+
+# After every refusal, so that a refused run leaves both markers;
+# update-failed decides on the next run as on this one.
+- name: Remove the marker of an update in progress beside its failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ postal_update_marker_files }}"
+  when: postal_update_rolled_back | bool
+
+# They hold the secrets: left when the marker was removed by hand, as its
+# refusal offers, or by a run stopped while it removed the marker and them.
+# Only without a marker: one that exists but cannot be read is refused above.
+- name: Remove the copies of an update in progress without its marker
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ postal_update_marker_files | difference([postal_update_marker]) }}"
+  when: not postal_update_marker_stat.stat.exists
+
 - name: Look for a pending restart
   ansible.builtin.stat:
     path: "{{ postal_restart_marker }}"
@@ -696,7 +972,8 @@
     postal_down: "{{ postal_services | difference(postal_ps.stdout_lines | default([])) }}"
     postal_restart_pending: "{{ postal_installed and postal_restart_marker_stat.stat.exists }}"
     postal_state: >-
-      {{ 'install' if not postal_installed
+      {{ 'restore_interrupted' if postal_update_in_progress.step | default(none) == 'update'
+         else 'install' if not postal_installed
          else 'update' if postal_version is version(postal_installed_version, '>')
          else 'reconfigure' if postal_compose_before != postal_compose
                                or postal_config_differs | bool

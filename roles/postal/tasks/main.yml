@@ -412,15 +412,88 @@
   ansible.builtin.include_tasks: install.yml
   when: postal_state == 'install'
 
-# Backups, the new version and a rollback come with the update support.
-- name: Refuse an update
-  ansible.builtin.fail:
-    msg: >-
-      postal_version {{ postal_version }} is newer than the installed version
-      {{ postal_installed_version }} in {{ postal_dir }}, and this version of
-      the role does not update Postal yet. The role changes nothing. Set
-      postal_version back to {{ postal_installed_version }}.
+# A backup first, then the new version, checked; a failed one is rolled back
+# to the backup, and update-failed keeps the role from trying it again.
+- name: Update Postal
+  ansible.builtin.include_tasks: update.yml
   when: postal_state == 'update'
+
+# The run after an update that did not finish, with
+# postal_restore_interrupted: the compose file, the configuration and the
+# databases of its backup put back by restore.yml, as a rollback puts them
+# back, and nothing else of the update. Healthy, the marker goes and the run
+# ends; the next run without the variable tries the update again. Not
+# healthy, update-failed records a failed rollback (rolled_back_to null),
+# which refuses every version.
+- name: Restore the backup of the interrupted update
+  when: postal_state == 'restore_interrupted'
+  vars:
+    postal_interrupted_from: "{{ postal_update_in_progress.from_version | default('?') }}"
+    postal_interrupted_to: "{{ postal_update_in_progress.to_version }}"
+  block:
+    # restore.yml reads both; the compose file on disk may name either
+    # version.
+    - name: Note the backup and the version of the interrupted update
+      ansible.builtin.set_fact:
+        postal_backup: "{{ postal_update_in_progress.backup }}"
+        postal_installed_version: "{{ postal_interrupted_from }}"
+
+    - name: Roll back to the backup of the interrupted update
+      ansible.builtin.include_tasks: restore.yml
+
+    - name: Remove the marker of the restored update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ postal_update_marker_files }}"
+      when: postal_healthy
+
+    - name: Report the restore
+      ansible.builtin.debug:
+        msg: >-
+          Postal in {{ postal_dir }} runs {{ postal_interrupted_from }} again:
+          the interrupted update to {{ postal_interrupted_to }} was rolled back
+          to the backup {{ postal_backup }}. Remove
+          postal_restore_interrupted; the next run with a newer postal_version
+          tries the update again.
+      when: postal_healthy
+
+    # As after a failed rollback: the databases are in the backup, and no
+    # version may run over what the restore left.
+    - name: Write the marker of the failed restore
+      ansible.builtin.copy:
+        dest: "{{ postal_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.postal role: the update to
+          # failed_version did not finish, and restoring the backup failed.
+          # The role refuses every version while this file exists.
+          {{ {'failed_version': postal_interrupted_to,
+              'rolled_back_to': none,
+              'backup': postal_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'restore_error': postal_restore_error}
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: not postal_healthy
+
+    - name: Remove the marker of the update whose restore failed
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ postal_update_marker_files }}"
+      when: not postal_healthy
+
+    - name: Fail with the failed restore
+      ansible.builtin.fail:
+        msg: >-
+          Restoring Postal {{ postal_interrupted_from }} in {{ postal_dir }}
+          from the backup {{ postal_backup }} after the interrupted update to
+          {{ postal_interrupted_to }} failed ({{ postal_restore_error }}), so
+          Postal may be down. {{ postal_restore_hint }} {{ postal_marker_file }}
+          refuses every version; remove it once Postal runs again.
+      when: not postal_healthy
 
 - name: Reconfigure Postal
   ansible.builtin.include_tasks: reconfigure.yml
@@ -451,6 +524,23 @@
           {{ postal_health_timeout }} seconds. The role restarts nothing on a
           run without changes; see docker compose logs in {{ postal_dir }}.
       when: not postal_healthy
+
+# The backup script, for backrest, on every run that ends here (an update
+# installed it before its backup already).
+- name: Install the backup script
+  ansible.builtin.include_tasks: dump.yml
+
+# Reached only by a run that succeeded, so the marker names another version
+# and records a rollback that worked. Not after the restore of an interrupted
+# update: that run ran only the version it had, not one that succeeded in
+# place of the failed one, so the marker stays until such a run.
+- name: Remove the marker of a failed update of another version
+  ansible.builtin.file:
+    path: "{{ postal_marker_file }}"
+    state: absent
+  when:
+    - postal_marker_read.content is defined
+    - postal_state != 'restore_interrupted'
 
 # Reached only by a run that ended healthy, which (re)started Postal on the
 # compose file and the configuration as they are: the restart a stopped

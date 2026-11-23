@@ -1,0 +1,84 @@
+---
+# The backup before an update, with the Postal services stopped (the own
+# MariaDB keeps running for the dump): postal_backup_dir/<UTC time>-<installed
+# version>-to-<new version>/ (root's, mode 0700) with
+#   compose.yaml  the compose file the installed version ran with (0600)
+#   config/       a copy of postal_config_dir (postal.yml, signing.key, the
+#                 certificate of SMTP TLS, rspamd's settings)
+#   databases/    what postal-dump writes: one dump per database (the main
+#                 one and every message database), read back, with
+#                 postal.yml and signing.key
+# Made below <name>.partial and renamed once complete; sets postal_backup
+# last, so a failure before that has changed nothing but the partial
+# directory, which the caller removes.
+
+- name: Create the backup directory
+  ansible.builtin.file:
+    path: "{{ postal_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Name the backup
+  ansible.builtin.set_fact:
+    postal_backup_next: >-
+      {{ postal_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ postal_installed_version }}-to-{{ postal_version }}
+
+# The name holds the current second, so it is new; the leftover of a run
+# stopped during its backup has a name of its own, which state.yml removes
+# on the next run (postal_backup_partial_pattern).
+- name: Create the partial backup
+  ansible.builtin.file:
+    path: "{{ postal_backup_next }}.partial"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# postal-dump fails with its error line, which quotes no secret.
+- name: Dump the databases
+  ansible.builtin.command:
+    argv: ["{{ postal_dump_script_file }}", "{{ postal_backup_next }}.partial/databases"]
+  changed_when: true
+
+# The copies hold the secrets: no_log, with a failure message of their own.
+- name: Keep the compose file and the configuration with the backup
+  block:
+    - name: Keep the compose file with the backup
+      ansible.builtin.copy:
+        dest: "{{ postal_backup_next }}.partial/compose.yaml"
+        content: "{{ postal_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Keep the configuration with the backup
+      ansible.builtin.command:
+        argv: [cp, -a, "{{ postal_config_dir }}", "{{ postal_backup_next }}.partial/config"]
+      changed_when: true
+      no_log: true
+  rescue:
+    - name: Fail on the compose file or the configuration of the backup
+      ansible.builtin.fail:
+        msg: >-
+          Writing the copy of the compose file or of the configuration in
+          {{ postal_backup_next }}.partial failed ({{ ansible_failed_task.name }});
+          the error is not shown, as it can quote a secret. Check that
+          {{ postal_backup_dir }} is writable and has space.
+
+# Not into a backup of that name (the same second), which mv would move it
+# into.
+- name: Complete the backup
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      backup={{ postal_backup_next | quote }}
+      if [ -e "$backup" ]; then echo "Error: $backup exists" >&2; exit 1; fi
+      mv "$backup.partial" "$backup"
+  changed_when: true
+
+- name: Note the backup
+  ansible.builtin.set_fact:
+    postal_backup: "{{ postal_backup_next }}"

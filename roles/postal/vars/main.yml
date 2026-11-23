@@ -26,6 +26,83 @@ postal_update_marker_config: "{{ postal_dir }}/update-in-progress.config"
 postal_marker_file: "{{ postal_dir }}/update-failed"
 
 postal_backup_dir: "{{ postal_data_dir }}/backups"
+# Removed together, the marker first: a run stopped in between leaves only a
+# copy, never a marker without its copies.
+postal_update_marker_files:
+  - "{{ postal_update_marker }}"
+  - "{{ postal_update_marker_compose }}"
+  - "{{ postal_update_marker_config }}"
+# The name of a complete backup below postal_backup_dir (snapshot.yml), and
+# of one being made, which only a run stopped during its backup leaves;
+# state.yml removes it.
+postal_backup_pattern: '^\d{8}T\d{6}Z-\d+\.\d+\.\d+-to-\d+\.\d+\.\d+$'
+postal_backup_partial_pattern: '^\d{8}T\d{6}Z-\d+\.\d+\.\d+-to-\d+\.\d+\.\d+\.partial$'
+# The order update.yml stops the Postal services in: nothing new is sent
+# first, the API goes last.
+postal_stop_order: "{{ ['worker', 'smtp'] + (['submission'] if postal_smtp_submission_port | int != 0 else []) + ['web'] }}"
+
+# The backup script (dump.yml, templates/postal-dump.sh.j2), which the update
+# runs and backrest can run, and its login to the external MariaDB: Postal's
+# user and password in an option file of mode 0600 (the role refuses a
+# double quote, a backslash or a line break in the password, which would end
+# its quoted value), read by a one-off client container of the server's
+# release series.
+postal_dump_script_file: /usr/local/sbin/postal-dump
+postal_dump_script: "{{ lookup('ansible.builtin.template', 'postal-dump.sh.j2') }}"
+postal_dump_cnf_file: "{{ postal_dir }}/dump.cnf"
+postal_dump_cnf: |
+  # Written by the noixdev.infra.postal role: the login of postal-dump.
+  [client]
+  host="{{ postal_db_host }}"
+  port={{ postal_db_port | int }}
+  user="{{ postal_db_user }}"
+  password="{{ postal_db_password }}"
+postal_dump_client_image: >-
+  {{ postal_mariadb_image | regex_replace(':[^:/]*$', '') }}:{{ postal_db_server_major | default('', true) }}
+# Shell functions of postal-dump and of the rollback (restore.yml), run in
+# postal_dir: sql [options...] runs the mariadb client, dump <database>
+# writes mariadb-dump --single-transaction --routines --databases of it to
+# stdout. With the own MariaDB as root over the socket of its container, with
+# the external one as Postal's user (postal_dump_cnf_file).
+postal_sql_functions: |
+  {% if postal_database == 'mariadb' %}
+  sql() { docker compose exec -T mariadb mariadb --user=root "$@"; }
+  dump() { docker compose exec -T mariadb mariadb-dump --user=root --single-transaction --routines --databases "$1"; }
+  {% else %}
+  client() {
+    tool="$1"
+    shift
+    docker run --rm -i --network {{ postal_traefik_network | quote }} \
+      --mount type=bind,source={{ postal_dump_cnf_file | quote }},target=/etc/postal-dump.cnf,readonly \
+      --entrypoint "$tool" {{ postal_dump_client_image | quote }} --defaults-extra-file=/etc/postal-dump.cnf "$@"
+  }
+  sql() { client mariadb "$@"; }
+  dump() { client mariadb-dump --single-transaction --routines --databases "$1"; }
+  {% endif %}
+
+# After a failed rollback: how to put the backup postal_backup back by hand.
+postal_restore_hint: >-
+  Roll back by hand in {{ postal_dir }}: run docker compose stop; copy
+  {{ postal_restore_from }}/compose.yaml to {{ postal_compose_file }} and the
+  files of {{ postal_restore_from }}/config into {{ postal_config_dir }} (cp
+  -a); {{ 'run docker compose up -d --wait mariadb; ' if postal_database == 'mariadb' else '' }}drop
+  every {{ postal_message_db_prefix }}-* database and every table of
+  {{ postal_db_name }} ({{ 'as root: docker compose exec -T mariadb mariadb --user=root'
+  if postal_database == 'mariadb' else 'on ' ~ postal_external_target ~ ' as ' ~ postal_db_user }}),
+  load each dump of {{ postal_restore_from }}/databases (the .sql files)
+  with that client, then run docker compose up -d.
+postal_restore_from: "{{ postal_backup | default('?', true) }}"
+# Added to the refusals of update-failed when postal_restore_interrupted is
+# set, which they come before: the variable does not apply while that marker
+# stands.
+postal_marker_restore_note: >-
+  {{ ('postal_restore_interrupted does not apply while ' ~ postal_marker_file ~ ' exists: '
+      ~ (('deal with it first as said, then run the role again with the variable to restore the'
+          ~ ' interrupted update that ' ~ postal_update_marker ~ ' records.')
+         if postal_update_in_progress.step | default(none) == 'update'
+         else ('no interrupted update is left to restore. Remove the variable, deal with '
+               ~ postal_marker_file ~ ' as said, then run the role again.')))
+     if postal_restore_interrupted | bool else '' }}
 # The subdirectories of postal_data_dir whose absence means the data is
 # missing (an unmounted volume): only install creates them.
 postal_data_subdirs: "{{ ['mariadb'] if postal_database == 'mariadb' else [] }}"
@@ -293,10 +370,11 @@ postal_tls_script: "{{ lookup('ansible.builtin.template', 'postal-smtp-cert.py.j
 postal_tls_service: "{{ lookup('ansible.builtin.template', 'postal-smtp-cert.service.j2') }}"
 postal_tls_timer: "{{ lookup('ansible.builtin.template', 'postal-smtp-cert.timer.j2') }}"
 # The health servers health.yml asks, and the upper bound of the attempts of
-# each of its waits (the deadline of postal_health_timeout ends them).
+# each of its waits (the deadline of postal_health_wait, postal_health_timeout
+# unless the includer sets it, ends them).
 postal_health_servers: >-
   {{ [{'service': 'worker', 'port': postal_worker_health_port | int},
       {'service': 'smtp', 'port': postal_smtp_health_port | int}]
      + ([{'service': 'submission', 'port': postal_submission_health_port | int}]
         if postal_smtp_submission_port | int != 0 else []) }}
-postal_health_retries: "{{ (postal_health_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+postal_health_retries: "{{ (postal_health_wait | default(postal_health_timeout) | int / 5) | round(0, 'ceil') | int + 1 }}"

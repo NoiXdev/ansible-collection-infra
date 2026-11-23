@@ -1,5 +1,7 @@
 ---
-# Waits up to postal_health_timeout seconds in all until every container of
+# Waits up to postal_health_wait seconds in all (postal_health_timeout unless
+# the includer sets it: the rollback waits postal_rollback_timeout) until
+# every container of
 # postal_services runs (each of the worker's replicas; MariaDB, rspamd and
 # ClamAV healthy, by the health checks of their images), then asks Postal
 # itself: the health
@@ -33,7 +35,7 @@
     (postal_health_expected | difference(postal_health.stdout_lines | default([]) | map('trim') | list) | length == 0
      and postal_health.stdout_lines | default([]) | map('trim') | select('eq', 'worker running') | list | length
          == postal_worker_replicas | int)
-    or now().timestamp() - postal_health_start | float >= postal_health_timeout | int
+    or now().timestamp() - postal_health_start | float >= postal_health_wait | default(postal_health_timeout) | int
   retries: "{{ postal_health_retries }}"
   delay: 5
   changed_when: false
@@ -57,7 +59,7 @@
   register: postal_health_servers_read
   until: >-
     postal_health_servers_read.content | default('') | trim == 'OK'
-    or now().timestamp() - postal_health_start | float >= postal_health_timeout | int
+    or now().timestamp() - postal_health_start | float >= postal_health_wait | default(postal_health_timeout) | int
   retries: "{{ postal_health_retries }}"
   delay: 5
   failed_when: false
@@ -97,7 +99,7 @@
   register: postal_web_read
   until: >-
     postal_web_read.stdout | default('') | trim == '200'
-    or now().timestamp() - postal_health_start | float >= postal_health_timeout | int
+    or now().timestamp() - postal_health_start | float >= postal_health_wait | default(postal_health_timeout) | int
   retries: "{{ postal_health_retries }}"
   delay: 5
   changed_when: false
@@ -123,7 +125,7 @@
   register: postal_ehlo_read
   until: >-
     postal_ehlo_read.stdout | default('') | trim == '250'
-    or now().timestamp() - postal_health_start | float >= postal_health_timeout | int
+    or now().timestamp() - postal_health_start | float >= postal_health_wait | default(postal_health_timeout) | int
   retries: "{{ postal_health_retries }}"
   delay: 5
   changed_when: false
