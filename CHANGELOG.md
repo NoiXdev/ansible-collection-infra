@@ -193,6 +193,31 @@
   in `waf_image`, and `--check` shows a change without making it. While the WAF is down its sites
   answer 504 behind Traefik and 502 on the host's nginx, never the backend; the next run starts it
   again. Response bodies are not inspected, and there is no entrypoint-wide mode. Needs Docker.
+  CRS plugins: `waf_plugins` (default `[]`) lists plugins by `name` (`^[a-z0-9][a-z0-9-]*$`, at
+  most 64 characters, unique, not `empty`), each either an archive (`url`, `https://`, `.tar.gz`
+  or `.tgz`, with its `sha256`, 64 lower-case hex digits) or a directory on the controller
+  (`src`, relative to the playbook's `files/` like a role's); exactly one of the two, and
+  `sha256` only with `url`. A site loads plugins with `plugins` (names from `waf_plugins`, each
+  once, default `[]`) and sets them with `plugin_settings` (plugin name, then setting, then value;
+  default `{}`): a setting is `^[a-z0-9_]+$`, not `enabled`, and its value a whole number or a
+  string of `[A-Za-z0-9_.:/-]`. A plugin is on for the sites that list it and off for every other
+  site, where the role also removes its rules by rule ID, so a plugin that does not check its own
+  switch stays quiet there; a request that matches no site runs no plugin rule. A plugin is read
+  from `<name>-config.conf`, `<name>-before.conf` and `<name>-after.conf` (at least one), from
+  `plugins/` or the top of `src`, or of an archive that may have one top-level directory (GitHub's
+  `<repo>-<version>/`). Archives are cached in `waf_dir/plugin-cache/<sha256>.tar.gz` and checked
+  against the SHA-256 before use, so a run with the same checksum downloads nothing; only
+  `.tar.gz` is supported. A plugin file may hold `SecRule`, `SecAction` and `SecMarker` only,
+  every rule with exactly one `id` in 9500000-9999999 (the CRS plugin registry range), no
+  `ctl:auditEngine` or `ctl:auditLogParts`, no chain left open and no comment ending in `\` that
+  a directive follows; two plugins may not share rule IDs. Plugin rules do not look at headers
+  and cookies that carry credentials, like the rule set's. The run is refused, before any change,
+  for each of these, for a download that fails (`waf: plugin <name>: ` and the reason, or `the
+  archive at <url> does not have sha256 <sha256>`) and for a plugin that fails the test in the
+  throwaway container, which leaves the running WAF and its files as they were. The role's own
+  rule IDs lie in 5000000-5099999 (global rules 50999xx, the site rules 5000000 + 100 × the
+  site's index), clear of the plugin range, so a plugin rule ID cannot meet one; the log and
+  `noix-waf-report` show them.
   Covered by the new test suite `waf` (Ubuntu 24.04 and 26.04). The `traefik` role is unchanged:
   without the `waf` role, Traefik's files stay as they were.
 - `nginx`: a site with `waf: true` (default `false`) is inspected by the `waf` role in host mode
