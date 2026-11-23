@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `syslog_forward`: new role that forwards the host's logs (what rsyslog takes from the journal,
+  narrowed by `syslog_forward_filter`, default `*.*`) to the receivers in `syslog_forward_targets`
+  (`host`, `port` default 514, `protocol` `udp` or `tcp` (default), `tls` for TCP with `ca_file` or
+  the system's CA bundle and the certificate checked against `host`, `queue_size` for TCP, default
+  10000) in RFC 5424 format, through one drop-in, `/etc/rsyslog.d/60-noixdev-forward.conf`. It
+  installs rsyslog (and rsyslog-gnutls for TLS) when missing. Every TCP target gets a disk-assisted
+  queue that keeps messages while its receiver is down. `rsyslogd -N1` checks the configuration
+  before rsyslog restarts; a drop-in it refuses is replaced by the previous one and the run fails.
+  A missing `ca_file`, `tls` or `queue_size` on UDP and a target without `host` are refused before
+  any change. An empty `syslog_forward_targets` removes the drop-in.
 - `graylog`: new role that runs Graylog (`graylog_version`, pinned, 7.0.0 or newer, default 7.2.2)
   with its Data Node and MongoDB (`graylog_mongodb_version`, major 7 or 8, default 8.0.38) as one
   compose project in `graylog_dir` (default `/opt/graylog`), with the web interface behind Traefik
