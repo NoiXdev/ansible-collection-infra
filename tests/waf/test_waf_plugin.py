@@ -12,6 +12,8 @@ _SPEC.loader.exec_module(waf_plugin)
 
 NC = "nextcloud-rule-exclusions"
 ALLOWED = "(only SecRule, SecAction and SecMarker)"
+SECOND = "after the first directive word is not allowed in a plugin (one directive per line)"
+SECRET = "is not allowed in a plugin (it can copy a credential into the log)"
 
 
 def check(text, kind="before", name="x"):
@@ -169,6 +171,93 @@ class CheckTest(unittest.TestCase):
     def test_check_backslash_comment_before_blank_or_eof(self):
         self.assertEqual(check('# a \\\n\nSecAction "id:9590001"\n')["errors"], [])
         self.assertEqual(check('SecAction "id:9590001"\n# a \\')["errors"], [])
+
+    def test_check_second_directive_on_one_line(self):
+        got = check('SecAction "id:9500001,phase:1,pass,nolog" SecRuleRemoveById 949110\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleRemoveById {SECOND}"])
+
+    def test_check_second_directive_after_continuation(self):
+        got = check('SecAction "id:9500001,pass,nolog" \\\nSecRuleRemoveById 949110\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleRemoveById {SECOND}"])
+        got = check('SecAction "id:9500001,pass,nolog"\\\nSecRuleRemoveById 949110\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleRemoveById {SECOND}"])
+        got = check('SecAction "id:9500001,pass,nolog" \\\nInclude /etc/passwd\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: Include {SECOND}"])
+        got = check('SecAction "id:9500001,pass,nolog" \\\n  includeOptional /etc/passwd\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: includeOptional {SECOND}"])
+
+    def test_check_second_directive_inside_quotes(self):
+        got = check('SecAction "id:9500001,pass,nolog,msg:\'x SecRuleEngine Off\'"\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleEngine {SECOND}"])
+
+    def test_check_second_directive_after_secmarker(self):
+        got = check('SecMarker X SecRuleEngine Off\nSecAction "id:9500001"\n')
+        self.assertEqual(
+            got["errors"],
+            [f"x-before.conf line 1: SecRuleEngine {SECOND}", "x-before.conf line 1: SecMarker takes one name"],
+        )
+        got = check('SecMarker X \\\nSecDefaultAction "phase:2,pass"\nSecAction "id:9500001"\n')
+        self.assertEqual(
+            got["errors"],
+            [f"x-before.conf line 1: SecDefaultAction {SECOND}", "x-before.conf line 1: SecMarker takes one name"],
+        )
+
+    def test_check_secmarker_one_name(self):
+        got = check('SecMarker A B\nSecAction "id:9500001"\n')
+        self.assertEqual(got["errors"], ["x-before.conf line 1: SecMarker takes one name"])
+        self.assertEqual(check('SecMarker "END-X"\nSecMarker END-Y\nSecAction "id:9500001"\n')["errors"], [])
+
+    def test_check_lone_cr_is_a_line_break(self):
+        got = check('SecAction "id:9500001,pass,nolog"\rSecRuleRemoveById 949110\r')
+        self.assertEqual(got["errors"], [f"x-before.conf line 2: SecRuleRemoveById is not allowed in a plugin {ALLOWED}"])
+        got = check('SecAction "id:9500001" \\\rSecRuleRemoveById 949110\r')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleRemoveById {SECOND}"])
+        got = check('SecAction \\\r "id:9500001"\rSecAction "id:9500002"\r\n')
+        self.assertEqual((got["errors"], got["ids"]), ([], [9500001, 9500002]))
+
+    def test_check_directive_like_words_that_pass(self):
+        text = (
+            'SecRule REQUEST_HEADERS:X-SecFoo "@rx x" "id:9500001,phase:1,pass,nolog,setvar:tx.secret=1"\n'
+            'SecRule TX:secret "@eq 1" "id:9500002,phase:1,pass,nolog,msg:\'Secure_x\'"\n'
+            'SecRule ARGS:included "@rx Security2" "id:9500003,phase:2,pass,nolog"\n'
+        )
+        self.assertEqual(check(text)["errors"], [])
+
+    def test_check_comment_inside_continuation(self):
+        got = check('SecAction "id:9500001,pass" \\\n# SecRuleRemoveById 949110\n')
+        self.assertEqual(
+            got["errors"],
+            ["x-before.conf line 2: a comment inside a continued directive",
+             f"x-before.conf line 1: SecRuleRemoveById {SECOND}"],
+        )
+        got = check('SecAction "id:9500001,pass" \\\n  # note \\\n  ",nolog"\n')
+        self.assertEqual(got["errors"], ["x-before.conf line 2: a comment inside a continued directive"])
+
+    def test_check_credential_macros(self):
+        cases = [
+            ("logdata:'%{REQUEST_HEADERS.authorization}'", "REQUEST_HEADERS"),
+            ("logdata:'%{request_headers:Cookie}'", "REQUEST_HEADERS"),
+            ("msg:'%{ Request_Cookies.session}'", "REQUEST_COOKIES"),
+            ("logdata:%{REQUEST_COOKIES:sid}", "REQUEST_COOKIES"),
+        ]
+        for action, name in cases:
+            with self.subTest(action=action):
+                got = check(f'SecAction "id:9500001,pass,log,{action}"\n')
+                self.assertEqual(got["errors"], [f"x-before.conf line 1: %{{{name}...}} {SECRET}"])
+
+    def test_check_full_request(self):
+        for text in ('SecRule FULL_REQUEST "@rx x" "id:9500001,pass"\n',
+                     'SecAction "id:9500001,pass,log,logdata:\'%{full_request}\'"\n'):
+            with self.subTest(text=text):
+                self.assertEqual(check(text)["errors"], [f"x-before.conf line 1: FULL_REQUEST {SECRET}"])
+
+    def test_check_harmless_macros_and_targets(self):
+        text = (
+            'SecRule REQUEST_HEADERS:Foo|REQUEST_HEADERS_NAMES "@rx x" "id:9500001,phase:1,pass,log,'
+            "logdata:'%{REQUEST_HEADERS_NAMES} %{tx.anomaly_score} %{MATCHED_VAR} %{REQUEST_FILENAME}'\"\n"
+            'SecRule FULL_REQUEST_LENGTH "@gt 1" "id:9500002,phase:2,pass,nolog"\n'
+        )
+        self.assertEqual(check(text)["errors"], [])
 
     def test_check_real_nextcloud_plugin(self):
         archive = pathlib.Path(__file__).resolve().parent / "fixtures" / "plugins" / f"{NC}-plugin-1.7.1.tar.gz"

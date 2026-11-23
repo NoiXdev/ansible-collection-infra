@@ -2,9 +2,11 @@
 
 waf_plugin_pick finds the config, before and after file of a plugin in the
 file list of an unpacked archive or src tree. waf_plugin_check refuses what a
-plugin may not contain (only SecRule, SecAction and SecMarker; no ctl: on the
-audit engine or the audit log parts; every rule with an id in 9500000-9999999)
-and reports the ids it uses. Pure Python, runs on the controller.
+plugin may not contain (only SecRule, SecAction and SecMarker, one directive
+per line; no ctl: on the audit engine or the audit log parts; no macro or
+target that copies the request headers, cookies or the full request into the
+log; every rule with an id in 9500000-9999999) and reports the ids it uses.
+Pure Python, runs on the controller.
 """
 
 import re
@@ -17,6 +19,14 @@ _CTL = re.compile(r"\bctl:\s*(auditengine|auditlogparts)\b", re.IGNORECASE)
 # Quote-unaware on purpose: any id:<digits> in a rule counts, however the
 # quotes and escapes are read by the engine.
 _ID = re.compile(r"""(?:^|(?<=[,\s'"]))id:\s*'?(\d+)""", re.IGNORECASE)
+# A directive name anywhere after the first word, quote-unaware: whatever the
+# engine makes of the quotes, a plugin line holds one directive. Its start
+# is checked separately (whitespace, the start of the text or of a line).
+_DIRECTIVE = re.compile(r"(?=(sec[a-z]+|include(?:optional)?)(?![a-z0-9_]))", re.IGNORECASE)
+# Macros and a target that can copy a credential into the log, quote-unaware.
+_SECRET_MACRO = re.compile(r"%\{\s*(request_headers|request_cookies)\s*[.:}]", re.IGNORECASE)
+_FULL_REQUEST = re.compile(r"(?<![a-z0-9_])full_request(?![a-z0-9_])", re.IGNORECASE)
+_SECRET = "is not allowed in a plugin (it can copy a credential into the log)"
 
 
 def waf_plugin_pick(paths, name):
@@ -43,34 +53,64 @@ def waf_plugin_pick(paths, name):
 
 
 def _directives(text):
-    """Yield (line number, directive text) with continuation lines joined."""
-    text = text.replace("\r\n", "\n")
-    start, parts = 0, []
+    """Yield (line number, directive text, line starts, problems).
+
+    Continuation lines are joined; line starts are the offsets in the
+    directive text where a physical line begins, and problems are
+    (line number, message) pairs found while joining.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    start, parts, problems = 0, [], []
     lines = text.split("\n")
+
+    def joined():
+        offsets, at = [], 0
+        for part in parts:
+            offsets.append(at)
+            at += len(part)
+        return start, "".join(parts), offsets, problems
+
     for number, line in enumerate(lines, 1):
         if not parts:
             start = number
             if line.lstrip().startswith("#"):
                 nxt = lines[number].strip() if number < len(lines) else ""
                 risky = line.rstrip().endswith("\\") and bool(nxt) and not nxt.startswith("#")
-                yield start, line.rstrip() if risky else "#"
+                yield start, line.rstrip() if risky else "#", [0], []
                 continue
+        elif line.lstrip().startswith("#"):
+            problems.append((number, "a comment inside a continued directive"))
         if line.endswith("\\"):
             parts.append(line[:-1])
             continue
         parts.append(line)
-        yield start, "".join(parts)
-        parts = []
+        yield joined()
+        parts, problems = [], []
     if parts:
-        yield start, "".join(parts)
+        yield joined()
+
+
+def _arguments(directive):
+    """The words of a directive, quotes removed (quoted or bare)."""
+    return [
+        next(g for g in match.groups() if g is not None)
+        for match in re.finditer(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|(\S+)', directive)
+    ]
 
 
 def _last_argument(directive):
     """The last argument of a directive, quotes removed (quoted or bare)."""
-    last = None
-    for match in re.finditer(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|(\S+)', directive):
-        last = next(g for g in match.groups() if g is not None)
-    return last or ""
+    words = _arguments(directive)
+    return words[-1] if words else ""
+
+
+def _second_directive(directive, starts, after):
+    """The first directive name that starts a word at or after offset after."""
+    for match in _DIRECTIVE.finditer(directive, after):
+        at = match.start()
+        if at == 0 or directive[at - 1].isspace() or at in starts:
+            return match.group(1)
+    return None
 
 
 def _actions(argument):
@@ -96,7 +136,8 @@ def waf_plugin_check(name, files):
             continue
         fname = f"{name}-{kind}.conf"
         chained = 0  # start line of the rule whose actions had chain, else 0
-        for number, directive in _directives(files[kind]):
+        for number, directive, starts, problems in _directives(files[kind]):
+            errors.extend(f"{fname} line {line}: {problem}" for line, problem in problems)
             stripped = directive.strip()
             if not stripped:
                 continue
@@ -111,13 +152,27 @@ def waf_plugin_check(name, files):
                     "(only SecRule, SecAction and SecMarker)"
                 )
                 continue
+            word_end = directive.index(word) + len(word)
+            second = _second_directive(directive, starts, word_end)
+            if second:
+                errors.append(
+                    f"{fname} line {number}: {second} after the first directive word is not allowed "
+                    "in a plugin (one directive per line)"
+                )
             if word.lower() == "secmarker":
+                if len(_arguments(stripped)) > 2:
+                    errors.append(f"{fname} line {number}: SecMarker takes one name")
                 continue
             rest = stripped[len(word):]
             argument = _last_argument(stripped)
             ctl = _CTL.search(rest)
             if ctl:
                 errors.append(f"{fname} line {number}: ctl:{ctl.group(1)} is not allowed in a plugin")
+            macro = _SECRET_MACRO.search(rest)
+            if macro:
+                errors.append(f"{fname} line {number}: %{{{macro.group(1).upper()}...}} {_SECRET}")
+            if _FULL_REQUEST.search(rest):
+                errors.append(f"{fname} line {number}: FULL_REQUEST {_SECRET}")
             found = _ID.findall(rest)
             if not found and not chained:
                 errors.append(f"{fname} line {number}: a rule without an id")
