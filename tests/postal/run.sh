@@ -33,13 +33,42 @@
 #             postal_max_message_size recreates MariaDB with the larger redo
 #             log (mariadb.cnf) and restarts the Postal services; the
 #             default brings everything back
-#   takeover  the MariaDB data of an installation without its compose file,
-#             configuration and database target (a takeover): refused as not
-#             supported yet, with another postal_db_password that the
-#             database then still refuses and root still on the socket; with
-#             a root that has a password the same; the files and containers
-#             the refused run made are gone again, and with the old files back
-#             Postal runs as before
+#   takeover_refusals
+#             an install over Postal's data without its keys, refused before
+#             any change: the MariaDB data of an installation without its
+#             compose file, configuration and database target, run without
+#             postal_signing_key, without postal_rails_secret_key and without
+#             both (no file written, no container, the data unchanged), and
+#             the same with postal_import_dump on a host without the
+#             installation (nothing created); a dump that is no file, a path
+#             that is no .sql or .sql.gz, postal_import_dump with
+#             mariadb_external, and a dump to load into MariaDB data that
+#             holds Postal's databases, refused before any change too; with
+#             the keys but a root that has a password: refused once MariaDB
+#             runs, the files and containers the run made gone again, root
+#             and the password of Postal's user (the run had another)
+#             unchanged; with the old files back Postal runs as before, with
+#             its signing key
+#   takeover  an installation with the fixture and a message through the
+#             API, dumped (mariadb-dump --databases, .sql.gz) and its keys
+#             noted, then postal_dir wiped: an install with
+#             postal_import_dump and the keys loads it and runs postal
+#             upgrade, not initialize, and makes no second user (other
+#             postal_admin_*); it prints the old rp. DKIM record, has the
+#             organization, the credential and the message, the old admin
+#             logs in and the API sends; the next run, the dump still set,
+#             loads nothing and changes nothing
+#   row_format
+#             a table of the main and of a message database set to
+#             ROW_FORMAT=COMPACT before the dump (.sql): the takeover converts
+#             both, names them, and leaves no table of either that is not
+#             Dynamic
+#   custom_names
+#             postal_db_name and postal_message_db_prefix mailer: an install
+#             makes the databases mailer and mailer-server-1 (Postal names a
+#             message database <prefix>-server-<id>) and no postal one, the
+#             API sends; their dump taken over with the names has the message
+#             and sends
 #   ipv6_off  IPv6 switched off on the test host: the SMTP servers listen on
 #             0.0.0.0 (postal.yml, the sockets) and answer EHLO; back on, on ::
 #   routers   the Traefik routers of web (verify.yml: every traefik.* label):
@@ -144,8 +173,11 @@
 #             mariadb service, the fixture and a message through the API;
 #             then refused without a change: a wrong password, that user, the
 #             own MariaDB (naming both modes), another postal_db_host (naming
-#             both servers), and a fresh install on the database that holds
-#             Postal's schema
+#             both servers); then a fresh install on that server, a
+#             takeover: without the keys refused before any change, with the
+#             keys of the installation postal upgrade, the old rp. DKIM
+#             record, the admin, the fixture's credential and message, and a
+#             message through the API
 # Postal's image is linux/amd64 only, so on a machine that is not amd64 (an
 # arm64 Mac, for example) it runs under emulation (Docker Desktop's Rosetta or
 # QEMU) inside the test host; every scenario but the arch refusal sets
@@ -1026,6 +1058,11 @@ db_login() {
   printf '%s' "$1" | hi sh -c 'cd '"$app_dir"' && exec docker compose exec -T mariadb sh -c '"'"'MYSQL_PWD="$(cat; echo x)"; MYSQL_PWD="${MYSQL_PWD%x}"; export MYSQL_PWD; exec mariadb --host=127.0.0.1 --port=3307 --user=postal --execute="SELECT 1"'"'" >/dev/null 2>&1
 }
 root_user() { compose exec -T mariadb mariadb --user=root --batch --skip-column-names --execute="'SHOW CREATE USER root@localhost'"; }
+# root_sql <sql>: runs the SQL as root in the own MariaDB and prints the
+# result (batch, no column names).
+root_sql() {
+  h sh -c 'cd '"$app_dir"' && exec docker compose exec -T mariadb mariadb --user=root --batch --skip-column-names --execute="$1"' sh "$1"
+}
 # Moves the compose file, the configuration, mariadb.cnf and the database
 # target aside, with Postal down: the data of an installation without it.
 set_files_aside() {
@@ -1037,49 +1074,274 @@ put_files_back() {
   h sh -c "cd $app_dir && rm -rf compose.yaml config mariadb.cnf database-target && mv /root/aside/* . && docker compose up -d --wait mariadb" >/dev/null 2>&1 \
     || fail "MariaDB does not start with the files put back"
 }
-# expect_refused_takeover <reason>: the refused run left nothing but the
-# configuration directory, and the database user still takes the old
-# password only.
-expect_refused_takeover() {
-  expect_in_log 'taking over an existing Postal database is not supported yet'
-  expect_in_log "$1"
-  expect_not_in_log "Create Postal's database user and its grants"
-  expect_not_in_log 'Initialize the database'
+# What is in app_dir and every file of the MariaDB data with its checksum
+# (MariaDB is down), for expect_data_untouched.
+data_state() { h sh -c "cd $app_dir && ls -A && find data/mariadb -type f -exec sha256sum {} + | sort"; }
+note_data() { data_before="$(data_state)"; }
+# Fails unless the refused run wrote nothing beside the data, started no
+# container and left the data as it was.
+expect_data_untouched() {
+  grep -Eq 'changed=0 ' "$out/converge.log" || { cat "$out/converge.log" >&2; fail "the refused run changed something"; }
+  [ -z "$(h docker ps -aq --filter label=com.docker.compose.project=postal)" ] || fail "the refused run made containers"
+  [ "$(data_state)" = "$data_before" ] || fail "the refused run changed $app_dir or the MariaDB data"
+}
+# task_result <task name>: how the postal role's task of that name ended in
+# the converge output (ok, changed, skipping, fatal; none when it did not
+# show). expect_task <task name> <result>.
+task_result() {
+  python3 - "$out/converge.log" "$1" <<'PY'
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+banner = "TASK [noixdev.infra.postal : " + sys.argv[2] + "]"
+result = "none"
+for i, line in enumerate(lines):
+    if line.startswith(banner):
+        for later in lines[i + 1:]:
+            found = re.match(r"(ok|changed|skipping|fatal|failed):", later)
+            if found or later.startswith("TASK ["):
+                result = found.group(1) if found else result
+                break
+print(result)
+PY
+}
+expect_task() {
+  local got
+  got="$(task_result "$1")"
+  [ "$got" = "$2" ] || fail "the task \"$1\" ended $got, not $2"
+}
+# The public key of the installation's signing key, as its DKIM record has
+# it (p=).
+signing_pub() { h sh -c "openssl pkey -in $app_dir/config/signing.key -pubout | grep -v -- ----- | tr -d '\n'"; }
+# write_takeover_vars: the keys of the installation in files of mode 0600
+# (takeover-vars.json both, takeover-key-vars.json the signing key alone,
+# takeover-secret-vars.json the Rails secret alone), for a takeover of its
+# databases. note_generated made them secrets.
+write_takeover_vars() {
+  local key secret
+  key="$(h cat "$app_dir/config/signing.key")"
+  secret="$(h sed -n 's/^  secret_key: *//p' "$app_dir/config/postal.yml" | tr -d "'\"")"
+  (
+    umask 077
+    env "KEY=$key" "SECRET=$secret" "OUT=$out" python3 -c '
+import json, os
+key, secret, out = os.environ["KEY"], os.environ["SECRET"], os.environ["OUT"]
+for name, data in (("takeover-vars.json", {"postal_signing_key": key, "postal_rails_secret_key": secret}),
+                   ("takeover-key-vars.json", {"postal_signing_key": key}),
+                   ("takeover-secret-vars.json", {"postal_rails_secret_key": secret})):
+    json.dump(data, open(os.path.join(out, name), "w"))'
+  )
+}
+# make_dump <file> [main database] [prefix]: mariadb-dump --single-transaction
+# --databases of the main database and every message database of the
+# running own MariaDB, as root, into the file on the test host (gzip for
+# .gz); never printed.
+make_dump() {
+  h sh -c 'set -e; cd '"$app_dir"'
+    dbs="$(docker compose exec -T mariadb mariadb --user=root --batch --skip-column-names --execute="SHOW DATABASES LIKE '"'"'$3-%'"'"'")"
+    docker compose exec -T mariadb mariadb-dump --user=root --single-transaction --databases "$2" $dbs >/root/dump.sql
+    case "$1" in *.gz) gzip -c /root/dump.sql >"$1" && rm /root/dump.sql ;; *) mv /root/dump.sql "$1" ;; esac' \
+    sh "$1" "${2:-postal}" "${3:-postal}" || fail "the dump $1 could not be made"
+}
+# The number of the fixture's messages with the subject.
+messages_with() {
+  postal_rails "puts $fixture_server.message_db.messages(where: { subject: \"$1\" }).size" | tail -n 1
+}
+
+test_takeover_refusals() {
+  local key_sum vars
+  echo "== takeover_refusals (ubuntu $1)"
+  ensure_installed takeover_refusals
+  write_takeover_vars
+  make_dump /root/refusals.sql.gz
+  key_sum="$(h sha256sum "$app_dir/config/signing.key" | cut -d' ' -f1)"
+
+  # The MariaDB data of an installation without its files, without one key
+  # or both: refused before any change, MariaDB not even started.
+  set_files_aside
+  note_data
+  for vars in takeover-secret-vars.json takeover-key-vars.json db-vars.json; do
+    echo "== takeover_refusals: the data without the keys ($vars, ubuntu $1)"
+    install_converge_fails -e "@$out/$vars"
+    expect_in_log "The own MariaDB in $app_dir/data/mariadb holds Postal's data"
+    case "$vars" in
+      takeover-secret-vars.json) expect_in_log 'and postal_signing_key is empty' ;;
+      takeover-key-vars.json) expect_in_log 'and postal_rails_secret_key is empty' ;;
+      *) expect_in_log 'and postal_signing_key and postal_rails_secret_key are empty' ;;
+    esac
+    expect_data_untouched
+  done
+
+  # A root with a password does not log in through the socket: with the keys
+  # the install starts MariaDB, asks it and is refused, the files and
+  # containers it made go again, and neither root nor the password of
+  # Postal's user (the run had another) changed.
+  echo "== takeover_refusals: a root with a password (ubuntu $1)"
+  put_files_back
+  root_sql "ALTER USER root@localhost IDENTIFIED BY 'noix-root-test'"
+  set_files_aside
+  install_converge_fails -e "@$out/takeover-vars.json" -e "@$out/new-db-vars.json"
+  expect_in_log 'its root does not log in through the socket'
+  expect_task "Create Postal's database user and its grants" none
+  expect_task 'Initialize the database' none
+  expect_task 'Upgrade the database' none
   local file
   for file in compose.yaml mariadb.cnf database-target install-incomplete; do
     h test ! -e "$app_dir/$file" || fail "the refused takeover left $app_dir/$file"
   done
   [ -z "$(h docker ps -aq --filter label=com.docker.compose.project=postal)" ] || fail "the refused takeover left containers"
-}
-
-test_takeover() {
-  echo "== takeover (ubuntu $1)"
-  ensure_installed takeover
-  set_files_aside
-  install_converge_fails -e "@$out/new-db-vars.json"
-  expect_refused_takeover "postal holds Postal's schema"
-  put_files_back
-  db_login "$db_password" || fail "the refused takeover changed the password of Postal's database user"
-  if db_login "${db_password}-new"; then fail "the refused takeover gave Postal's database user the new password"; fi
-  [[ "$(root_user)" == *'IDENTIFIED VIA unix_socket'* ]] || fail "root is no longer on the socket: $(root_user)"
-
-  # A root with a password: it does not log in through the socket, which is
-  # refused as well, and the password stays.
-  echo "== takeover: a root with a password (ubuntu $1)"
-  compose exec -T mariadb mariadb --user=root --execute="\"ALTER USER root@localhost IDENTIFIED BY 'noix-root-test'\""
-  set_files_aside
-  install_converge_fails -e "@$out/new-db-vars.json"
-  expect_refused_takeover 'its root does not log in through the socket'
   put_files_back
   [[ "$(compose exec -T -e MYSQL_PWD=noix-root-test mariadb mariadb --user=root --batch --skip-column-names \
         --execute="'SHOW CREATE USER root@localhost'")" == *PASSWORD* ]] || fail "the refused takeover changed root"
   db_login "$db_password" || fail "the refused takeover changed the password of Postal's database user"
+  if db_login "${db_password}-new"; then fail "the refused takeover gave Postal's database user the new password"; fi
   compose exec -T -e MYSQL_PWD=noix-root-test mariadb mariadb --user=root \
     --execute="\"ALTER USER root@localhost IDENTIFIED VIA unix_socket\""
+  [[ "$(root_user)" == *'IDENTIFIED VIA unix_socket'* ]] || fail "root is not back on the socket: $(root_user)"
 
+  # A dump to load: without a key refused before any change, on a host
+  # without the installation (nothing is created); and the dump that is no
+  # file, a path that is no dump, and an external MariaDB.
+  echo "== takeover_refusals: a dump without the keys (ubuntu $1)"
+  compose down >/dev/null 2>&1
+  h sh -c "rm -rf /root/postal-a && mv $app_dir /root/postal-a"
+  refused 'and postal_signing_key is empty' -e "@$out/takeover-secret-vars.json" -e postal_import_dump=/root/refusals.sql.gz
+  expect_in_log "The dump /root/refusals.sql.gz holds Postal's data"
+  refused 'and postal_rails_secret_key is empty' -e "@$out/takeover-key-vars.json" -e postal_import_dump=/root/refusals.sql.gz
+  refused 'postal_import_dump /root/missing.sql.gz is no file' -e "@$out/takeover-vars.json" -e postal_import_dump=/root/missing.sql.gz
+  refused 'postal_import_dump must be an absolute path on the host ending in .sql or .sql.gz' -e postal_import_dump=/root/refusals.tar
+  refused 'postal_import_dump must be an absolute path on the host ending in .sql or .sql.gz' -e postal_import_dump=refusals.sql
+  refused 'postal_import_dump is set, but postal_database is mariadb_external' \
+    -e "$ext_vars" -e "@$out/takeover-vars.json" -e postal_import_dump=/root/refusals.sql.gz
+
+  # A dump to load into MariaDB data that holds Postal's databases: refused
+  # before any change.
+  echo "== takeover_refusals: a dump over Postal's databases (ubuntu $1)"
+  h mv /root/postal-a "$app_dir"
+  set_files_aside
+  note_data
+  install_converge_fails -e "@$out/takeover-vars.json" -e postal_import_dump=/root/refusals.sql.gz
+  expect_in_log "postal_import_dump is set, but the own MariaDB in $app_dir/data/mariadb already holds postal"
+  expect_data_untouched
+
+  # With the old files back Postal runs as before, with its signing key.
+  put_files_back
   compose up -d >/dev/null 2>&1
   install_converge_unchanged
+  [ "$(h sha256sum "$app_dir/config/signing.key" | cut -d' ' -f1)" = "$key_sum" ] || fail "the refused takeovers changed signing.key"
   [ "$(postal_rails 'puts User.count')" = 1 ] || fail "the admin is gone after the refused takeovers"
+}
+
+test_takeover() {
+  local key subject pub answer
+  echo "== takeover (ubuntu $1)"
+  ensure_installed takeover
+  key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  [ "${#key}" = 24 ] || fail "the fixture printed no API key: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$key")
+  subject="noixold$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+  pub="$(signing_pub)"
+  write_takeover_vars
+  make_dump /root/takeover.sql.gz
+  remove_installation
+
+  # postal_dir wiped: the install loads the dump and takes it over, with
+  # other postal_admin_* values, which make no second user.
+  echo "== takeover: the dump (ubuntu $1)"
+  postal_converge -e "@$out/takeover-vars.json" -e postal_import_dump=/root/takeover.sql.gz -e "@$out/other-admin-vars.json"
+  expect_task 'Load the dump into the own MariaDB' changed
+  expect_task 'Upgrade the database' changed
+  expect_task 'Initialize the database' skipping
+  expect_in_log 'The role took over the Postal databases there'
+  expect_not_in_log 'The role generated'
+  expect_in_log "v=DKIM1; t=s; h=sha256; p=$pub;"
+  [ "$(signing_pub)" = "$pub" ] || fail "the takeover has another signing key"
+  note_generated
+  verify
+  expect_clean
+  # Loaded once: the next run, the dump still set, changes nothing.
+  postal_converge_unchanged -e "@$out/takeover-vars.json" -e postal_import_dump=/root/takeover.sql.gz -e "@$out/other-admin-vars.json"
+  expect_task 'Load the dump into the own MariaDB' none
+
+  # The data of the old installation: its admin (alone), the organization,
+  # the message; the admin logs in and the API sends.
+  [ "$(postal_rails 'puts User.count')" = 1 ] || fail "the takeover has not exactly the old admin"
+  [ "$(postal_rails 'puts Organization.where(permalink: "noix").count')" = 1 ] || fail "the takeover lacks the organization"
+  [ "$(messages_with "$subject")" = 1 ] || fail "the takeover lacks the message $subject"
+  [ "$(postal_fixture)" = "$key" ] || fail "the takeover lacks the fixture's API credential"
+  answer="$(admin_login "$admin_email" "$admin_password")"
+  [ "$(printf '%s\n' "$answer" | head -n 1)" = 302 ] || fail "the old admin's login was not redirected: $(printf '%s' "$answer" | head -c 300)"
+  [[ "$answer" == *'Welcome to Postal, Noix'* ]] || fail "/ after the old admin's login is not Postal's: $(printf '%s' "$answer" | head -c 300)"
+  subject="noixnew$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+  install_converge_unchanged
+}
+
+test_row_format() {
+  local mdb tables
+  echo "== row_format (ubuntu $1)"
+  ensure_installed row_format
+  postal_fixture >/dev/null || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  mdb="$(root_sql "SHOW DATABASES LIKE 'postal-%'" | head -n 1)"
+  [ -n "$mdb" ] || fail "the installation has no message database"
+  # Small tables: the wide ones exceed COMPACT's row size, which is why
+  # Postal v3 needs DYNAMIC.
+  root_sql "ALTER TABLE postal.ip_pools ROW_FORMAT=COMPACT; ALTER TABLE \`$mdb\`.migrations ROW_FORMAT=COMPACT"
+  write_takeover_vars
+  make_dump /root/row-format.sql
+  [ "$(h grep -c 'ROW_FORMAT=COMPACT' /root/row-format.sql)" = 2 ] || fail "the dump does not hold the two COMPACT tables"
+  remove_installation
+
+  # A plain .sql dump; the takeover converts both tables and names them.
+  install_converge -e "@$out/takeover-vars.json" -e postal_import_dump=/root/row-format.sql
+  expect_task 'Convert the tables to ROW_FORMAT=DYNAMIC' changed
+  expect_in_log "Converted to ROW_FORMAT=DYNAMIC: postal.ip_pools, $mdb.migrations"
+  tables="$(root_sql "SELECT CONCAT(table_schema, '.', table_name, ' ', row_format) FROM information_schema.tables
+    WHERE (table_schema = 'postal' OR table_schema LIKE 'postal-%') AND table_type = 'BASE TABLE' AND row_format <> 'Dynamic'")"
+  [ -z "$tables" ] || fail "tables are not Dynamic after the takeover: $tables"
+  [ "$(root_sql "SELECT row_format FROM information_schema.tables WHERE table_schema = '$mdb' AND table_name = 'migrations'")" = Dynamic ] \
+    || fail "$mdb.migrations is not Dynamic"
+  note_generated
+  verify
+  install_converge_unchanged -e "@$out/takeover-vars.json" -e postal_import_dump=/root/row-format.sql
+}
+
+test_custom_names() {
+  local names='{"postal_db_name": "mailer", "postal_message_db_prefix": "mailer"}' key databases subject
+  echo "== custom_names (ubuntu $1)"
+  remove_installation
+  install_converge -e "$names"
+  note_generated
+  verify -e verify_db_name=mailer -e verify_db_prefix=mailer
+  install_converge_unchanged -e "$names"
+  key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  [ "${#key}" = 24 ] || fail "the fixture printed no API key: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$key")
+  databases="$(root_sql 'SHOW DATABASES' | grep -E '^(mailer|postal)' | sort | paste -sd' ' -)"
+  [ "$databases" = 'mailer mailer-server-1' ] || fail "the installation has the databases $databases, not mailer and mailer-server-1"
+  subject="noixmailer$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+
+  # Their dump, taken over with the names.
+  echo "== custom_names: a takeover (ubuntu $1)"
+  write_takeover_vars
+  make_dump /root/mailer.sql.gz mailer mailer
+  remove_installation
+  install_converge -e "$names" -e "@$out/takeover-vars.json" -e postal_import_dump=/root/mailer.sql.gz
+  expect_task 'Upgrade the database' changed
+  verify -e verify_db_name=mailer -e verify_db_prefix=mailer
+  install_converge_unchanged -e "$names" -e "@$out/takeover-vars.json" -e postal_import_dump=/root/mailer.sql.gz
+  databases="$(root_sql 'SHOW DATABASES' | grep -E '^(mailer|postal)' | sort | paste -sd' ' -)"
+  [ "$databases" = 'mailer mailer-server-1' ] || fail "the takeover has the databases $databases, not mailer and mailer-server-1"
+  [ "$(messages_with "$subject")" = 1 ] || fail "the takeover lacks the message $subject"
+  subject="noixmailernew$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+  # The other scenarios run on the default names.
+  remove_installation
 }
 
 test_ipv6_off() {
@@ -1845,7 +2107,7 @@ db_postal_user() {
 }
 
 test_install_external() {
-  local key subject databases
+  local key subject databases pub
   echo "== install_external (ubuntu $1)"
   remove_installation
   start_db noix-db mariadb:11.4 db.example.test -p 127.0.0.1:3306:3306
@@ -1910,11 +2172,30 @@ test_install_external() {
   expect_untouched
   install_converge_unchanged -e "$ext_vars"
 
-  # A fresh install on the server that holds Postal's schema: refused before
-  # any change.
-  echo "== install_external: a database with Postal's schema (ubuntu $1)"
+  # A fresh install on the server that holds Postal's schema is a takeover:
+  # without the keys refused before any change, with those of the
+  # installation it runs postal upgrade and keeps the data.
+  echo "== install_external: a takeover (ubuntu $1)"
+  pub="$(signing_pub)"
+  write_takeover_vars
   remove_installation
-  refused "db.example.test:3306 already holds Postal's schema in postal" -e "$ext_vars"
+  refused "The external MariaDB db.example.test:3306 holds Postal's data" -e "$ext_vars"
+  expect_in_log 'and postal_signing_key and postal_rails_secret_key are empty'
+  refused 'and postal_rails_secret_key is empty' -e "$ext_vars" -e "@$out/takeover-key-vars.json"
+  install_converge -e "$ext_vars" -e "@$out/takeover-vars.json"
+  expect_task 'Upgrade the database' changed
+  expect_task 'Initialize the database' skipping
+  expect_in_log "v=DKIM1; t=s; h=sha256; p=$pub;"
+  note_generated
+  verify -e verify_database=mariadb_external -e verify_db_host=db.example.test -e verify_db_port=3306
+  install_converge_unchanged -e "$ext_vars" -e "@$out/takeover-vars.json"
+  [ "$(postal_rails 'puts User.count')" = 1 ] || fail "the external takeover has not exactly the old admin"
+  [ "$(postal_fixture)" = "$key" ] || fail "the external takeover lacks the fixture's API credential"
+  [ "$(messages_with "$subject")" = 1 ] || fail "the external takeover lacks the message $subject"
+  subject="noixexttakeover$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+  remove_installation
 
   h docker rm -f -v noix-db noix-mysql noix-old >/dev/null
   # /etc/hosts is a bind mount of the test host: rewritten in place.
@@ -1924,7 +2205,7 @@ test_install_external() {
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure takeover ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external"
+all_scenarios="refusals install noop_down reconfigure takeover_refusals takeover row_format custom_names ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -1934,7 +2215,10 @@ for ubuntu in $releases; do
       install) test_install "$ubuntu" ;;
       noop_down) test_noop_down "$ubuntu" ;;
       reconfigure) test_reconfigure "$ubuntu" ;;
+      takeover_refusals) test_takeover_refusals "$ubuntu" ;;
       takeover) test_takeover "$ubuntu" ;;
+      row_format) test_row_format "$ubuntu" ;;
+      custom_names) test_custom_names "$ubuntu" ;;
       ipv6_off) test_ipv6_off "$ubuntu" ;;
       routers) test_routers "$ubuntu" ;;
       mail) test_mail "$ubuntu" ;;

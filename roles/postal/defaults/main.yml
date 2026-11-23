@@ -84,7 +84,8 @@ postal_db_port: 3306
 postal_db_user: postal
 postal_db_password: ""
 # The main database, and the prefix of the message databases (one per mail
-# server, <prefix>-<id>): set them for an installation that used others.
+# server, <prefix>-server-<id>): set them for an installation that used
+# others.
 postal_db_name: postal
 postal_message_db_prefix: postal
 
@@ -166,8 +167,10 @@ postal_admin_email: ""
 postal_admin_password: ""
 postal_admin_first_name: ""
 postal_admin_last_name: ""
-# A host path of a mariadb-dump of the postal and postal-* databases, loaded
-# once on an install into an empty server of the own MariaDB.
+# A host path of a mariadb-dump --databases of the main and the message
+# databases (.sql or .sql.gz), loaded once on an install into the own
+# MariaDB when it holds none of them; the install then takes them over, with
+# postal_signing_key and postal_rails_secret_key. Own MariaDB only.
 postal_import_dump: ""
 
 # Backups before updates that are kept, and the seconds a run waits for

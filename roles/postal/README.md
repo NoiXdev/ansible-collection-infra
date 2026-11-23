@@ -16,7 +16,11 @@ answers; updates follow. A MariaDB server of your own must be MariaDB 10.6 or
 newer, reachable from the host and from Traefik's network, with a user that
 has all privileges on `postal_db_name` and on the message databases
 (`<postal_message_db_prefix>-%`); every run checks that before it changes
-anything. With
+anything. An install on a database that already holds Postal's data, or with
+`postal_import_dump` (loaded into the MariaDB container), takes that
+installation over: it needs the old installation's `postal_signing_key` and
+`postal_rails_secret_key`, refuses without them before any change, keeps the
+data and its users and upgrades the schema. With
 `postal_smtp_tls: traefik` the certificate is the one Traefik obtained for
 `postal_smtp_hostname`: the role installs `/usr/local/sbin/postal-smtp-cert`
 and a systemd timer that copies it twice a day and restarts the SMTP services
@@ -63,6 +67,7 @@ required. The full reference is in `meta/argument_specs.yml`, the defaults in
 | `postal_spam` | `none` | `none` or `rspamd` |
 | `postal_clamav` | `false` | Virus checks with ClamAV |
 | `postal_admin_email`, `postal_admin_password` | `""` | The first admin, created once on an install |
+| `postal_import_dump` | `""` | A dump of an earlier installation's databases (`.sql` or `.sql.gz`), loaded once on an install into the own MariaDB |
 | `postal_backups_keep` | `3` | Backups before updates that are kept |
 | `postal_health_timeout` | `300` | Seconds to wait until Postal is healthy |
 | `postal_config_extra` | `{}` | More of Postal's configuration; the keys the role owns are refused |

@@ -30,7 +30,8 @@
 # timer; with files or traefik smtp.cert and smtp.key 0440 root:999 and
 # STARTTLS on in postal.yml, with off none of these), verify_database
 # (mariadb, or mariadb_external at verify_db_host and verify_db_port: no
-# mariadb service), verify_spam (none or rspamd) with verify_rspamd_password
+# mariadb service), verify_db_name and verify_db_prefix (postal_db_name and
+# postal_message_db_prefix), verify_spam (none or rspamd) with verify_rspamd_password
 # (whether postal.yml gives Postal rspamd's password), verify_clamav,
 # verify_workers (the worker's replicas, each running), verify_relays
 # (postal_smtp_relays, comma-separated), verify_ip_pools, verify_oidc_name
@@ -60,6 +61,8 @@
     verify_database: mariadb
     verify_db_host: postal-mariadb
     verify_db_port: 3307
+    verify_db_name: postal
+    verify_db_prefix: postal
     verify_spam: none
     verify_rspamd_password: false
     verify_clamav: false
@@ -362,10 +365,10 @@
           - verify_config.postal.signing_key_path == '/config/signing.key'
           - verify_config.main_db.host == verify_db_host
           - verify_config.main_db.port == verify_db_port | int
-          - verify_config.main_db.database == 'postal'
+          - verify_config.main_db.database == verify_db_name
           - verify_config.message_db.host == verify_db_host
           - verify_config.message_db.port == verify_db_port | int
-          - verify_config.message_db.database_name_prefix == 'postal'
+          - verify_config.message_db.database_name_prefix == verify_db_prefix
           - verify_config.rails.secret_key | length == 128
           - verify_config.smtp_server.default_port == 25
           - verify_config.smtp_server.default_bind_address == verify_smtp_bind
@@ -388,7 +391,8 @@
           postal.yml lacks a value the role owns (the bind address
           {{ verify_config.web_server | default({}) }}, trusted_proxies
           {{ verify_config.postal.trusted_proxies | default('') }}, the
-          databases {{ verify_config.main_db.host | default('') }}:{{ verify_config.main_db.port | default('') }}
+          databases {{ verify_config.main_db.database | default('') }} on
+          {{ verify_config.main_db.host | default('') }}:{{ verify_config.main_db.port | default('') }}
           with the prefix {{ verify_config.message_db.database_name_prefix | default('') }},
           the spam threshold {{ verify_config.postal.default_spam_threshold | default('none') }},
           the SMTP address {{ verify_config.smtp_server.default_bind_address | default('') }},

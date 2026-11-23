@@ -189,6 +189,29 @@
     quiet: true
   when: postal_database == 'mariadb_external'
 
+# The role loads a dump into its own MariaDB alone (import.yml): an external
+# server is the operator's, who loads it there.
+- name: Refuse postal_import_dump with an external MariaDB
+  ansible.builtin.assert:
+    that: postal_import_dump | string | length == 0 or postal_database == 'mariadb'
+    fail_msg: >-
+      postal_import_dump is set, but postal_database is mariadb_external: the
+      role loads a dump into its own MariaDB only. Load the dump into
+      {{ postal_db_host }} yourself (as an admin of that server), then run the
+      role without postal_import_dump: it takes the databases there over,
+      with postal_signing_key and postal_rails_secret_key. The role changes
+      nothing.
+    quiet: true
+
+- name: Check postal_import_dump
+  ansible.builtin.assert:
+    that: postal_import_dump | string | length == 0 or postal_import_dump | string is match('^/.*[.]sql([.]gz)?$')
+    fail_msg: >-
+      postal_import_dump must be an absolute path on the host ending in .sql
+      or .sql.gz (a mariadb-dump of the main database and the message
+      databases, gzip-compressed or not). The role changes nothing.
+    quiet: true
+
 - name: Check postal_smtp_tls
   ansible.builtin.assert:
     that:

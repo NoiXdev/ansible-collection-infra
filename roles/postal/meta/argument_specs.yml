@@ -140,7 +140,7 @@ argument_specs:
         description: The main database.
       postal_message_db_prefix:
         type: str
-        description: Prefix of the message databases (<prefix>-<id>).
+        description: Prefix of the message databases (<prefix>-server-<id>).
       postal_signing_key:
         type: str
         description: >-
@@ -290,8 +290,11 @@ argument_specs:
       postal_import_dump:
         type: path
         description: >-
-          Host path of a mariadb-dump of the postal and postal-* databases,
-          loaded once on an install into an empty own MariaDB.
+          Host path of a mariadb-dump --databases of the main and the message
+          databases (.sql or .sql.gz), loaded once on an install into the own
+          MariaDB when it holds none of them; the install then takes them over
+          and needs postal_signing_key and postal_rails_secret_key. Refused
+          with mariadb_external, whose server the operator loads.
       postal_backups_keep:
         type: int
         description: Backups before updates that are kept.

@@ -21,10 +21,12 @@
 # postal_down (the services that are not running), postal_db_has_schema
 # (the main database holds a schema_migrations table: asked of the running
 # own MariaDB of an installation, or of the external server by external.yml;
-# on an install of the own MariaDB it is false here, as the server does not
-# run yet, and install.yml asks again once it does), postal_db_server_major
-# (external.yml) and postal_track_domains (the tracking domains whose DNS
-# Postal verified, with postal_track_hostnames). Refuses, before any change
+# on an install of the own MariaDB, which does not run yet, read from its
+# data directory, and install.yml asks the server again once it runs),
+# postal_own_database_names (on an install, Postal's databases in the data
+# directory of the own MariaDB), postal_db_server_major (external.yml) and
+# postal_track_domains (the tracking domains whose DNS Postal verified, with
+# postal_track_hostnames). Refuses, before any change
 # and in this order: a postal_data_dir that is not a mountpoint (with
 # postal_data_dir_mountpoint), an installation of another database mode, an
 # external installation of another server, an installation without its data
@@ -32,8 +34,12 @@
 # install that did not complete (its marker), a compose file without a Postal
 # version, a downgrade, an installation without its signing key when
 # postal_signing_key is empty, with postal_smtp_tls files certificate files
-# that are missing or do not load with their key, and with the external
-# MariaDB what external.yml refuses. It changes nothing.
+# that are missing or do not load with their key, with the external
+# MariaDB what external.yml refuses, and on an install a postal_import_dump
+# that is no file, a dump to load into an own MariaDB that holds Postal's
+# databases, and a takeover (Postal's schema in the database, or a dump to
+# load) without postal_signing_key or postal_rails_secret_key. It changes
+# nothing.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -364,11 +370,112 @@
     - postal_database == 'mariadb'
     - "'mariadb' in postal_ps.stdout_lines"
 
-# The external MariaDB: login, version, privileges and on an install an
-# existing schema, before any change and before the read below.
+# The external MariaDB: login, version, privileges and whether it holds
+# Postal's schema, before any change and before the read below.
 - name: Check the external MariaDB
   ansible.builtin.include_tasks: external.yml
   when: postal_database == 'mariadb_external'
+
+# An install over Postal's data takes that installation over (install.yml).
+# The own MariaDB does not run before an install, so its data directory is
+# asked: a database is a directory there, a table a .frm file in it, and a -
+# in a name is written @002d.
+- name: Look for Postal's databases in the data of the own MariaDB
+  ansible.builtin.find:
+    paths: "{{ postal_data_dir }}/mariadb"
+    file_type: directory
+    use_regex: true
+    patterns:
+      - "^{{ postal_db_name | regex_escape }}$"
+      - "^{{ postal_message_db_prefix | regex_escape }}@002d.*$"
+  register: postal_own_databases
+  when:
+    - not postal_installed
+    - postal_database == 'mariadb'
+    - "'mariadb' in postal_data_present"
+
+- name: Look for Postal's schema in the data of the own MariaDB
+  ansible.builtin.stat:
+    path: "{{ postal_data_dir }}/mariadb/{{ postal_db_name }}/schema_migrations.frm"
+    get_checksum: false
+  register: postal_own_schema_stat
+  when:
+    - not postal_installed
+    - postal_database == 'mariadb'
+    - "'mariadb' in postal_data_present"
+
+- name: Note whether the install takes Postal's data over
+  ansible.builtin.set_fact:
+    postal_db_has_schema: >-
+      {{ postal_db_has_schema | default(false) | bool if postal_database == 'mariadb_external'
+         else postal_own_schema_stat.stat.exists | default(false) }}
+    postal_own_database_names: >-
+      {{ postal_own_databases.files | default([]) | map(attribute='path') | map('basename')
+         | map('replace', '@002d', '-') | sort }}
+  when: not postal_installed
+
+- name: Look for the dump to import
+  ansible.builtin.stat:
+    path: "{{ postal_import_dump }}"
+    get_checksum: false
+  register: postal_import_stat
+  when:
+    - not postal_installed
+    - postal_import_dump | length > 0
+
+- name: Refuse a dump that is not there
+  ansible.builtin.fail:
+    msg: >-
+      postal_import_dump {{ postal_import_dump }} is no file on
+      {{ inventory_hostname }}. Copy the dump there first. The role changes
+      nothing.
+  when:
+    - not postal_installed
+    - postal_import_dump | length > 0
+    - not postal_import_stat.stat.isreg | default(false)
+
+# Loaded once, into a server that holds none of Postal's databases: loaded
+# over others it would mix two installations.
+- name: Refuse to import into a server with Postal's databases
+  ansible.builtin.fail:
+    msg: >-
+      postal_import_dump is set, but the own MariaDB in
+      {{ postal_data_dir }}/mariadb already holds
+      {{ postal_own_database_names | join(', ') }}: the role loads a dump only
+      into a server without {{ postal_db_name }} and
+      {{ postal_message_db_prefix }}-* databases. The role changes nothing.
+      Run the role without postal_import_dump to take these databases over,
+      or move {{ postal_data_dir }}/mariadb away to load the dump into a new
+      server.
+  when:
+    - not postal_installed
+    - postal_import_dump | length > 0
+    - postal_own_database_names | length > 0
+
+# A new signing key would break the DKIM record published for the
+# return-path domain and the signatures of Postal's webhooks, a new Rails
+# secret the sessions. Keys on disk do not count: a refused install may have
+# left generated ones there.
+- name: Refuse a takeover without its keys
+  ansible.builtin.fail:
+    msg: >-
+      {{ postal_takeover_source }} holds Postal's data, so this install takes
+      that installation over, which needs its keys, and
+      {{ postal_takeover_keys_missing | join(' and ') }}
+      {{ 'is' if postal_takeover_keys_missing | length == 1 else 'are' }} empty: set
+      postal_signing_key to the old installation's signing.key (the private
+      key of its DKIM record for {{ postal_dns_settings.return_path_domain }})
+      and postal_rails_secret_key to rails.secret_key of its postal.yml. The
+      role changes nothing.
+  vars:
+    postal_takeover_source: >-
+      {{ 'The dump ' ~ postal_import_dump if postal_import_dump | length > 0
+         else 'The external MariaDB ' ~ postal_external_target if postal_database == 'mariadb_external'
+         else 'The own MariaDB in ' ~ postal_data_dir ~ '/mariadb' }}
+  when:
+    - not postal_installed
+    - postal_db_has_schema | bool or postal_import_dump | length > 0
+    - postal_takeover_keys_missing | length > 0
 
 # The customer tracking domains: the full names (<name>.<domain>) of
 # Postal's track_domains whose CNAME Postal verified (dns_status OK, the
@@ -584,7 +691,7 @@
 - name: Decide what to do
   ansible.builtin.set_fact:
     postal_db_has_schema: >-
-      {{ postal_db_has_schema | default(false) | bool if postal_database == 'mariadb_external'
+      {{ postal_db_has_schema | default(false) | bool if postal_database == 'mariadb_external' or not postal_installed
          else (postal_schema_read.stdout | default('0') | trim) not in ['', '0'] }}
     postal_down: "{{ postal_services | difference(postal_ps.stdout_lines | default([])) }}"
     postal_restart_pending: "{{ postal_installed and postal_restart_marker_stat.stat.exists }}"

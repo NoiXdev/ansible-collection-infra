@@ -222,10 +222,18 @@ postal_failure: >-
      if ansible_failed_result.msg | default('') is search('non-zero return code')
      else ((ansible_failed_result.msg | default('') | trim).splitlines() or ['']) | first }}
 
+# The keys a takeover (an install on Postal's schema) needs and lacks: only
+# the given ones count, never those on disk.
+postal_takeover_keys_missing: >-
+  {{ (['postal_signing_key'] if postal_signing_key | string | length == 0 else [])
+     + (['postal_rails_secret_key'] if postal_rails_secret_key | string | length == 0 else []) }}
+
 # After a failed install: nothing in it should be worth keeping yet, so what
 # it made is removed and the next run installs afresh. A data subdirectory
 # that was there before the install (install.yml notes them in
-# postal_install_data_before; a later run cannot tell) is kept.
+# postal_install_data_before; a later run cannot tell) is kept. The
+# databases on an external server, or in a kept data subdirectory, stay as
+# the install left them: a schema there makes the next run a takeover.
 postal_install_hint: >-
   It left a partial installation, which the role does not take for a
   finished one. To install again, first check that nothing in it is worth
@@ -234,7 +242,12 @@ postal_install_hint: >-
   {{ postal_compose_file }}, {{ postal_config_dir }},
   {{ postal_mariadb_cnf_file }}, {{ postal_target_file }},
   {{ postal_install_marker }}{{ postal_install_hint_data }}, then run the role
-  again.
+  again. {{ ('The databases on the external MariaDB ' ~ postal_external_target)
+            if postal_database == 'mariadb_external'
+            else ('The databases in a kept ' ~ postal_data_dir ~ '/mariadb') }} stay as
+  they are: where they hold Postal's schema the next run takes them over,
+  with postal_signing_key and postal_rails_secret_key (drop them first for a
+  fresh install).
 postal_install_hint_data: >-
   {%- set made = postal_subdirs | reject('in', postal_install_data_before | default([])) | list -%}
   {%- set kept = postal_subdirs | select('in', postal_install_data_before | default([])) | list -%}

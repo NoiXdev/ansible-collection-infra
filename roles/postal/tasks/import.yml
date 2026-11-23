@@ -1,0 +1,77 @@
+---
+# Loads postal_import_dump (a mariadb-dump --databases of the main and the
+# message databases, .sql or gzip-compressed .sql.gz) into the own MariaDB,
+# as root through its socket, once: install.yml includes it on an install
+# alone, into a server that holds none of Postal's databases (state.yml and
+# install.yml refuse others), and only with the keys of the takeover that
+# follows (state.yml refuses it without them). Sets postal_db_has_schema.
+# The dump holds Postal's data, credentials among them: the task that reads
+# it is no_log, and a failure names MariaDB's error code and line or gzip's
+# error, never a line of the dump.
+
+- name: Load the dump into the own MariaDB
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        case "$1" in
+          *.gz) gzip -dc -- "$1" ;;
+          *) cat -- "$1" ;;
+        esac | docker compose exec -T mariadb mariadb --user=root --batch
+      - bash
+      - "{{ postal_import_dump }}"
+    chdir: "{{ postal_dir }}"
+  register: postal_import_load
+  changed_when: true
+  failed_when: false
+  no_log: true
+
+- name: Fail on a dump that does not load
+  ansible.builtin.fail:
+    msg: >-
+      postal_import_dump {{ postal_import_dump }} did not load into the own
+      MariaDB ({{ postal_import_error }}; the dump's lines are not shown).
+      Check the file (gzip -t for a .sql.gz) and that it is a mariadb-dump
+      --databases of {{ postal_db_name }} and its
+      {{ postal_message_db_prefix }}-* databases.
+  vars:
+    postal_import_error: >-
+      {{ ((postal_import_load.stderr | default('')).splitlines()
+          | map('regex_search', '^(ERROR [0-9]+ [(][0-9A-Z]+[)]( at line [0-9]+)?|gzip: .*)') | select | list
+          or ['exit code ' ~ postal_import_load.rc | default('?') | string]) | first }}
+  when: postal_import_load.rc != 0
+
+- name: Look for Postal's schema in the loaded dump
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - mariadb
+      - mariadb
+      - --user=root
+      - --batch
+      - --skip-column-names
+      - "--execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{{ postal_db_name }}' AND table_name = 'schema_migrations'"
+    chdir: "{{ postal_dir }}"
+  register: postal_import_schema
+  changed_when: false
+
+# A dump of other databases than postal_db_name would leave Postal an empty
+# main database, which initialize would fill beside them.
+- name: Fail on a dump without Postal's schema
+  ansible.builtin.fail:
+    msg: >-
+      postal_import_dump {{ postal_import_dump }} loaded, but
+      {{ postal_db_name }} holds no schema_migrations table afterwards: the
+      dump is no mariadb-dump --databases of Postal's main database
+      {{ postal_db_name }}. For an installation that used other names set
+      postal_db_name and postal_message_db_prefix to them.
+  when: postal_import_schema.stdout | trim in ['', '0']
+
+- name: Note that the install takes the dump over
+  ansible.builtin.set_fact:
+    postal_db_has_schema: true

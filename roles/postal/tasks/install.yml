@@ -1,19 +1,25 @@
 ---
 # A fresh install: the directories (the data subdirectories only here), the
 # compose file, the configuration with its keys, the database target, then
-# with the own MariaDB the server and Postal's user; postal initialize on an
-# empty database (it creates the main database and loads the schema), the
-# first admin when postal_admin_email is set, the certificate of the SMTP
-# services (tls.yml), Postal until it is healthy,
-# and the DNS records to set. The marker postal_install_marker lives from
-# before the first data directory until Postal is healthy, so a run after a
-# failed install refuses (state.yml) instead of taking the half-made
-# installation for a finished one. A failed install stops Postal and deletes
-# nothing (install_failed.yml). An own MariaDB whose data directory already
-# holds a database (Postal's schema, or a root that does not log in through
-# the socket, as the role leaves none) is asked before anything is done in
-# it, and the install is refused without a change to it: what this run
-# wrote beside it goes again, so the next run is an install as well.
+# with the own MariaDB the server, the dump of postal_import_dump
+# (import.yml) and Postal's user; postal initialize on an empty database (it
+# creates the main database and loads the schema), or on a database that
+# holds Postal's schema a takeover: its tables converted to
+# ROW_FORMAT=DYNAMIC and postal upgrade, never initialize (state.yml refused
+# it without postal_signing_key and postal_rails_secret_key); the first admin
+# when postal_admin_email is set and Postal has no user yet, the certificate
+# of the SMTP services (tls.yml), Postal until it is healthy, and the DNS
+# records to set. The marker postal_install_marker lives from before the
+# first data directory until Postal is healthy, so a run after a failed
+# install refuses (state.yml) instead of taking the half-made installation
+# for a finished one. A failed install stops Postal and deletes nothing
+# (install_failed.yml). The own MariaDB is asked once it runs, before
+# anything is done in it; the install is refused without a change to it when
+# its root does not log in through the socket (the role leaves none such, and
+# cannot set up Postal's user then), when postal_import_dump is set and it
+# holds Postal's databases, or when it holds Postal's schema that state.yml
+# did not see in its files and the keys of a takeover are missing: what this
+# run wrote beside it goes again, so the next run is an install as well.
 
 - name: Create the Postal directory
   ansible.builtin.file:
@@ -85,10 +91,11 @@
         wait_timeout: "{{ postal_health_timeout | int }}"
       when: postal_database == 'mariadb'
 
-    # state.yml could not ask the server, which did not run yet. Read-only, as
-    # root through the socket: a fresh server lets root in without a
-    # password; one that does not (root has a password) is not the empty
-    # server the install needs either.
+    # state.yml read the server's files only, as it did not run yet.
+    # Read-only, as root through the socket (a fresh server lets root in
+    # without a password; one whose root has a password is no server the role
+    # set up): whether the main database holds Postal's schema, then Postal's
+    # databases, one per line.
     - name: Look for Postal's schema in the own MariaDB
       ansible.builtin.command:
         argv:
@@ -101,7 +108,11 @@
           - --user=root
           - --batch
           - --skip-column-names
-          - "--execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{{ postal_db_name }}' AND table_name = 'schema_migrations'"
+          - >-
+            --execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{{ postal_db_name }}'
+            AND table_name = 'schema_migrations'; SELECT schema_name FROM information_schema.schemata
+            WHERE schema_name = '{{ postal_db_name }}'
+            OR schema_name LIKE '{{ postal_message_db_prefix | replace('_', '\_') }}-%' ORDER BY schema_name
         chdir: "{{ postal_dir }}"
       register: postal_schema_read
       changed_when: false
@@ -112,19 +123,35 @@
     - name: Fail with the failed install
       ansible.builtin.include_tasks: install_failed.yml
 
-- name: Note whether the own MariaDB holds a database
+- name: Note what the own MariaDB holds
   ansible.builtin.set_fact:
+    postal_db_root_refused: "{{ postal_schema_read.rc | default(0) != 0 }}"
     postal_db_has_schema: >-
-      {{ postal_schema_read.rc | default(0) != 0 or (postal_schema_read.stdout | default('0') | trim) not in ['', '0'] }}
+      {{ postal_db_has_schema | bool
+         or (postal_schema_read.stdout_lines | default(['0']) | first | default('0') | trim) not in ['', '0'] }}
+    postal_own_database_names: "{{ (postal_schema_read.stdout_lines | default([]))[1:] | map('trim') | select | list }}"
   when: postal_database == 'mariadb'
 
-# Taking over a database that holds Postal's data needs its signing key and
-# Rails secret and postal upgrade in place of initialize. Nothing was done in
-# the database: the containers and what this run wrote beside the data go
-# again (the configuration directory stays, its keys are taken up by the
-# next run), so the next run installs again and asks again.
-- name: Refuse to install over an existing database
-  when: postal_db_has_schema | bool
+# Nothing was done in the database: the containers and what this run wrote
+# beside the data go again (the configuration directory stays: a takeover
+# takes only the keys it is given), so the next run installs again and asks
+# again.
+- name: Refuse to install on the own MariaDB
+  when:
+    - postal_database == 'mariadb'
+    - postal_own_refusal | length > 0
+  vars:
+    postal_own_refusal: >-
+      {{ "its root does not log in through the socket, so the role cannot set up Postal's database user there:"
+         ~ ' let root@localhost log in through unix_socket (ALTER USER root@localhost IDENTIFIED VIA unix_socket)'
+         if postal_db_root_refused | bool
+         else 'it holds ' ~ postal_own_database_names | join(', ') ~ ', and the role loads postal_import_dump only into'
+              ~ ' a server without ' ~ postal_db_name ~ ' and ' ~ postal_message_db_prefix ~ '-* databases'
+         if postal_import_dump | length > 0 and postal_own_database_names | length > 0
+         else postal_db_name ~ " holds Postal's schema (a schema_migrations table), which its files did not show,"
+              ~ ' and a takeover needs ' ~ postal_takeover_keys_missing | join(' and ')
+         if postal_db_has_schema | bool and postal_takeover_keys_missing | length > 0
+         else '' }}
   block:
     - name: Remove the containers of the refused install
       community.docker.docker_compose_v2:
@@ -142,24 +169,89 @@
         - "{{ postal_target_file }}"
         - "{{ postal_install_marker }}"
 
-    - name: Fail on an existing database
+    - name: Fail on the own MariaDB
       ansible.builtin.fail:
         msg: >-
-          {{ postal_data_dir }}/mariadb already holds a database
-          ({{ 'its root does not log in through the socket'
-              if postal_schema_read.rc | default(0) != 0
-              else postal_db_name ~ " holds Postal's schema, a schema_migrations table" }}),
-          and this version of the role installs on an empty server only:
-          taking over an existing Postal database is not supported yet. The
-          role changed nothing in that database and removed again the compose
-          file, mariadb.cnf, the database target and the containers it had
-          made; the data stays as it was.
+          {{ postal_data_dir }}/mariadb already holds a database the role does
+          not install on: {{ postal_own_refusal }}. The role changed nothing in
+          that database and removed again the compose file, mariadb.cnf, the
+          database target and the containers it had made; the data stays as it
+          was.
 
 - name: Install Postal
   block:
+    # Into the own MariaDB only (main.yml refuses it with an external one),
+    # which holds none of Postal's databases (refused above); then the
+    # install is a takeover.
+    - name: Load the dump
+      ansible.builtin.include_tasks: import.yml
+      when: postal_import_dump | length > 0
+
     - name: Set up Postal's database user
       ansible.builtin.include_tasks: db_user.yml
       when: postal_database == 'mariadb'
+
+    # A takeover: Postal v3 needs ROW_FORMAT=DYNAMIC (the step of its upgrade
+    # guide for a schema from v2), so every table of the main and the message
+    # databases that is not converts, as Postal's user, which has all
+    # privileges on them. The tables, as schema<TAB>table.
+    - name: Read the tables that are not ROW_FORMAT=DYNAMIC
+      ansible.builtin.command:
+        argv: >-
+          {{ postal_db_client
+             + ["--execute=SELECT table_schema, table_name FROM information_schema.tables"
+                ~ " WHERE table_type = 'BASE TABLE' AND row_format <> 'Dynamic'"
+                ~ " AND (table_schema = '" ~ postal_db_name ~ "'"
+                ~ " OR table_schema LIKE '" ~ postal_message_db_prefix | replace('_', '\_') ~ "-%')"
+                ~ " ORDER BY table_schema, table_name"] }}
+        chdir: "{{ postal_dir }}"
+        stdin: "{{ postal_db_password }}"
+        stdin_add_newline: false
+      register: postal_row_format_read
+      changed_when: false
+      no_log: true
+      when: postal_db_has_schema | bool
+
+    # [schema, table] each (Postal's names hold no white space); not secret.
+    - name: Note the tables that are not ROW_FORMAT=DYNAMIC
+      ansible.builtin.set_fact:
+        postal_row_format_tables: >-
+          {{ postal_row_format_read.stdout_lines | default([]) | map('split') | selectattr('1', 'defined') | list }}
+      when: postal_db_has_schema | bool
+
+    - name: Convert the tables to ROW_FORMAT=DYNAMIC
+      ansible.builtin.command:
+        argv: >-
+          {%- set statements = [] -%}
+          {%- for schema, table in postal_row_format_tables -%}
+          {%-   set _ = statements.append('ALTER TABLE `' ~ schema | replace('`', '``') ~ '`.`'
+                                          ~ table | replace('`', '``') ~ '` ROW_FORMAT=DYNAMIC') -%}
+          {%- endfor -%}
+          {{ postal_db_client + ['--execute=' ~ statements | join('; ')] }}
+        chdir: "{{ postal_dir }}"
+        stdin: "{{ postal_db_password }}"
+        stdin_add_newline: false
+      changed_when: true
+      no_log: true
+      when:
+        - postal_db_has_schema | bool
+        - postal_row_format_tables | length > 0
+
+    - name: Report the tables converted to ROW_FORMAT=DYNAMIC
+      ansible.builtin.debug:
+        msg: "Converted to ROW_FORMAT=DYNAMIC: {{ postal_row_format_tables | map('join', '.') | join(', ') }}"
+      when:
+        - postal_db_has_schema | bool
+        - postal_row_format_tables | length > 0
+
+    # rake postal:update: db:migrate on the main database, then on every
+    # message database.
+    - name: Upgrade the database
+      ansible.builtin.command:
+        argv: [docker, compose, run, --rm, -T, runner, postal, upgrade]
+        chdir: "{{ postal_dir }}"
+      changed_when: true
+      when: postal_db_has_schema | bool
 
     # rake db:create postal:update: the main database and its schema.
     - name: Initialize the database
@@ -167,10 +259,11 @@
         argv: [docker, compose, run, --rm, -T, runner, postal, initialize]
         chdir: "{{ postal_dir }}"
       changed_when: true
+      when: not postal_db_has_schema | bool
 
-    # Only when Postal has no user yet; the values go through stdin as JSON
-    # (the password among them), so the task is no_log, and the script prints
-    # none of them.
+    # Only when Postal has no user yet (a takeover has its users); the values
+    # go through stdin as JSON (the password among them), so the task is
+    # no_log, and the script prints none of them.
     - name: Create the first admin
       ansible.builtin.command:
         argv: "{{ postal_runner + ['runner', 'bundle', 'exec', 'rails', 'runner', lookup('ansible.builtin.file', 'make_admin.rb')] }}"
@@ -260,7 +353,10 @@
                                  ~ ' into postal_rails_secret_key of your vault. A lost signing key breaks the'
                                  ~ ' DKIM record above.') -%}
       {%- endif -%}
-      {%- if postal_admin_email | string | length == 0 -%}
+      {%- if postal_db_has_schema | bool -%}
+      {%-   set _ = lines.append('The role took over the Postal databases there (postal upgrade): with the'
+                                 ~ ' signing key of that installation the DKIM record above is the one it published.') -%}
+      {%- elif postal_admin_email | string | length == 0 -%}
       {%-   set _ = lines.append('No admin was created (postal_admin_email is empty): run docker compose run --rm'
                                  ~ ' runner postal make-user in ' ~ postal_dir ~ '.') -%}
       {%- endif -%}

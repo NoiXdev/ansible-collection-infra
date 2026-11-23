@@ -1,8 +1,8 @@
 ---
 # The own MariaDB: root logs in through the socket only (no password at all),
 # and Postal's user postal_db_user has postal_db_password and all privileges
-# on the main database and on every message database (<prefix>-<id>, which
-# Postal creates per mail server). Run by install once MariaDB is healthy
+# on the main database and on every message database (<prefix>-server-<id>,
+# which Postal creates per mail server). Run by install once MariaDB is healthy
 # and by reconfigure (so that a new postal_db_password reaches the server);
 # every statement keeps what is there. In a grant _ is a wildcard and is
 # escaped; the % of the message databases is meant. The SQL goes through
@@ -18,8 +18,8 @@
           ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;
           CREATE USER IF NOT EXISTS '{{ postal_db_user }}'@'%' IDENTIFIED BY '{{ postal_db_password_sql }}';
           ALTER USER '{{ postal_db_user }}'@'%' IDENTIFIED BY '{{ postal_db_password_sql }}';
-          GRANT ALL PRIVILEGES ON `{{ postal_db_name | replace('_', '\\_') }}`.* TO '{{ postal_db_user }}'@'%';
-          GRANT ALL PRIVILEGES ON `{{ postal_message_db_prefix | replace('_', '\\_') }}-%`.* TO '{{ postal_db_user }}'@'%';
+          GRANT ALL PRIVILEGES ON `{{ postal_db_name | replace('_', '\_') }}`.* TO '{{ postal_db_user }}'@'%';
+          GRANT ALL PRIVILEGES ON `{{ postal_message_db_prefix | replace('_', '\_') }}-%`.* TO '{{ postal_db_user }}'@'%';
       vars:
         # A string literal of MariaDB's SQL (main.yml refuses a backslash in
         # the password; doubled here all the same).
