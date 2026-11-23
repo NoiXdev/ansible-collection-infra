@@ -874,6 +874,10 @@ test_plugins() {
     -e "$(one_site '')" -e "$(bad_plugin audit-parts 'SecAction "id:9600001,phase:1,pass,nolog,ctl:auditLogParts=+E"')"
   refused plugin-id-range 'waf: plugin bad: bad-before.conf line 1: rule id 1234 is outside 9500000-9999999' \
     -e "$(one_site '')" -e "$(bad_plugin id-range 'SecAction "id:1234,phase:1,pass,nolog"')"
+  refused plugin-second-directive 'waf: plugin bad: bad-before.conf line 1: SecRuleRemoveById after the first directive word is not allowed in a plugin (one directive per line)' \
+    -e "$(one_site '')" -e "$(bad_plugin second-directive $'SecAction "id:9600001,phase:1,pass,nolog" \\\nSecRuleRemoveById 949110')"
+  refused plugin-credential-macro 'waf: plugin bad: bad-before.conf line 1: %{REQUEST_HEADERS...} is not allowed in a plugin (it can copy a credential into the log)' \
+    -e "$(one_site '')" -e "$(bad_plugin credential-macro "SecAction \"id:9600001,phase:1,pass,log,logdata:'%{REQUEST_HEADERS.authorization}'\"")"
 
   echo "-- refused plugin archives, after the download"
   refused_cached plugin-checksum "waf: plugin nextcloud-rule-exclusions: the archive at $nextcloud_url does not have sha256 0000000000000000000000000000000000000000000000000000000000000000" \
@@ -950,6 +954,11 @@ test_plugins() {
   expect 200 own.test '/?mark=ownsecret' -H 'X-Secret-Token: tokenvalue123'
   expect 200 plain.test '/?mark=plainsecret' -H 'X-Secret-Token: whatever'
   if h docker logs "$waf" 2>&1 | grep -F -e tokenvalue123 -e whatever; then fail "the WAF's log holds a credential"; fi
+  # A credential cookie on a request that logs an event (9590010, own.test's
+  # greeting hi): the event is logged, the cookie's value is not.
+  expect 403 own.test '/?noixprobe=hi&mark=owncookie' -H 'Cookie: session=cookievalue123'
+  audit | grep -qF 'mark=owncookie' || { audit >&2; fail "the request with a credential cookie logged no event"; }
+  if audit | grep -qF cookievalue123; then audit >&2; fail "the WAF's log holds a credential cookie"; fi
   # The credential exclusion keeps 9590011 from ever matching a credential
   # header; 9590012 (phase 1, any X-Noix-Mark header) shows the phase 1 rules:
   # logged for the site that lists the plugin, removed for one that does not.
