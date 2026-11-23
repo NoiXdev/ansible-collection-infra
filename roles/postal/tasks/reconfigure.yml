@@ -25,6 +25,17 @@
     group: root
     mode: "0644"
 
+# rspamd and ClamAV switched on, or their subdirectory gone: their state
+# comes back on start (state.yml).
+- name: Create the subdirectories of rspamd and ClamAV
+  ansible.builtin.file:
+    path: "{{ postal_data_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ postal_subdir_owners[item] | default(omit if item in postal_data_present else 'root') }}"
+    group: "{{ postal_subdir_owners[item] | default(omit if item in postal_data_present else 'root') }}"
+    mode: "0755"
+  loop: "{{ postal_cache_subdirs }}"
+
 - name: Write the compose file
   ansible.builtin.copy:
     dest: "{{ postal_compose_file }}"
@@ -65,15 +76,21 @@
   when: postal_database == 'mariadb'
 
 # Once: every Postal service for a new configuration (or a restart a stopped
-# run left), else the SMTP services for a new certificate.
+# run left), else the SMTP services for a new certificate; and rspamd for new
+# settings of its own (or that restart) when it ran before this run (else
+# compose just started it on them).
 - name: Restart Postal with the new configuration
   community.docker.docker_compose_v2:
     project_src: "{{ postal_dir }}"
-    services: >-
-      {{ postal_app_services if postal_config_changed | bool or postal_restart_pending | bool
-         else postal_smtp_service_names }}
+    services: "{{ postal_restart_services }}"
     state: restarted
-  when: postal_config_changed | bool or postal_restart_pending | bool or postal_tls_changed | bool
+  vars:
+    postal_restart_services: >-
+      {{ (postal_app_services if postal_config_changed | bool or postal_restart_pending | bool
+          else postal_smtp_service_names if postal_tls_changed | bool else [])
+         + (['rspamd'] if postal_spam == 'rspamd' and 'rspamd' in postal_ps.stdout_lines | default([])
+                          and (postal_rspamd_config_changed | bool or postal_restart_pending | bool) else []) }}
+  when: postal_restart_services | length > 0
 
 - name: Check that Postal is healthy
   ansible.builtin.include_tasks: health.yml

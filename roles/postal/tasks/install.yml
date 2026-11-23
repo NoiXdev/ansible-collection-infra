@@ -48,15 +48,16 @@
         group: root
         mode: "0755"
 
-    # MariaDB chowns its data directory on start.
+    # MariaDB and ClamAV chown theirs on start; rspamd's image runs as its
+    # own user from the start. One that is there keeps its owner.
     - name: Create the data subdirectories
       ansible.builtin.file:
         path: "{{ postal_data_dir }}/{{ item }}"
         state: directory
-        owner: root
-        group: root
+        owner: "{{ postal_subdir_owners[item] | default(omit if item in postal_data_present else 'root') }}"
+        group: "{{ postal_subdir_owners[item] | default(omit if item in postal_data_present else 'root') }}"
         mode: "0755"
-      loop: "{{ postal_data_subdirs }}"
+      loop: "{{ postal_subdirs }}"
 
     - name: Write the compose file
       ansible.builtin.copy:

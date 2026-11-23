@@ -28,10 +28,17 @@ postal_marker_file: "{{ postal_dir }}/update-failed"
 postal_backup_dir: "{{ postal_data_dir }}/backups"
 # The subdirectories of postal_data_dir whose absence means the data is
 # missing (an unmounted volume): only install creates them.
-postal_data_subdirs: >-
-  {{ (['mariadb'] if postal_database == 'mariadb' else [])
-     + (['rspamd'] if postal_spam == 'rspamd' else [])
-     + (['clamav'] if postal_clamav | bool else []) }}
+postal_data_subdirs: "{{ ['mariadb'] if postal_database == 'mariadb' else [] }}"
+# The subdirectories of rspamd's state and ClamAV's signatures, which come
+# back on start: install and reconfigure create them when they are missing
+# (switching the checks on later), rspamd's owned by the user its image runs
+# as. ClamAV's image chowns its own on start.
+postal_cache_subdirs: >-
+  {{ (['rspamd'] if postal_spam == 'rspamd' else []) + (['clamav'] if postal_clamav | bool else []) }}
+postal_subdirs: "{{ postal_data_subdirs + postal_cache_subdirs }}"
+postal_rspamd_uid: 11333
+postal_subdir_owners:
+  rspamd: "{{ postal_rspamd_uid }}"
 
 # The oldest release the role runs.
 postal_min_version: 3.0.0
@@ -144,7 +151,12 @@ postal_mariadb_cnf_file: "{{ postal_dir }}/mariadb.cnf"
 # run Postal (and read postal.yml and the keys on start).
 postal_app_services: >-
   {{ ['web', 'smtp'] + (['submission'] if postal_smtp_submission_port | int != 0 else []) + ['worker'] }}
-postal_services: "{{ (['mariadb'] if postal_database == 'mariadb' else []) + postal_app_services }}"
+# The helpers of the project: the own MariaDB, rspamd and ClamAV, each with
+# a health check of its image.
+postal_helper_services: >-
+  {{ (['mariadb'] if postal_database == 'mariadb' else []) + (['rspamd'] if postal_spam == 'rspamd' else [])
+     + (['clamav'] if postal_clamav | bool else []) }}
+postal_services: "{{ postal_helper_services + postal_app_services }}"
 # The ports the SMTP services listen on.
 postal_smtp_services: >-
   {{ [{'service': 'smtp', 'port': postal_smtp_port | int}]
@@ -178,6 +190,22 @@ postal_database_target: >-
                if postal_database == 'mariadb_external' else {}) }}
 postal_external_target: "{{ postal_db_host }}:{{ postal_db_port | int }}"
 
+# A client of the database as Postal's user, with the password through
+# stdin into its environment (the x keeps trailing newlines), so a task that
+# runs it passes stdin: postal_db_password and is no_log:
+# postal_db_client + [mariadb options...]. With the own MariaDB inside its
+# container over TCP (as Postal logs in); with the external server a one-off
+# container of postal_mariadb_image on the Traefik network, where web reaches
+# the server too (needs no compose file).
+postal_db_client: >-
+  {{ (['docker', 'compose', 'exec', '-T', 'mariadb', 'sh'] if postal_database == 'mariadb'
+      else ['docker', 'run', '--rm', '-i', '--network', postal_traefik_network, '--entrypoint', 'sh',
+            postal_mariadb_image])
+     + ['-c', 'MYSQL_PWD="$(cat; echo x)"; MYSQL_PWD="${MYSQL_PWD%x}"; export MYSQL_PWD; exec mariadb'
+              ~ ' --host=' ~ ('127.0.0.1' if postal_database == 'mariadb' else postal_db_host | string)
+              ~ ' --port=' ~ (postal_mariadb_port if postal_database == 'mariadb' else postal_db_port) | int | string
+              ~ ' --user=' ~ postal_db_user ~ ' --batch --skip-column-names --connect-timeout=10 "$@"', 'sh'] }}
+
 # A one-off command of Postal's image in the runner service (on the project
 # and the Traefik network, the configuration mounted), without starting
 # MariaDB: postal_runner + [command...].
@@ -208,10 +236,10 @@ postal_install_hint: >-
   {{ postal_install_marker }}{{ postal_install_hint_data }}, then run the role
   again.
 postal_install_hint_data: >-
-  {%- set made = postal_data_subdirs | reject('in', postal_install_data_before | default([])) | list -%}
-  {%- set kept = postal_data_subdirs | select('in', postal_install_data_before | default([])) | list -%}
-  {%- if postal_install_data_before is not defined and postal_data_subdirs | length > 0 -%}
-  {{ ' and the subdirectories ' ~ postal_data_subdirs | join(' and ') ~ ' of ' ~ postal_data_dir
+  {%- set made = postal_subdirs | reject('in', postal_install_data_before | default([])) | list -%}
+  {%- set kept = postal_subdirs | select('in', postal_install_data_before | default([])) | list -%}
+  {%- if postal_install_data_before is not defined and postal_subdirs | length > 0 -%}
+  {{ ' and the subdirectories ' ~ postal_subdirs | join(' and ') ~ ' of ' ~ postal_data_dir
      ~ ' (keep those that held data before the install)' }}
   {%- else -%}
   {{ ((' and the subdirectories ' ~ made | join(' and ') ~ ' of ' ~ postal_data_dir) if made | length > 0 else '')
@@ -221,6 +249,11 @@ postal_install_hint_data: >-
 # The files the role renders, as it writes them.
 postal_compose: "{{ lookup('ansible.builtin.template', 'compose.yaml.j2') }}"
 postal_mariadb_cnf: "{{ lookup('ansible.builtin.template', 'mariadb.cnf.j2') }}"
+# rspamd's controller settings (rspamd-controller.inc): its password when
+# postal_rspamd_password is set, so the file is 0440 root:postal_rspamd_uid in
+# postal_config_dir and bound read-only into rspamd.
+postal_rspamd_config: "{{ lookup('ansible.builtin.template', 'rspamd-controller.inc.j2') }}"
+postal_rspamd_config_file: "{{ postal_config_dir }}/rspamd-controller.inc"
 # postal.yml: evaluated only once postal_rails_secret_value is known
 # (state.yml, config.yml).
 postal_config: "{{ lookup('ansible.builtin.template', 'postal.yml.j2') }}"

@@ -3,8 +3,10 @@
 #   install      no compose file
 #   update       postal_version is newer than the installed version
 #   reconfigure  the compose file or mariadb.cnf the role writes differs from
-#                the one on disk, postal.yml or signing.key from what the role
-#                writes, SMTP TLS from what tls.yml leaves, or a restart is
+#                the one on disk, postal.yml, signing.key or
+#                rspamd-controller.inc from what the role writes, SMTP TLS
+#                from what tls.yml leaves, a subdirectory of rspamd or ClamAV
+#                is missing (or rspamd's has another owner), or a restart is
 #                pending (postal_restart_marker, postal_smtp_cert_marker)
 #   noop         everything as the role writes it
 # Also sets postal_installed (a compose file exists), postal_compose_before
@@ -18,18 +20,20 @@
 # postal_tls_differs (SMTP TLS is not as tls.yml leaves it),
 # postal_down (the services that are not running), postal_db_has_schema
 # (the main database holds a schema_migrations table: asked of the running
-# own MariaDB of an installation; on an install of the own MariaDB it is
-# false here, as the server does not run yet, and install.yml asks again once
-# it does) and postal_track_domains (the tracking domains whose DNS Postal
-# verified, with postal_track_hostnames). Refuses, before any change and in
-# this order: a postal_data_dir that is not a mountpoint (with
+# own MariaDB of an installation, or of the external server by external.yml;
+# on an install of the own MariaDB it is false here, as the server does not
+# run yet, and install.yml asks again once it does), postal_db_server_major
+# (external.yml) and postal_track_domains (the tracking domains whose DNS
+# Postal verified, with postal_track_hostnames). Refuses, before any change
+# and in this order: a postal_data_dir that is not a mountpoint (with
 # postal_data_dir_mountpoint), an installation of another database mode, an
 # external installation of another server, an installation without its data
 # subdirectories (an unmounted volume), a compose file that is not YAML, an
 # install that did not complete (its marker), a compose file without a Postal
 # version, a downgrade, an installation without its signing key when
-# postal_signing_key is empty, and with postal_smtp_tls files certificate
-# files that are missing or do not load with their key. It changes nothing.
+# postal_signing_key is empty, with postal_smtp_tls files certificate files
+# that are missing or do not load with their key, and with the external
+# MariaDB what external.yml refuses. It changes nothing.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -65,7 +69,7 @@
   ansible.builtin.stat:
     path: "{{ postal_data_dir }}/{{ item }}"
     get_checksum: false
-  loop: "{{ postal_data_subdirs }}"
+  loop: "{{ postal_subdirs }}"
   register: postal_subdirs_stat
 
 - name: Note what is on the host
@@ -74,6 +78,15 @@
     postal_installed: "{{ postal_compose_read.content is defined }}"
     postal_data_present: >-
       {{ postal_subdirs_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}
+    # rspamd and ClamAV come back without their state: a missing
+    # subdirectory of theirs is made by a reconfigure, never refused.
+    postal_cache_differs: >-
+      {{ postal_subdirs_stat.results | selectattr('item', 'in', postal_cache_subdirs)
+         | rejectattr('stat.isdir', 'defined') | list | length > 0
+         or postal_subdirs_stat.results | selectattr('item', 'in', postal_cache_subdirs)
+            | selectattr('stat.isdir', 'defined') | rejectattr('stat.isdir') | list | length > 0
+         or postal_subdirs_stat.results | selectattr('item', 'eq', 'rspamd') | selectattr('stat.exists')
+            | rejectattr('stat.uid', 'eq', postal_rspamd_uid | int) | list | length > 0 }}
   no_log: true
 
 # Not secret: the database mode (and for an external server where it is).
@@ -217,12 +230,13 @@
           {{ postal_installed_version }} or newer.
       when: postal_version is version(postal_installed_version, '<')
 
-# The keys: postal.yml holds every secret and signing.key the private key of
-# the published DKIM record, so both are read and compared in no_log tasks.
+# The keys: postal.yml holds every secret, signing.key the private key of
+# the published DKIM record and rspamd-controller.inc rspamd's password, so
+# they are read and compared in no_log tasks.
 - name: Read the configuration
   ansible.builtin.slurp:
     src: "{{ item }}"
-  loop: ["{{ postal_config_file }}", "{{ postal_signing_key_file }}"]
+  loop: ["{{ postal_config_file }}", "{{ postal_signing_key_file }}", "{{ postal_rspamd_config_file }}"]
   register: postal_config_read
   failed_when: false
   no_log: true
@@ -233,6 +247,8 @@
   ansible.builtin.set_fact:
     postal_config_disk: "{{ postal_config_read.results[0].content | default('') | b64decode }}"
     postal_signing_key_disk: "{{ postal_config_read.results[1].content | default('') | b64decode }}"
+    postal_rspamd_config_disk: "{{ postal_config_read.results[2].content | default('') | b64decode }}"
+    postal_rspamd_config_found: "{{ postal_config_read.results[2].content is defined }}"
   no_log: true
 
 # A postal.yml that is not YAML has no Rails secret to keep (one is
@@ -294,16 +310,18 @@
     postal_smtp_bind_address: >-
       {{ '::' if (postal_ipv6_read.content | default('') | b64decode | trim) == '0' else '0.0.0.0' }}
 
-# The rendered postal.yml compared with the one on disk, and the key; the
-# Rails secret is empty only when config.yml has to generate one, which then
-# changes the file.
+# The rendered postal.yml compared with the one on disk, the key and rspamd's
+# settings (there only with rspamd); the Rails secret is empty only when
+# config.yml has to generate one, which then changes the file.
 - name: Compare the configuration with what the role writes
   ansible.builtin.set_fact:
     postal_config_differs: >-
       {{ postal_installed
          and (postal_rails_secret_value | length == 0
               or postal_config_disk != postal_config
-              or postal_signing_key_disk != postal_signing_key_value) }}
+              or postal_signing_key_disk != postal_signing_key_value
+              or (postal_rspamd_config_found | bool != (postal_spam == 'rspamd'))
+              or (postal_spam == 'rspamd' and postal_rspamd_config_disk != postal_rspamd_config)) }}
   no_log: true
 
 - name: Read mariadb.cnf
@@ -346,42 +364,35 @@
     - postal_database == 'mariadb'
     - "'mariadb' in postal_ps.stdout_lines"
 
+# The external MariaDB: login, version, privileges and on an install an
+# existing schema, before any change and before the read below.
+- name: Check the external MariaDB
+  ansible.builtin.include_tasks: external.yml
+  when: postal_database == 'mariadb_external'
+
 # The customer tracking domains: the full names (<name>.<domain>) of
 # Postal's track_domains whose CNAME Postal verified (dns_status OK, the
 # filter Postal applies before it rewrites links), with or without SSL. Read
-# on every run as Postal's user over TCP, the password through stdin into the
-# client's environment (no_log). On an install the database does not run
-# yet. With the external server (postal_db_settings) only the client
-# container changes.
+# on every run as Postal's user (postal_db_client, no_log). On an install
+# the database does not run yet (the own MariaDB) or holds no table yet (the
+# external one).
 - name: Read the verified tracking domains
   ansible.builtin.command:
-    argv: "{{ postal_db_client }}"
+    argv: >-
+      {{ postal_db_client
+         + ['--database=' ~ postal_db_name,
+            "--execute=SELECT CONCAT(t.name, '.', d.name) FROM track_domains t JOIN domains d ON d.id = t.domain_id"
+            ~ " WHERE t.dns_status = 'OK'"] }}
     chdir: "{{ postal_dir }}"
     stdin: "{{ postal_db_password }}"
     stdin_add_newline: false
-  vars:
-    postal_db_client:
-      - docker
-      - compose
-      - exec
-      - -T
-      - mariadb
-      - sh
-      - -c
-      - >-
-        MYSQL_PWD="$(cat; echo x)"; MYSQL_PWD="${MYSQL_PWD%x}"; export MYSQL_PWD;
-        exec mariadb --host=127.0.0.1 --port={{ postal_mariadb_port | int }} --user={{ postal_db_user }}
-        --database={{ postal_db_name }} --batch --skip-column-names --connect-timeout=10
-        --execute="SELECT CONCAT(t.name, '.', d.name) FROM track_domains t
-        JOIN domains d ON d.id = t.domain_id WHERE t.dns_status = 'OK'"
   register: postal_track_read
   changed_when: false
   failed_when: false
   no_log: true
   when:
     - postal_installed
-    - postal_database == 'mariadb'
-    - "'mariadb' in postal_ps.stdout_lines"
+    - postal_database == 'mariadb_external' or 'mariadb' in postal_ps.stdout_lines
 
 # A table that cannot be read (MariaDB down, a postal_db_password the
 # database does not know yet) must not drop the routers of the customers:
@@ -408,10 +419,11 @@
       so it keeps the customer tracking domains of the compose file:
       {{ postal_track_found | join(', ') or 'none' }}.
   vars:
+    # Skipped only with the own MariaDB down.
     postal_track_error: >-
-      {{ 'MariaDB is not running' if postal_track_read.rc is not defined
+      {{ 'the mariadb service is not running' if postal_track_read.rc is not defined
          else (postal_track_read.stderr | default('') | trim).splitlines() | select('search', 'ERROR')
-              | first | default('the client failed') }}
+              | first | default('the client exited with ' ~ postal_track_read.rc | string) }}
   when:
     - postal_installed
     - not postal_track_read_ok
@@ -571,7 +583,9 @@
 
 - name: Decide what to do
   ansible.builtin.set_fact:
-    postal_db_has_schema: "{{ (postal_schema_read.stdout | default('0') | trim) not in ['', '0'] }}"
+    postal_db_has_schema: >-
+      {{ postal_db_has_schema | default(false) | bool if postal_database == 'mariadb_external'
+         else (postal_schema_read.stdout | default('0') | trim) not in ['', '0'] }}
     postal_down: "{{ postal_services | difference(postal_ps.stdout_lines | default([])) }}"
     postal_restart_pending: "{{ postal_installed and postal_restart_marker_stat.stat.exists }}"
     postal_state: >-
@@ -580,6 +594,7 @@
          else 'reconfigure' if postal_compose_before != postal_compose
                                or postal_config_differs | bool
                                or postal_tls_differs | bool
+                               or postal_cache_differs | bool
                                or (postal_database == 'mariadb'
                                    and (postal_mariadb_cnf_read.content | default('') | b64decode) != postal_mariadb_cnf)
                                or postal_restart_marker_stat.stat.exists

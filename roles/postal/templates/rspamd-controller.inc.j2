@@ -1,0 +1,16 @@
+{#- rspamd's controller, which Postal asks to check each message (checkv2,
+    from the worker on the host's network through the port on 127.0.0.1).
+    With postal_rspamd_password it takes that password (main.yml refuses
+    white space, $, a double quote and a backslash in it, which rspamd's
+    configuration would read otherwise) and Postal sends it; without one
+    every client that reaches it (on 127.0.0.1 of the host and the project
+    network) is trusted, as one on the host's loopback is where rspamd runs
+    on the host itself. A client never names a file for rspamd to read. -#}
+# Managed by the noixdev.infra.postal role; changes are overwritten.
+{% if postal_rspamd_password | string | length > 0 %}
+password = "{{ postal_rspamd_password }}";
+{% else %}
+secure_ip = "0.0.0.0/0";
+secure_ip = "::/0";
+{% endif %}
+allow_file_and_shm_inputs = false;

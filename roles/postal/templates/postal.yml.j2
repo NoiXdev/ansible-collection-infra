@@ -1,7 +1,8 @@
 {#- Postal's configuration (format version 2), its only source: the role sets
     no environment variable but the per-service ports of compose. It holds
     every secret of the installation (the database password, the Rails
-    secret, the SMTP password of postal_mail, the OIDC secret), so the role
+    secret, the SMTP password of postal_mail, rspamd's password, the OIDC
+    secret), so the role
     writes it 0440 root:999 in no_log tasks. postal_config_extra is merged
     last; main.yml refuses the keys the role owns there. -#}
 {%- set db = postal_db_settings -%}
@@ -72,6 +73,18 @@
 {%- endif -%}
 {%- if postal_oidc | length > 0 -%}
 {%-   set _ = config.update({'oidc': postal_oidc}) -%}
+{%- endif -%}
+{#- rspamd and ClamAV at their ports on 127.0.0.1, where the worker on the
+    host's network reaches them; the worker inspects every message. -#}
+{%- if postal_spam == 'rspamd' -%}
+{%-   set rspamd = {'enabled': true, 'host': '127.0.0.1', 'port': postal_rspamd_port | int, 'ssl': false} -%}
+{%-   if postal_rspamd_password | string | length > 0 -%}
+{%-     set _ = rspamd.update({'password': postal_rspamd_password | string}) -%}
+{%-   endif -%}
+{%-   set _ = config.update({'rspamd': rspamd}) -%}
+{%- endif -%}
+{%- if postal_clamav | bool -%}
+{%-   set _ = config.update({'clamav': {'enabled': true, 'host': '127.0.0.1', 'port': postal_clamav_port | int}}) -%}
 {%- endif -%}
 # Managed by the noixdev.infra.postal role; changes are overwritten.
 {{ config | combine(postal_config_extra, recursive=true) | to_nice_yaml(indent=2, sort_keys=false) }}

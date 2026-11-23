@@ -6,12 +6,17 @@ click tracking, spam and virus checks, the database of your choice (a MariaDB
 container of its own or a MariaDB server of your own), a backup before every
 update and a rollback when an update fails.
 
-This part of the role installs Postal with a MariaDB container of its own,
-creates the first admin (`postal_admin_email`, `postal_admin_password`),
-prints the DNS records to set, applies changed settings, routes the API, the
-web interface and the tracking domains through Traefik, gives the SMTP
-services a certificate for STARTTLS and checks on every run that Postal
-answers; updates, the external MariaDB and the spam checks follow. With
+This part of the role installs Postal with a MariaDB container of its own
+or on a MariaDB server of your own, creates the first admin
+(`postal_admin_email`, `postal_admin_password`), prints the DNS records to
+set, applies changed settings, routes the API, the web interface and the
+tracking domains through Traefik, gives the SMTP services a certificate for
+STARTTLS, runs the spam and virus checks and checks on every run that Postal
+answers; updates follow. A MariaDB server of your own must be MariaDB 10.6 or
+newer, reachable from the host and from Traefik's network, with a user that
+has all privileges on `postal_db_name` and on the message databases
+(`<postal_message_db_prefix>-%`); every run checks that before it changes
+anything. With
 `postal_smtp_tls: traefik` the certificate is the one Traefik obtained for
 `postal_smtp_hostname`: the role installs `/usr/local/sbin/postal-smtp-cert`
 and a systemd timer that copies it twice a day and restarts the SMTP services

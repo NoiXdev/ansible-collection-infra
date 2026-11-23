@@ -189,17 +189,6 @@
     quiet: true
   when: postal_database == 'mariadb_external'
 
-# Its checks (login, version, grants) and the database check of every run
-# come with the support for it; until then the role would run Postal's
-# setup against a server it did not check.
-- name: Refuse an external MariaDB
-  ansible.builtin.fail:
-    msg: >-
-      postal_database mariadb_external is set, but an external MariaDB is not
-      supported yet by this version of the role. Use postal_database mariadb
-      (a MariaDB container of the project). The role changes nothing.
-  when: postal_database == 'mariadb_external'
-
 - name: Check postal_smtp_tls
   ansible.builtin.assert:
     that:
@@ -221,12 +210,13 @@
       - postal_clamav is boolean
       - postal_rspamd_image | length > 0
       - postal_clamav_image | length > 0
-      - postal_rspamd_password | string is match('^[^\s]*$')
+      - postal_rspamd_password | string is match('^[^\s$"\\\\]*$')
     fail_msg: >-
       postal_spam must be none or rspamd, postal_clamav true or false,
       postal_rspamd_image and postal_clamav_image must be set, and
-      postal_rspamd_password must not hold white space (the value is not
-      shown). The role changes nothing.
+      postal_rspamd_password must not hold white space, a $, a double quote
+      or a backslash, which rspamd's configuration would read as more than the
+      password (the value is not shown). The role changes nothing.
     quiet: true
 
 # The role writes these itself; a copy in postal_config_extra would be

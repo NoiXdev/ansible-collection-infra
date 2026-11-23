@@ -1,6 +1,8 @@
 ---
 # Writes Postal's configuration into postal_config_dir (0750 root:999):
-# signing.key and postal.yml, each 0440 root:999, and with the own MariaDB
+# signing.key and postal.yml, each 0440 root:999, with rspamd
+# rspamd-controller.inc (0440 root:postal_rspamd_uid, which rspamd reads; it
+# holds rspamd's password) and without it none, and with the own MariaDB
 # mariadb.cnf (0644, no secret) into postal_dir. The keys state.yml noted
 # (postal_signing_key_value, postal_rails_secret_value: given, else those of
 # the installation) are generated only when both the variable and the file
@@ -8,7 +10,8 @@
 # openssl in the runner service (genrsa 2048, rand -hex 64), whose output
 # only no_log tasks see. A signing key given that differs from the file is
 # written: that is the operator's change. Sets postal_config_changed (one of
-# the files Postal reads changed). Needs the compose file (the runner). The
+# the files Postal reads changed) and postal_rspamd_config_changed (the one
+# rspamd reads). Needs the compose file (the runner). The
 # tasks that touch a secret are no_log, so a failure gets a message of its
 # own that quotes nothing of them.
 
@@ -84,6 +87,23 @@
       register: postal_config_written
       no_log: true
 
+    - name: Write rspamd's settings
+      ansible.builtin.copy:
+        dest: "{{ postal_rspamd_config_file }}"
+        content: "{{ postal_rspamd_config }}"
+        owner: root
+        group: "{{ postal_rspamd_uid }}"
+        mode: "0440"
+      register: postal_rspamd_config_written
+      no_log: true
+      when: postal_spam == 'rspamd'
+
+    - name: Remove rspamd's settings
+      ansible.builtin.file:
+        path: "{{ postal_rspamd_config_file }}"
+        state: absent
+      when: postal_spam != 'rspamd'
+
     - name: Write mariadb.cnf
       ansible.builtin.copy:
         dest: "{{ postal_mariadb_cnf_file }}"
@@ -96,6 +116,7 @@
     - name: Note whether the configuration changed
       ansible.builtin.set_fact:
         postal_config_changed: "{{ postal_signing_key_written is changed or postal_config_written is changed }}"
+        postal_rspamd_config_changed: "{{ postal_rspamd_config_written is changed }}"
 
   rescue:
     - name: Fail with the task that could not write the configuration

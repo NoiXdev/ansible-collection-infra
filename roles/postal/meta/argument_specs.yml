@@ -243,7 +243,11 @@ argument_specs:
         description: Port rspamd publishes on 127.0.0.1.
       postal_rspamd_password:
         type: str
-        description: rspamd's controller password; empty sets none.
+        description: >-
+          rspamd's controller password, which Postal sends; no white space,
+          $, double quote or backslash. Empty sets none: every client that
+          reaches the controller on 127.0.0.1 or the project network is
+          trusted.
       postal_clamav:
         type: bool
         description: >-

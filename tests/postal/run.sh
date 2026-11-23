@@ -114,6 +114,38 @@
 #   mountpoint
 #             postal_data_dir_mountpoint on a plain directory refused, nothing
 #             changed (installed) or created (a fresh directory)
+#   spam      rspamd and ClamAV (verify.yml: on the project network, published
+#             on 127.0.0.1 alone, healthy; nothing else listens on their
+#             ports): a message through the API, which the fixture's mail
+#             server inspects (an outbound spam threshold), gets rspamd's
+#             checks and ClamAV's clean verdict in its message record; a
+#             message with the EICAR test file as an attachment to the route
+#             on port 25 is flagged as a threat (Eicar in its record); with
+#             postal_rspamd_password the controller refuses a client without
+#             it and Postal's checks still pass; off again removes both
+#             services. ClamAV starts from signatures this script downloads
+#             once into tests/output/postal/clamav-db (freshclam in the pinned
+#             image on this machine, updated on every run) and copies into the
+#             data directory first, so that no test host downloads the full
+#             database
+#   oidc_gelf postal_oidc (the login page offers the provider, local logins
+#             stay), postal_gelf to a UDP listener on the test host's
+#             loopback, postal_use_ip_pools, postal_worker_replicas 2 and
+#             relays with an ssl_mode: rendered into postal.yml and compose,
+#             both workers run, a message through the API reaches Mailpit and
+#             a GELF message with the facility reaches the listener
+#   install_external
+#             postal_database mariadb_external against a mariadb:11.4
+#             container on the Traefik network (db.example.test, published on
+#             the test host's 127.0.0.1:3306) with the two GRANTs of the
+#             docs: refused before any change with a wrong password, against
+#             a mysql:8.4 server, a user without the grant of the message
+#             databases and a mariadb:10.5 server; an install without a
+#             mariadb service, the fixture and a message through the API;
+#             then refused without a change: a wrong password, that user, the
+#             own MariaDB (naming both modes), another postal_db_host (naming
+#             both servers), and a fresh install on the database that holds
+#             Postal's schema
 # Postal's image is linux/amd64 only, so on a machine that is not amd64 (an
 # arm64 Mac, for example) it runs under emulation (Docker Desktop's Rosetta or
 # QEMU) inside the test host; every scenario but the arch refusal sets
@@ -148,7 +180,11 @@ app_dir=/opt/postal
 db_password="$(openssl rand -hex 12)"' pa$s w'"'"'o rd'
 admin_password="$(openssl rand -hex 10)"' ad$m '"'"'in'
 admin_email=admin@example.test
-secrets=("$db_password" "$admin_password")
+# rspamd's controller password (no white space, $, double quote or
+# backslash, which the role refuses there) and the OIDC client secret.
+rspamd_password="$(openssl rand -hex 10)"\''rs'
+oidc_secret="$(openssl rand -hex 16)"
+secrets=("$db_password" "$admin_password" "$rspamd_password" "$oidc_secret")
 
 # The TLS scenarios: Pebble, Let's Encrypt's test ACME server, on the
 # Traefik network as pebble (its listener certificate names that host),
@@ -247,6 +283,21 @@ write_role_vars() {
   write_db_vars backslash-db-vars.json 'a\b'"$db_password"
   write_admin_vars admin-vars.json "$admin_email" "$admin_password" Noix Admin
   write_admin_vars other-admin-vars.json other@example.test "${admin_password}-other" Other Person
+  # rspamd's controller password, and an OIDC provider whose endpoints are
+  # given (no discovery: nothing answers at id.example.test).
+  (
+    umask 077
+    env "OUT=$out" "RSPAMD_PASSWORD=$rspamd_password" "OIDC_SECRET=$oidc_secret" python3 -c '
+import json, os
+out = os.environ["OUT"]
+json.dump({"postal_rspamd_password": os.environ["RSPAMD_PASSWORD"]}, open(os.path.join(out, "rspamd-vars.json"), "w"))
+json.dump({"postal_oidc": {"enabled": True, "name": "Noix ID", "issuer": "https://id.example.test",
+                           "identifier": "postal", "secret": os.environ["OIDC_SECRET"], "discovery": False,
+                           "authorization_endpoint": "https://id.example.test/authorize",
+                           "token_endpoint": "https://id.example.test/token",
+                           "userinfo_endpoint": "https://id.example.test/userinfo",
+                           "jwks_uri": "https://id.example.test/jwks"}}, open(os.path.join(out, "oidc-vars.json"), "w"))'
+  )
 }
 # write_admin_vars <file> <email> <password> <first name> <last name>: the
 # first admin, in a file of mode 0600.
@@ -303,7 +354,7 @@ start_host() {
   h sh -c 'echo "127.0.0.1 postal.test" >>/etc/hosts'
   docker cp "$here/web.sh" "$host:/root/web.sh" >/dev/null
   docker cp "$here/echo.py" "$host:/root/echo.py" >/dev/null
-  secrets=("$db_password" "$admin_password")
+  secrets=("$db_password" "$admin_password" "$rspamd_password" "$oidc_secret")
 
   echo "== test host (ubuntu $ubuntu)"
   converge
@@ -567,7 +618,7 @@ note_generated() {
   key_line="$(h sed -n '12p' "$app_dir/config/signing.key")"
   [ "${#rails_secret}" = 128 ] || fail "postal.yml holds no generated Rails secret of 128 characters"
   [ "${#key_line}" -ge 32 ] || fail "signing.key has no line 12"
-  secrets=("$db_password" "$admin_password" "$rails_secret" "$key_line")
+  secrets=("$db_password" "$admin_password" "$rspamd_password" "$oidc_secret" "$rails_secret" "$key_line")
 }
 # Fails when the compose file or docker inspect of the project holds a test
 # secret.
@@ -814,9 +865,11 @@ test_refusals() {
   refused 'is not a release the role runs' -e postal_version=3.5
   refused 'value of postal_database must be one of' -e postal_database=mysql
   refused 'postal_db_host is required' -e postal_database=mariadb_external
-  refused 'an external MariaDB is not supported yet' -e postal_database=mariadb_external -e postal_db_host=db.example.test
+  # No such server: the check of the external MariaDB refuses it.
+  refused 'could not log in to the external MariaDB db.example.test:3306' -e postal_database=mariadb_external -e postal_db_host=db.example.test
   refused 'postal_smtp_tls must be traefik, files or off' -e postal_smtp_tls=files
   refused 'value of postal_spam must be one of' -e postal_spam=spamd
+  refused 'postal_rspamd_password must not hold' -e '{"postal_rspamd_password": "a$b"}'
   refused 'postal_config_extra must be a mapping' -e '{"postal_config_extra": {"main_db": {}}}'
   refused 'postal_config_extra must be a mapping' -e '{"postal_config_extra": {"postal": {"trusted_proxies": []}}}'
   refused 'postal_config_extra must be a mapping' -e '{"postal_config_extra": {"web_server": {"default_port": 1}}}'
@@ -1504,9 +1557,7 @@ test_mail() {
   # the install prints (postal._domainkey.rp.mail.test).
   echo "== mail: the API (ubuntu $1)"
   subject="noixapi$(openssl rand -hex 4)"
-  body="$(request 443 postal.test /api/v1/send/message -X POST -H 'Content-Type: application/json' -H "X-Server-API-Key: $key" \
-    --data '{"to": ["someone@example.test"], "from": "test@mail.example.test", "subject": "'"$subject"'", "plain_body": "A message of the postal suite."}')"
-  [[ "$body" == *'"status":"success"'* ]] || fail "the API did not take the message: $(printf '%s' "$body" | head -c 300)"
+  api_send "$key" "$subject"
   raw="$(wait_mail "$subject")"
   [ "$(dkim_key_name <<<"$raw")" = postal._domainkey.rp.mail.test ] \
     || fail "the message from the API is not signed with postal._domainkey.rp.mail.test: $(printf '%s' "$raw" | head -c 600)"
@@ -1531,10 +1582,349 @@ test_mail() {
   expect_clean
 }
 
+# api_send <key> <subject>: a message from test@mail.example.test to
+# someone@example.test through the API router with the key; fails unless the
+# API takes it.
+api_send() {
+  local body
+  body="$(request 443 postal.test /api/v1/send/message -X POST -H 'Content-Type: application/json' -H "X-Server-API-Key: $1" \
+    --data '{"to": ["someone@example.test"], "from": "test@mail.example.test", "subject": "'"$2"'", "plain_body": "A message of the postal suite."}')"
+  [[ "$body" == *'"status":"success"'* ]] || fail "the API did not take the message $2: $(printf '%s' "$body" | head -c 300)"
+}
+# The fixture's mail server, in Ruby (postal_rails).
+fixture_server='Organization.find_by!(permalink: "noix").servers.find_by!(permalink: "test")'
+# inspection <subject>: how Postal inspected the fixture's newest message with
+# the subject: "inspected=<true|false> threat=<true|false> details=<ClamAV's
+# verdict> checks=<the codes of its spam checks, comma-separated>", or none.
+inspection() {
+  postal_rails '
+message = '"$fixture_server"'.message_db.messages(where: { subject: "'"$1"'" }, order: "id", direction: "desc", limit: 1).first
+if message
+  flag = ->(value) { [true, 1].include?(value) }
+  codes = message.spam_checks.map { |check| check["code"] || check[:code] }.join(",")
+  puts "inspected=#{flag.(message.inspected)} threat=#{flag.(message.threat)} details=#{message.threat_details} checks=#{codes}"
+else
+  puts "none"
+end' | tail -n 1
+}
+# expect_inspection <subject> <threat: true|false> <text of ClamAV's
+# verdict>: the message was inspected, ClamAV gave that verdict (any case), and
+# rspamd gave it checks (not Postal's ERROR of a failed request).
+expect_inspection() {
+  local answer checks
+  answer="$(inspection "$1")"
+  checks="${answer##*checks=}"
+  { [[ "$answer" == "inspected=true threat=$2 details="* ]] && printf '%s\n' "${answer%% checks=*}" | grep -qiF -- "$3"; } \
+    || fail "$1 was not inspected with the threat $2 and ClamAV's \"$3\": $answer"
+  { [ -n "$checks" ] && [[ ",$checks," != *,ERROR,* ]]; } || fail "rspamd did not check $1 (its checks: ${checks:-none})"
+}
+# smtp_send_eicar <subject>: a message with the EICAR test file as an
+# attachment to the route on port 25 (the test string is put together here,
+# so that no file of the repository holds it).
+smtp_send_eicar() {
+  h python3 -c '
+import smtplib, sys
+from email.message import EmailMessage
+eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$" + "EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+message = EmailMessage()
+message["From"], message["To"], message["Subject"] = "sender@example.test", "in@routes.mail.test", sys.argv[1]
+message.set_content("A message of the postal suite with a test file.\n")
+message.add_attachment(eicar.encode(), maintype="application", subtype="octet-stream", filename="eicar.com")
+with smtplib.SMTP("127.0.0.1", 25, timeout=120) as smtp:
+    smtp.ehlo("client.example.test")
+    smtp.send_message(message)' "$1"
+}
+# The containers of a service of the project (all replicas), running or not.
+service_containers() {
+  h docker ps -aq --filter label=com.docker.compose.project=postal --filter "label=com.docker.compose.service=$1"
+}
+# expect_loopback_only <port>: something listens on 127.0.0.1:<port> of the
+# test host, and on no other address of it.
+expect_loopback_only() {
+  local listening
+  listening="$(h ss -ltnH "sport = :$1" | awk '{ print $4 }' | sort -u | paste -sd' ' -)"
+  [ "$listening" = "127.0.0.1:$1" ] || fail "port $1 listens on ${listening:-nothing}, not on 127.0.0.1 alone"
+}
+
+# ClamAV's signatures, downloaded once into this directory on this machine by
+# freshclam in the pinned image (brought up to date on every call: a small
+# download) and copied into the data directory of the test host before
+# ClamAV first starts there, so that no test host downloads the full
+# database. Its first start sees main.cvd and skips its own download.
+clamav_db="$out/clamav-db"
+clamav_signatures() {
+  local image
+  image="$(sed -n 's/^postal_clamav_image: *//p' "$root/roles/postal/defaults/main.yml")"
+  mkdir -p "$clamav_db"
+  docker run --rm -v "$clamav_db:/var/lib/clamav" --entrypoint sh "$image" -c '
+chown -R clamav:clamav /var/lib/clamav
+sed -e "s|^\(TestDatabases \)|#\1|" -e "\$a TestDatabases no" -e "s|^\(NotifyClamd \)|#\1|" \
+  /etc/clamav/freshclam.conf >/tmp/freshclam.conf
+freshclam --foreground --stdout --config-file=/tmp/freshclam.conf' >"$out/freshclam.log" 2>&1 || true
+  [ -s "$clamav_db/main.cvd" ] || fail "freshclam downloaded no main.cvd: $(tail -n 5 "$out/freshclam.log")"
+  h mkdir -p "$app_dir/data/clamav"
+  docker cp "$clamav_db/." "$host:$app_dir/data/clamav/" >/dev/null
+}
+# clamav_ping: what ClamAV answers on 127.0.0.1:3310 to zPING.
+clamav_ping() {
+  h python3 -c '
+import socket
+with socket.create_connection(("127.0.0.1", 3310), timeout=30) as sock:
+    sock.sendall(b"zPING\0")
+    print(sock.recv(64).rstrip(b"\0\n").decode())'
+}
+
+test_spam() {
+  local key subject answer spam='{"postal_spam": "rspamd", "postal_clamav": true}'
+  echo "== spam (ubuntu $1)"
+  ensure_installed spam
+  start_echo
+  key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  [ "${#key}" = 24 ] || fail "the fixture printed no API key: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$key")
+  # Postal inspects outgoing mail only for a mail server with an outbound spam
+  # threshold (high, so that nothing is held).
+  postal_rails "$fixture_server"'.update_column(:outbound_spam_threshold, 50)' >/dev/null
+
+  # rspamd without a password and ClamAV: both on 127.0.0.1 alone, ClamAV
+  # answers, and so does rspamd's controller to a client of the host.
+  clamav_signatures
+  install_converge -e "$spam"
+  verify -e verify_spam=rspamd -e verify_clamav=true
+  install_converge_unchanged -e "$spam"
+  expect_clean
+  expect_loopback_only 11334
+  expect_loopback_only 3310
+  [ "$(clamav_ping)" = PONG ] || fail "ClamAV does not answer PING with PONG"
+  answer="$(h curl -s -o /dev/null -w '%{http_code}' --max-time 30 --data-binary 'Subject: noix' http://127.0.0.1:11334/checkv2)"
+  [ "$answer" = 200 ] || fail "rspamd's controller without a password answered $answer to a client of the host, not 200"
+
+  # Through the API: rspamd's checks and ClamAV's clean verdict.
+  echo "== spam: a message through the API (ubuntu $1)"
+  subject="noixspam$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+  expect_inspection "$subject" false 'No threats found'
+
+  # The EICAR test file to the route on port 25: a threat.
+  echo "== spam: the EICAR test file (ubuntu $1)"
+  subject="noixeicar$(openssl rand -hex 4)"
+  smtp_send_eicar "$subject" || fail "port 25 refused the message with the EICAR test file"
+  wait_echo "$subject" >/dev/null
+  expect_inspection "$subject" true eicar
+
+  # With a password: the controller refuses a client without it, and Postal,
+  # which sends it, still gets its checks.
+  echo "== spam: rspamd's password (ubuntu $1)"
+  install_converge -e "$spam" -e "@$out/rspamd-vars.json"
+  verify -e verify_spam=rspamd -e verify_clamav=true -e verify_rspamd_password=true
+  install_converge_unchanged -e "$spam" -e "@$out/rspamd-vars.json"
+  expect_clean
+  answer="$(h curl -s -o /dev/null -w '%{http_code}' --max-time 30 --data-binary 'Subject: noix' http://127.0.0.1:11334/checkv2)"
+  [ "$answer" = 401 ] || fail "rspamd's controller with a password answered $answer to a client without it, not 401"
+  subject="noixspampw$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+  expect_inspection "$subject" false 'No threats found'
+
+  # Off again: both services go.
+  echo "== spam: off again (ubuntu $1)"
+  install_converge
+  [ -z "$(service_containers rspamd)$(service_containers clamav)" ] || fail "rspamd or ClamAV is left with postal_spam none and postal_clamav false"
+  verify
+  install_converge_unchanged
+  postal_rails "$fixture_server"'.update_column(:outbound_spam_threshold, nil)' >/dev/null
+}
+
+# start_gelf: a UDP listener on the test host's 127.0.0.1:12201 that writes
+# every GELF message it gets (zlib, gzip or plain JSON; chunks are skipped)
+# as a line into /root/gelf.log. stop_gelf stops it.
+start_gelf() {
+  h rm -f /root/gelf.log
+  h systemctl is-active -q postal-gelf && return 0
+  h systemd-run --quiet --unit=postal-gelf python3 -c '
+import gzip, socket, zlib
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 12201))
+while True:
+    data = sock.recv(65535)
+    for decode in (zlib.decompress, gzip.decompress, lambda raw: raw):
+        try:
+            text = decode(data).decode()
+            break
+        except Exception:
+            continue
+    else:
+        continue
+    with open("/root/gelf.log", "a") as log:
+        log.write(" ".join(text.split()) + "\n")'
+}
+stop_gelf() { h systemctl stop postal-gelf >/dev/null 2>&1 || true; }
+# wait_gelf <text>: waits for a GELF message that holds the text.
+wait_gelf() {
+  for _ in $(seq 90); do
+    h grep -qF -- "$1" /root/gelf.log 2>/dev/null && return 0
+    sleep 2
+  done
+  fail "no GELF message with $1 reached the listener: $(h tail -n 3 /root/gelf.log 2>/dev/null | cut -c1-200)"
+}
+
+test_oidc_gelf() {
+  local key subject settings
+  settings='{"postal_gelf": {"host": "127.0.0.1", "port": 12201, "facility": "noixtest"}, "postal_use_ip_pools": true,
+    "postal_worker_replicas": 2, "postal_smtp_relays": ["smtp://localhost:1025?ssl_mode=None"]}'
+  echo "== oidc_gelf (ubuntu $1)"
+  ensure_installed oidc_gelf
+  key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  [ "${#key}" = 24 ] || fail "the fixture printed no API key: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$key")
+  start_gelf
+
+  install_converge -e "$settings" -e "@$out/oidc-vars.json"
+  verify -e '{"verify_workers": 2, "verify_ip_pools": true, "verify_relays": "smtp://localhost:1025?ssl_mode=None",
+    "verify_oidc_name": "Noix ID", "verify_gelf_host": "127.0.0.1", "verify_gelf_facility": "noixtest"}'
+  install_converge_unchanged -e "$settings" -e "@$out/oidc-vars.json"
+  expect_clean
+  [ "$(service_containers worker | wc -l | tr -d ' ')" = 2 ] || fail "the project does not have two workers"
+  # The login page offers the provider, and the local login stays.
+  expect_answer 200 'Login with Noix ID' 443 postal.test /login
+  login_page 443 postal.test /login
+
+  # A message through the API reaches Mailpit over the relay with its
+  # ssl_mode, and the worker's log reaches the GELF listener.
+  subject="noixgelf$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+  wait_gelf noixtest
+  h cat /root/gelf.log >"$out/gelf.log"
+  expect_no_secrets "$out/gelf.log" "the GELF messages"
+  stop_gelf
+
+  install_converge
+  verify
+  install_converge_unchanged
+}
+
+# The external MariaDB servers of install_external, on the Traefik network
+# of the test host: start_db <name> <image> <alias> [docker run options...]
+# (root logs in through the socket only); db_sql <name> runs the SQL of stdin
+# as root there, the password of the run SQL-quoted in sql_password.
+ext_vars='{"postal_database": "mariadb_external", "postal_db_host": "db.example.test", "postal_db_port": 3306}'
+start_db() {
+  local name="$1" image="$2" alias="$3" env
+  case "$image" in
+    mysql:*) env=(-e MYSQL_ALLOW_EMPTY_PASSWORD=yes -e MYSQL_ROOT_HOST=localhost) ;;
+    *) env=(-e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 -e MARIADB_ROOT_HOST=localhost) ;;
+  esac
+  h docker rm -f -v "$name" >/dev/null 2>&1 || true
+  h docker run -d --name "$name" --network proxy --network-alias "$alias" "${env[@]}" "${@:4}" "$image" >/dev/null
+  # The server the entrypoint starts last (its first one has no port).
+  for _ in $(seq 150); do
+    h sh -c 'docker logs "$1" 2>&1 | grep -q "socket: .* port: 3306"' sh "$name" && return 0
+    sleep 2
+  done
+  fail "$image ($name) did not start: $(h docker logs --tail 20 "$name" 2>&1)"
+}
+db_sql() {
+  local client=mariadb
+  case "$(h docker inspect --format '{{.Config.Image}}' "$1")" in mysql:*) client=mysql ;; esac
+  hi docker exec -i "$1" "$client" --user=root --batch --skip-column-names
+}
+# db_postal_user <name> <user> <database patterns...>: the user with the
+# password of the run and all privileges on each pattern (the GRANTs of the
+# docs).
+db_postal_user() {
+  local name="$1" user="$2" sql_password pattern
+  sql_password="$(printf '%s' "$db_password" | sed "s/'/''/g")"
+  {
+    printf "CREATE USER '%s'@'%%' IDENTIFIED BY '%s';\n" "$user" "$sql_password"
+    for pattern in "${@:3}"; do
+      printf "GRANT ALL PRIVILEGES ON \`%s\`.* TO '%s'@'%%';\n" "$pattern" "$user"
+    done
+  } | db_sql "$name" >/dev/null || fail "the user $user could not be made on $name"
+}
+
+test_install_external() {
+  local key subject databases
+  echo "== install_external (ubuntu $1)"
+  remove_installation
+  start_db noix-db mariadb:11.4 db.example.test -p 127.0.0.1:3306:3306
+  start_db noix-mysql mysql:8.4 mysql.example.test
+  start_db noix-old mariadb:10.5 old.example.test
+  db_postal_user noix-db postal postal 'postal-%'
+  db_postal_user noix-db nomsg postal
+  db_postal_user noix-mysql postal postal 'postal-%'
+  db_postal_user noix-old postal postal 'postal-%'
+  # Postal's services on the host's network reach the server at its port on
+  # the test host's loopback, web and the role's client on the Traefik
+  # network.
+  h sh -c 'grep -q " db.example.test$" /etc/hosts || echo "127.0.0.1 db.example.test" >>/etc/hosts'
+
+  # Refused before any change: nothing on the host afterwards.
+  echo "== install_external: refusals (ubuntu $1)"
+  refused 'could not log in to the external MariaDB db.example.test:3306 as postal' -e "$ext_vars" -e "@$out/new-db-vars.json"
+  expect_in_log 'Access denied for user'
+  refused 'mysql.example.test:3306 is not MariaDB' -e "$ext_vars" -e postal_db_host=mysql.example.test
+  refused 'lacks ALL PRIVILEGES on postal-noixcheck' -e "$ext_vars" -e postal_db_user=nomsg
+  refused 'old.example.test:3306 is MariaDB 10.5' -e "$ext_vars" -e postal_db_host=old.example.test
+
+  # The install: no mariadb service, no data of it, Postal's databases on the
+  # external server.
+  echo "== install_external: install (ubuntu $1)"
+  install_converge -e "$ext_vars"
+  [ -z "$(service_containers mariadb)" ] || fail "the external install has a mariadb service"
+  h test ! -e "$app_dir/data/mariadb" || fail "the external install made $app_dir/data/mariadb"
+  note_generated
+  verify -e verify_database=mariadb_external -e verify_db_host=db.example.test -e verify_db_port=3306
+  expect_clean
+  install_converge_unchanged -e "$ext_vars"
+  [ "$(postal_rails 'puts User.count')" = 1 ] || fail "the external install has no admin"
+
+  # The fixture and a message through the API.
+  echo "== install_external: a message through the API (ubuntu $1)"
+  key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  [ "${#key}" = 24 ] || fail "the fixture printed no API key: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$key")
+  subject="noixext$(openssl rand -hex 4)"
+  api_send "$key" "$subject"
+  wait_mail "$subject" >/dev/null
+  databases="$(printf "SHOW DATABASES LIKE 'postal%%';\n" | db_sql noix-db | sort | paste -sd' ' -)"
+  [[ "$databases" == 'postal postal-'* ]] || fail "the external server holds the databases $databases, not postal and a message database"
+  install_converge_unchanged -e "$ext_vars"
+
+  # Refused without a change on the installation.
+  echo "== install_external: refusals of the installation (ubuntu $1)"
+  note_untouched
+  install_converge_fails -e "$ext_vars" -e "@$out/new-db-vars.json"
+  expect_in_log 'could not log in to the external MariaDB db.example.test:3306 as postal'
+  expect_untouched
+  install_converge_fails -e "$ext_vars" -e postal_db_user=nomsg
+  expect_in_log 'lacks ALL PRIVILEGES on postal-noixcheck'
+  expect_untouched
+  install_converge_fails
+  expect_in_log 'postal_database mariadb was set, but the installation in /opt/postal was made with the database mariadb_external'
+  expect_untouched
+  install_converge_fails -e "$ext_vars" -e postal_db_host=other.example.test
+  expect_in_log 'The settings name the external database server other.example.test:3306'
+  expect_in_log 'was made with the server db.example.test:3306'
+  expect_untouched
+  install_converge_unchanged -e "$ext_vars"
+
+  # A fresh install on the server that holds Postal's schema: refused before
+  # any change.
+  echo "== install_external: a database with Postal's schema (ubuntu $1)"
+  remove_installation
+  refused "db.example.test:3306 already holds Postal's schema in postal" -e "$ext_vars"
+
+  h docker rm -f -v noix-db noix-mysql noix-old >/dev/null
+  # /etc/hosts is a bind mount of the test host: rewritten in place.
+  h sh -c 'grep -v " db.example.test$" /etc/hosts >/root/hosts.new; cat /root/hosts.new >/etc/hosts; rm /root/hosts.new'
+}
+
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure takeover ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint"
+all_scenarios="refusals install noop_down reconfigure takeover ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -1555,6 +1945,9 @@ for ubuntu in $releases; do
       smtp_off) test_smtp_off "$ubuntu" ;;
       missing_data) test_missing_data "$ubuntu" ;;
       mountpoint) test_mountpoint "$ubuntu" ;;
+      spam) test_spam "$ubuntu" ;;
+      oidc_gelf) test_oidc_gelf "$ubuntu" ;;
+      install_external) test_install_external "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

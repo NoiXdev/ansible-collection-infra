@@ -139,6 +139,34 @@ services:
     restart: unless-stopped
 
 {% endif %}
+{% if postal_spam == 'rspamd' %}
+  # rspamd on the project network, its controller (which Postal asks) published
+  # on 127.0.0.1 only, for the worker on the host's network. Its settings
+  # (rspamd-controller.inc, with the password) are bound read-only; the role
+  # restarts it when they change. The image's health check pings it.
+  rspamd:
+    image: {{ q(postal_rspamd_image) }}
+    volumes:
+{{ bind(postal_data_dir ~ '/rspamd', '/var/lib/rspamd') }}
+{{ bind(postal_rspamd_config_file, '/etc/rspamd/local.d/worker-controller.inc', read_only=true) }}
+    ports:
+      - {{ q('127.0.0.1:' ~ postal_rspamd_port ~ ':11334') }}
+    restart: unless-stopped
+
+{% endif %}
+{% if postal_clamav | bool %}
+  # ClamAV on the project network, published on 127.0.0.1 only; its
+  # signatures below the data directory (the image downloads them on its
+  # first start and keeps them current). The image's health check asks clamd.
+  clamav:
+    image: {{ q(postal_clamav_image) }}
+    volumes:
+{{ bind(postal_data_dir ~ '/clamav', '/var/lib/clamav') }}
+    ports:
+      - {{ q('127.0.0.1:' ~ postal_clamav_port ~ ':3310') }}
+    restart: unless-stopped
+
+{% endif %}
   # The web interface, the API and tracking, on 0.0.0.0:5000 (postal.yml) of
   # the project network and the Traefik network; no published port: Traefik
   # reaches it over its network.

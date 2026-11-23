@@ -1,0 +1,154 @@
+---
+# The external MariaDB (postal_database mariadb_external), asked on every run
+# before any change, through a one-off client container of
+# postal_mariadb_image on the Traefik network (postal_db_client: Postal's
+# user, the password through stdin into MYSQL_PWD, no_log). Refuses, in this
+# order: a server the client cannot log in to, a server that is not MariaDB
+# (MySQL: VERSION() without MariaDB), a MariaDB older than 10.6, a user
+# without ALL PRIVILEGES on postal_db_name or on a message database
+# (<prefix>-noixcheck stands for <prefix>-<id>), both read from SHOW GRANTS,
+# which needs no privilege of its own, and on an install a server that
+# already holds Postal's schema (taking over an existing database is not
+# supported yet). Sets postal_db_server_major (the release series, X.Y, for
+# the dumps) and postal_db_has_schema. It changes nothing, on the host or on
+# the server.
+
+# One round trip: the version, whether the main database holds Postal's
+# schema, and the grants. --raw keeps the backslash of an escaped _ in a
+# grant. The output holds the hash of the password (SHOW GRANTS), so the
+# tasks that read it are no_log, and only the parts below are shown.
+- name: Ask the external MariaDB
+  ansible.builtin.command:
+    argv: >-
+      {{ postal_db_client
+         + ['--raw', '--execute=SELECT VERSION(); SELECT COUNT(*) FROM information_schema.tables'
+            ~ " WHERE table_schema = '" ~ postal_db_name ~ "' AND table_name = 'schema_migrations'; SHOW GRANTS"] }}
+    stdin: "{{ postal_db_password }}"
+    stdin_add_newline: false
+  register: postal_external_read
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+# A grant names its database as a pattern of MariaDB: % any characters, _
+# one, \ escapes the next; a backtick inside the name is doubled. Every
+# database pattern with ALL PRIVILEGES, in the order of SHOW GRANTS (*.* for
+# all of them).
+- name: Note what the external MariaDB answered
+  ansible.builtin.set_fact:
+    postal_external_error: >-
+      {{ ((postal_external_read.stderr | default('') | trim).splitlines() | select('search', '(?i)error') | list
+          or ['exit code ' ~ postal_external_read.rc | default('?') | string]) | last | trim }}
+    postal_external_version: "{{ postal_external_read.stdout_lines[0] | default('') | trim }}"
+    postal_db_has_schema: "{{ (postal_external_read.stdout_lines[1] | default('0') | trim) not in ['', '0'] }}"
+    postal_external_grants: >-
+      {%- set found = [] -%}
+      {%- for line in postal_external_read.stdout_lines[2:] | default([]) -%}
+      {%-   set target = line | regex_search('^GRANT ALL PRIVILEGES ON (\*|`(?:[^`]|``)*`)\.\* TO ', '\\1') -%}
+      {%-   if target -%}
+      {%-     set _ = found.append(target[0] if target[0] == '*' else target[0][1:-1] | replace('``', '`')) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ found }}
+  no_log: true
+
+- name: Refuse an external MariaDB the role cannot log in to
+  ansible.builtin.fail:
+    msg: >-
+      The role could not log in to the external MariaDB
+      {{ postal_external_target }} as {{ postal_db_user }} from a container on
+      the {{ postal_traefik_network }} network ({{ postal_external_error }}).
+      Check postal_db_host, postal_db_port, postal_db_user and
+      postal_db_password, that the user exists on the server and that the
+      server is reachable from the {{ postal_traefik_network }} network and
+      from {{ inventory_hostname }}. The role changes nothing.
+  when: postal_external_read.rc != 0
+
+- name: Refuse an external server that is not MariaDB
+  ansible.builtin.fail:
+    msg: >-
+      The external database server {{ postal_external_target }} is not
+      MariaDB (VERSION() is {{ postal_external_version or 'empty' }}): Postal
+      runs on MariaDB 10.6 or newer, and MySQL is not supported. The role
+      changes nothing.
+  when: postal_external_version is not search('MariaDB')
+
+- name: Note the release series of the external MariaDB
+  ansible.builtin.set_fact:
+    postal_db_server_major: "{{ postal_external_version | regex_search('^[0-9]+[.][0-9]+') | default('', true) }}"
+
+- name: Refuse an external MariaDB older than 10.6
+  ansible.builtin.fail:
+    msg: >-
+      The external database server {{ postal_external_target }} is MariaDB
+      {{ postal_db_server_major or postal_external_version }}
+      ({{ postal_external_version }}), and Postal needs MariaDB 10.6 or newer.
+      Upgrade the server first. The role changes nothing.
+  when: >-
+    postal_db_server_major | length == 0
+    or postal_db_server_major is version('10.6', '<')
+
+# Matched as MariaDB matches a grant's pattern; table and column grants do
+# not count, a role's grants count when it is the user's default role
+# (SHOW GRANTS lists those of the active roles).
+- name: Refuse a database user without its privileges
+  ansible.builtin.fail:
+    msg: >-
+      The database user {{ postal_db_user }} lacks ALL PRIVILEGES on
+      {{ postal_external_missing | join(' and ') }} on the external MariaDB
+      {{ postal_external_target }} (SHOW GRANTS gives it all privileges on
+      {{ postal_external_grants | map('regex_replace', '^(.*)$', '`\1`.*') | join(', ') or 'no database' }}).
+      Postal needs them on its main database and on every message database
+      ({{ postal_message_db_prefix }}-<id>, which it creates per mail server).
+      Grant them as an admin of the server:
+      GRANT ALL PRIVILEGES ON `{{ postal_db_name | replace('_', '\\_') }}`.* TO '{{ postal_db_user }}'@'<host>';
+      GRANT ALL PRIVILEGES ON `{{ postal_message_db_prefix | replace('_', '\\_') }}-%`.* TO '{{ postal_db_user }}'@'<host>';
+      The role changes nothing.
+  vars:
+    postal_external_missing: >-
+      {%- set missing = [] -%}
+      {%- for name in [postal_db_name, postal_message_db_prefix ~ '-noixcheck'] -%}
+      {%-   set ns = namespace(found=false) -%}
+      {%-   for pattern in postal_external_grants -%}
+      {%-     set re = namespace(text='', escaped=false) -%}
+      {%-     for char in pattern if pattern != '*' -%}
+      {%-       if re.escaped -%}
+      {%-         set re.text = re.text ~ (char | regex_escape) -%}
+      {%-         set re.escaped = false -%}
+      {%-       elif char == '\\' -%}
+      {%-         set re.escaped = true -%}
+      {%-       elif char == '%' -%}
+      {%-         set re.text = re.text ~ '.*' -%}
+      {%-       elif char == '_' -%}
+      {%-         set re.text = re.text ~ '.' -%}
+      {%-       else -%}
+      {%-         set re.text = re.text ~ (char | regex_escape) -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-     if pattern == '*' or name is match('^' ~ re.text ~ '$') -%}
+      {%-       set ns.found = true -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if not ns.found -%}
+      {%-     set _ = missing.append(name) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ missing }}
+  when: postal_external_missing | length > 0
+
+# An install runs postal initialize, which takes an empty database; taking
+# over Postal's data needs its keys (not supported yet).
+- name: Refuse to install on an external database with Postal's schema
+  ansible.builtin.fail:
+    msg: >-
+      The external MariaDB {{ postal_external_target }} already holds Postal's
+      schema in {{ postal_db_name }} (a schema_migrations table), and this
+      version of the role installs on an empty database only: taking over an
+      existing Postal database is not supported yet. The role changes
+      nothing; the database stays as it was. Install with another
+      postal_db_name and postal_message_db_prefix, or drop the databases of
+      the old installation if nothing in them is worth keeping.
+  when:
+    - not postal_installed | bool
+    - postal_db_has_schema | bool

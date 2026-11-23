@@ -1,16 +1,19 @@
 ---
-# Checks an installation on the test host as run.sh's settings make it, with
-# the own MariaDB: the containers of the compose project (web, smtp,
-# submission, worker and mariadb, each running with the pinned image; no
-# runner left), web on the project network and the Traefik network without a
-# published port, smtp, submission and worker on the host's network (smtp and
-# submission with NET_BIND_SERVICE and only their ports in the environment),
-# MariaDB published on 127.0.0.1 alone, no secret in any environment; the
+# Checks an installation on the test host as run.sh's settings make it: the
+# containers of the compose project (web, smtp, submission, worker, with the
+# own MariaDB mariadb, with the spam and virus checks rspamd and clamav, each
+# running with the pinned image; no runner left), web on the project network
+# and the Traefik network without a published port, smtp, submission and
+# worker on the host's network (smtp and submission with NET_BIND_SERVICE and
+# only their ports in the environment), MariaDB, rspamd and ClamAV on the
+# project network alone, published on 127.0.0.1 alone and healthy (rspamd's
+# controller settings 0440 root:11333), no secret in any environment; the
 # files: the compose file 0644, the config directory 0750 root:999,
 # postal.yml and signing.key each 0440 root:999, signing.key a 2048-bit RSA
-# key, postal.yml with the values the role owns and the smtp section of
-# postal_mail, and the database target; the Traefik labels of web (every
-# traefik.* label, exactly).
+# key, postal.yml with the values the role owns, the smtp section of
+# postal_mail, the rspamd, clamav, oidc and gelf sections, the relays and IP
+# pools, and the database target; the Traefik labels of web (every traefik.*
+# label, exactly).
 # Extra variables: verify_submission (default true: the submission service
 # runs), verify_mail_host and verify_mail_port (postal_mail's host and port;
 # empty host: the role writes no host), verify_spam_threshold (the
@@ -25,7 +28,15 @@
 # (postal_smtp_tls: off, the suite's default, files or traefik; with traefik
 # and an SMTP host name of its own the router postal-smtp, the script and its
 # timer; with files or traefik smtp.cert and smtp.key 0440 root:999 and
-# STARTTLS on in postal.yml, with off none of these).
+# STARTTLS on in postal.yml, with off none of these), verify_database
+# (mariadb, or mariadb_external at verify_db_host and verify_db_port: no
+# mariadb service), verify_spam (none or rspamd) with verify_rspamd_password
+# (whether postal.yml gives Postal rspamd's password), verify_clamav,
+# verify_workers (the worker's replicas, each running), verify_relays
+# (postal_smtp_relays, comma-separated), verify_ip_pools, verify_oidc_name
+# (the name of the enabled OIDC provider; empty: no oidc section) and
+# verify_gelf_host, verify_gelf_port and verify_gelf_facility (empty host: no
+# gelf section).
 - name: Verify
   hosts: all
   gather_facts: false
@@ -46,9 +57,31 @@
     verify_track_customers: ""
     verify_smtp_hostname: postal.test
     verify_smtp_tls: "off"
-    verify_services: "{{ ['mariadb', 'smtp', 'web', 'worker'] + (['submission'] if verify_submission | bool else []) }}"
+    verify_database: mariadb
+    verify_db_host: postal-mariadb
+    verify_db_port: 3307
+    verify_spam: none
+    verify_rspamd_password: false
+    verify_clamav: false
+    verify_workers: 1
+    verify_relays: smtp://localhost:1025
+    verify_ip_pools: false
+    verify_oidc_name: ""
+    verify_gelf_host: ""
+    verify_gelf_port: 12201
+    verify_gelf_facility: postal
+    verify_rspamd_image: "{{ verify_defaults.postal_rspamd_image }}"
+    verify_clamav_image: "{{ verify_defaults.postal_clamav_image }}"
+    # The services that do not run Postal's image, with their images.
+    verify_helpers: >-
+      {{ ({'mariadb': verify_mariadb_image} if verify_database == 'mariadb' else {})
+         | combine({'rspamd': verify_rspamd_image} if verify_spam == 'rspamd' else {})
+         | combine({'clamav': verify_clamav_image} if verify_clamav | bool else {}) }}
+    verify_services: >-
+      {{ ['smtp', 'web', 'worker'] + (['submission'] if verify_submission | bool else [])
+         + verify_helpers.keys() | list }}
     verify_all: "{{ verify_inspect.stdout | from_json }}"
-    # One container per service (the worker has one replica).
+    # One container per service (of the worker's replicas the last one).
     verify_by_service: >-
       {%- set found = {} -%}
       {%- for container in verify_all -%}
@@ -76,20 +109,32 @@
     - name: Check the containers of the project
       ansible.builtin.assert:
         that:
-          - verify_all | length == verify_services | length
+          - verify_all | length == verify_services | length + verify_workers | int - 1
           - verify_by_service.keys() | sort == verify_services | sort
+          - verify_worker_count | int == verify_workers | int
           - verify_all | rejectattr('State.Running') | list | length == 0
           - verify_all | rejectattr('HostConfig.RestartPolicy.Name', 'eq', 'unless-stopped') | list | length == 0
-          - verify_by_service.mariadb.Config.Image == verify_mariadb_image
-          - verify_services | reject('eq', 'mariadb') | map('extract', verify_by_service) | map(attribute='Config.Image')
+          - verify_services | reject('in', verify_helpers) | map('extract', verify_by_service) | map(attribute='Config.Image')
             | reject('eq', verify_image) | list | length == 0
-          - verify_by_service.mariadb.State.Health.Status == 'healthy'
+          - verify_helpers.keys() | map('extract', verify_by_service) | map(attribute='Config.Image') | list
+            == verify_helpers.values() | list
+          - verify_helpers.keys() | map('extract', verify_by_service) | map(attribute='State.Health.Status')
+            | reject('eq', 'healthy') | list | length == 0
         fail_msg: >-
           The project does not run {{ verify_services | sort | join(', ') }} (one
-          container each, running, restarted unless stopped, the pinned images):
+          container each, {{ verify_workers }} of the worker, running, restarted
+          unless stopped, the pinned images, {{ verify_helpers.keys() | join(', ') }}
+          healthy):
           {{ verify_all | map(attribute='Name') | list }},
           {{ verify_all | map(attribute='State.Status') | list }},
           {{ verify_all | map(attribute='Config.Image') | list }}.
+      vars:
+        verify_worker_count: >-
+          {%- set n = namespace(count=0) -%}
+          {%- for container in verify_all if container.Config.Labels['com.docker.compose.service'] == 'worker' -%}
+          {%-   set n.count = n.count + 1 -%}
+          {%- endfor -%}
+          {{ n.count }}
 
     - name: Check the web container
       ansible.builtin.assert:
@@ -213,6 +258,30 @@
           {{ verify_mariadb.HostConfig.PortBindings }}.
       vars:
         verify_mariadb: "{{ verify_by_service.mariadb }}"
+      when: verify_database == 'mariadb'
+
+    # Only Postal's worker on the host's network asks them, at their ports on
+    # 127.0.0.1.
+    - name: Check the rspamd and ClamAV containers
+      ansible.builtin.assert:
+        that:
+          - verify_container.HostConfig.NetworkMode != 'host'
+          - verify_container.NetworkSettings.Networks.keys() | list == ['postal_default']
+          - >-
+            verify_container.HostConfig.PortBindings
+            == {item.inner ~ '/tcp': [{'HostIp': '127.0.0.1', 'HostPort': item.port | string}]}
+        fail_msg: >-
+          {{ item.name }} is not on the project network alone, published on
+          127.0.0.1:{{ item.port }} only:
+          {{ verify_container.NetworkSettings.Networks.keys() | list }},
+          {{ verify_container.HostConfig.PortBindings }}.
+      vars:
+        verify_container: "{{ verify_by_service[item.name] }}"
+      loop: >-
+        {{ ([{'name': 'rspamd', 'inner': 11334, 'port': 11334}] if verify_spam == 'rspamd' else [])
+           + ([{'name': 'clamav', 'inner': 3310, 'port': 3310}] if verify_clamav | bool else []) }}
+      loop_control:
+        label: "{{ item.name }}"
 
     # The values are not shown: the names only.
     - name: Check that no environment holds a secret
@@ -229,6 +298,7 @@
         - "{{ verify_dir }}/config"
         - "{{ verify_dir }}/config/postal.yml"
         - "{{ verify_dir }}/config/signing.key"
+        - "{{ verify_dir }}/config/rspamd-controller.inc"
       register: verify_stat
 
     - name: Check the modes of the files
@@ -239,12 +309,18 @@
           - verify_stat.results[1].stat.mode == '0750'
           - verify_stat.results[1].stat.uid == 0
           - verify_stat.results[1].stat.gid == 999
-          - verify_stat.results[2:] | map(attribute='stat.mode') | unique == ['0440']
-          - verify_stat.results[2:] | map(attribute='stat.uid') | unique == [0]
-          - verify_stat.results[2:] | map(attribute='stat.gid') | unique == [999]
+          - verify_stat.results[2:4] | map(attribute='stat.mode') | unique == ['0440']
+          - verify_stat.results[2:4] | map(attribute='stat.uid') | unique == [0]
+          - verify_stat.results[2:4] | map(attribute='stat.gid') | unique == [999]
+          - verify_stat.results[4].stat.exists == (verify_spam == 'rspamd')
+          - verify_spam != 'rspamd' or verify_stat.results[4].stat.mode == '0440'
+          - verify_spam != 'rspamd' or verify_stat.results[4].stat.uid == 0
+          - verify_spam != 'rspamd' or verify_stat.results[4].stat.gid == 11333
         fail_msg: >-
           The compose file is not 0644, the config directory not 0750
-          root:999, or postal.yml and signing.key not 0440 root:999:
+          root:999, postal.yml and signing.key not 0440 root:999, or
+          rspamd-controller.inc not 0440 root:11333 with rspamd (and absent
+          without):
           {{ verify_stat.results | map(attribute='stat') | map('dict2items')
              | map('selectattr', 'key', 'in', ['path', 'mode', 'uid', 'gid']) | map('items2dict') | list }}.
 
@@ -284,10 +360,11 @@
           - verify_config.postal.smtp_hostname == verify_smtp_hostname
           - verify_config.postal.trusted_proxies == ['172.31.255.254']
           - verify_config.postal.signing_key_path == '/config/signing.key'
-          - verify_config.main_db.host == 'postal-mariadb'
-          - verify_config.main_db.port == 3307
+          - verify_config.main_db.host == verify_db_host
+          - verify_config.main_db.port == verify_db_port | int
           - verify_config.main_db.database == 'postal'
-          - verify_config.message_db.host == 'postal-mariadb'
+          - verify_config.message_db.host == verify_db_host
+          - verify_config.message_db.port == verify_db_port | int
           - verify_config.message_db.database_name_prefix == 'postal'
           - verify_config.rails.secret_key | length == 128
           - verify_config.smtp_server.default_port == 25
@@ -300,8 +377,10 @@
           - verify_config.dns.return_path_domain == 'rp.mail.test'
           - verify_config.dns.mx_records == ['mx.mail.test']
           - verify_config.postal.default_spam_threshold | default('') | string == verify_spam_threshold | string
-          - verify_config.postal.smtp_relays == ['smtp://localhost:1025']
+          - verify_config.postal.smtp_relays == verify_relays | split(',')
+          - verify_config.postal.use_ip_pools == verify_ip_pools | bool
           - verify_config.postal.allowed_request_destinations == ['127.0.0.1']
+          - verify_config.worker.threads == 2
           - verify_smtp_plain == verify_smtp_expected
           - (verify_config.smtp.username | default('')) == ''
           - (verify_config.smtp.password | default('')) == ''
@@ -328,6 +407,39 @@
           {{ {'from_name': 'Postal', 'from_address': 'postal@mail.test'}
              | combine({'host': verify_mail_host, 'port': verify_mail_port | int, 'authentication_type': none}
                        if verify_mail_host | length > 0 else {}) }}
+
+    # The sections the role writes only when they are on; the message names
+    # the keys of the sections, never the values of the secret ones.
+    - name: Check the optional sections of postal.yml
+      ansible.builtin.assert:
+        that:
+          - >-
+            (verify_config.rspamd | default({}) | dict2items | rejectattr('key', 'eq', 'password') | items2dict)
+            == ({'enabled': true, 'host': '127.0.0.1', 'port': 11334, 'ssl': false} if verify_spam == 'rspamd' else {})
+          - ('password' in verify_config.rspamd | default({})) == (verify_rspamd_password | bool)
+          - (verify_config.rspamd.password | default('') | length > 0) == (verify_rspamd_password | bool)
+          - verify_config.spamd is not defined
+          - >-
+            verify_config.clamav | default({})
+            == ({'enabled': true, 'host': '127.0.0.1', 'port': 3310} if verify_clamav | bool else {})
+          - (verify_config.oidc is defined) == (verify_oidc_name | length > 0)
+          - verify_oidc_name | length == 0 or verify_config.oidc.enabled is true
+          - verify_oidc_name | length == 0 or verify_config.oidc.name == verify_oidc_name
+          - verify_oidc_name | length == 0 or verify_config.oidc.secret | default('') | length > 0
+          - >-
+            verify_config.gelf | default({})
+            == ({'host': verify_gelf_host, 'port': verify_gelf_port | int, 'facility': verify_gelf_facility}
+                if verify_gelf_host | length > 0 else {})
+        fail_msg: >-
+          postal.yml has the sections rspamd (keys
+          {{ verify_config.rspamd | default({}) | list }}), clamav
+          {{ verify_config.clamav | default('none') }}, oidc (keys
+          {{ verify_config.oidc | default({}) | list }}, name
+          {{ verify_config.oidc.name | default('none') }}) and gelf
+          {{ verify_config.gelf | default('none') }}, not those of rspamd
+          {{ verify_spam }} (password {{ verify_rspamd_password }}), ClamAV
+          {{ verify_clamav }}, OIDC {{ verify_oidc_name or 'off' }} and GELF to
+          {{ verify_gelf_host or 'nowhere' }}.
 
     - name: Stat the files of SMTP TLS
       ansible.builtin.stat:
@@ -379,6 +491,10 @@
 
     - name: Check the database target
       ansible.builtin.assert:
-        that: >-
-          (verify_target.content | b64decode | from_yaml) == {'database': 'mariadb'}
-        fail_msg: "The database target is not {'database': 'mariadb'}: {{ verify_target.content | b64decode }}"
+        that: (verify_target.content | b64decode | from_yaml) == verify_target_expected
+        fail_msg: "The database target is not {{ verify_target_expected }}: {{ verify_target.content | b64decode }}"
+      vars:
+        verify_target_expected: >-
+          {{ {'database': verify_database}
+             | combine({'host': verify_db_host, 'port': verify_db_port | int}
+                       if verify_database == 'mariadb_external' else {}) }}
