@@ -19,9 +19,10 @@ _CTL = re.compile(r"\bctl:\s*(auditengine|auditlogparts)\b", re.IGNORECASE)
 # Quote-unaware on purpose: any id:<digits> in a rule counts, however the
 # quotes and escapes are read by the engine.
 _ID = re.compile(r"""(?:^|(?<=[,\s'"]))id:\s*'?(\d+)""", re.IGNORECASE)
-# A directive name anywhere after the first word, quote-unaware: whatever the
-# engine makes of the quotes, a plugin line holds one directive. Its start
-# is checked separately (whitespace, the start of the text or of a line).
+# A directive name anywhere after the first word. The text inside plain
+# double-quoted strings is masked first (see _mask_quoted); the start of a
+# match is checked separately (whitespace, the start of the text or of a
+# line, or right after a closing double quote).
 _DIRECTIVE = re.compile(r"(?=(sec[a-z]+|include(?:optional)?)(?![a-z0-9_]))", re.IGNORECASE)
 # Macros and a target that can copy a credential into the log, quote-unaware.
 _SECRET_MACRO = re.compile(r"%\{\s*(request_headers|request_cookies)\s*[.:}]", re.IGNORECASE)
@@ -104,12 +105,44 @@ def _last_argument(directive):
     return words[-1] if words else ""
 
 
+_DOUBLE_QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def _mask_quoted(directive):
+    """Blank the inside of double-quoted strings, keeping length and quotes.
+
+    A string whose inner text holds an escaped quote, or a quote that is
+    never closed, is left as it is, so it is scanned (fails closed where
+    this reading could differ from the engine's).
+    """
+    out, at = [], 0
+    while True:
+        quote = directive.find('"', at)
+        if quote < 0:
+            break
+        match = _DOUBLE_QUOTED.match(directive, quote)
+        if not match:
+            break
+        inner = match.group(1)
+        out.append(directive[at:quote + 1])
+        out.append(inner if '\\"' in inner else " " * len(inner))
+        out.append('"')
+        at = match.end()
+    out.append(directive[at:])
+    return "".join(out)
+
+
 def _second_directive(directive, starts, after):
-    """The first directive name that starts a word at or after offset after."""
-    for match in _DIRECTIVE.finditer(directive, after):
+    """The first directive name that starts a word at or after offset after.
+
+    Words inside plain double-quoted strings are not read; a word right
+    after a closing double quote is a directive for the engine.
+    """
+    masked = _mask_quoted(directive)
+    for match in _DIRECTIVE.finditer(masked, after):
         at = match.start()
-        if at == 0 or directive[at - 1].isspace() or at in starts:
-            return match.group(1)
+        if at == 0 or masked[at - 1].isspace() or masked[at - 1] == '"' or at in starts:
+            return directive[at:match.end(1)]
     return None
 
 

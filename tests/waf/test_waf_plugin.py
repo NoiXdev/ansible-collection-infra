@@ -187,7 +187,40 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(got["errors"], [f"x-before.conf line 1: includeOptional {SECOND}"])
 
     def test_check_second_directive_inside_quotes(self):
+        # Text inside a double-quoted argument is not read as a directive.
         got = check('SecAction "id:9500001,pass,nolog,msg:\'x SecRuleEngine Off\'"\n')
+        self.assertEqual(got["errors"], [])
+
+    def test_check_quoted_words_pass(self):
+        text = (
+            'SecRule ARGS:a "@rx ." "id:9500001,phase:1,pass,nolog,'
+            "msg:'a secret, security and SecRuleEngine Off note'\"\n"
+        )
+        self.assertEqual(check(text)["errors"], [])
+        fixture = (
+            'SecRule REQUEST_HEADERS:X-Secret-Token "@rx ." \\\n'
+            '    "id:9590011,\\\n    phase:1,\\\n    pass,\\\n    log,\\\n'
+            "    severity:'NOTICE',\\\n"
+            "    msg:'noix-test secret header'\"\n"
+        )
+        self.assertEqual(check(fixture)["errors"], [])
+
+    def test_check_glued_after_quote(self):
+        got = check('SecAction "id:9500001,phase:1,pass,nolog"SecRuleEngine Off\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleEngine {SECOND}"])
+        got = check('SecAction "id:9500001,phase:1,pass,nolog"SecAction "id:9500002"\n')
+        self.assertEqual(got["errors"][0], f"x-before.conf line 1: SecAction {SECOND}")
+
+    def test_check_escaped_quote_scanned(self):
+        got = check('SecAction "id:9500001,pass,nolog,msg:\'a \\" b SecRuleEngine Off\'"\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleEngine {SECOND}"])
+
+    def test_check_unclosed_quote_scanned(self):
+        got = check('SecAction "id:9500001,pass,nolog,msg:\'x SecRuleEngine Off\'\n')
+        self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleEngine {SECOND}"])
+
+    def test_check_glued_after_quote_continued(self):
+        got = check('SecAction "id:9500001,phase:1,pass,nolog"\\\nSecRuleEngine Off\n')
         self.assertEqual(got["errors"], [f"x-before.conf line 1: SecRuleEngine {SECOND}"])
 
     def test_check_second_directive_after_secmarker(self):

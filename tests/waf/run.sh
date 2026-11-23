@@ -876,6 +876,8 @@ test_plugins() {
     -e "$(one_site '')" -e "$(bad_plugin id-range 'SecAction "id:1234,phase:1,pass,nolog"')"
   refused plugin-second-directive 'waf: plugin bad: bad-before.conf line 1: SecRuleRemoveById after the first directive word is not allowed in a plugin (one directive per line)' \
     -e "$(one_site '')" -e "$(bad_plugin second-directive $'SecAction "id:9600001,phase:1,pass,nolog" \\\nSecRuleRemoveById 949110')"
+  refused plugin-glued-directive 'waf: plugin bad: bad-before.conf line 1: SecRuleEngine after the first directive word is not allowed in a plugin (one directive per line)' \
+    -e "$(one_site '')" -e "$(bad_plugin glued-directive 'SecAction "id:9600001,phase:1,pass,nolog"SecRuleEngine Off')"
   refused plugin-credential-macro 'waf: plugin bad: bad-before.conf line 1: %{REQUEST_HEADERS...} is not allowed in a plugin (it can copy a credential into the log)' \
     -e "$(one_site '')" -e "$(bad_plugin credential-macro "SecAction \"id:9600001,phase:1,pass,log,logdata:'%{REQUEST_HEADERS.authorization}'\"")"
 
