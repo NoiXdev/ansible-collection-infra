@@ -184,7 +184,8 @@
 #             directories (a complete dump of the main and of the message
 #             database, postal.yml and signing.key); killed with SIGKILL
 #             once it made <dir>.tmp, only that is left, and the next run
-#             replaces it
+#             replaces it; without an argument, as backrest runs it, the
+#             backup directory's latest; two arguments refused
 #   update    from 3.4.0 with the fixture and a message to the default
 #             3.5.0: postal upgrade, web on the new image, a backup with the
 #             compose file, the configuration and the databases (one complete
@@ -209,6 +210,12 @@
 #   no_space  a backup directory (a tmpfs of 64 KB) with less space than the
 #             databases: the update refused before any change, no service
 #             restarted
+#   secrets   the install of 3.4.0, a reconfigure (rspamd with its password,
+#             OIDC) and the update to 3.5.0 at -vvv, the process list sampled
+#             during the update; an install on an external MariaDB at -vvv
+#             and postal-dump with the process list sampled (dump.cnf 0600
+#             root): no test secret in an output, the process list, the
+#             compose file or docker inspect
 # Postal's image is linux/amd64 only, so on a machine that is not amd64 (an
 # arm64 Mac, for example) it runs under emulation (Docker Desktop's Rosetta or
 # QEMU) inside the test host; every scenario but the arch refusal sets
@@ -2521,12 +2528,84 @@ test_postal_dump() {
   h test ! -e /root/dump-c.tmp || fail "postal-dump left /root/dump-c.tmp"
   h test -s /root/dump-c/postal.sql || fail "postal-dump after the killed one wrote no dump"
   h rm -rf /root/dump-a /root/dump-b /root/dump-c
+  # Without an argument, as backrest runs it: the backup directory's latest,
+  # which the pruning of the update backups leaves alone.
+  h rm -rf "$backups/latest" "$backups/latest.tmp"
+  h /usr/local/sbin/postal-dump </dev/null || fail "postal-dump without an argument failed"
+  h sh -c "tail -n 1 $backups/latest/postal.sql | grep -q '^-- Dump completed'" \
+    || fail "postal-dump without an argument wrote no complete dump to $backups/latest"
+  [ "$(h stat -c '%a %U' "$backups/latest")" = '700 root' ] || fail "$backups/latest is not root's with mode 0700"
+  h sh -c 'postal-dump a b' >/dev/null 2>&1 && fail "postal-dump took two arguments"
+  h rm -rf "$backups/latest"
+}
+
+# ps_start, then ps_check <what> [<command>]: the process list of the test
+# host (with the processes of its containers), sampled every 0.1 s in
+# between, holds no test secret; with a command, a process that ran it was
+# sampled.
+ps_start() {
+  h rm -f /root/ps.log /root/ps.stop
+  docker exec -d "$host" sh -c 'while [ ! -e /root/ps.stop ]; do ps -eo args >>/root/ps.log; sleep 0.1; done'
+}
+ps_check() {
+  h touch /root/ps.stop
+  sleep 1
+  h cat /root/ps.log >"$out/ps.log"
+  [ -s "$out/ps.log" ] || fail "the process list was not sampled ($1)"
+  expect_no_secrets "$out/ps.log" "the process list ($1)"
+  [ -z "${2:-}" ] || grep -qF -- "$2" "$out/ps.log" || fail "no process ran $2 while the process list was sampled ($1)"
+}
+# The last converge ran at -vvv (the connection plugin's lines).
+expect_verbose() {
+  grep -qF 'ESTABLISH DOCKER CONNECTION' "$out/converge.log" || fail "the converge did not run at -vvv"
+}
+
+test_secrets() {
+  local spam='{"postal_spam": "rspamd"}'
+  echo "== secrets (ubuntu $1)"
+  remove_installation
+  install_converge -vvv -e "postal_version=$old_version"
+  expect_verbose
+  note_generated
+
+  echo "== secrets: a reconfigure (ubuntu $1)"
+  install_converge -vvv -e "postal_version=$old_version" -e "$spam" -e "@$out/rspamd-vars.json" -e "@$out/oidc-vars.json"
+  expect_in_log 'reconfigure.yml for postalhost'
+  expect_clean
+
+  # The backup's dumps (postal-dump, mariadb-dump) and postal upgrade.
+  echo "== secrets: an update (ubuntu $1)"
+  ps_start
+  install_converge -vvv -e "$spam" -e "@$out/rspamd-vars.json" -e "@$out/oidc-vars.json"
+  ps_check "the update" mariadb-dump
+  expect_task "Migrate the databases to Postal $new_version" changed
+  expect_clean
+
+  # The external server's password reaches the client container in
+  # dump.cnf only.
+  echo "== secrets: postal-dump against an external MariaDB (ubuntu $1)"
+  remove_installation
+  start_db noix-db mariadb:11.4 db.example.test -p 127.0.0.1:3306:3306
+  db_postal_user noix-db postal postal 'postal-%'
+  h sh -c 'grep -q " db.example.test$" /etc/hosts || echo "127.0.0.1 db.example.test" >>/etc/hosts'
+  install_converge -vvv -e "$ext_vars"
+  expect_verbose
+  note_generated
+  [ "$(h stat -c '%a %U' "$app_dir/dump.cnf")" = '600 root' ] || fail "$app_dir/dump.cnf is not root's with mode 0600"
+  h rm -rf /root/dump-ext /root/dump-ext.tmp
+  ps_start
+  h /usr/local/sbin/postal-dump /root/dump-ext || fail "postal-dump against the external MariaDB failed"
+  ps_check "postal-dump against an external MariaDB" mariadb-dump
+  h test -s /root/dump-ext/postal.sql || fail "postal-dump against the external MariaDB wrote no dump"
+  h rm -rf /root/dump-ext
+  remove_installation
+  h docker rm -f -v noix-db >/dev/null
 }
 
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure takeover_refusals takeover row_format custom_names ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external postal_dump update failed_update broken_db interrupted no_space"
+all_scenarios="refusals install noop_down reconfigure takeover_refusals takeover row_format custom_names ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external postal_dump update failed_update broken_db interrupted no_space secrets"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -2559,6 +2638,7 @@ for ubuntu in $releases; do
       broken_db) test_broken_db "$ubuntu" ;;
       interrupted) test_interrupted "$ubuntu" ;;
       no_space) test_no_space "$ubuntu" ;;
+      secrets) test_secrets "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

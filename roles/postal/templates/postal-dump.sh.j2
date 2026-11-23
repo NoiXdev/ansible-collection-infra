@@ -1,8 +1,10 @@
 #!/bin/sh
 # Managed by the noixdev.infra.postal role; changes are overwritten.
-# postal-dump <dir>: a backup of Postal in {{ postal_dir }} that the role
+# postal-dump [<dir>]: a backup of Postal in {{ postal_dir }} that the role
 # makes before an update and that backrest can run (dump.type: command,
-# output: <dir>). It writes into <dir>.tmp, which it removes first:
+# which passes no argument: <dir> is then {{ postal_backup_dir }}/latest,
+# the output to give backrest). It writes into <dir>.tmp, which it removes
+# first:
 #   <database>.sql  mariadb-dump --single-transaction --routines --databases
 #                   of {{ postal_db_name }} and of every
 #                   {{ postal_message_db_prefix }}-* database, one file each,
@@ -17,11 +19,13 @@
 set -eu
 umask 077
 
-if [ "$#" -ne 1 ] || [ -z "$1" ]; then
-  echo "usage: postal-dump <dir>" >&2
+if [ "$#" -gt 1 ] || { [ "$#" = 1 ] && [ -z "$1" ]; }; then
+  echo "usage: postal-dump [<dir>]" >&2
   exit 2
 fi
-dir="${1%/}"
+latest={{ (postal_backup_dir ~ "/latest") | quote }}
+dir="${1:-$latest}"
+dir="${dir%/}"
 case "$dir" in
   /*) ;;
   *) dir="$(pwd)/$dir" ;;

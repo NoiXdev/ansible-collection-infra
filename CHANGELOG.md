@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+- `postal`: new role that runs Postal (`postal_version`, pinned, 3.0.0 or newer, default
+  `3.5.0`, no `latest`), a mail delivery platform, as one compose project in `postal_dir`
+  (default `/opt/postal`) behind Traefik. It needs Docker and an x86_64 host, as Postal's image
+  exists for that architecture only. `postal_web_hostname`, `postal_dns_domain` and
+  `postal_db_password` (keep it in a vault) are required. `postal_database` keeps the data in a
+  MariaDB container of the project (`mariadb`, default) or on a MariaDB 10.6 or newer server of
+  your own (`mariadb_external`, `postal_db_host`, `_port`, `_user`), whose user needs all
+  privileges on `postal_db_name` and on the message databases (`<postal_message_db_prefix>-%`);
+  every run checks the login, the server and the grants before any change. The mode, and for an
+  external server its host, are fixed at install. An install creates the first admin
+  (`postal_admin_email`, `postal_admin_password`) and prints the DNS records to set; the keys of
+  the installation (`postal_signing_key`, `postal_rails_secret_key`) are generated when empty and
+  belong in a vault. An install on a database that already holds Postal's data, or with
+  `postal_import_dump` (loaded into the own MariaDB), takes that installation over: it needs both
+  keys of the old installation, refuses without them before any change, keeps the data and its
+  users and upgrades the schema. The sending API and the tracking domains are routed on
+  `postal_traefik_entrypoints`, the web interface on `postal_traefik_ui_entrypoints` (for example
+  an entrypoint reachable only from a private network). A customer tracking domain added in Postal
+  gets its router and an HTTP-01 certificate on the next run once Postal has verified its CNAME.
+  SMTP (`postal_smtp_port`, default 25, and the submission port 587, `0` switches it off) uses
+  STARTTLS with the certificate Traefik obtained for `postal_smtp_hostname` (`postal_smtp_tls:
+  traefik`; a systemd timer picks up renewals and restarts the SMTP services), certificate files
+  (`files`) or none (`"off"`, quoted). Outgoing mail needs port 25 open to the internet, or
+  `postal_smtp_relays`. Optional: spam checks with rspamd (`postal_spam`, with
+  `postal_rspamd_password`), virus checks with ClamAV (`postal_clamav`), single sign-on through
+  OpenID Connect (`postal_oidc`), log shipping over GELF (`postal_gelf`), IP pools and more
+  workers. More of Postal's configuration goes through `postal_config_extra`; the keys the role
+  owns are refused. The secrets live in files of mode 0440 in `<postal_dir>/config`, not in the
+  compose file, the output or a process list. Every run checks that Postal is healthy: its
+  containers and health servers, the login page, an SMTP greeting and a read of its database.
+  Before an update the role checks the free space, pulls the new image, stops Postal and takes a
+  backup in `<postal_data_dir>/backups/` (the compose file, the configuration and one dump per
+  database), keeping the newest `postal_backups_keep`, then runs `postal upgrade`. A failed update
+  is rolled back (`postal_rollback_timeout` bounds the wait) and writes `update-failed`, which
+  blocks that version; after a rollback that failed too it blocks every version until the backup
+  is restored by hand. A run that stopped during an update leaves `update-in-progress`: stopped
+  during the backup, the next run cleans up and updates; stopped after it, every run refuses until
+  `postal_restore_interrupted: true` restores the backup for one run (refused when there is no
+  such update) or the marker is removed. A downgrade is refused, and a failed install leaves
+  `install-incomplete`, which makes every later run refuse. `/usr/local/sbin/postal-dump` writes
+  the same dump for scheduled backups with `backrest` (`dump.type: command`).
+- `traefik`: `traefik_acme_http_resolver: true` adds, with `traefik_acme_challenge: dns`, a second
+  certificate resolver named `http` (HTTP-01 on `traefik_acme_http_entrypoint`, the same account
+  and storage file) for routers that name it, such as hosts outside the DNS provider's zone; the
+  entrypoints keep the DNS-01 resolver. It needs `traefik_acme_email` and the HTTP entrypoint on
+  port 80. The default `false` changes nothing; with the `http` challenge it changes nothing
+  either.
 - `syslog_forward`: new role that forwards the host's logs (what rsyslog takes from the journal,
   narrowed by `syslog_forward_filter`, default `*.*`) to the receivers in `syslog_forward_targets`
   (`host`, `port` default 514, `protocol` `udp` or `tcp` (default), `tls` for TCP with `ca_file` or
