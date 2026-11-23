@@ -9,8 +9,9 @@
 # API. This waits up to graylog_health_timeout seconds for that API
 # (GET /api/system/lbstatus answers 200, which the preflight never does) and
 # fails, naming the preflight when the server answers as one (its
-# GET /api/status), when it does not come. Sets graylog_api_url and graylog_preflight_start, when the wait
-# began: install.yml's health check ends at the same deadline.
+# GET /api/status), when it does not come. Sets graylog_api_url and
+# graylog_preflight_start, when the wait began: install.yml's health check
+# ends at the same deadline.
 
 - name: Note when the first start begins
   ansible.builtin.set_fact:

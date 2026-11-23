@@ -7,23 +7,38 @@
 #                disk, a secrets file from what the role writes, or a
 #                restart is pending (graylog_restart_marker)
 #   noop         everything as the role writes it
+#   restore_interrupted
+#                an update that did not finish (graylog_update_marker, step
+#                update) and graylog_restore_interrupted: main.yml restores
+#                its backup and does nothing else
 # Also sets graylog_installed (a compose file exists), graylog_compose_before
 # (the compose file on disk), graylog_marker_read and graylog_marker (the
 # marker of a failed update), graylog_installed_version and
 # graylog_installed_mongodb_version (from graylog_versions_file, empty
 # without an installation), graylog_secrets (file name to content of the
 # secrets the role writes), graylog_secrets_changed (the names of the secrets
-# files that differ from it), graylog_restart_pending and graylog_down (the
-# services that are not running). Refuses, before any change and in this
-# order: a graylog_data_dir that is not a mountpoint (with
-# graylog_data_dir_mountpoint), an installation without its data
-# subdirectories (an unmounted volume), after a failed update every version
-# when its rollback failed too, else the failed versions, an install that did
-# not complete (its marker), an update that did not finish (its marker), an
+# files that differ from it), graylog_update_in_progress (the marker of an
+# update that did not finish parsed, empty without one),
+# graylog_restart_pending and graylog_down (the services that are not
+# running). Refuses, before any change and in this order: a graylog_data_dir
+# that is not a mountpoint (with graylog_data_dir_mountpoint), an
+# installation without its data subdirectories (an unmounted volume), a
+# marker of a failed update that is not YAML, a marker of an update in
+# progress the role did not write, after a failed update every version when
+# its rollback failed too, else the failed versions, an install that did not
+# complete (its marker), an update that did not finish (step update; without
+# graylog_restore_interrupted, or with it but without what its backup must
+# hold), graylog_restore_interrupted without an update to restore, an
 # installation without a versions file the role can read, a Graylog or
-# MongoDB version older than the installed one, a graylog_password_secret
-# that is not the one of the installation, and an update together with a new
-# root password. It makes no change.
+# MongoDB version older than the installed one (not for a restore), a
+# graylog_password_secret that is not the one of the installation, and an
+# update or a restore together with a new root password. The only changes it
+# makes remove what an interrupted update left that nothing needs: a marker
+# of an update in progress beside update-failed of the same backup (the
+# rollback ran; before the refusal of update-failed), and, after every
+# refusal, the partial backup and the marker of an update stopped during its
+# backup (nothing else had changed), or the copies of a marker that was
+# removed by hand.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -114,6 +129,77 @@
           cannot tell which Graylog update failed and changes nothing. Check
           Graylog, then remove the file (rm {{ graylog_marker_file }}).
 
+# Left by a run that stopped during an update (update.yml). Not secret: the
+# versions, the step, the backup and the time.
+- name: Read the marker of an update in progress
+  ansible.builtin.slurp:
+    src: "{{ graylog_update_marker }}"
+  register: graylog_update_marker_read
+  failed_when: false
+
+# Whether it exists, which a read that failed does not tell.
+- name: Look for the marker of an update in progress
+  ansible.builtin.stat:
+    path: "{{ graylog_update_marker }}"
+    get_checksum: false
+  register: graylog_update_marker_stat
+
+# Empty without a marker; one that is not YAML parses as a step the role
+# never writes and is refused below.
+- name: Parse the marker of an update in progress
+  block:
+    - name: Note the marker of an update in progress
+      ansible.builtin.set_fact:
+        graylog_update_in_progress: "{{ graylog_progress_yaml if graylog_progress_yaml is mapping else {'step': none} }}"
+      vars:
+        graylog_progress_yaml: "{{ (graylog_update_marker_read.content | default('') | b64decode or '{}') | from_yaml }}"
+  rescue:
+    - name: Note a marker of an update in progress that is not YAML
+      ansible.builtin.set_fact:
+        graylog_update_in_progress: {step: null}
+
+# update.yml writes it with the versions, a step and, from step update on,
+# the backup; any other content is not the role's, and the role cannot tell
+# how far the update got.
+- name: Refuse a marker of an update in progress the role did not write
+  ansible.builtin.fail:
+    msg: >-
+      {{ graylog_update_marker }} exists, but it is not YAML or lacks step or
+      to_version (at step update also the backup), so the role cannot tell
+      how far an update of Graylog in {{ graylog_dir }} got and changes
+      nothing. Check Graylog, then remove it with its copies (rm -r
+      {{ graylog_update_marker_files | join(' ') }}).
+  when:
+    - graylog_update_marker_stat.stat.exists
+    - >-
+      graylog_update_in_progress.step | default(none) not in ['backup', 'update']
+      or not graylog_update_in_progress.to_version | default('', true) | string is match('^\d+\.\d+\.\d+$')
+      or not graylog_update_in_progress.to_mongodb_version | default('', true) | string is match('^\d+\.\d+\.\d+$')
+      or (graylog_update_in_progress.step == 'update'
+          and not graylog_update_in_progress.backup | default('', true) | string is match('^/'))
+
+# update.yml writes update-failed before it removes the marker of the update
+# in progress: both, with the same backup, mean the rollback ran and only the
+# removal was lost. update-failed decides from here on.
+- name: Note whether the update in progress was rolled back
+  ansible.builtin.set_fact:
+    graylog_update_rolled_back: >-
+      {{ graylog_update_in_progress.step | default(none) == 'update'
+         and graylog_marker_read.content is defined
+         and graylog_marker.backup | default('', true) | string == graylog_update_in_progress.backup | string }}
+
+- name: Remove the marker of an update in progress beside its failed update
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ graylog_update_marker_files }}"
+  when: graylog_update_rolled_back | bool
+
+- name: Note that no update is in progress
+  ansible.builtin.set_fact:
+    graylog_update_in_progress: {}
+  when: graylog_update_rolled_back | bool
+
 # The rollback failed (or the marker does not say it worked): the database
 # and the Data Node's data may be empty, half restored or migrated, and the
 # backup holds them. Any version would take a backup of that state and,
@@ -173,43 +259,78 @@
       {{ graylog_install_hint }}
   when: graylog_install_marker_stat.stat.exists
 
-# Left by a run that stopped during an update (update.yml). Not secret: the
-# versions, the step, the backup and the time.
-- name: Read the marker of an update in progress
-  ansible.builtin.slurp:
-    src: "{{ graylog_update_marker }}"
-  register: graylog_update_marker_read
-  failed_when: false
-
-# Whether it exists, which a read that failed does not tell.
-- name: Look for the marker of an update in progress
-  ansible.builtin.stat:
-    path: "{{ graylog_update_marker }}"
-    get_checksum: false
-  register: graylog_update_marker_stat
-
-# The compose file, the secrets, the database and the Data Node's data may
-# be either version's, and Graylog may run either or neither; rolling back on
+# Step update: the compose file, the secrets and the versions file may be
+# the new versions', the database and the Data Node's data migrated or half
+# migrated, and Graylog may run either versions or neither. Rolling back on
 # its own would lose what changed since, if the update had in fact finished
-# and only the marker's removal was lost. The operator decides.
-- name: Refuse to run after an update that did not finish
+# and only the marker's removal was lost; the operator decides.
+- name: Refuse to run after an interrupted update
   ansible.builtin.fail:
     msg: >-
-      {{ graylog_update_marker }} exists: an update of Graylog in
-      {{ graylog_dir }} did not finish (the run that started it stopped), so
-      Graylog may run either version or neither; the role changes nothing.
-      Check Graylog. To keep it as it is, remove the marker with its copies
-      (rm -r {{ graylog_update_marker_files | join(' ') }}) and run the role
-      again. To go back to the versions before it, restore its backup
-      {{ graylog_backup }} by hand. {{ graylog_restore_hint }}
+      {{ graylog_update_marker }} exists: the Graylog update from
+      {{ graylog_update_in_progress.from_version | default('?') }} with MongoDB
+      {{ graylog_update_in_progress.from_mongodb_version | default('?') }} to
+      {{ graylog_update_in_progress.to_version }} with MongoDB
+      {{ graylog_update_in_progress.to_mongodb_version }} did not finish (the
+      run that started it on {{ graylog_update_in_progress.time | default('?') }}
+      stopped after its backup), and the backup from before it is
+      {{ graylog_update_in_progress.backup }}. Graylog in {{ graylog_dir }}
+      may run either versions or neither, with a database and Data Node's
+      data the new versions may have migrated; the role changes nothing. To
+      go back to {{ graylog_update_in_progress.from_version | default('?') }},
+      set graylog_restore_interrupted: true for one run to restore it (the
+      compose file, the secrets, the database and, when the backup has it,
+      the Data Node's data), or remove {{ graylog_update_marker }} with its
+      copies (rm -r {{ graylog_update_marker_files | join(' ') }}) to keep
+      Graylog as it is now, then check it and run the role again.
+  when:
+    - graylog_update_in_progress.step | default(none) == 'update'
+    - not graylog_restore_interrupted | bool
+
+- name: Look for what the restore of the interrupted update needs
+  ansible.builtin.stat:
+    path: "{{ graylog_update_in_progress.backup }}/{{ item }}"
+    get_checksum: false
+  loop: [compose.yaml, secrets, versions, mongodb.archive]
+  register: graylog_restore_needs
+  when:
+    - graylog_update_in_progress.step | default(none) == 'update'
+    - graylog_restore_interrupted | bool
+
+- name: Refuse a restore without its backup
+  ansible.builtin.fail:
+    msg: >-
+      graylog_restore_interrupted is set to restore the backup
+      {{ graylog_update_in_progress.backup }} of the interrupted Graylog
+      update from {{ graylog_update_in_progress.from_version | default('?') }}
+      to {{ graylog_update_in_progress.to_version }}, but it lacks
+      {{ graylog_restore_missing | join(', ') }}, so the role cannot restore it
+      and changes nothing. {{ graylog_restore_hint }} Then remove
+      {{ graylog_update_marker }} and run the role again without the
+      variable.
   vars:
-    graylog_update_in_progress: >-
-      {{ (graylog_update_marker_read.content | default('') | b64decode | from_yaml)
-         if graylog_update_marker_read.content is defined else {} }}
-    graylog_backup: >-
-      {{ (graylog_update_in_progress.backup | default('?', true))
-         if graylog_update_in_progress is mapping else '?' }}
-  when: graylog_update_marker_stat.stat.exists
+    graylog_backup: "{{ graylog_update_in_progress.backup }}"
+    graylog_restore_missing: >-
+      {{ graylog_restore_needs.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+  when:
+    - graylog_update_in_progress.step | default(none) == 'update'
+    - graylog_restore_interrupted | bool
+    - graylog_restore_missing | length > 0
+
+# A variable left set must never turn a later interruption into a rollback
+# of its own. An update stopped during its backup changed nothing to restore.
+- name: Refuse graylog_restore_interrupted without an interrupted update
+  ansible.builtin.fail:
+    msg: >-
+      graylog_restore_interrupted is set, but there is no interrupted update
+      in {{ graylog_dir }}; remove the variable{{ (' (' ~ graylog_update_marker
+      ~ ' records an update that stopped during its backup, before anything changed;'
+      ~ ' the next run without the variable cleans it up and updates)')
+      if graylog_update_in_progress.step | default(none) == 'backup' else '' }}.
+      The role changes nothing.
+  when:
+    - graylog_restore_interrupted | bool
+    - graylog_update_in_progress.step | default(none) != 'update'
 
 # Mode 0600: beside the versions it holds the SHA-256 of the password secret,
 # so it is read and parsed in no_log tasks.
@@ -268,6 +389,7 @@
       or newer.
   when:
     - graylog_installed
+    - graylog_update_in_progress.step | default(none) != 'update'
     - graylog_version is version(graylog_installed_version, '<')
 
 - name: Refuse a downgrade of MongoDB
@@ -281,6 +403,7 @@
       newer.
   when:
     - graylog_installed
+    - graylog_update_in_progress.step | default(none) != 'update'
     - graylog_mongodb_version is version(graylog_installed_mongodb_version, '<')
 
 # The secret encrypts values in the database (access tokens, the Data Node's
@@ -359,6 +482,36 @@
   changed_when: false
   when: graylog_installed
 
+# After every refusal. Step backup: the compose file, the secrets and the
+# versions file are as before the update, the server and the Data Node
+# stopped; the run goes on as any other, which with the same versions tries
+# the update again and starts Graylog. A backup being made is below
+# <name>.partial, which only an interrupted backup leaves.
+- name: Find the partial backups of an update stopped during its backup
+  ansible.builtin.find:
+    paths: "{{ graylog_backup_dir }}"
+    file_type: directory
+    patterns: ['^.+\.partial$']
+    use_regex: true
+  register: graylog_partial_backups
+  when: graylog_update_in_progress.step | default(none) == 'backup'
+
+- name: Remove what an update stopped during its backup left
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (graylog_partial_backups.files | default([]) | map(attribute='path') | sort) + graylog_update_marker_files }}"
+  when: graylog_update_in_progress.step | default(none) == 'backup'
+
+# They hold the secrets: left when the marker was removed by hand, as its
+# refusal offers, or by a run stopped while it removed the marker and them.
+- name: Remove the copies of an update in progress without its marker
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ graylog_update_marker_files | difference([graylog_update_marker]) }}"
+  when: not graylog_update_marker_stat.stat.exists
+
 # Written by reconfigure.yml before it writes the secrets and the compose
 # file, and removed by main.yml once a run ends healthy: a run stopped in
 # between leaves files that equal the settings while the containers still
@@ -375,7 +528,8 @@
     graylog_down: "{{ graylog_services | difference(graylog_ps.stdout_lines | default([])) }}"
     graylog_restart_pending: "{{ graylog_installed and graylog_restart_marker_stat.stat.exists }}"
     graylog_state: >-
-      {{ 'install' if not graylog_installed
+      {{ 'restore_interrupted' if graylog_update_in_progress.step | default(none) == 'update'
+         else 'install' if not graylog_installed
          else 'update' if graylog_version | string != graylog_installed_version
                           or graylog_mongodb_version | string != graylog_installed_mongodb_version
          else 'reconfigure' if graylog_compose_before != graylog_compose or graylog_secrets_changed | length > 0
@@ -401,4 +555,19 @@
       ones for the new password.
   when:
     - graylog_state == 'update'
+    - "'root_password_sha2' in graylog_secrets_changed"
+
+# The restore puts the backup's secrets back, the root password's SHA-256
+# among them, then checks Graylog with graylog_root_password.
+- name: Refuse a restore together with a new root password
+  ansible.builtin.fail:
+    msg: >-
+      graylog_restore_interrupted is set to restore the backup
+      {{ graylog_update_in_progress.backup }}, but graylog_root_password is
+      not the installation's (neither value is shown): the restored Graylog
+      would refuse it, and the restore would count as failed. The role
+      changes nothing. Set graylog_root_password back to the installation's
+      for the restore, and change it in a run of its own afterwards.
+  when:
+    - graylog_state == 'restore_interrupted'
     - "'root_password_sha2' in graylog_secrets_changed"

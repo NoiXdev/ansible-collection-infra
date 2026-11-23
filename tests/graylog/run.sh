@@ -91,9 +91,26 @@
 #             removes the marker; then an update whose new input cannot
 #             start (GELF over TCP on the server's API port) rolled back the
 #             same way
-# Every converge runs at least at -v, and its output must not hold a test
-# secret; every successful converge of a scenario is repeated and must change
-# nothing.
+#   interrupted
+#             an install stopped before it completed refused; on an
+#             installation of the previous release, graylog_restore_interrupted
+#             without an interrupted update and a marker the role did not
+#             write refused, a marker beside update-failed of the same backup
+#             removed; an update stopped during its backup: the variable
+#             refused, the next run removes the partial backup and updates;
+#             an update (the defaults' images tagged 7.2.3) stopped once the
+#             compose file names the new version: the next run refuses naming
+#             both versions and the backup, graylog_restore_interrupted brings
+#             back 7.2.2 healthy with its messages and inputs, the database
+#             changed after the backup undone, no update tried, update-failed
+#             of another version kept; the variable then refused, and the next
+#             run updates
+#   secrets   the processes of the test host sampled while an update dumps
+#             the database and while a failed one restores it: no test
+#             secret, and no SHA-256 of one, in a command line
+# Every converge runs at least at -v, and its output must hold neither a test
+# secret nor the SHA-256 of one; every successful converge of a scenario is
+# repeated and must change nothing.
 #
 # GRAYLOG_UBUNTU selects the releases (default "24.04 26.04");
 # NOIXDEV_INFRA_GRAYLOG_TESTS selects scenarios (see the end of the file);
@@ -134,6 +151,10 @@ new_gelf_token="$(openssl rand -hex 16)"
 # No converge's output may hold one of these.
 secrets=("$root_password" "$password_secret" "$short_secret" "$new_root_password" "$other_secret"
   "$gelf_token" "$new_gelf_token")
+# Nor their SHA-256 (the host keeps the root password's, inputs.json the
+# tokens', the versions file the password secret's).
+sha256() { printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
+for secret in "${secrets[@]}"; do secrets+=("$(sha256 "$secret")"); done
 
 cleanup() {
   [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
@@ -559,6 +580,11 @@ test_refusals() {
     -e '{"graylog_inputs": [{"name": "a", "type": "syslog_tcp", "port": 1515, "traefik": {"hostname": "a.test", "entrypoints": ["logs-tls"], "sni": "*"}}, {"name": "b", "type": "gelf_tcp", "port": 12201, "traefik": {"hostname": "b.test", "entrypoints": ["logs-tls"]}}]}'
   refused 'sni is * or a host name' \
     -e '{"graylog_inputs": [{"name": "a", "type": "syslog_tcp", "port": 1515, "traefik": {"hostname": "a.test", "entrypoints": ["logs-tls"], "sni": "a b"}}]}'
+  refused 'for the TCP routes of gelf_tcp and syslog_tcp inputs only' \
+    -e '{"graylog_inputs": [{"name": "a", "type": "gelf_http", "port": 12202, "traefik": {"hostname": "a.test", "entrypoints": ["websecure"], "sni": "a.test"}}]}'
+  # The web interface's entrypoint is not one for a catch-all route either.
+  refused 'logs-tls: a, the web interface' -e '{"graylog_traefik_entrypoints": ["logs-tls"]}' \
+    -e '{"graylog_inputs": [{"name": "a", "type": "syslog_tcp", "port": 1515, "traefik": {"hostname": "a.test", "entrypoints": ["logs-tls"], "sni": "*"}}]}'
   refused 'options must be a mapping' \
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": 12201, "options": {"x": [1]}}]}'
 
@@ -722,9 +748,9 @@ test_inputs() {
   wrong="gelf-http-wrong-$(openssl rand -hex 6)"
   missing="gelf-http-missing-$(openssl rand -hex 6)"
   gelf_http_accepted "$accepted" -H "Authorization: Bearer $gelf_token"
-  since="$(date +%s)"
   expect_gelf_http_refused "$wrong" -H "Authorization: Bearer not-the-$gelf_token"
   expect_gelf_http_refused "$missing"
+  since="$(date +%s)"
   expect_found "$accepted"
   sleep "$((30 - ($(date +%s) - since) > 0 ? 30 - ($(date +%s) - since) : 0))"
   expect_not_found "$wrong"
@@ -745,8 +771,9 @@ test_reconcile() {
   ensure_installed reconcile
   write_inputs_vars inputs-vars.json "$(inputs_json)" "$gelf_token"
   role_converge "reconcile, the inputs" -e "@$out/inputs-vars.json"
-  local gelf_tcp_id manual_id
+  local gelf_tcp_id gelf_http_id manual_id
   gelf_tcp_id="$(expect_input gelf-tcp 12201)"
+  gelf_http_id="$(expect_input gelf-http 12202)"
   expect_input syslog-tcp 1515 >/dev/null
   # An input of someone else: no prefix.
   api /system/inputs -X POST -H 'Content-Type: application/json' \
@@ -764,6 +791,7 @@ test_reconcile() {
   [ "$moved_id" = "$gelf_tcp_id" ] || fail "the gelf_tcp input was replaced ($moved_id), not updated ($gelf_tcp_id)"
   expect_no_input syslog-tcp
   expect_input syslog-udp 10514 >/dev/null
+  [ "$(expect_input gelf-http 12202)" = "$gelf_http_id" ] || fail "the gelf_http input was replaced for its new token, not updated"
   write_published reconcile-published.json \
     "$host_ip:12201:12201/udp" "$host_ip:514:10514/udp" "$host_ip:12203:12203/tcp"
   verify -e "@$out/reconcile-published.json"
@@ -780,7 +808,8 @@ test_reconcile() {
   # The gelf_tcp input moved onto the port of the server's API: Graylog
   # restarts it after the change, and the new one cannot open its port. The
   # first answer after the change can still be the RUNNING input from before
-  # it, which must not count.
+  # it, which must not count. Graylog 7.2.2 restarts the input at once, so
+  # this does not force that race; it pins the failure being reported.
   write_inputs_vars clash-vars.json "$(inputs_json 9000 0 514)" "$new_gelf_token"
   role_converge_fails -e "@$out/clash-vars.json" -e graylog_retention_days=7
   expect_in_log "The inputs gelf-tcp (FAILED) of graylog_inputs are not RUNNING"
@@ -1039,13 +1068,210 @@ test_failed_update() {
   remove_installation
 }
 
+# Waits until no Ansible module runs on the test host (one a killed converge
+# left, which would still change things).
+wait_modules() {
+  local quiet=0
+  for _ in $(seq 300); do
+    if h pgrep -f '[A]nsiballZ_' >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+    [ "$quiet" -lt 5 ] || return 0
+    sleep 1
+  done
+  fail "an Ansible module still runs on the test host after 300 seconds"
+}
+# The role's converge at -v in the background, killed with its process group
+# once <condition> holds on the test host; its output must hold no test
+# secret: play_killed <condition> [-e ...].
+play_killed() {
+  local condition="$1" pid
+  shift
+  set -m
+  ansible-playbook -v -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" \
+    -e "@$out/role-vars.json" "$@" >"$out/converge.log" 2>&1 &
+  pid=$!
+  set +m
+  for _ in $(seq 1800); do
+    if h sh -c "$condition" >/dev/null 2>&1; then
+      kill -9 -- "-$pid"
+      { wait "$pid"; } 2>/dev/null || true
+      expect_no_secrets "$out/converge.log" "the output of the killed converge"
+      wait_modules
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      tail -n 40 "$out/converge.log" >&2
+      fail "the converge ended before it was killed at: $condition"
+    fi
+    sleep 0.5
+  done
+  kill -9 -- "-$pid" 2>/dev/null || true
+  wait "$pid" || true
+  fail "the converge did not reach within the wait: $condition"
+}
+# Whether Graylog's database holds the collection noix_sentinel.
+has_sentinel() {
+  [ "$(compose "exec -T mongodb mongosh --quiet graylog --eval 'db.getCollectionNames().includes(\"noix_sentinel\")'")" = true ]
+}
+
+test_interrupted() {
+  local backup failed_other
+  echo "== interrupted: an install stopped before it completed (ubuntu $1)"
+  remove_installation
+  write_inputs_vars update-inputs.json "$(update_inputs_json)" ''
+  play_killed "test -e $app_dir/install-incomplete && test -e $app_dir/compose.yaml" \
+    -e "@$out/update-inputs.json" "${old_args[@]}"
+  up_converge_fails "${old_args[@]}"
+  expect_in_log "$app_dir/install-incomplete exists: an install of Graylog in $app_dir did not complete"
+  h test -e "$app_dir/install-incomplete" || fail "the refused run removed $app_dir/install-incomplete"
+
+  install_old interrupted
+
+  # The variable without a marker, and a marker the role did not write.
+  note_untouched
+  up_converge_fails "${old_args[@]}" -e '{"graylog_restore_interrupted": true}'
+  expect_in_log "graylog_restore_interrupted is set, but there is no interrupted update in $app_dir; remove the variable"
+  expect_untouched
+  h sh -c "echo 'not: [yaml' >$progress"
+  up_converge_fails "${old_args[@]}"
+  expect_in_log "$progress exists, but it is not YAML or lacks step or to_version"
+  expect_untouched
+  h rm "$progress"
+
+  # Beside update-failed of the same backup (a rescue stopped after it wrote
+  # update-failed): the marker of the update in progress goes, update-failed
+  # refuses.
+  h sh -c "printf 'from_version: $old_version\nfrom_mongodb_version: $old_mongodb\nto_version: $new_version\nto_mongodb_version: $new_mongodb\nstep: update\nbackup: $backups/20260101T000000Z-$old_version-to-$new_version\ntime: \"2026-01-01T00:00:00Z\"\n' >$progress"
+  h sh -c "printf 'failed_version: $new_version\nfailed_mongodb_version: $new_mongodb\nrolled_back_to: $old_version\nrolled_back_to_mongodb: $old_mongodb\nbackup: $backups/20260101T000000Z-$old_version-to-$new_version\ntime: \"2026-01-01T00:00:00Z\"\n' >$failed_marker"
+  up_converge_fails
+  expect_in_log "$failed_marker exists: the Graylog update to $new_version with MongoDB $new_mongodb failed"
+  expect_no_progress "beside update-failed of the same backup"
+  h test -e "$failed_marker" || fail "the run removed $failed_marker"
+  h rm "$failed_marker"
+
+  echo "== interrupted: stopped during its backup (ubuntu $1)"
+  play_killed "ls -d $backups/*.partial" -e "@$out/update-inputs.json"
+  h grep -qx 'step: backup' "$progress" || fail "the marker does not record the step backup: $(h cat "$progress")"
+  # The variable is refused: nothing had changed to restore.
+  note_untouched
+  up_converge_fails -e '{"graylog_restore_interrupted": true}'
+  expect_in_log "records an update that stopped during its backup, before anything changed"
+  expect_untouched
+  h sh -c "ls -d $backups/*.partial" >/dev/null || fail "the refused run removed the partial backup"
+  # The next run removes the partial backup and the marker and updates.
+  up_converge "the update after the stopped backup"
+  [ "$(service_line graylog)" = "docker.io/graylog/graylog:$new_version running healthy" ] \
+    || fail "the server after the update: $(service_line graylog)"
+  [ -z "$(h sh -c "ls -d $backups/*.partial 2>/dev/null || true")" ] || fail "the partial backup is left: $(h ls -A "$backups")"
+  newest_backup "$old_version" "$new_version" >/dev/null
+  expect_no_progress "after the update that followed the stopped backup"
+  expect_data_kept "after the update that followed the stopped backup"
+  up_converge_unchanged "the update after the stopped backup"
+
+  echo "== interrupted: stopped once the compose file names the new version (ubuntu $1)"
+  h docker tag "docker.io/graylog/graylog:$new_version" "$test_repo/graylog:$next_version"
+  h docker tag "docker.io/graylog/graylog-datanode:$new_version" "$test_repo/graylog-datanode:$next_version"
+  play_killed "grep -qF 'graylog:$next_version\"' $app_dir/compose.yaml" -e "@$out/update-inputs.json" "${next_args[@]}"
+  h grep -qx 'step: update' "$progress" || fail "the marker does not record the step update: $(h cat "$progress")"
+  h grep -qx "from_version: $new_version" "$progress" || fail "the marker does not name $new_version: $(h cat "$progress")"
+  h grep -qx "to_version: $next_version" "$progress" || fail "the marker does not name $next_version: $(h cat "$progress")"
+  backup="$(h sed -n 's/^backup: //p' "$progress")"
+  h grep -qF "graylog:$new_version\"" "$backup/compose.yaml" || fail "the backup $backup is not the one of $new_version"
+  for file in "$progress" "$progress.compose.yaml" "$progress.secrets"; do
+    [ "$(h stat -c '%a %U' "$file")" = "$([ "$file" = "$progress.secrets" ] && echo 700 || echo 600) root" ] \
+      || fail "$file is not root's only: $(h stat -c '%a %U' "$file")"
+  done
+  # A change after the backup, which the restore must undo.
+  compose "exec -T mongodb mongosh --quiet graylog --eval 'db.noix_sentinel.insertOne({})'" >/dev/null
+  has_sentinel || fail "the collection noix_sentinel was not created"
+  note_untouched
+  up_converge_fails "${next_args[@]}"
+  expect_in_log "$progress exists: the Graylog update from $new_version with MongoDB $new_mongodb to $next_version with MongoDB $new_mongodb did not finish"
+  expect_in_log "the backup from before it is $backup"
+  expect_in_log "set graylog_restore_interrupted: true for one run to restore it"
+  expect_in_log "or remove $progress with its copies"
+  expect_untouched
+
+  # Restored with the variable: the previous versions with their data, and
+  # no update. update-failed of an earlier update to another version, rolled
+  # back, stays: the restore ran no version but the one it had.
+  failed_other="$(printf 'failed_version: 7.2.9\nfailed_mongodb_version: %s\nrolled_back_to: %s\nrolled_back_to_mongodb: %s\nbackup: %s\ntime: "2026-01-01T00:00:00Z"' \
+    "$new_mongodb" "$new_version" "$new_mongodb" "$backups/20260101T000000Z-$new_version-to-7.2.9")"
+  printf '%s\n' "$failed_other" | docker exec -i "$host" sh -c "cat >$failed_marker"
+  up_converge "the restore of the interrupted update" "${next_args[@]}" -e '{"graylog_restore_interrupted": true}'
+  expect_in_log "Graylog in $app_dir runs $new_version with MongoDB $new_mongodb again"
+  if grep -qF 'Stop the server and the Data Node for the update' "$out/converge.log"; then fail "the restore tried the update again"; fi
+  [ "$(service_line graylog)" = "docker.io/graylog/graylog:$new_version running healthy" ] \
+    || fail "the server after the restore: $(service_line graylog)"
+  expect_no_progress "after the restore"
+  [ "$(h cat "$failed_marker" 2>&1)" = "$failed_other" ] || fail "the restore did not keep $failed_marker of 7.2.9 as it was: $(h cat "$failed_marker" 2>&1)"
+  h rm "$failed_marker"
+  ! has_sentinel || fail "the restore kept the database changed after the backup"
+  h test -d "$backup-failed/datanode" || fail "the restore did not set the Data Node's data it found aside to $backup-failed"
+  expect_compose_clean
+  expect_data_kept "after the restore"
+  # The variable is refused once the update is restored.
+  note_untouched
+  up_converge_fails "${next_args[@]}" -e '{"graylog_restore_interrupted": true}'
+  expect_in_log "graylog_restore_interrupted is set, but there is no interrupted update"
+  expect_untouched
+
+  # Without the variable the next run updates.
+  up_converge "the update after the restore" "${next_args[@]}"
+  [ "$(service_line graylog)" = "$test_repo/graylog:$next_version running healthy" ] \
+    || fail "the server after the update that followed the restore: $(service_line graylog)"
+  expect_no_progress "after the update that followed the restore"
+  expect_data_kept "after the update that followed the restore"
+  up_converge_unchanged "the update after the restore" "${next_args[@]}"
+  remove_installation
+}
+
+# The command lines of every process of the test host (the containers' among
+# them), sampled until stop_processes: sample_processes.
+sample_processes() {
+  h rm -f /tmp/processes.log /tmp/processes.stop
+  docker exec -d "$host" sh -c 'until [ -e /tmp/processes.stop ]; do ps -eo args >>/tmp/processes.log; done'
+}
+# Stops the sampling and fails when a sampled command line holds a test
+# secret or its SHA-256, or <command> was never seen: stop_processes
+# <command...>.
+stop_processes() {
+  local command
+  h touch /tmp/processes.stop
+  sleep 1
+  h cat /tmp/processes.log >"$out/processes.log"
+  expect_no_secrets "$out/processes.log" "a command line on the test host"
+  for command in "$@"; do
+    grep -qF -- "$command" "$out/processes.log" || fail "the sampling never saw $command"
+  done
+}
+
+test_secrets() {
+  echo "== secrets (ubuntu $1)"
+  install_old secrets
+  echo "== secrets: a failed update, rolled back (ubuntu $1)"
+  h docker pull -q "$busybox" >/dev/null
+  h docker tag "$busybox" "$test_repo/graylog:$new_version"
+  sample_processes
+  up_converge_fails -e "graylog_image=$test_repo/graylog" -e graylog_health_timeout=60 -e graylog_rollback_timeout=600
+  stop_processes mongodump mongorestore
+  expect_in_log "was rolled back: Graylog $old_version with MongoDB $old_mongodb runs again"
+  h docker rmi "$test_repo/graylog:$new_version" >/dev/null
+  h rm "$failed_marker"
+  echo "== secrets: an update (ubuntu $1)"
+  sample_processes
+  up_converge "the update with the processes sampled"
+  stop_processes mongodump
+  remove_installation
+}
+
 # All scenarios by default; NOIXDEV_INFRA_GRAYLOG_TESTS="refusals" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-# update and failed_update install the previous release afresh and remove
-# their installation at the end.
+# update, failed_update, interrupted and secrets install the previous release
+# afresh and remove their installation at the end.
 all_scenarios="refusals install self_logging missing_data mountpoint noop_down reconfigure secret_changed inputs reconcile
-  update failed_update"
+  update failed_update interrupted secrets"
 scenarios="${NOIXDEV_INFRA_GRAYLOG_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -1063,6 +1289,8 @@ for ubuntu in $releases; do
       reconcile) test_reconcile "$ubuntu" ;;
       update) test_update "$ubuntu" ;;
       failed_update) test_failed_update "$ubuntu" ;;
+      interrupted) test_interrupted "$ubuntu" ;;
+      secrets) test_secrets "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

@@ -26,8 +26,10 @@ graylog_install_marker: "{{ graylog_dir }}/install-incomplete"
 graylog_update_marker: "{{ graylog_dir }}/update-in-progress"
 graylog_update_marker_compose: "{{ graylog_dir }}/update-in-progress.compose.yaml"
 graylog_update_marker_secrets: "{{ graylog_dir }}/update-in-progress.secrets"
-# Removed together, the marker first: a run stopped in between leaves only a
-# copy, never a marker without its copies.
+# Written marker first (update.yml), so a run stopped in between can leave a
+# marker without its copies; removed marker first, so one stopped in between
+# can leave copies without the marker. state.yml handles both: the restore
+# reads the backup, not the copies, and copies without a marker are removed.
 graylog_update_marker_files:
   - "{{ graylog_update_marker }}"
   - "{{ graylog_update_marker_compose }}"

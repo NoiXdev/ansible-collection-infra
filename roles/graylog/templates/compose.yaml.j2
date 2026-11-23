@@ -126,7 +126,8 @@ services:
       start_interval: 5s
     networks: [default, traefik]
 {# Only the inputs with bind addresses are published, each on those
-    addresses only; the container port is the input's (above 1024). #}
+    addresses only; the container port is the input's, plus 10000 below
+    1024 (Graylog does not run as root). #}
 {% set published = [] %}
 {% for input in graylog_inputs_wanted %}
 {%   for address in input.bind %}

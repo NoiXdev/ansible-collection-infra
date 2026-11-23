@@ -163,15 +163,17 @@
     msg: >-
       Graylog refused to create or update the inputs
       {{ graylog_inputs_refused | join(', ') }} of graylog_inputs (the status
-      and Graylog's message for each; the configuration is not shown, as it
-      can hold a token). The other inputs are as before or changed. Check the
-      options of the entries, then run the role again.
+      and, for an input without a token, Graylog's message; the configuration
+      is not shown, and Graylog's message could quote a token). The other
+      inputs are as before or changed. Check the options of the entries, then
+      run the role again.
   vars:
     graylog_inputs_refused: >-
       {%- set refused = [] -%}
       {%- for result in graylog_inputs_changed.results | default([]) if result.status | default(-1) not in [200, 201] -%}
-      {%-   set _ = refused.append(result.item.name ~ ' (' ~ result.status | default('no answer') ~ ': '
-                                   ~ ((result.json | default({})).message | default('') | string | truncate(200, true))
+      {%-   set _ = refused.append(result.item.name ~ ' (' ~ result.status | default('no answer')
+                                   ~ ('' if result.item.token is defined
+                                      else ': ' ~ ((result.json | default({})).message | default('') | string | truncate(200, true)))
                                    ~ ')') -%}
       {%- endfor -%}
       {{ refused }}

@@ -104,18 +104,6 @@
       nothing.
     quiet: true
 
-# The backup binds files below the data directory into one-off containers
-# with docker run --mount, whose source ends at the first comma.
-- name: Check that graylog_data_dir has no comma
-  ansible.builtin.assert:
-    that: "',' not in graylog_data_dir"
-    fail_msg: >-
-      graylog_data_dir {{ graylog_data_dir }} holds a comma, which the role
-      cannot pass to Docker as the source of a mount (the backup before an
-      update binds files below it). Use a path without a comma. The role
-      changes nothing.
-    quiet: true
-
 # Sizes end up in JVM options and in MongoDB's configuration.
 - name: Check the memory settings
   ansible.builtin.assert:
@@ -385,7 +373,8 @@
 # What is installed and what to do (graylog_state); refuses, before any
 # change, a data directory that is not mounted, an installation without its
 # data or its versions file, the versions of a failed update (every version
-# after a failed rollback), an install or an update that did not complete, a
+# after a failed rollback), an install that did not complete, an update that
+# did not finish (unless graylog_restore_interrupted asks to restore it), a
 # downgrade and another graylog_password_secret.
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
@@ -426,6 +415,93 @@
   ansible.builtin.include_tasks: update.yml
   when: graylog_state == 'update'
 
+# The run after an update that did not finish, with
+# graylog_restore_interrupted: the compose file, the secrets, the versions
+# file, the state of the inputs, the database and (when the backup has it)
+# the Data Node's data of its backup put back by restore.yml, as a rollback
+# puts them back, and nothing else of the update. Healthy, the marker goes
+# and the run ends; the next run without the variable tries the update
+# again. Not healthy, update-failed records a failed rollback
+# (rolled_back_to null), which refuses every version.
+- name: Restore the backup of the interrupted update
+  when: graylog_state == 'restore_interrupted'
+  vars:
+    graylog_interrupted_from: "{{ graylog_update_in_progress.from_version | default('?') }}"
+    graylog_interrupted_from_mongodb: "{{ graylog_update_in_progress.from_mongodb_version | default('?') }}"
+    graylog_interrupted_to: "{{ graylog_update_in_progress.to_version }}"
+    graylog_interrupted_to_mongodb: "{{ graylog_update_in_progress.to_mongodb_version }}"
+  block:
+    # restore.yml reads them; the versions file on disk may name either
+    # versions.
+    - name: Note the backup and the versions of the interrupted update
+      ansible.builtin.set_fact:
+        graylog_backup: "{{ graylog_update_in_progress.backup }}"
+        graylog_installed_version: "{{ graylog_interrupted_from }}"
+        graylog_installed_mongodb_version: "{{ graylog_interrupted_from_mongodb }}"
+
+    - name: Roll back to the backup of the interrupted update
+      ansible.builtin.include_tasks: restore.yml
+
+    - name: Remove the marker of the restored update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ graylog_update_marker_files }}"
+      when: graylog_healthy | bool
+
+    - name: Report the restore
+      ansible.builtin.debug:
+        msg: >-
+          Graylog in {{ graylog_dir }} runs {{ graylog_interrupted_from }} with
+          MongoDB {{ graylog_interrupted_from_mongodb }} again: the interrupted
+          update to {{ graylog_interrupted_to }} with MongoDB
+          {{ graylog_interrupted_to_mongodb }} was rolled back to the backup
+          {{ graylog_backup }}{{ (" (the Data Node's data found is in " ~ graylog_backup ~ '-failed)')
+          if graylog_restore_datanode else '' }}. Remove
+          graylog_restore_interrupted; the next run tries the update again.
+      when: graylog_healthy | bool
+
+    # As after a failed rollback: the data is in the backup, and no version
+    # may run over what the restore left.
+    - name: Write the marker of the failed restore
+      ansible.builtin.copy:
+        dest: "{{ graylog_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.graylog role: the update to
+          # failed_version did not finish, and restoring the backup failed.
+          # The role refuses every version while this file exists.
+          {{ {'failed_version': graylog_interrupted_to,
+              'failed_mongodb_version': graylog_interrupted_to_mongodb,
+              'rolled_back_to': none,
+              'rolled_back_to_mongodb': none,
+              'backup': graylog_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'restore_error': graylog_restore_error}
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: not graylog_healthy | bool
+
+    - name: Remove the marker of the update whose restore failed
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ graylog_update_marker_files }}"
+      when: not graylog_healthy | bool
+
+    - name: Fail with the failed restore
+      ansible.builtin.fail:
+        msg: >-
+          Restoring Graylog {{ graylog_interrupted_from }} with MongoDB
+          {{ graylog_interrupted_from_mongodb }} in {{ graylog_dir }} from the
+          backup {{ graylog_backup }} after the interrupted update to
+          {{ graylog_interrupted_to }} failed ({{ graylog_restore_error }}), so
+          Graylog may be down. {{ graylog_restore_hint }}
+          {{ graylog_marker_file }} refuses every version; remove it once
+          Graylog runs again.
+      when: not graylog_healthy | bool
+
 - name: Reconfigure Graylog
   ansible.builtin.include_tasks: reconfigure.yml
   when: graylog_state == 'reconfigure'
@@ -459,22 +535,27 @@
 # Reached only by a run that ended healthy (installed, reconfigured or
 # without changes): the inputs and the retention are Graylog's own settings,
 # kept through its API on every run. An update has kept them already, as part
-# of its checks.
+# of its checks; the restore of an interrupted update keeps the backup's.
 - name: Reconcile the inputs
   ansible.builtin.include_tasks: inputs.yml
-  when: graylog_state != 'update'
+  when: graylog_state not in ['update', 'restore_interrupted']
 
 - name: Set the retention
   ansible.builtin.include_tasks: retention.yml
-  when: graylog_state != 'update'
+  when: graylog_state not in ['update', 'restore_interrupted']
 
 # Reached only by a run that succeeded, so the marker names other versions
-# and records a rollback that worked.
+# and records a rollback that worked. Not after the restore of an
+# interrupted update: that run ran only the versions it had, not ones that
+# succeeded in place of the failed ones, so the marker stays until such a
+# run.
 - name: Remove the marker of a failed update of other versions
   ansible.builtin.file:
     path: "{{ graylog_marker_file }}"
     state: absent
-  when: graylog_marker_read.content is defined
+  when:
+    - graylog_marker_read.content is defined
+    - graylog_state != 'restore_interrupted'
 
 # Graylog was (re)started on the compose file and the secrets files as they
 # are and is healthy: the restart a stopped reconfigure left pending is

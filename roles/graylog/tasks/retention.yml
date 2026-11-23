@@ -44,9 +44,9 @@
                                 else graylog_rotation_strategy.config,
            'retention_strategy_class': graylog_retention_strategy.class,
            'retention_strategy': graylog_index_set.retention_strategy | default({})
-                                 | combine(graylog_retention_strategy.config, {'max_number_of_indices': graylog_retention_days | int})
+                                 | combine(graylog_retention_strategy.config)
                                  if graylog_index_set.retention_strategy_class | default('') == graylog_retention_strategy.class
-                                 else graylog_retention_strategy.config | combine({'max_number_of_indices': graylog_retention_days | int})}) }}
+                                 else graylog_retention_strategy.config}) }}
 
 - name: Set the retention of the default index set
   ansible.builtin.include_tasks: api.yml
