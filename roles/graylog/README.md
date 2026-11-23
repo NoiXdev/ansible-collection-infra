@@ -56,6 +56,9 @@ prefix that no entry names; inputs without the prefix, made in the web
 interface, are never touched. After a change of the prefix the inputs with
 the old one stay, and still hold their ports: delete them in the web
 interface. Every input of the role must be `RUNNING`, or the run fails.
+Changes made by hand to the role's inputs are reset only when the role's
+settings for them change, and swapping the ports of two inputs may need a
+second run.
 
 - `bind` publishes the port on those host addresses only, and nothing else
   restricts who sends: use the host's or the cloud's firewall. A port below
@@ -63,12 +66,15 @@ interface. Every input of the role must be `RUNNING`, or the run fails.
   root), so a syslog input on 514 listens on 10514 there.
 - `traefik` routes the input through Traefik: a `gelf_http` input gets an
   HTTPS router on the host name; `gelf_tcp` and `syslog_tcp` get a TCP router
-  with TLS ended at Traefik, chosen by the server name (SNI) the sender sends.
-  A sender must therefore connect by that host name: one that sends no server
-  name, as when it connects to an IP address, is not routed. Traefik serves
-  the certificate it holds for the name, for example one it obtains for a name
-  listed in the `traefik` role's certificate domains, and else its default
-  one.
+  with TLS ended at Traefik, chosen by the server name (SNI) the sender sends,
+  `sni` (default the host name). A sender that connects to an IP address, or
+  sends no server name, needs `sni: '*'` on an entrypoint of its own;
+  otherwise Traefik drops its messages without an error. An entrypoint with
+  a `'*'` route serves that one input only, and the role refuses to share it.
+- A TCP route serves the certificate Traefik holds for the server name, for
+  example one it obtains for a name listed in the `traefik` role's
+  certificate domains, else Traefik's default one; a `'*'` route serves the
+  default one to a sender without a server name.
 - `token` makes a `gelf_http` input accept only requests with the header
   `Authorization: Bearer <token>`.
 - `options` sets further settings of the input, by Graylog's names (as

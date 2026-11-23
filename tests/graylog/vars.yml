@@ -5,7 +5,8 @@ traefik_dir: /opt/traefik
 # Plain HTTP and HTTPS on the test host's loopback, HTTPS the routers'
 # default, as on a server. The ACME server does not exist, so Traefik serves
 # its own self-signed certificate, which the tests accept (curl -k). logs-tls
-# is the TCP entrypoint of the inputs that go through Traefik with TLS.
+# is the TCP entrypoint of the inputs that go through Traefik with TLS and
+# SNI, logs-any the one of an input that takes any SNI or none.
 traefik_entrypoints:
   - name: web
     port: 80
@@ -17,6 +18,10 @@ traefik_entrypoints:
     as_default: true
   - name: logs-tls
     port: 6514
+    protocol: tcp
+    bind: [127.0.0.1]
+  - name: logs-any
+    port: 6515
     protocol: tcp
     bind: [127.0.0.1]
 traefik_acme_email: acme@example.test

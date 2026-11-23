@@ -160,7 +160,9 @@ services:
 {# The inputs with a traefik block, each with a router and a service of its
     own: gelf_http over HTTP like the web interface, gelf_tcp and syslog_tcp
     as TCP routers with TLS terminated at Traefik, chosen by the server name
-    the sender gives (SNI). #}
+    the sender gives (SNI: traefik.sni, default the host name; * takes any
+    and none). No certresolver: the web router has none either, and gets its
+    certificate from its entrypoint's TLS settings. #}
 {% for input in graylog_inputs_wanted if input.traefik %}
 {%   set r = graylog_project ~ '-input-' ~ input.name %}
 {%   set kind = 'http' if input.type == 'gelf_http' else 'tcp' %}
@@ -168,7 +170,7 @@ services:
       - {{ q('traefik.http.routers.' ~ r ~ '.rule=Host(`' ~ input.traefik.hostname ~ '`)') }}
       - {{ q('traefik.http.routers.' ~ r ~ '.priority=' ~ graylog_traefik_priority) }}
 {%   else %}
-      - {{ q('traefik.tcp.routers.' ~ r ~ '.rule=HostSNI(`' ~ input.traefik.hostname ~ '`)') }}
+      - {{ q('traefik.tcp.routers.' ~ r ~ '.rule=HostSNI(`' ~ input.traefik.sni | default(input.traefik.hostname) ~ '`)') }}
       - {{ q('traefik.tcp.routers.' ~ r ~ '.tls=true') }}
 {%   endif %}
       - {{ q('traefik.' ~ kind ~ '.routers.' ~ r ~ '.entrypoints=' ~ input.traefik.entrypoints | join(',')) }}

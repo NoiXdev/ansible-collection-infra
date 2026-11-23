@@ -52,8 +52,10 @@
 #             bound address found through the search API with its container
 #             name; through Traefik the right token accepted and found, a
 #             wrong and a missing one refused and not stored; a syslog
-#             message over TLS with SNI found; the default index set rotated
-#             daily and deleting after 30 indices
+#             message over TLS with SNI found, and one without SNI through
+#             a syslog_tcp input with sni '*' on an entrypoint of its own
+#             (logs-any); the default index set rotated daily and deleting
+#             after 30 indices
 #   reconcile the gelf_tcp input moved to 12203 (the same input, RUNNING on
 #             the new port), the syslog_tcp entry removed (the input
 #             deleted), the syslog_udp input on 514 (published from 10514 in
@@ -268,7 +270,8 @@ print(json.dumps({"graylog_inputs": inputs}))' >"$out/$1"
 }
 # The inputs of the inputs scenario: the defaults bound to the test host,
 # GELF over TCP on the port of the GELF UDP input, GELF over HTTP with a
-# token behind the HTTPS entrypoint, syslog over TCP behind logs-tls.
+# token behind the HTTPS entrypoint, syslog over TCP behind logs-tls, and
+# syslog over TCP for any SNI behind logs-any.
 # inputs_json [gelf_tcp port] [with syslog_tcp: 1 or 0] [syslog_udp port].
 inputs_json() {
   local gelf_tcp_port="${1:-12201}" with_syslog_tcp="${2:-1}" syslog_udp_port="${3:-1514}" syslog_tcp=
@@ -278,7 +281,9 @@ inputs_json() {
     {"name": "syslog-udp", "type": "syslog_udp", "port": '"$syslog_udp_port"', "bind": ["'"$host_ip"'"]},
     {"name": "gelf-tcp", "type": "gelf_tcp", "port": '"$gelf_tcp_port"', "bind": ["'"$host_ip"'"]},
     {"name": "gelf-http", "type": "gelf_http", "port": 12202, "token": "TOKEN",
-     "traefik": {"hostname": "gelf.test", "entrypoints": ["websecure"]}}'"$syslog_tcp"']'
+     "traefik": {"hostname": "gelf.test", "entrypoints": ["websecure"]}},
+    {"name": "syslog-any", "type": "syslog_tcp", "port": 1516,
+     "traefik": {"hostname": "syslog-any.test", "entrypoints": ["logs-any"], "sni": "*"}}'"$syslog_tcp"']'
 }
 # verify.yml's verify_published: the graylog container's published ports,
 # as <address>:<host port>:<container port>/<protocol>, in a file:
@@ -373,11 +378,25 @@ expect_gelf_http_refused() {
   [ "$status" = 401 ] || fail "the gelf_http input answered $status, not 401, to a wrong or missing token"
 }
 
-# A syslog message over TLS through Traefik's logs-tls entrypoint, with SNI
-# syslog.test: syslog_tls <text>.
+# A syslog message over TLS through one of Traefik's TCP entrypoints:
+# syslog_tls <text> [port [openssl option...]], by default to logs-tls with
+# SNI syslog.test.
 syslog_tls() {
-  h sh -c "printf '<14>1 %s syslog-probe probe - - - %s\n' \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" '$1' \
-    | timeout 10 openssl s_client -quiet -no_ign_eof -connect 127.0.0.1:6514 -servername syslog.test >/dev/null 2>&1" || true
+  local text="$1" port="${2:-6514}" options="${*:3}"
+  h sh -c "printf '<14>1 %s syslog-probe probe - - - %s\n' \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" '$text' \
+    | timeout 10 openssl s_client -quiet -no_ign_eof -connect 127.0.0.1:$port ${options:--servername syslog.test} >/dev/null 2>&1" || true
+}
+# Sends until the message is found (Traefik picks up a new router after a
+# moment): expect_syslog_tls <text> [port [openssl option...]].
+expect_syslog_tls() {
+  local found
+  for _ in $(seq 15); do
+    syslog_tls "$@"
+    sleep 4
+    found="$(search "$1")"
+    [ -z "$found" ] || return 0
+  done
+  fail "no syslog message $1 over TLS (port ${2:-6514}, ${*:3}) within 60 seconds"
 }
 
 # The default index set's rotation and retention, as
@@ -505,6 +524,11 @@ test_refusals() {
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_http", "port": 12202, "token": null}]}'
   refused 'traefik takes hostname and entrypoints' \
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_http", "port": 12202, "traefik": {"hostname": "a.test"}}]}'
+  # A route that takes any SNI catches every connection of its entrypoint.
+  refused 'an entrypoint with a catch-all route serves one input only' \
+    -e '{"graylog_inputs": [{"name": "a", "type": "syslog_tcp", "port": 1515, "traefik": {"hostname": "a.test", "entrypoints": ["logs-tls"], "sni": "*"}}, {"name": "b", "type": "gelf_tcp", "port": 12201, "traefik": {"hostname": "b.test", "entrypoints": ["logs-tls"]}}]}'
+  refused 'sni is * or a host name' \
+    -e '{"graylog_inputs": [{"name": "a", "type": "syslog_tcp", "port": 1515, "traefik": {"hostname": "a.test", "entrypoints": ["logs-tls"], "sni": "a b"}}]}'
   refused 'options must be a mapping' \
     -e '{"graylog_inputs": [{"name": "a", "type": "gelf_udp", "port": 12201, "options": {"x": [1]}}]}'
 
@@ -651,6 +675,7 @@ test_inputs() {
   expect_input gelf-tcp 12201 >/dev/null
   expect_input gelf-http 12202 >/dev/null
   expect_input syslog-tcp 1515 >/dev/null
+  expect_input syslog-any 1516 >/dev/null
 
   # A container with the GELF driver to the bound address.
   local marker
@@ -675,16 +700,11 @@ test_inputs() {
   expect_not_found "$wrong"
   expect_not_found "$missing"
 
-  # Syslog over TLS through Traefik's TCP router, sent until it is routed.
-  marker="syslog-tls-$(openssl rand -hex 6)"
-  local found
-  for _ in $(seq 15); do
-    syslog_tls "$marker"
-    sleep 4
-    found="$(search "$marker")"
-    [ -z "$found" ] || break
-  done
-  expect_found "$marker"
+  # Syslog over TLS through Traefik's TCP routers: with SNI, and without
+  # any (as a sender that connects to an IP address) through the input that
+  # takes any SNI.
+  expect_syslog_tls "syslog-tls-$(openssl rand -hex 6)"
+  expect_syslog_tls "syslog-any-$(openssl rand -hex 6)" 6515 -noservername
 
   expect_retention 30
   role_converge_unchanged inputs -e "@$out/inputs-vars.json"
@@ -732,6 +752,7 @@ test_reconcile() {
   role_converge "reconcile back"
   expect_no_input gelf-tcp
   expect_no_input gelf-http
+  expect_no_input syslog-any
   expect_input gelf-udp 12201 >/dev/null
   expect_input syslog-udp 1514 >/dev/null
   expect_retention 30

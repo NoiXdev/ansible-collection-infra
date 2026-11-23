@@ -217,13 +217,60 @@
       - graylog_inputs[input_index].traefik.middlewares | default([]) | reject('match', '^[A-Za-z0-9][A-Za-z0-9_.@-]*$') | list | length == 0
     fail_msg: >-
       The input {{ graylog_inputs[input_index].name }}: traefik takes
-      hostname and entrypoints (both required, entrypoints not empty) and
-      middlewares (name@provider). The role changes nothing.
+      hostname and entrypoints (both required, entrypoints not empty),
+      middlewares (name@provider) and sni. The role changes nothing.
     quiet: true
   loop: "{{ range(graylog_inputs | length) | list }}"
   loop_control:
     loop_var: input_index
   when: graylog_inputs[input_index].traefik is defined
+
+# The server name a TCP route takes (default the route's host name); * takes
+# any and none, for senders that connect to an IP address.
+- name: Check the SNI of the inputs
+  ansible.builtin.assert:
+    that:
+      - graylog_inputs[input_index].type != 'gelf_http'
+      - graylog_inputs[input_index].traefik.sni | string is match('^(\*|[A-Za-z0-9][A-Za-z0-9.-]*)$')
+    fail_msg: >-
+      The input {{ graylog_inputs[input_index].name }}: traefik.sni is * or a
+      host name, for the TCP routes of gelf_tcp and syslog_tcp inputs only (a
+      gelf_http input is routed by its host name). The role changes nothing.
+    quiet: true
+  loop: "{{ range(graylog_inputs | length) | list }}"
+  loop_control:
+    loop_var: input_index
+  when: graylog_inputs[input_index].traefik.sni is defined
+
+# A route for any SNI takes every connection of its entrypoint, so nothing
+# else of the role may use that entrypoint: not another input, nor the web
+# interface's router.
+- name: Check that a route for any SNI has its entrypoint alone
+  ansible.builtin.assert:
+    that: graylog_sni_shared | length == 0
+    fail_msg: >-
+      The inputs with traefik.sni '*' share an entrypoint
+      ({{ graylog_sni_shared | join('; ') }}): an entrypoint with a
+      catch-all route serves one input only, as it takes every connection
+      on it. Give that input an entrypoint of its own (add one to the
+      traefik role). The role changes nothing.
+    quiet: true
+  vars:
+    graylog_sni_shared: >-
+      {%- set shared = [] -%}
+      {%- set routed = graylog_inputs | selectattr('traefik', 'defined') | list -%}
+      {%- for input in routed if input.traefik.sni | default('') == '*' -%}
+      {%-   for entrypoint in input.traefik.entrypoints -%}
+      {%-     set users = routed | selectattr('traefik.entrypoints', 'contains', entrypoint) | map(attribute='name') | list -%}
+      {%-     if entrypoint in graylog_traefik_entrypoints -%}
+      {%-       set users = users + ['the web interface'] -%}
+      {%-     endif -%}
+      {%-     if users | length > 1 -%}
+      {%-       set _ = shared.append(entrypoint ~ ': ' ~ users | join(', ')) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ shared | unique | list }}
 
 # The message quotes nothing of the token.
 - name: Check the tokens of the inputs

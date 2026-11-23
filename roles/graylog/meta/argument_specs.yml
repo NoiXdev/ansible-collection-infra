@@ -122,6 +122,13 @@ argument_specs:
                 type: list
                 elements: str
                 description: Traefik middlewares (name@provider) of the router.
+              sni:
+                type: str
+                description: >-
+                  Server name a TCP route (gelf_tcp, syslog_tcp) takes; default
+                  the hostname. '*' takes any server name and none (senders
+                  that connect to an IP address) and needs an entrypoint of
+                  its own.
           token:
             type: str
             no_log: true

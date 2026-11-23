@@ -68,7 +68,7 @@ graylog_inputs_wanted: >-
   {{ wanted }}
 # The keys of an input and of its traefik block.
 graylog_input_keys: [name, type, port, bind, traefik, token, options]
-graylog_input_traefik_keys: [hostname, entrypoints, middlewares]
+graylog_input_traefik_keys: [hostname, entrypoints, middlewares, sni]
 
 # The retention of the default index set (retention.yml): a new index every
 # day, and the oldest deleted beyond graylog_retention_days indices.
