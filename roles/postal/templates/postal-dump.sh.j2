@@ -12,10 +12,13 @@
 #                   last)
 #   postal.yml      Postal's configuration (every secret of the installation)
 #   signing.key     the private key of the published DKIM record
+#   .postal-dump    the mark of a directory postal-dump wrote
 # and renames it to <dir> once all of it is complete (an older <dir> goes
 # then), so <dir> is always a complete backup; a run that fails or is killed
-# leaves <dir>.tmp at most, which the next run replaces. Exits non-zero on any
-# error. The files are root's, mode 0600 (0700 for the directory).
+# leaves <dir>.tmp at most, which the next run replaces. An existing <dir>
+# without the mark is refused (exit 2) and left alone, so that a directory
+# of other files is never replaced. Exits non-zero on any error. The files
+# are root's, mode 0600 (0700 for the directory).
 set -eu
 umask 077
 
@@ -26,10 +29,19 @@ fi
 latest={{ (postal_backup_dir ~ "/latest") | quote }}
 dir="${1:-$latest}"
 dir="${dir%/}"
+if [ -z "$dir" ]; then
+  echo "usage: postal-dump [<dir>]: not the root directory" >&2
+  exit 2
+fi
 case "$dir" in
   /*) ;;
   *) dir="$(pwd)/$dir" ;;
 esac
+mark=.postal-dump
+if { [ -e "$dir" ] || [ -L "$dir" ]; } && { [ -L "$dir" ] || [ ! -d "$dir" ] || [ ! -f "$dir/$mark" ]; }; then
+  echo "postal-dump: $dir exists and is not a backup of postal-dump (no $mark in it), so it stays as it is; give a directory that does not exist yet" >&2
+  exit 2
+fi
 tmp="$dir.tmp"
 main={{ postal_db_name | quote }}
 prefix={{ postal_message_db_prefix | quote }}
@@ -62,6 +74,7 @@ if [ -z "$found" ]; then
   exit 1
 fi
 cp "$config/postal.yml" "$config/signing.key" "$tmp/"
+echo "# Written by postal-dump: this directory is a backup of Postal, replaced by the next run." >"$tmp/$mark"
 
 # The new backup in place of an older one of that name, never half of either.
 if [ -e "$dir" ]; then

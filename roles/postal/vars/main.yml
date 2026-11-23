@@ -377,4 +377,10 @@ postal_health_servers: >-
       {'service': 'smtp', 'port': postal_smtp_health_port | int}]
      + ([{'service': 'submission', 'port': postal_submission_health_port | int}]
         if postal_smtp_submission_port | int != 0 else []) }}
+# What health.yml takes from an SMTP service's EHLO: 250, with STARTTLS
+# offered unless TLS is off.
+postal_ehlo_pattern: "{{ '^250 ' if postal_smtp_tls | string == 'off' else '^250 STARTTLS$' }}"
+# The id of the first server that is not deleted, from the database check of
+# health.yml (users, servers, that id or NULL).
+postal_first_server: "{{ ((postal_db_check.stdout | default('') | trim).split() + ['', '', ''])[2] }}"
 postal_health_retries: "{{ (postal_health_wait | default(postal_health_timeout) | int / 5) | round(0, 'ceil') | int + 1 }}"

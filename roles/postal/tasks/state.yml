@@ -510,15 +510,21 @@
       ansible.builtin.set_fact:
         postal_rails_secret_disk: ""
 
-# The given value wins (that is the operator's change); else what the
-# installation has; else config.yml generates one.
+# On an installation, what it has (a given key that differs, beyond white
+# space at its ends, is refused below), so that a vaulted key with another
+# final line break rewrites nothing; else the given value; else what a
+# refused install left; else config.yml generates one.
 - name: Note the keys the role writes
   ansible.builtin.set_fact:
     postal_signing_key_value: >-
-      {{ postal_signing_key | string if postal_signing_key | string | length > 0
+      {{ postal_signing_key_disk | default('')
+           if postal_installed and postal_signing_key_disk | default('') | trim | length > 0
+         else postal_signing_key | string if postal_signing_key | string | length > 0
          else postal_signing_key_disk | default('') }}
     postal_rails_secret_value: >-
-      {{ postal_rails_secret_key | string if postal_rails_secret_key | string | length > 0
+      {{ postal_rails_secret_disk | default('')
+           if postal_installed and postal_rails_secret_disk | default('') | trim | length > 0
+         else postal_rails_secret_key | string if postal_rails_secret_key | string | length > 0
          else postal_rails_secret_disk | default('') }}
   no_log: true
 
@@ -538,6 +544,45 @@
   when:
     - postal_installed
     - postal_signing_key_value | length == 0
+
+# A key given that differs from the installation's is refused, never written:
+# a wrong vault value would break the published DKIM record and the webhook
+# signatures (the signing key), or end every session (the Rails secret), on
+# an ordinary run. A rotation on purpose changes the file first.
+- name: Refuse a signing key that differs from the installation's
+  ansible.builtin.fail:
+    msg: >-
+      postal_signing_key differs from {{ postal_signing_key_file }}, the
+      signing key of the Postal installed in {{ postal_dir }}. The role does
+      not replace it: a new key breaks the DKIM record published for
+      {{ postal_dns_settings.return_path_domain }} and the signatures of
+      Postal's webhooks. Set postal_signing_key to the installed key (from
+      your vault, or that file). To rotate it on purpose, write the new key
+      into {{ postal_signing_key_file }} yourself, publish its DKIM record
+      (docker compose run --rm runner postal default-dkim-record in
+      {{ postal_dir }}), then run the role with it. The role changes
+      nothing.
+  when:
+    - postal_installed
+    - postal_signing_key | string | trim | length > 0
+    - postal_signing_key_disk | default('') | trim | length > 0
+    - postal_signing_key | string | trim != postal_signing_key_disk | trim
+
+- name: Refuse a Rails secret that differs from the installation's
+  ansible.builtin.fail:
+    msg: >-
+      postal_rails_secret_key differs from rails.secret_key in
+      {{ postal_config_file }}, the Rails secret of the Postal installed in
+      {{ postal_dir }}. The role does not replace it: a new one ends every
+      session. Set postal_rails_secret_key to the installed value (from your
+      vault, or that file). To change it on purpose, write the new value
+      into rails.secret_key of {{ postal_config_file }} yourself, then run
+      the role with it. The role changes nothing.
+  when:
+    - postal_installed
+    - postal_rails_secret_key | string | trim | length > 0
+    - postal_rails_secret_disk | default('') | trim | length > 0
+    - postal_rails_secret_key | string | trim != postal_rails_secret_disk | trim
 
 # Postal's SMTP servers listen on :: (IPv4 and IPv6) where the host has
 # IPv6, else on 0.0.0.0: binding :: fails without it.

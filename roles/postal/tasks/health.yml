@@ -9,11 +9,13 @@
 # answer OK, web answers GET /login with 200 from the runner service on the
 # Traefik network (at web's address on that network, with Host:
 # postal_web_hostname, as Traefik sends it), and each SMTP service answers
-# EHLO on its port with 250. Then the database check: the users and servers
-# tables of the main database read as Postal's user (postal_db_client: in the
-# own MariaDB's container, or from a one-off client on the Traefik network
-# for the external server), so that a broken schema or a revoked right fails
-# it. Callable from any state; sets postal_healthy
+# EHLO on its port with 250, offering STARTTLS unless postal_smtp_tls is off.
+# Then the database check: the users and servers tables of the main database
+# read as Postal's user (postal_db_client: in the own MariaDB's container, or
+# from a one-off client on the Traefik network for the external server), and
+# the messages table of the message database of the first server that is not
+# deleted, when there is one, so that a broken schema, a broken message
+# database or a revoked right fails it. Callable from any state; sets postal_healthy
 # and postal_health_lines (each container's service and state, then what each
 # check got). Never fails by itself.
 
@@ -117,14 +119,15 @@
       - |
         import smtplib, sys
         with smtplib.SMTP("127.0.0.1", int(sys.argv[1]), local_hostname="health.invalid", timeout=30) as smtp:
-            print(smtp.ehlo()[0])
+            code = smtp.ehlo()[0]
+            print(code, "STARTTLS" if smtp.has_extn("starttls") else "without STARTTLS")
       - "{{ item.port }}"
   loop: "{{ postal_smtp_services }}"
   loop_control:
     label: "{{ item.service }} on {{ item.port }}"
   register: postal_ehlo_read
   until: >-
-    postal_ehlo_read.stdout | default('') | trim == '250'
+    postal_ehlo_read.stdout | default('') | trim is match(postal_ehlo_pattern)
     or now().timestamp() - postal_health_start | float >= postal_health_wait | default(postal_health_timeout) | int
   retries: "{{ postal_health_retries }}"
   delay: 5
@@ -137,7 +140,7 @@
     postal_answers: >-
       {{ postal_web_read.stdout | default('') | trim == '200'
          and postal_ehlo_read.results | default([]) | selectattr('stdout', 'defined')
-             | map(attribute='stdout') | map('trim') | select('eq', '250') | list | length
+             | map(attribute='stdout') | map('trim') | select('match', postal_ehlo_pattern) | list | length
              == postal_smtp_services | length }}
 
 # Read-only, as Postal's user over TCP (postal_db_client); the password goes
@@ -147,7 +150,8 @@
   ansible.builtin.command:
     argv: >-
       {{ postal_db_client
-         + ['--database=' ~ postal_db_name, '--execute=SELECT (SELECT COUNT(*) FROM users), (SELECT COUNT(*) FROM servers)'] }}
+         + ['--database=' ~ postal_db_name, '--execute=SELECT (SELECT COUNT(*) FROM users), (SELECT COUNT(*) FROM servers),'
+            ~ ' (SELECT MIN(id) FROM servers WHERE deleted_at IS NULL)'] }}
     chdir: "{{ postal_dir }}"
     stdin: "{{ postal_db_password }}"
     stdin_add_newline: false
@@ -160,6 +164,29 @@
   check_mode: false
   no_log: true
   when: postal_answers | bool
+
+# Postal keeps a server's messages in <prefix>-server-<id>, which postal
+# upgrade migrates too.
+- name: Read the messages table of a message database
+  ansible.builtin.command:
+    argv: >-
+      {{ postal_db_client + ['--database=' ~ postal_message_db, '--execute=SELECT COUNT(*) FROM messages'] }}
+    chdir: "{{ postal_dir }}"
+    stdin: "{{ postal_db_password }}"
+    stdin_add_newline: false
+  register: postal_message_db_check
+  until: postal_message_db_check.rc == 0
+  retries: 2
+  delay: 2
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+  vars:
+    postal_message_db: "{{ postal_message_db_prefix }}-server-{{ postal_first_server }}"
+  when:
+    - postal_db_check.rc | default(1) == 0
+    - postal_first_server is match('^[0-9]+$')
 
 - name: Note whether Postal is healthy
   ansible.builtin.set_fact:
@@ -179,10 +206,20 @@
       {%-   set _ = lines.append('the users and servers tables '
                                  ~ ('read' if postal_db_check.rc == 0 else 'cannot be read: ' ~ postal_db_error)) -%}
       {%- endif -%}
+      {%- if postal_message_db_check.rc is defined -%}
+      {%-   set _ = lines.append('the messages table of ' ~ postal_message_db_prefix ~ '-server-' ~ postal_first_server ~ ' '
+                                 ~ ('read' if postal_message_db_check.rc == 0 else 'cannot be read: ' ~ postal_message_db_error)) -%}
+      {%- endif -%}
       {{ lines }}
-    postal_healthy: "{{ postal_answers | bool and postal_db_check.rc | default(1) == 0 }}"
+    postal_healthy: >-
+      {{ postal_answers | bool and postal_db_check.rc | default(1) == 0
+         and postal_message_db_check.rc | default(0) == 0 }}
   vars:
     postal_db_error: >-
       {%- set stderr = (postal_db_check.stderr | default('') | trim).splitlines() -%}
       {{ ((stderr | select('search', 'ERROR') | list) or stderr
           or ['exit code ' ~ postal_db_check.rc | default('?') | string]) | last | trim }}
+    postal_message_db_error: >-
+      {%- set stderr = (postal_message_db_check.stderr | default('') | trim).splitlines() -%}
+      {{ ((stderr | select('search', 'ERROR') | list) or stderr
+          or ['exit code ' ~ postal_message_db_check.rc | default('?') | string]) | last | trim }}

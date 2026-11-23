@@ -12,7 +12,7 @@ or on a MariaDB server of your own, creates the first admin
 set, applies changed settings, routes the API, the web interface and the
 tracking domains through Traefik, gives the SMTP services a certificate for
 STARTTLS, runs the spam and virus checks, checks on every run that Postal
-answers, and updates Postal with a backup first and a rollback when the new
+answers (with STARTTLS offered and its main and a message database read), and updates Postal with a backup first and a rollback when the new
 version fails. A MariaDB server of your own must be MariaDB 10.6 or
 newer, reachable from the host and from Traefik's network, with a user that
 has all privileges on `postal_db_name` and on the message databases
@@ -125,7 +125,9 @@ argument it writes `<postal_data_dir>/backups/latest`, with one the directory
 it names: a `.sql` file per database, `postal.yml` and `signing.key`. It
 writes into `<dir>.tmp` and replaces the directory only once everything is
 complete, so a failed or killed run never leaves half a backup there; it
-exits non-zero on any error. With an external MariaDB it logs in with
+exits non-zero on any error. An existing directory it did not write (it
+marks its own with `.postal-dump`) is refused with exit code 2 and left as
+it is. With an external MariaDB it logs in with
 `<postal_dir>/dump.cnf` (mode 0600), never on a command line.
 
 ```yaml
@@ -154,13 +156,18 @@ does not store it. With an external MariaDB, `postal-dump` logs in with
 `<postal_dir>/dump.cnf` (mode 0600). Keep `postal_signing_key` and
 `postal_rails_secret_key` of an installation in a vault: a new installation
 or a takeover needs them, and a new signing key breaks the published DKIM
-record.
+record. On an installation, a given key that differs from the installed one
+is refused before any change; to rotate a key on purpose, write the new one
+into `<postal_dir>/config` yourself (and publish its DKIM record), then run
+the role with it.
 
 ## Notes
 
 - Write `postal_smtp_tls: "off"` quoted; unquoted YAML makes it a boolean,
   which the role refuses.
 - With `traefik`, a renewal is picked up by the timer, within about 13 hours.
+  With `files`, it reaches Postal on the next run of the role: run the role
+  on a schedule, or from your ACME client's deploy hook.
 - `postal_smtp_relays` need host names: Postal finds no endpoint for an IP
   address.
 - A wrong `postal_traefik_track_cert_resolver` is not refused by the role;

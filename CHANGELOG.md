@@ -24,14 +24,16 @@
   SMTP (`postal_smtp_port`, default 25, and the submission port 587, `0` switches it off) uses
   STARTTLS with the certificate Traefik obtained for `postal_smtp_hostname` (`postal_smtp_tls:
   traefik`; a systemd timer picks up renewals and restarts the SMTP services), certificate files
-  (`files`) or none (`"off"`, quoted). Outgoing mail needs port 25 open to the internet, or
+  (`files`, copied on every run of the role) or none (`"off"`, quoted). Outgoing mail needs port 25 open to the internet, or
   `postal_smtp_relays`. Optional: spam checks with rspamd (`postal_spam`, with
   `postal_rspamd_password`), virus checks with ClamAV (`postal_clamav`), single sign-on through
   OpenID Connect (`postal_oidc`), log shipping over GELF (`postal_gelf`), IP pools and more
   workers. More of Postal's configuration goes through `postal_config_extra`; the keys the role
   owns are refused. The secrets live in files of mode 0440 in `<postal_dir>/config`, not in the
-  compose file, the output or a process list. Every run checks that Postal is healthy: its
-  containers and health servers, the login page, an SMTP greeting and a read of its database.
+  compose file, the output or a process list; a given key that differs from the installation's
+  is refused. Every run checks that Postal is healthy: its containers and health servers, the
+  login page, an SMTP greeting (offering STARTTLS unless TLS is off) and a read of its main
+  database and of a message database.
   Before an update the role checks the free space, pulls the new image, stops Postal and takes a
   backup in `<postal_data_dir>/backups/` (the compose file, the configuration and one dump per
   database), keeping the newest `postal_backups_keep`, then runs `postal upgrade`. A failed update
@@ -42,7 +44,8 @@
   `postal_restore_interrupted: true` restores the backup for one run (refused when there is no
   such update) or the marker is removed. A downgrade is refused, and a failed install leaves
   `install-incomplete`, which makes every later run refuse. `/usr/local/sbin/postal-dump` writes
-  the same dump for scheduled backups with `backrest` (`dump.type: command`).
+  the same dump for scheduled backups with `backrest` (`dump.type: command`; without an argument
+  into `<postal_data_dir>/backups/latest`) and refuses to replace a directory it did not write.
 - `traefik`: `traefik_acme_http_resolver: true` adds, with `traefik_acme_challenge: dns`, a second
   certificate resolver named `http` (HTTP-01 on `traefik_acme_http_entrypoint`, the same account
   and storage file) for routers that name it, such as hosts outside the DNS provider's zone; the

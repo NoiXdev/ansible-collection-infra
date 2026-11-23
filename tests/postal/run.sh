@@ -32,7 +32,9 @@
 #             service and the health check asks smtp only; a larger
 #             postal_max_message_size recreates MariaDB with the larger redo
 #             log (mariadb.cnf) and restarts the Postal services; the
-#             default brings everything back
+#             default brings everything back; a postal_signing_key or
+#             postal_rails_secret_key that differs from the installation's
+#             refused without a change, its own keys given change nothing
 #   takeover_refusals
 #             an install over Postal's data without its keys, refused before
 #             any change: the MariaDB data of an installation without its
@@ -185,7 +187,9 @@
 #             database, postal.yml and signing.key); killed with SIGKILL
 #             once it made <dir>.tmp, only that is left, and the next run
 #             replaces it; without an argument, as backrest runs it, the
-#             backup directory's latest; two arguments refused
+#             backup directory's latest; two arguments refused; an existing
+#             directory without its mark, a file and / refused (exit 2) and
+#             left as they are
 #   update    from 3.4.0 with the fixture and a message to the default
 #             3.5.0: postal upgrade, web on the new image, a backup with the
 #             compose file, the configuration and the databases (one complete
@@ -199,7 +203,9 @@
 #             change; a run with another version removes the marker
 #   broken_db to a release whose migration drops the servers table (Postal's
 #             image with an entrypoint of the test): the database check
-#             fails, rolled back, the servers table and the data back
+#             fails, rolled back, the servers table and the data back; then
+#             one that drops the messages table of the fixture's message
+#             database: the same
 #   interrupted
 #             postal_restore_interrupted without an interrupted update
 #             refused; a converge killed once the compose file names the new
@@ -210,6 +216,12 @@
 #   no_space  a backup directory (a tmpfs of 64 KB) with less space than the
 #             databases: the update refused before any change, no service
 #             restarted
+#   failed_update_external
+#             on an external MariaDB (mariadb:11.4) that also holds a
+#             database other: 3.4.0 with the fixture and a message, an update
+#             to an image that exits rolled back (the data back, other
+#             untouched), then the update to 3.5.0 with its backup, the data
+#             and other as they were, the API sends
 #   secrets   the install of 3.4.0, a reconfigure (rspamd with its password,
 #             OIDC) and the update to 3.5.0 at -vvv, the process list sampled
 #             during the update; an install on an external MariaDB at -vvv
@@ -1038,7 +1050,7 @@ test_noop_down() {
 }
 
 test_reconfigure() {
-  local key threshold='{"postal_settings": {"default_spam_threshold": 7}}'
+  local key other_key other_secret threshold='{"postal_settings": {"default_spam_threshold": 7}}'
   echo "== reconfigure (ubuntu $1)"
   ensure_installed reconfigure
 
@@ -1088,6 +1100,30 @@ test_reconfigure() {
   verify
   expect_clean
   install_converge_unchanged
+
+  # Keys that differ from the installation's are refused, never written; its
+  # own keys given change nothing.
+  echo "== reconfigure: other keys refused (ubuntu $1)"
+  other_key="$(openssl genrsa 2048 2>/dev/null)"
+  other_secret="$(openssl rand -hex 64)"
+  secrets+=("$(printf '%s\n' "$other_key" | sed -n 12p)" "$other_secret")
+  (
+    umask 077
+    env "KEY=$other_key" "SECRET=$other_secret" "OUT=$out" python3 -c '
+import json, os
+out = os.environ["OUT"]
+json.dump({"postal_signing_key": os.environ["KEY"]}, open(os.path.join(out, "other-key-vars.json"), "w"))
+json.dump({"postal_rails_secret_key": os.environ["SECRET"]}, open(os.path.join(out, "other-secret-vars.json"), "w"))'
+  )
+  note_untouched
+  install_converge_fails -e "@$out/other-key-vars.json"
+  expect_in_log "postal_signing_key differs from $app_dir/config/signing.key"
+  expect_untouched
+  install_converge_fails -e "@$out/other-secret-vars.json"
+  expect_in_log "postal_rails_secret_key differs from rails.secret_key in $app_dir/config/postal.yml"
+  expect_untouched
+  write_takeover_vars
+  install_converge_unchanged -e "@$out/takeover-vars.json"
 }
 
 # db_login <password>: whether Postal's user logs in to the own MariaDB with
@@ -2372,32 +2408,46 @@ test_failed_update() {
 # A release whose migration breaks a table: Postal's image of new_version
 # with an entrypoint that, for postal upgrade, migrates and then drops the
 # servers table (the test's fault), tagged as test_repo's new_version.
+# make_breaking_image <SQL>: the new version tagged in test_repo, whose
+# postal upgrade runs the SQL afterwards (the fault of the suite).
 make_breaking_image() {
   local entry
   h docker pull -q --platform linux/amd64 "$postal_repo:$new_version" >/dev/null
   entry="$(h docker image inspect --format '{{join .Config.Entrypoint " "}}' "$postal_repo:$new_version")"
   h sh -c 'rm -rf /root/breaking && mkdir /root/breaking'
+  printf 'ActiveRecord::Base.connection.execute(%s)\n' "$(printf '%s' "$1" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')" \
+    | hi sh -c 'cat >/root/breaking/break.rb'
   hi sh -c 'cat >/root/breaking/entry.sh' <<EOF
 #!/bin/sh
-# The fault of the postal suite: postal upgrade, then the servers table dropped.
+# The fault of the postal suite: postal upgrade, then break.rb.
 if [ "\$1 \$2" = "postal upgrade" ]; then
   $entry "\$@" || exit
-  exec $entry bundle exec rails runner 'ActiveRecord::Base.connection.execute("DROP TABLE servers")'
+  exec $entry bundle exec rails runner /noix-break.rb
 fi
 exec $entry "\$@"
 EOF
-  printf 'FROM %s:%s\nCOPY --chmod=0755 entry.sh /noix-entry.sh\nENTRYPOINT ["/noix-entry.sh"]\n' "$postal_repo" "$new_version" \
-    | hi sh -c 'cat >/root/breaking/Dockerfile'
+  printf 'FROM %s:%s\nCOPY --chmod=0755 entry.sh /noix-entry.sh\nCOPY --chmod=0644 break.rb /noix-break.rb\nENTRYPOINT ["/noix-entry.sh"]\n' \
+    "$postal_repo" "$new_version" | hi sh -c 'cat >/root/breaking/Dockerfile'
   h docker build -q --platform linux/amd64 -t "$test_repo:$new_version" /root/breaking >/dev/null
 }
 
 test_broken_db() {
   echo "== broken_db (ubuntu $1)"
   ensure_old_installed broken_db
-  make_breaking_image
+  make_breaking_image 'DROP TABLE servers'
   install_converge_fails -e "postal_image=$test_repo"
   expect_in_log 'the users and servers tables'
   expect_rolled_back "a broken database" "$new_version"
+  h rm "$marker"
+
+  # The message database of the fixture's server, which postal upgrade
+  # migrates too.
+  echo "== broken_db: a broken message database (ubuntu $1)"
+  h docker rmi "$test_repo:$new_version" >/dev/null
+  make_breaking_image 'DROP TABLE `postal-server-1`.messages'
+  install_converge_fails -e "postal_image=$test_repo"
+  expect_in_log 'the messages table of postal-server-1 cannot be read'
+  expect_rolled_back "a broken message database" "$new_version"
   h rm "$marker"
   remove_installation
   h docker rmi "$test_repo:$new_version" >/dev/null
@@ -2504,7 +2554,7 @@ test_no_space() {
 # postal-dump by hand: two complete directories; killed with SIGKILL in the
 # middle only <dir>.tmp is left, which the next run replaces.
 test_postal_dump() {
-  local dir
+  local dir rc
   echo "== postal_dump (ubuntu $1)"
   ensure_installed postal_dump
   postal_fixture >/dev/null
@@ -2516,6 +2566,10 @@ test_postal_dump() {
       || fail "postal-dump $dir wrote: $(h ls "$dir")"
     h sh -c "tail -n 1 $dir/postal.sql | grep -q '^-- Dump completed'" || fail "the dump in $dir is not complete"
   done
+  # Its own earlier backup is replaced.
+  h /usr/local/sbin/postal-dump /root/dump-a || fail "postal-dump over its own backup /root/dump-a failed"
+  h test -f /root/dump-a/.postal-dump || fail "postal-dump wrote no mark into /root/dump-a"
+  h test ! -e /root/dump-a.old || fail "postal-dump left /root/dump-a.old"
   h rm -rf /root/dump-c /root/dump-c.tmp
   # In a process group of its own, killed as a whole once it made <dir>.tmp
   # (each dump runs through docker compose exec, which takes a while).
@@ -2536,7 +2590,60 @@ test_postal_dump() {
     || fail "postal-dump without an argument wrote no complete dump to $backups/latest"
   [ "$(h stat -c '%a %U' "$backups/latest")" = '700 root' ] || fail "$backups/latest is not root's with mode 0700"
   h sh -c 'postal-dump a b' >/dev/null 2>&1 && fail "postal-dump took two arguments"
+  # A directory it did not write stays as it is: refused with exit 2.
+  h sh -c 'rm -rf /root/other && mkdir /root/other && echo keep >/root/other/file && echo keep >/root/plain'
+  for dir in /root/other /root/plain /; do
+    rc=0; h /usr/local/sbin/postal-dump "$dir" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "postal-dump $dir ended $rc, not 2"
+  done
+  [ "$(h cat /root/other/file)" = keep ] || fail "postal-dump replaced /root/other"
+  [ "$(h cat /root/plain)" = keep ] || fail "postal-dump replaced /root/plain"
+  h test ! -e /root/other.tmp || fail "the refused postal-dump left /root/other.tmp"
+  h rm -rf /root/other /root/plain
   h rm -rf "$backups/latest"
+}
+
+# The rollback and an update on an external MariaDB, which hold a database
+# of someone else (other): it stays as it is.
+expect_other() {
+  [ "$(printf 'SELECT v FROM other.keep;\n' | db_sql noix-db)" = 7 ] || fail "$1: the database other was touched"
+}
+test_failed_update_external() {
+  echo "== failed_update_external (ubuntu $1)"
+  remove_installation
+  start_db noix-db mariadb:11.4 db.example.test -p 127.0.0.1:3306:3306
+  db_postal_user noix-db postal postal 'postal-%'
+  printf 'CREATE DATABASE other;\nCREATE TABLE other.keep (v INT);\nINSERT INTO other.keep VALUES (7);\n' \
+    | db_sql noix-db >/dev/null || fail "the database other could not be made"
+  h sh -c 'grep -q " db.example.test$" /etc/hosts || echo "127.0.0.1 db.example.test" >>/etc/hosts'
+  echo "== install of $old_version on the external MariaDB for failed_update_external"
+  install_converge -e "$ext_vars" -e "postal_version=$old_version"
+  note_generated
+  fixture_key="$(postal_fixture)" || fail "the fixture failed: $(tail -n 20 "$out/rails.log")"
+  secrets+=("$fixture_key")
+  old_subject="noixext$(openssl rand -hex 4)"
+  api_send "$fixture_key" "$old_subject"
+  wait_mail "$old_subject" >/dev/null
+
+  # The rollback drops and loads Postal's databases on that server.
+  h docker pull -q --platform linux/amd64 "$busybox" >/dev/null
+  h docker tag "$busybox" "$test_repo:$new_version"
+  install_converge_fails -e "$ext_vars" -e "postal_image=$test_repo" -e postal_health_timeout=60
+  expect_rolled_back "a rollback on an external MariaDB" "$new_version"
+  expect_other "the rollback"
+  h rm "$marker"
+  h docker rmi "$test_repo:$new_version" >/dev/null
+
+  echo "== failed_update_external: the update (ubuntu $1)"
+  install_converge -e "$ext_vars"
+  expect_task "Migrate the databases to Postal $new_version" changed
+  expect_backup "$backups/$(complete_backups | tail -n 1)"
+  expect_data "the update on an external MariaDB"
+  expect_other "the update"
+  api_send "$fixture_key" "noixextnew$(openssl rand -hex 4)"
+  install_converge_unchanged -e "$ext_vars"
+  remove_installation
+  h docker rm -f -v noix-db >/dev/null
 }
 
 # ps_start, then ps_check <what> [<command>]: the process list of the test
@@ -2605,7 +2712,7 @@ test_secrets() {
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure takeover_refusals takeover row_format custom_names ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external postal_dump update failed_update broken_db interrupted no_space secrets"
+all_scenarios="refusals install noop_down reconfigure takeover_refusals takeover row_format custom_names ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external postal_dump update failed_update broken_db interrupted no_space failed_update_external secrets"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -2638,6 +2745,7 @@ for ubuntu in $releases; do
       broken_db) test_broken_db "$ubuntu" ;;
       interrupted) test_interrupted "$ubuntu" ;;
       no_space) test_no_space "$ubuntu" ;;
+      failed_update_external) test_failed_update_external "$ubuntu" ;;
       secrets) test_secrets "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac

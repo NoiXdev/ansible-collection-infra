@@ -8,8 +8,8 @@
 # the installation) are generated only when both the variable and the file
 # are empty, which state.yml allows on an install alone for the signing key:
 # openssl in the runner service (genrsa 2048, rand -hex 64), whose output
-# only no_log tasks see. A signing key given that differs from the file is
-# written: that is the operator's change. Sets postal_config_changed (one of
+# only no_log tasks see. A key given that differs from the installation's is
+# refused by state.yml, so only an install writes a given key. Sets postal_config_changed (one of
 # the files Postal reads changed) and postal_rspamd_config_changed (the one
 # rspamd reads). Needs the compose file (the runner). The
 # tasks that touch a secret are no_log, so a failure gets a message of its
