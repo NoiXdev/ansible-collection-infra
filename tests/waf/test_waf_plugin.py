@@ -239,6 +239,8 @@ class CheckTest(unittest.TestCase):
             ("logdata:'%{request_headers:Cookie}'", "REQUEST_HEADERS"),
             ("msg:'%{ Request_Cookies.session}'", "REQUEST_COOKIES"),
             ("logdata:%{REQUEST_COOKIES:sid}", "REQUEST_COOKIES"),
+            ("logdata:'%{REQUEST_HEADERS}'", "REQUEST_HEADERS"),
+            ("logdata:'%{request_cookies .sid}'", "REQUEST_COOKIES"),
         ]
         for action, name in cases:
             with self.subTest(action=action):
