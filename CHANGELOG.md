@@ -206,12 +206,17 @@
   from `<name>-config.conf`, `<name>-before.conf` and `<name>-after.conf` (at least one), from
   `plugins/` or the top of `src`, or of an archive that may have one top-level directory (GitHub's
   `<repo>-<version>/`). Archives are cached in `waf_dir/plugin-cache/<sha256>.tar.gz` and checked
-  against the SHA-256 before use, so a run with the same checksum downloads nothing; only
-  `.tar.gz` is supported. A plugin file may hold `SecRule`, `SecAction` and `SecMarker` only,
-  every rule with exactly one `id` in 9500000-9999999 (the CRS plugin registry range), no
-  `ctl:auditEngine` or `ctl:auditLogParts`, no chain left open and no comment ending in `\` that
-  a directive follows; two plugins may not share rule IDs. Plugin rules do not look at headers
-  and cookies that carry credentials, like the rule set's. The run is refused, before any change,
+  against the SHA-256 before use, so a run with the same checksum downloads nothing; an archive
+  is a gzip-compressed tar (`.tar.gz` or `.tgz`), not a `.zip`. A plugin file may hold `SecRule`,
+  `SecAction` and `SecMarker` only, one directive per line (no `Sec…` or `Include` word after the
+  first word, also not after a `\` continuation, and no comment inside a continued directive),
+  `SecMarker` with one name, every rule with exactly one `id` in 9500000-9999999 (the CRS plugin
+  registry range), no `ctl:auditEngine` or `ctl:auditLogParts`, no `%{REQUEST_HEADERS…}` or
+  `%{REQUEST_COOKIES…}` macro and no `FULL_REQUEST` target, no chain left open and no comment
+  ending in `\` that a directive follows; two plugins may not share rule IDs. Plugin rules do not
+  look at headers and cookies that carry credentials, like the rule set's, and cannot copy them
+  into the log through a macro; what else a plugin logs is its own business on the sites that
+  list it. The run is refused, before any change,
   for each of these, for a download that fails (`waf: plugin <name>: ` and the reason, or `the
   archive at <url> does not have sha256 <sha256>`) and for a plugin that fails the test in the
   throwaway container, which leaves the running WAF and its files as they were. The role's own
