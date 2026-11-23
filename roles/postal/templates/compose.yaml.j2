@@ -60,6 +60,17 @@
    'middlewares': [set_track] + postal_traefik_track_middlewares,
    'certresolver': postal_traefik_track_cert_resolver}) -%}
 {%- endif -%}
+{#- With postal_smtp_tls traefik, Traefik obtains and renews the certificate
+    of the SMTP services only for a host name a router names, with the
+    resolver of the entrypoints: a host name of their own gets a router of its
+    own, with the API's paths alone (never the UI, which may sit behind other
+    entrypoints and middlewares) and the API's middlewares. -#}
+{%- if postal_smtp_tls == 'traefik' and postal_smtp_hostname | lower != postal_web_hostname | lower -%}
+{%-   set _ = routers.append(
+  {'name': router ~ '-smtp', 'rule': 'Host(`' ~ postal_smtp_hostname ~ '`) && (' ~ api_paths ~ ')',
+   'entrypoints': postal_traefik_entrypoints, 'priority': postal_traefik_priority | int + 1,
+   'middlewares': [strip] + postal_traefik_middlewares}) -%}
+{%- endif -%}
 # Managed by the noixdev.infra.postal role; changes are overwritten.
 
 # What every Postal service shares: the image (linux/amd64 only; the role

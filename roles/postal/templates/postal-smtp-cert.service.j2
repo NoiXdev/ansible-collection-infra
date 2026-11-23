@@ -1,0 +1,9 @@
+# Managed by the noixdev.infra.postal role; changes are overwritten.
+[Unit]
+Description=Give Postal's SMTP servers Traefik's certificate for {{ postal_smtp_hostname }}
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart={{ postal_tls_script_file }}

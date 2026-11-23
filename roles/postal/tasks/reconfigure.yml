@@ -4,7 +4,8 @@
 # postal.yml and the keys only on start, so a changed configuration alone,
 # which leaves the compose file as it is, restarts them (web, smtp,
 # submission and worker; MariaDB only when its own settings change, through
-# the compose file). A run stopped after the files are written and before
+# the compose file); a new certificate of the SMTP services alone restarts
+# smtp and submission. A run stopped after the files are written and before
 # that restart would leave files that equal the settings while the
 # containers run with the old ones, so postal_restart_marker is written
 # first, on every reconfigure; while it exists every run reconfigures and
@@ -35,6 +36,12 @@
 - name: Write the configuration
   ansible.builtin.include_tasks: config.yml
 
+# Before compose (re)starts a service: what starts reads the new
+# certificate, and a changed one only adds the SMTP services to the one
+# restart below.
+- name: Set up SMTP TLS
+  ansible.builtin.include_tasks: tls.yml
+
 - name: Start Postal with the new compose file
   community.docker.docker_compose_v2:
     project_src: "{{ postal_dir }}"
@@ -57,12 +64,16 @@
   ansible.builtin.include_tasks: db_user.yml
   when: postal_database == 'mariadb'
 
+# Once: every Postal service for a new configuration (or a restart a stopped
+# run left), else the SMTP services for a new certificate.
 - name: Restart Postal with the new configuration
   community.docker.docker_compose_v2:
     project_src: "{{ postal_dir }}"
-    services: "{{ postal_app_services }}"
+    services: >-
+      {{ postal_app_services if postal_config_changed | bool or postal_restart_pending | bool
+         else postal_smtp_service_names }}
     state: restarted
-  when: postal_config_changed | bool or postal_restart_pending | bool
+  when: postal_config_changed | bool or postal_restart_pending | bool or postal_tls_changed | bool
 
 - name: Check that Postal is healthy
   ansible.builtin.include_tasks: health.yml

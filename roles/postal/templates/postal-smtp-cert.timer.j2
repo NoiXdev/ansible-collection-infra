@@ -1,0 +1,13 @@
+# Managed by the noixdev.infra.postal role; changes are overwritten.
+# Twice a day, at a random minute of the hour after: Traefik renews 30 days
+# before the end, so a run that is missed costs nothing.
+[Unit]
+Description=Give Postal's SMTP servers Traefik's certificate twice a day
+
+[Timer]
+OnCalendar=*-*-* 00,12:00:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

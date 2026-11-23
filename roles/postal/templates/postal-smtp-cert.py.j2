@@ -1,0 +1,228 @@
+#!/usr/bin/python3 -I
+# Managed by the noixdev.infra.postal role; changes are overwritten.
+"""Gives Postal's SMTP servers the certificate Traefik obtained.
+
+Reads Traefik's ACME storage file and takes the certificate for the SMTP host
+name: one whose main domain or SANs name it, or a wildcard of one label that
+covers it, under any of the file's resolvers; the one that expires last wins,
+as long as it loads with its key. When it (or its key) differs from what
+Postal has, it is written into Postal's configuration directory (0440
+root:999, each file replaced at once), and the SMTP services that run are
+restarted, since Postal reads the certificate once per process. Prints
+"updated" or "unchanged" and nothing of the key.
+
+--no-restart (the role's runs, which restart once for every reason they
+have): writes the files the same way, restarts nothing and prints "updated"
+also when an earlier run left a restart pending.
+
+Exit codes: 0 done, 1 failed (the ACME file cannot be read, a file cannot be
+written, the restart failed), 3 no usable certificate for the host yet.
+"""
+import base64
+import binascii
+import datetime
+import fcntl
+import json
+import os
+import ssl
+import subprocess
+import sys
+import tempfile
+
+ACME_FILE = {{ postal_traefik_acme_file | string | to_json }}
+HOST = {{ postal_smtp_hostname | string | lower | to_json }}
+POSTAL_DIR = {{ postal_dir | string | to_json }}
+CONFIG_DIR = {{ postal_config_dir | string | to_json }}
+CERT_FILE = {{ postal_smtp_cert_file | string | to_json }}
+KEY_FILE = {{ postal_smtp_key_file | string | to_json }}
+# Written before the files change and removed once the services restarted:
+# a run whose restart failed leaves it, and the next run restarts.
+MARKER = {{ postal_smtp_cert_marker | string | to_json }}
+SERVICES = {{ postal_smtp_service_names | to_json }}
+# Postal's uid and gid in its image.
+GROUP = 999
+MODE = 0o440
+
+
+def fail(code, message):
+    print(f"postal-smtp-cert: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def covers(name):
+    """Whether a domain of a certificate covers HOST."""
+    name = name.strip().lower().rstrip(".")
+    if name == HOST:
+        return True
+    return name.startswith("*.") and "." in HOST and HOST.split(".", 1)[1] == name[2:]
+
+
+def tlv(der, pos):
+    """The tag, the start and the end of the DER element at pos."""
+    tag, length = der[pos], der[pos + 1]
+    pos += 2
+    if length & 0x80:
+        size = length & 0x7F
+        length = int.from_bytes(der[pos:pos + size], "big")
+        pos += size
+    return tag, pos, pos + length
+
+
+def not_after(pem):
+    """The end of the validity of the first certificate of a PEM chain."""
+    body = pem.split(b"-----BEGIN CERTIFICATE-----", 1)[1].split(b"-----END CERTIFICATE-----", 1)[0]
+    der = base64.b64decode(b"".join(body.split()))
+    _, start, _ = tlv(der, 0)  # Certificate
+    _, start, _ = tlv(der, start)  # tbsCertificate
+    tag, _, end = tlv(der, start)  # [0] version, else the serial number
+    if tag == 0xA0:
+        _, _, end = tlv(der, end)  # the serial number
+    _, _, end = tlv(der, end)  # signature algorithm
+    _, _, end = tlv(der, end)  # issuer
+    _, start, _ = tlv(der, end)  # validity
+    _, _, end = tlv(der, start)  # notBefore
+    tag, start, end = tlv(der, end)  # notAfter
+    text = der[start:end].decode("ascii")
+    if tag == 0x17:  # UTCTime: YYMMDDHHMMSSZ, 50 to 99 in the 1900s
+        year = int(text[:2])
+        text = str(year + (1900 if year >= 50 else 2000)) + text[2:]
+    return datetime.datetime.strptime(text, "%Y%m%d%H%M%SZ")
+
+
+def candidates(acme):
+    """(expiry, resolver, names, certificate, key) of every stored certificate
+    for HOST, the last to expire first."""
+    found = []
+    for resolver, body in acme.items() if isinstance(acme, dict) else []:
+        if not isinstance(body, dict):
+            continue
+        for entry in body.get("Certificates") or []:
+            if not isinstance(entry, dict):
+                continue
+            domain = entry.get("domain") or {}
+            names = [domain.get("main")] + list(domain.get("sans") or [])
+            names = [name for name in names if isinstance(name, str) and name]
+            if not any(covers(name) for name in names):
+                continue
+            try:
+                cert = base64.b64decode(entry["certificate"], validate=True)
+                key = base64.b64decode(entry["key"], validate=True)
+                expiry = not_after(cert)
+            except (KeyError, TypeError, ValueError, IndexError, binascii.Error):
+                print(f"postal-smtp-cert: skipped an unreadable certificate of {resolver} for {', '.join(names)}",
+                      file=sys.stderr)
+                continue
+            found.append((expiry, resolver, names, cert, key))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return found
+
+
+def current(path):
+    """The bytes of a file Postal reads, or None when it is missing or has
+    another mode or owner."""
+    try:
+        with open(path, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            data = handle.read()
+    except FileNotFoundError:
+        return None
+    if (info.st_mode & 0o7777, info.st_uid, info.st_gid) != (MODE, 0, GROUP):
+        return None
+    return data
+
+
+def stage(data):
+    """A new file of the configuration directory, 0440 root:999, with the data."""
+    handle, path = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".postal-smtp-cert.")
+    try:
+        os.fchown(handle, 0, GROUP)
+        os.fchmod(handle, MODE)
+        os.write(handle, data)
+        os.fsync(handle)
+    except BaseException:
+        os.close(handle)
+        os.unlink(path)
+        raise
+    os.close(handle)
+    return path
+
+
+def loads(cert_path, key_path):
+    """None when the pair loads as a server certificate, else why not."""
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(cert_path, key_path)
+    except (ssl.SSLError, OSError, ValueError) as error:
+        return str(error.args[-1] if error.args else error)
+    return None
+
+
+def restart():
+    """Restarts the SMTP services that run; a stopped one reads the files
+    when it starts."""
+    listed = subprocess.run(["docker", "compose", "ps", "--services", "--status", "running"],
+                            cwd=POSTAL_DIR, capture_output=True, text=True, check=False)
+    if listed.returncode != 0:
+        fail(1, f"docker compose ps failed in {POSTAL_DIR}: {listed.stderr.strip()}")
+    running = [service for service in SERVICES if service in listed.stdout.split()]
+    if running:
+        # Compose's progress goes to stderr: stdout is the result alone.
+        done = subprocess.run(["docker", "compose", "restart", *running], cwd=POSTAL_DIR, check=False,
+                              stdout=sys.stderr)
+        if done.returncode != 0:
+            fail(1, f"docker compose restart {' '.join(running)} failed in {POSTAL_DIR}; "
+                    f"{MARKER} stays, so the next run restarts them")
+    try:
+        os.unlink(MARKER)
+    except FileNotFoundError:
+        pass
+
+
+def main():
+    no_restart = sys.argv[1:] == ["--no-restart"]
+    if sys.argv[1:] not in ([], ["--no-restart"]):
+        fail(1, "usage: postal-smtp-cert [--no-restart]")
+    # One run at a time: the timer's and the role's.
+    lock = os.open(CONFIG_DIR, os.O_RDONLY)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        with open(ACME_FILE, "rb") as handle:
+            acme = json.load(handle)
+    except FileNotFoundError:
+        fail(3, f"{ACME_FILE} does not exist yet: Traefik has stored no certificate")
+    except (OSError, ValueError) as error:
+        fail(1, f"{ACME_FILE} cannot be read: {error}")
+
+    have = (current(CERT_FILE), current(KEY_FILE))
+    changed = False
+    for expiry, resolver, names, cert, key in candidates(acme):
+        if have == (cert, key):
+            break
+        staged = [stage(cert), stage(key)]
+        problem = loads(*staged)
+        if problem is not None:
+            for path in staged:
+                os.unlink(path)
+            print(f"postal-smtp-cert: skipped the certificate of {resolver} for {', '.join(names)} "
+                  f"(until {expiry:%Y-%m-%d}), which does not load with its key: {problem}", file=sys.stderr)
+            continue
+        if not no_restart:
+            with open(MARKER, "w", encoding="ascii") as handle:
+                handle.write("# Written by postal-smtp-cert: the SMTP services still have to restart.\n")
+        os.replace(staged[1], KEY_FILE)
+        os.replace(staged[0], CERT_FILE)
+        directory = os.open(CONFIG_DIR, os.O_RDONLY)
+        os.fsync(directory)
+        os.close(directory)
+        changed = True
+        break
+    else:
+        fail(3, f"{ACME_FILE} holds no usable certificate for {HOST} yet")
+
+    pending = os.path.exists(MARKER)
+    if not no_restart and (changed or pending):
+        restart()
+    print("updated" if changed or pending else "unchanged")
+
+
+if __name__ == "__main__":
+    main()

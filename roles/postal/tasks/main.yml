@@ -441,8 +441,10 @@
 
 # Reached only by a run that ended healthy, which (re)started Postal on the
 # compose file and the configuration as they are: the restart a stopped
-# reconfigure left pending is done.
-- name: Remove the marker of a pending restart
+# reconfigure (or a failed restart of the certificate script) left pending is
+# done.
+- name: Remove the markers of a pending restart
   ansible.builtin.file:
-    path: "{{ postal_restart_marker }}"
+    path: "{{ item }}"
     state: absent
+  loop: ["{{ postal_restart_marker }}", "{{ postal_smtp_cert_marker }}"]

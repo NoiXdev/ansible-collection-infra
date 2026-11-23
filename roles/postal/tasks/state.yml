@@ -4,7 +4,8 @@
 #   update       postal_version is newer than the installed version
 #   reconfigure  the compose file or mariadb.cnf the role writes differs from
 #                the one on disk, postal.yml or signing.key from what the role
-#                writes, or a restart is pending (postal_restart_marker)
+#                writes, SMTP TLS from what tls.yml leaves, or a restart is
+#                pending (postal_restart_marker, postal_smtp_cert_marker)
 #   noop         everything as the role writes it
 # Also sets postal_installed (a compose file exists), postal_compose_before
 # (the compose file on disk), postal_compose_on_disk (it parsed),
@@ -14,6 +15,7 @@
 # postal_rails_secret_value (the given ones, else those on disk, else empty:
 # config.yml generates them), postal_smtp_bind_address (:: with IPv6, else
 # 0.0.0.0), postal_config_differs, postal_restart_pending,
+# postal_tls_differs (SMTP TLS is not as tls.yml leaves it),
 # postal_down (the services that are not running), postal_db_has_schema
 # (the main database holds a schema_migrations table: asked of the running
 # own MariaDB of an installation; on an install of the own MariaDB it is
@@ -25,8 +27,9 @@
 # external installation of another server, an installation without its data
 # subdirectories (an unmounted volume), a compose file that is not YAML, an
 # install that did not complete (its marker), a compose file without a Postal
-# version, a downgrade, and an installation without its signing key when
-# postal_signing_key is empty. It changes nothing.
+# version, a downgrade, an installation without its signing key when
+# postal_signing_key is empty, and with postal_smtp_tls files certificate
+# files that are missing or do not load with their key. It changes nothing.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -429,6 +432,132 @@
       {{ (postal_track_found | select('match', postal_hostname_pattern) | list
           + postal_track_hostnames | map('string') | list) | unique | sort }}
 
+# SMTP TLS: the files tls.yml writes or removes, as they are on the host
+# (sha1 checksums, no_log as one is the key's).
+- name: Look for the files of SMTP TLS
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ postal_tls_script_file }}"
+    - "{{ postal_tls_service_file }}"
+    - "{{ postal_tls_timer_file }}"
+    - "{{ postal_smtp_cert_file }}"
+    - "{{ postal_smtp_key_file }}"
+    - "{{ postal_smtp_cert_marker }}"
+  register: postal_tls_stat
+  no_log: true
+
+- name: Look for the certificate files of postal_smtp_tls files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: ["{{ postal_smtp_tls_cert }}", "{{ postal_smtp_tls_key }}"]
+  register: postal_tls_source_stat
+  no_log: true
+  when: postal_smtp_tls == 'files'
+
+- name: Refuse certificate files that are missing
+  ansible.builtin.fail:
+    msg: >-
+      postal_smtp_tls is files, but {{ postal_tls_missing | join(' and ') }}
+      {{ 'is no file' if postal_tls_missing | length == 1 else 'are no files' }}
+      on {{ inventory_hostname }} (postal_smtp_tls_cert, postal_smtp_tls_key:
+      the certificate with its chain and its key, PEM). The role changes
+      nothing.
+  vars:
+    postal_tls_missing: >-
+      {{ postal_tls_source_stat.results | rejectattr('stat.isreg', 'defined')
+         | map(attribute='item') | list
+         + postal_tls_source_stat.results | selectattr('stat.isreg', 'defined') | rejectattr('stat.isreg')
+           | map(attribute='item') | list }}
+  when:
+    - postal_smtp_tls == 'files'
+    - postal_tls_missing | length > 0
+
+# As Postal's SMTP server would load them, which it does on the first
+# STARTTLS only. Python's error names the problem, never the key.
+- name: Check that the certificate loads with its key
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -I
+      - -c
+      - |
+        import ssl, sys
+        try:
+            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(sys.argv[1], sys.argv[2])
+        except (ssl.SSLError, OSError, ValueError) as error:
+            sys.exit(str(error.args[-1] if error.args else error))
+      - "{{ postal_smtp_tls_cert }}"
+      - "{{ postal_smtp_tls_key }}"
+  register: postal_tls_source_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+  when: postal_smtp_tls == 'files'
+
+- name: Refuse certificate files that do not load
+  ansible.builtin.fail:
+    msg: >-
+      postal_smtp_tls is files, but {{ postal_smtp_tls_cert }} and
+      {{ postal_smtp_tls_key }} do not load as a certificate with its key
+      ({{ (postal_tls_source_check.stderr | default('') | trim).splitlines() | last | default('no output') }}):
+      both must be PEM, the certificate first in its file and the key its
+      own. The role changes nothing.
+  when:
+    - postal_smtp_tls == 'files'
+    - postal_tls_source_check.rc != 0
+
+- name: Read the state of the timer of SMTP TLS
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=ActiveState, --property=UnitFileState, "{{ postal_tls_unit }}.timer"]
+  register: postal_tls_timer_read
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - postal_installed
+    - postal_smtp_tls == 'traefik'
+
+# What tls.yml would change: with traefik the script, its units or the
+# timer, missing certificate files; with files copies that differ from
+# postal_smtp_tls_cert and _key; with off any of these files; in every mode
+# files with another mode or owner, and a pending restart of the SMTP
+# services. A certificate Traefik renewed is the timer's work.
+- name: Compare SMTP TLS with what the role writes
+  ansible.builtin.set_fact:
+    postal_tls_differs: >-
+      {%- set found = {} -%}
+      {%- for result in postal_tls_stat.results -%}
+      {%-   set _ = found.update({result.item: result.stat}) -%}
+      {%- endfor -%}
+      {%- set certs = [found[postal_smtp_cert_file], found[postal_smtp_key_file]] -%}
+      {%- set certs_ok = certs | selectattr('exists') | list | length == 2
+            and certs | map(attribute='mode') | unique | list == ['0440']
+            and certs | map(attribute='uid') | unique | list == [0]
+            and certs | map(attribute='gid') | unique | list == [999] -%}
+      {%- set tools = [postal_tls_script_file, postal_tls_service_file, postal_tls_timer_file] -%}
+      {%- if postal_smtp_tls == 'traefik' -%}
+      {%-   set timer = {} -%}
+      {%-   for line in postal_tls_timer_read.stdout_lines | default([]) if '=' in line -%}
+      {%-     set _ = timer.update({line.split('=', 1)[0]: line.split('=', 1)[1]}) -%}
+      {%-   endfor -%}
+      {%-   set differs = not certs_ok
+              or found[postal_tls_script_file].checksum | default('') != postal_tls_script | hash('sha1')
+              or found[postal_tls_service_file].checksum | default('') != postal_tls_service | hash('sha1')
+              or found[postal_tls_timer_file].checksum | default('') != postal_tls_timer | hash('sha1')
+              or timer.get('ActiveState') != 'active' or timer.get('UnitFileState') != 'enabled' -%}
+      {%- elif postal_smtp_tls == 'files' -%}
+      {%-   set differs = not certs_ok
+              or tools | map('extract', found) | selectattr('exists') | list | length > 0
+              or certs[0].checksum | default('') != postal_tls_source_stat.results[0].stat.checksum | default('-')
+              or certs[1].checksum | default('') != postal_tls_source_stat.results[1].stat.checksum | default('-') -%}
+      {%- else -%}
+      {%-   set differs = (tools + [postal_smtp_cert_file, postal_smtp_key_file]) | map('extract', found)
+              | selectattr('exists') | list | length > 0 -%}
+      {%- endif -%}
+      {{ postal_installed and (differs or found[postal_smtp_cert_marker].exists) }}
+
 # Written by reconfigure.yml before it writes the compose file and the
 # configuration, and removed by main.yml once a run ends healthy: a run
 # stopped in between leaves files that equal the settings while the
@@ -450,6 +579,7 @@
          else 'update' if postal_version is version(postal_installed_version, '>')
          else 'reconfigure' if postal_compose_before != postal_compose
                                or postal_config_differs | bool
+                               or postal_tls_differs | bool
                                or (postal_database == 'mariadb'
                                    and (postal_mariadb_cnf_read.content | default('') | b64decode) != postal_mariadb_cnf)
                                or postal_restart_marker_stat.stat.exists

@@ -77,6 +77,36 @@
 #             routed domains; postal_track_hostnames go on postal-track (a
 #             verified domain listed there too on postal-track alone); a
 #             domain removed in Postal loses its router on the next run
+#   smtp_tls  STARTTLS with Traefik's certificate (postal_smtp_tls traefik,
+#             Traefik on Pebble, the test ACME server): a fresh install for
+#             smtp.example.test waits for the certificate Traefik obtains
+#             through the router postal-smtp, both SMTP ports offer STARTTLS
+#             and show it (Pebble's, the one acme.json stores), smtp.cert and
+#             smtp.key are 0440 root:999, the timer runs twice a day and its
+#             service changes nothing; with the web host name as the SMTP
+#             host name the API router's certificate and no router of its
+#             own; no certificate within postal_health_timeout fails naming
+#             the host and acme.json; off removes STARTTLS, the files, the
+#             script and the timer; switched on again each SMTP service
+#             starts once
+#   cert_rotation
+#             certificates written into acme.json beside Pebble's that
+#             expire later (a wildcard of another resolver, a SAN of a third
+#             one): one run of the timer's service prints updated and starts
+#             smtp and submission once each (start times, Docker's events),
+#             the next prints unchanged and starts nothing; a new
+#             certificate and a new setting in one run of the role start each
+#             SMTP service once; a pending restart (its marker) restarts them
+#             on the next run of the role or of the script; without the
+#             submission service the script restarts smtp alone
+#   smtp_files
+#             postal_smtp_tls files with a self-signed pair: copied 0440
+#             root:999 and shown on both ports; a new pair at the same paths
+#             starts smtp and submission once and nothing else; a missing
+#             file and a key of another certificate refused before any change
+#   smtp_off  postal_smtp_tls off (the suite's default): no STARTTLS on
+#             either port, no certificate files, script or timer, and no
+#             router for another SMTP host name
 #   missing_data
 #             the MariaDB data moved away (an unmounted volume): the run
 #             refuses and creates nothing, and compose does not start MariaDB
@@ -119,6 +149,17 @@ db_password="$(openssl rand -hex 12)"' pa$s w'"'"'o rd'
 admin_password="$(openssl rand -hex 10)"' ad$m '"'"'in'
 admin_email=admin@example.test
 secrets=("$db_password" "$admin_password")
+
+# The TLS scenarios: Pebble, Let's Encrypt's test ACME server, on the
+# Traefik network as pebble (its listener certificate names that host),
+# passing every challenge (PEBBLE_VA_ALWAYS_VALID: no name has to resolve).
+# Traefik asks it through LEGO_CA_CERTIFICATES, the CA of that listener in
+# Traefik's acme directory, through the env file of the traefik role
+# (traefik_dns_env), and the role takes Traefik's certificate for
+# smtp.example.test.
+pebble_image=ghcr.io/letsencrypt/pebble:2.10.1
+acme_file=/opt/traefik/acme/acme.json
+tls='{"traefik_acme_ca_server": "https://pebble:14000/dir", "traefik_dns_env": {"LEGO_CA_CERTIFICATES": "/acme/pebble.minica.pem"}, "postal_smtp_tls": "traefik", "postal_smtp_hostname": "smtp.example.test"}'
 
 cleanup() {
   [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
@@ -286,7 +327,12 @@ refused() {
 compose() { h sh -c "cd $app_dir && docker compose $*"; }
 # The container of a service (the first replica): container <service>.
 container() { printf '%s\n' "postal-$1-1"; }
-started_at() { h docker inspect --format '{{.State.StartedAt}}' "$(container "$1")"; }
+# The start time of the service's container, none without one.
+started_at() {
+  local at
+  at="$(h docker inspect --format '{{.State.StartedAt}}' "$(container "$1")" 2>/dev/null | tr -d '[:space:]' || true)"
+  printf '%s\n' "${at:-none}"
+}
 # postal_rails '<ruby>': runs the Ruby code in Postal's Rails environment (as
 # postal console does) through rails runner in the runner service, and prints
 # what it prints. The code goes through stdin into the argument of rails
@@ -548,7 +594,7 @@ note_starts() {
   local service
   starts_before=
   for service in web smtp submission worker mariadb; do
-    starts_before="$starts_before $service=$(started_at "$service" 2>/dev/null || echo none)"
+    starts_before="$starts_before $service=$(started_at "$service")"
   done
 }
 # expect_restarted <services...>: these services started again since
@@ -558,12 +604,193 @@ expect_restarted() {
   local service before now
   for service in web smtp submission worker mariadb; do
     before="$(printf '%s\n' "$starts_before" | tr ' ' '\n' | sed -n "s/^$service=//p")"
-    now="$(started_at "$service" 2>/dev/null || echo none)"
+    now="$(started_at "$service")"
     case " $* " in
       *" $service "*) [ "$now" != "$before" ] || fail "$service was not restarted" ;;
       *) [ "$now" = "$before" ] || fail "$service was restarted ($before, now $now)" ;;
     esac
   done
+}
+
+# start_pebble: Pebble running (see tls), its listener's CA where Traefik
+# reads it. Its configuration is the image's with the one profile of 90 days:
+# the image's also offers a short-lived one, and Traefik renews a certificate
+# of 6 days whenever it restarts, which would race the role's copy.
+start_pebble() {
+  if [ -z "$(h docker ps -q --filter name=^pebble$)" ]; then
+    h docker rm -f pebble >/dev/null 2>&1 || true
+    hi sh -c 'cat >/root/pebble.json' <<'JSON'
+{"pebble": {"listenAddress": "0.0.0.0:14000", "managementListenAddress": "0.0.0.0:15000",
+            "certificate": "test/certs/localhost/cert.pem", "privateKey": "test/certs/localhost/key.pem",
+            "httpPort": 5002, "tlsPort": 5001, "ocspResponderURL": "", "externalAccountBindingRequired": false,
+            "retryAfter": {"authz": 1, "order": 1}, "keyAlgorithm": "ecdsa",
+            "profiles": {"default": {"description": "90 days", "validityPeriod": 7776000}}}}
+JSON
+    h docker run -d --name pebble --network proxy --restart unless-stopped \
+      -e PEBBLE_VA_ALWAYS_VALID=1 -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 \
+      -v /root/pebble.json:/pebble.json:ro "$pebble_image" -config /pebble.json >/dev/null
+  fi
+  h sh -c 'docker cp pebble:/test/certs/pebble.minica.pem /opt/traefik/acme/pebble.minica.pem && chmod 0644 /opt/traefik/acme/pebble.minica.pem'
+}
+# acme_has <name>: whether acme.json stores a certificate whose main domain
+# is the name (yes or no). acme_cert <file> <name>: writes that certificate
+# to the file on the test host.
+acme_has() {
+  h python3 -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    data = {}
+print("yes" if any(entry["domain"]["main"] == sys.argv[2] for body in data.values() if isinstance(body, dict)
+                   for entry in body.get("Certificates") or []) else "no")' "$acme_file" "$1"
+}
+acme_cert() {
+  h python3 -c '
+import base64, json, sys
+data = json.load(open(sys.argv[1]))
+for body in data.values():
+    for entry in (body or {}).get("Certificates") or []:
+        if entry["domain"]["main"] == sys.argv[3]:
+            open(sys.argv[2], "wb").write(base64.b64decode(entry["certificate"]))
+            sys.exit(0)
+sys.exit("acme.json has no certificate for " + sys.argv[3])' "$acme_file" "$1" "$2" || fail "acme.json has no certificate for $2"
+}
+# acme_add <resolver> <main> <sans, comma-separated> <dir>: stores the pair of
+# the directory (make_pair) in acme.json as Traefik does, under the
+# resolver. acme_drop <dir>: removes it again.
+acme_add() {
+  h python3 -c '
+import base64, json, os, sys
+path, resolver, main, sans, folder = sys.argv[1:]
+data = json.load(open(path))
+body = data.setdefault(resolver, {})
+body["Certificates"] = body.get("Certificates") or []
+read = lambda name: base64.b64encode(open(os.path.join(folder, name), "rb").read()).decode()
+body["Certificates"].append({"domain": {"main": main, "sans": [name for name in sans.split(",") if name]},
+                             "certificate": read("cert.pem"), "key": read("key.pem"), "Store": "default"})
+with open(path + ".new", "w") as out:
+    json.dump(data, out)
+os.chmod(path + ".new", 0o600)
+os.replace(path + ".new", path)' "$acme_file" "$@"
+}
+acme_drop() {
+  h python3 -c '
+import base64, json, os, sys
+path, folder = sys.argv[1:]
+cert = base64.b64encode(open(os.path.join(folder, "cert.pem"), "rb").read()).decode()
+data = json.load(open(path))
+for body in data.values():
+    if isinstance(body, dict) and body.get("Certificates"):
+        body["Certificates"] = [entry for entry in body["Certificates"] if entry.get("certificate") != cert]
+with open(path + ".new", "w") as out:
+    json.dump(data, out)
+os.chmod(path + ".new", 0o600)
+os.replace(path + ".new", path)' "$acme_file" "$1"
+}
+# make_pair <dir> <days> <name> [more names]: a self-signed certificate
+# (P-256) for the names in <dir>/cert.pem and its key in <dir>/key.pem on the
+# test host; a line of the key joins the secrets no output may hold.
+make_pair() {
+  h sh -c 'dir="$1" days="$2" name="$3"; shift 3; san="DNS:$name"; for more in "$@"; do san="$san,DNS:$more"; done
+    rm -rf "$dir" && mkdir -p "$dir" && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+      -days "$days" -subj "/CN=$name" -addext "subjectAltName=$san" -keyout "$dir/key.pem" -out "$dir/cert.pem" 2>/dev/null' sh "$@"
+  secrets+=("$(h sed -n 2p "$1/key.pem")")
+}
+# note_tls_key: a line of the key the role copied joins the secrets.
+note_tls_key() {
+  local line
+  line="$(h sed -n 2p "$app_dir/config/smtp.key" 2>/dev/null)" || fail "the role wrote no $app_dir/config/smtp.key"
+  secrets+=("$line")
+}
+# The SHA-256 fingerprint of a PEM certificate on the test host (the first of
+# a chain), and of the one the SMTP service on a port shows after STARTTLS
+# (empty while it does not answer): fingerprint <file>, served <port>.
+fingerprint() { h openssl x509 -in "$1" -noout -fingerprint -sha256; }
+served() {
+  h sh -c 'openssl s_client -starttls smtp -connect "127.0.0.1:$1" </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null' sh "$1" || true
+}
+# expect_served <file> <ports...>: STARTTLS on each port shows the
+# certificate of the file (waiting while a restarted service starts).
+expect_served() {
+  local want port got
+  want="$(fingerprint "$1")"
+  for port in "${@:2}"; do
+    for _ in $(seq 60); do
+      got="$(served "$port")"
+      [ "$got" = "$want" ] && break
+      sleep 3
+    done
+    [ "$got" = "$want" ] || fail "STARTTLS on $port shows ${got:-no certificate}, not $1 ($want)"
+  done
+}
+# expect_acme_served <name> <ports...>: STARTTLS on each port shows the
+# certificate acme.json stores for the name now (Traefik renews Pebble's
+# short-lived ones whenever it restarts).
+expect_acme_served() {
+  acme_cert "/root/acme-$1.pem" "$1"
+  expect_served "/root/acme-$1.pem" "${@:2}"
+}
+# starttls <port>: yes or no, whether the SMTP service on the port offers
+# STARTTLS after EHLO (waiting while it starts). expect_starttls <yes|no>
+# <ports...>.
+starttls() {
+  h python3 -c '
+import smtplib, sys, time
+for _ in range(60):
+    try:
+        with smtplib.SMTP("127.0.0.1", int(sys.argv[1]), local_hostname="client.example.test", timeout=30) as smtp:
+            smtp.ehlo()
+            print("yes" if smtp.has_extn("starttls") else "no")
+            break
+    except OSError:
+        time.sleep(3)
+else:
+    print("no answer")' "$1"
+}
+expect_starttls() {
+  local port answer
+  for port in "${@:2}"; do
+    answer="$(starttls "$port")"
+    [ "$answer" = "$1" ] || fail "port $port answers $answer to whether it offers STARTTLS, not $1"
+  done
+}
+# note_events: from now on count_starts <service> counts how often the
+# service's container started (Docker's start events);
+# expect_started_once <services...>.
+note_events() { events_since="$(h date +%s)"; }
+count_starts() {
+  h docker events --since "$events_since" --until "$(($(h date +%s) + 1))" --filter "container=$(container "$1")" \
+    --filter event=start --format '{{.Action}}' | wc -l | tr -d ' '
+}
+expect_started_once() {
+  local service count
+  for service in "$@"; do
+    count="$(count_starts "$service")"
+    [ "$count" = 1 ] || fail "$service started $count times since note_events, not once"
+  done
+}
+# timer_run: one run of the service the timer starts; prints what the
+# script printed (updated or unchanged). Its journal must hold no secret.
+timer_run() {
+  local id answer
+  h systemctl start postal-smtp-cert.service \
+    || fail "postal-smtp-cert.service failed: $(h journalctl -u postal-smtp-cert.service -n 20 --no-pager -o cat)"
+  id="$(h systemctl show --property=InvocationID --value postal-smtp-cert.service)"
+  for _ in $(seq 10); do
+    answer="$(h journalctl "_SYSTEMD_INVOCATION_ID=$id" -o cat --no-pager | grep -Ex 'updated|unchanged' | tail -n 1 || true)"
+    [ -n "$answer" ] && break
+    sleep 1
+  done
+  h journalctl -u postal-smtp-cert.service -o cat --no-pager >"$out/timer.log"
+  expect_no_secrets "$out/timer.log" "the journal of postal-smtp-cert.service"
+  printf '%s\n' "$answer"
+}
+# Removes the installation (its containers, files and data), for a scenario
+# that installs afresh.
+remove_installation() {
+  h sh -c "cd $app_dir 2>/dev/null && docker compose down --remove-orphans" >/dev/null 2>&1 || true
+  h rm -rf "$app_dir"
 }
 
 # An installation with the first admin, as the install scenario makes it,
@@ -1021,6 +1248,243 @@ test_track_domains() {
   expect_clean
 }
 
+# verify with postal_smtp_tls traefik for smtp.example.test.
+verify_tls() { verify -e verify_smtp_tls=traefik -e verify_smtp_hostname=smtp.example.test "$@"; }
+
+test_smtp_tls() {
+  local fresh same='{"postal_smtp_hostname": "postal.test"}'
+  local nocert='{"postal_smtp_hostname": "nocert.example.test", "postal_health_timeout": 60}'
+  echo "== smtp_tls (ubuntu $1)"
+  start_pebble
+
+  # A fresh install: unless an earlier run of the suite on this host got it,
+  # Traefik has no certificate for smtp.example.test yet, so the run starts
+  # web, whose router postal-smtp makes Traefik ask Pebble, and waits for it.
+  remove_installation
+  fresh="$(acme_has smtp.example.test)"
+  install_converge -e "$tls"
+  note_generated
+  if [ "$fresh" = no ]; then
+    [ "$(acme_has smtp.example.test)" = yes ] || fail "the install ended without Traefik's certificate for smtp.example.test"
+  else
+    echo "== smtp_tls: Traefik had the certificate before the install, which did not wait for it"
+  fi
+  note_tls_key
+  verify_tls
+  acme_cert /root/acme-smtp.example.test.pem smtp.example.test
+  h cmp -s /root/acme-smtp.example.test.pem "$app_dir/config/smtp.cert" || fail "smtp.cert is not the certificate acme.json stores for smtp.example.test"
+  h openssl x509 -in /root/acme-smtp.example.test.pem -noout -issuer | grep -q 'Pebble Intermediate' || fail "the certificate for smtp.example.test is not Pebble's"
+  h openssl x509 -in /root/acme-smtp.example.test.pem -noout -text | grep -q 'DNS:smtp.example.test' || fail "the certificate does not name smtp.example.test"
+  expect_starttls yes 25 587
+  expect_served /root/acme-smtp.example.test.pem 25 587
+  # The timer: twice a day at a random minute of the hour after; its service
+  # with nothing new restarts nothing.
+  h systemctl show --property=TimersCalendar --value postal-smtp-cert.timer | grep -qF 'OnCalendar=*-*-* 00,12:00:00' \
+    || fail "the timer does not run at 00:00 and 12:00: $(h systemctl show --property=TimersCalendar --value postal-smtp-cert.timer)"
+  [ "$(h systemctl show --property=RandomizedDelayUSec --value postal-smtp-cert.timer)" = 1h ] || fail "the timer has no random delay of 1h"
+  note_starts
+  [ "$(timer_run)" = unchanged ] || fail "the timer's service did not print unchanged"
+  expect_restarted
+  install_converge_unchanged -e "$tls"
+  expect_clean
+
+  # The SMTP host name is the web host name: no router of its own, the
+  # certificate of the API's router.
+  echo "== smtp_tls: the web host name (ubuntu $1)"
+  install_converge -e "$tls" -e "$same"
+  note_tls_key
+  verify -e verify_smtp_tls=traefik
+  expect_acme_served postal.test 25 587
+  install_converge_unchanged -e "$tls" -e "$same"
+
+  # Traefik cannot reach Pebble: no certificate for the new host name within
+  # postal_health_timeout, and the run fails naming the host and acme.json.
+  echo "== smtp_tls: no certificate (ubuntu $1)"
+  h docker network disconnect proxy pebble
+  install_converge_fails -e "$tls" -e "$nocert"
+  h docker network connect proxy pebble
+  expect_in_log 'Traefik stored no certificate for nocert.example.test in /opt/traefik/acme/acme.json within 60 seconds'
+  install_converge -e "$tls"
+  verify_tls
+  expect_acme_served smtp.example.test 25 587
+  install_converge_unchanged -e "$tls"
+
+  # Off: no STARTTLS; the files, the script and the timer go.
+  echo "== smtp_tls: off (ubuntu $1)"
+  install_converge
+  verify
+  expect_starttls no 25 587
+  install_converge_unchanged
+
+  # On again: the certificate is there, postal.yml changes, and every Postal
+  # service restarts, each SMTP service starting once.
+  echo "== smtp_tls: on again (ubuntu $1)"
+  note_starts
+  note_events
+  install_converge -e "$tls"
+  expect_restarted web smtp submission worker
+  expect_started_once smtp submission
+  verify_tls
+  expect_acme_served smtp.example.test 25 587
+  install_converge_unchanged -e "$tls"
+
+  install_converge
+  verify
+  install_converge_unchanged
+  expect_clean
+}
+
+test_cert_rotation() {
+  local threshold='{"postal_settings": {"default_spam_threshold": 7}}' nosub='{"postal_smtp_submission_port": 0}'
+  echo "== cert_rotation (ubuntu $1)"
+  start_pebble
+  ensure_installed cert_rotation
+  install_converge -e "$tls"
+  note_tls_key
+  install_converge_unchanged -e "$tls"
+  expect_acme_served smtp.example.test 25 587
+
+  # A certificate that expires after Pebble's, a wildcard under another
+  # resolver: one run of the timer's service copies it and starts smtp and
+  # submission once each; the next run changes nothing.
+  make_pair /root/rotate1 400 '*.example.test'
+  acme_add dns '*.example.test' '' /root/rotate1
+  note_starts
+  note_events
+  [ "$(timer_run)" = updated ] || fail "the timer's service did not print updated for the new certificate"
+  expect_restarted smtp submission
+  expect_started_once smtp submission
+  h cmp -s /root/rotate1/cert.pem "$app_dir/config/smtp.cert" || fail "smtp.cert is not the new certificate"
+  h cmp -s /root/rotate1/key.pem "$app_dir/config/smtp.key" || fail "smtp.key is not the new key"
+  verify_tls
+  expect_served /root/rotate1/cert.pem 25 587
+  h test ! -e "$app_dir/smtp-restart-pending" || fail "the timer's service left $app_dir/smtp-restart-pending"
+  note_starts
+  [ "$(timer_run)" = unchanged ] || fail "the second run of the timer's service did not print unchanged"
+  expect_restarted
+  install_converge_unchanged -e "$tls"
+
+  # A newer certificate (a SAN of a certificate of a third resolver) and a
+  # new setting in one run of the role: every Postal service restarts, each
+  # SMTP service starting once, with the new certificate.
+  echo "== cert_rotation: a new certificate and a new setting (ubuntu $1)"
+  make_pair /root/rotate2 500 mx.example.test smtp.example.test
+  acme_add tailnet mx.example.test smtp.example.test /root/rotate2
+  note_starts
+  note_events
+  install_converge -e "$tls" -e "$threshold"
+  expect_restarted web smtp submission worker
+  expect_started_once smtp submission
+  expect_served /root/rotate2/cert.pem 25 587
+  install_converge_unchanged -e "$tls" -e "$threshold"
+
+  # A restart the script could not do (its marker): the next run of the role
+  # restarts the SMTP services alone, the next run of the script too.
+  echo "== cert_rotation: a pending restart (ubuntu $1)"
+  h touch "$app_dir/smtp-restart-pending"
+  note_starts
+  note_events
+  install_converge -e "$tls" -e "$threshold"
+  expect_restarted smtp submission
+  expect_started_once smtp submission
+  h test ! -e "$app_dir/smtp-restart-pending" || fail "the healthy run kept $app_dir/smtp-restart-pending"
+  install_converge_unchanged -e "$tls" -e "$threshold"
+  h touch "$app_dir/smtp-restart-pending"
+  note_starts
+  [ "$(timer_run)" = updated ] || fail "the timer's service did not print updated for a pending restart"
+  expect_restarted smtp submission
+  h test ! -e "$app_dir/smtp-restart-pending" || fail "the timer's service kept $app_dir/smtp-restart-pending"
+
+  # Without the submission service the script restarts smtp alone.
+  echo "== cert_rotation: no submission service (ubuntu $1)"
+  install_converge -e "$tls" -e "$nosub"
+  install_converge_unchanged -e "$tls" -e "$nosub"
+  make_pair /root/rotate3 600 smtp.example.test
+  acme_add http smtp.example.test '' /root/rotate3
+  note_starts
+  note_events
+  [ "$(timer_run)" = updated ] || fail "the timer's service did not print updated without the submission service"
+  expect_restarted smtp
+  expect_started_once smtp
+  expect_served /root/rotate3/cert.pem 25
+
+  # Back to the defaults; the certificates written here go again.
+  acme_drop /root/rotate1
+  acme_drop /root/rotate2
+  acme_drop /root/rotate3
+  install_converge
+  verify
+  install_converge_unchanged
+  expect_clean
+}
+
+test_smtp_files() {
+  local files='{"postal_smtp_tls": "files", "postal_smtp_tls_cert": "/root/tls/cert.pem", "postal_smtp_tls_key": "/root/tls/key.pem"}'
+  echo "== smtp_files (ubuntu $1)"
+  ensure_installed smtp_files
+
+  # A self-signed pair: copied, and every Postal service restarts for the
+  # new postal.yml, each SMTP service starting once.
+  make_pair /root/tls 30 smtp.example.test
+  note_starts
+  note_events
+  install_converge -e "$files"
+  expect_restarted web smtp submission worker
+  expect_started_once smtp submission
+  verify -e verify_smtp_tls=files
+  h cmp -s /root/tls/cert.pem "$app_dir/config/smtp.cert" || fail "smtp.cert is not postal_smtp_tls_cert"
+  h cmp -s /root/tls/key.pem "$app_dir/config/smtp.key" || fail "smtp.key is not postal_smtp_tls_key"
+  expect_starttls yes 25 587
+  expect_served /root/tls/cert.pem 25 587
+  install_converge_unchanged -e "$files"
+
+  # A new pair at the same paths: copied, smtp and submission start once,
+  # nothing else restarts.
+  echo "== smtp_files: a new pair (ubuntu $1)"
+  make_pair /root/tls 60 smtp.example.test
+  note_starts
+  note_events
+  install_converge -e "$files"
+  expect_restarted smtp submission
+  expect_started_once smtp submission
+  expect_served /root/tls/cert.pem 25 587
+  install_converge_unchanged -e "$files"
+
+  # Refused before any change: a missing file, a key of another certificate.
+  echo "== smtp_files: refusals (ubuntu $1)"
+  make_pair /root/tls-other 30 smtp.example.test
+  note_untouched
+  install_converge_fails -e "$files" -e postal_smtp_tls_key=/root/tls/missing.pem
+  expect_in_log 'postal_smtp_tls is files, but /root/tls/missing.pem is no file'
+  expect_untouched
+  install_converge_fails -e "$files" -e postal_smtp_tls_key=/root/tls-other/key.pem
+  expect_in_log 'do not load as a certificate with its key'
+  expect_untouched
+
+  install_converge
+  verify
+  expect_starttls no 25 587
+  install_converge_unchanged
+  expect_clean
+}
+
+test_smtp_off() {
+  local other='{"postal_smtp_hostname": "smtp.example.test"}'
+  echo "== smtp_off (ubuntu $1)"
+  ensure_installed smtp_off
+  install_converge_unchanged
+  verify
+  expect_starttls no 25 587
+  [ -z "$(served 25)" ] || fail "port 25 shows a certificate with postal_smtp_tls off"
+  # Another SMTP host name: no router for it, so Traefik asks no certificate.
+  install_converge -e "$other"
+  verify -e verify_smtp_hostname=smtp.example.test
+  expect_starttls no 25 587
+  install_converge_unchanged -e "$other"
+  install_converge
+  install_converge_unchanged
+}
+
 test_mail() {
   local key smtp_key subject raw body
   echo "== mail (ubuntu $1)"
@@ -1070,7 +1534,7 @@ test_mail() {
 # All scenarios by default; NOIXDEV_INFRA_POSTAL_TESTS="install" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install noop_down reconfigure takeover ipv6_off routers mail track_domains missing_data mountpoint"
+all_scenarios="refusals install noop_down reconfigure takeover ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -1085,6 +1549,10 @@ for ubuntu in $releases; do
       routers) test_routers "$ubuntu" ;;
       mail) test_mail "$ubuntu" ;;
       track_domains) test_track_domains "$ubuntu" ;;
+      smtp_tls) test_smtp_tls "$ubuntu" ;;
+      cert_rotation) test_cert_rotation "$ubuntu" ;;
+      smtp_files) test_smtp_files "$ubuntu" ;;
+      smtp_off) test_smtp_off "$ubuntu" ;;
       missing_data) test_missing_data "$ubuntu" ;;
       mountpoint) test_mountpoint "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;

@@ -3,7 +3,8 @@
 # compose file, the configuration with its keys, the database target, then
 # with the own MariaDB the server and Postal's user; postal initialize on an
 # empty database (it creates the main database and loads the schema), the
-# first admin when postal_admin_email is set, Postal until it is healthy,
+# first admin when postal_admin_email is set, the certificate of the SMTP
+# services (tls.yml), Postal until it is healthy,
 # and the DNS records to set. The marker postal_install_marker lives from
 # before the first data directory until Postal is healthy, so a run after a
 # failed install refuses (state.yml) instead of taking the half-made
@@ -184,6 +185,10 @@
       vars:
         postal_admin_result: "{{ postal_admin_created.stdout_lines | default([]) | select('match', '^(created|exists|invalid:)') | last | default('') }}"
       when: postal_admin_email | string | length > 0
+
+    # Before the SMTP services start: they read it once.
+    - name: Set up SMTP TLS
+      ansible.builtin.include_tasks: tls.yml
 
     - name: Start Postal
       community.docker.docker_compose_v2:

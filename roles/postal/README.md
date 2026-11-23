@@ -9,18 +9,24 @@ update and a rollback when an update fails.
 This part of the role installs Postal with a MariaDB container of its own,
 creates the first admin (`postal_admin_email`, `postal_admin_password`),
 prints the DNS records to set, applies changed settings, routes the API, the
-web interface and the tracking domains through Traefik and checks on every run
-that Postal answers; updates, the external MariaDB, SMTP TLS and the spam
-checks follow. A customer tracking domain added in Postal gets its router and
-its certificate on the next run of the role, once Postal has verified its
-CNAME; its certificate comes from HTTP-01 (the `traefik` role's
-`traefik_acme_http_resolver` with the DNS-01 challenge). A password of the database user
-must not hold a double quote or a backslash, which Postal cannot read. Docker
-comes from the playbook (the `docker` role); the role checks for it. The host
-must be x86_64, as Postal's image exists for that architecture only.
-`postal_web_hostname`, `postal_dns_domain` and `postal_db_password` (keep it
-in a vault) are required. The full reference is in `meta/argument_specs.yml`,
-the defaults in `defaults/main.yml`.
+web interface and the tracking domains through Traefik, gives the SMTP
+services a certificate for STARTTLS and checks on every run that Postal
+answers; updates, the external MariaDB and the spam checks follow. With
+`postal_smtp_tls: traefik` the certificate is the one Traefik obtained for
+`postal_smtp_hostname`: the role installs `/usr/local/sbin/postal-smtp-cert`
+and a systemd timer that copies it twice a day and restarts the SMTP services
+when it changed, and the first run waits for it. With `files` it copies
+`postal_smtp_tls_cert` and `postal_smtp_tls_key` on every run. A customer
+tracking domain added in Postal gets its router and its certificate on the
+next run of the role, once Postal has verified its CNAME; its certificate
+comes from HTTP-01 (the `traefik` role's `traefik_acme_http_resolver` with the
+DNS-01 challenge). A password of the database user must not hold a double
+quote or a backslash, which Postal cannot read. Docker comes from the playbook
+(the `docker` role); the role checks for it. The host must be x86_64, as
+Postal's image exists for that architecture only. `postal_web_hostname`,
+`postal_dns_domain` and `postal_db_password` (keep it in a vault) are
+required. The full reference is in `meta/argument_specs.yml`, the defaults in
+`defaults/main.yml`.
 
 ## Variables
 
@@ -47,6 +53,8 @@ the defaults in `defaults/main.yml`.
 | `postal_smtp_port` | `25` | Port of the receiving SMTP service |
 | `postal_smtp_submission_port` | `587` | Port of the submission service; `0` switches it off |
 | `postal_smtp_tls` | `traefik` | `traefik`, `files` or `off` |
+| `postal_traefik_acme_file` | `/opt/traefik/acme/acme.json` | Traefik's certificate storage, with `traefik` |
+| `postal_smtp_tls_cert`, `postal_smtp_tls_key` | `""` | Certificate (with its chain) and key on the host, with `files` |
 | `postal_spam` | `none` | `none` or `rspamd` |
 | `postal_clamav` | `false` | Virus checks with ClamAV |
 | `postal_admin_email`, `postal_admin_password` | `""` | The first admin, created once on an install |

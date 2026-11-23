@@ -1,0 +1,190 @@
+---
+# The certificate of the SMTP services, before compose (re)starts them:
+# install.yml calls it before Postal starts, reconfigure.yml before compose
+# brings the services to the new compose file, so that a service that starts
+# reads the new files and the one restart of reconfigure.yml covers them.
+#   traefik  the script postal_tls_script_file and its systemd timer
+#            (twice a day) are installed; the script copies the certificate
+#            Traefik stored for postal_smtp_hostname into smtp.cert and
+#            smtp.key. Without one yet, web is started (Traefik asks for a
+#            certificate for the host names of its routers) and the run waits
+#            up to postal_health_timeout seconds for it.
+#   files    postal_smtp_tls_cert and _key are copied (state.yml checked
+#            them); the script and the timer go.
+#   off      the script, the timer, smtp.cert and smtp.key go.
+# Sets postal_tls_changed: the SMTP services must restart for the
+# certificate (it changed, or a restart is pending: postal_smtp_cert_marker).
+# The key is copied in no_log tasks; the script prints none of it.
+
+- name: Look for a pending restart of the SMTP services
+  ansible.builtin.stat:
+    path: "{{ postal_smtp_cert_marker }}"
+    get_checksum: false
+  register: postal_tls_marker_stat
+
+- name: Note whether the certificate changes
+  ansible.builtin.set_fact:
+    postal_tls_changed: "{{ postal_tls_marker_stat.stat.exists }}"
+    postal_tls_start: "{{ now().timestamp() }}"
+
+- name: Copy Traefik's certificate
+  when: postal_smtp_tls == 'traefik'
+  block:
+    - name: Install the script that copies Traefik's certificate
+      ansible.builtin.copy:
+        dest: "{{ postal_tls_script_file }}"
+        content: "{{ postal_tls_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the units of the script
+      ansible.builtin.copy:
+        dest: "{{ item.dest }}"
+        content: "{{ item.content }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - {dest: "{{ postal_tls_service_file }}", content: "{{ postal_tls_service }}"}
+        - {dest: "{{ postal_tls_timer_file }}", content: "{{ postal_tls_timer }}"}
+      loop_control:
+        label: "{{ item.dest }}"
+      register: postal_tls_units
+
+    # Prints updated or unchanged; restarts nothing (reconfigure.yml does).
+    - name: Copy the certificate Traefik has
+      ansible.builtin.command:
+        argv: ["{{ postal_tls_script_file }}", --no-restart]
+      register: postal_tls_copied
+      changed_when: postal_tls_copied.stdout | trim == 'updated'
+      failed_when: false
+
+    # Traefik asks for a certificate for the host names of the routers of a
+    # running web, with the resolver of their entrypoints.
+    - name: Start web so that Traefik asks for the certificate
+      community.docker.docker_compose_v2:
+        project_src: "{{ postal_dir }}"
+        services: [web]
+        state: present
+        pull: missing
+      when: postal_tls_copied.rc != 0
+
+    - name: Wait for Traefik's certificate
+      ansible.builtin.command:
+        argv: ["{{ postal_tls_script_file }}", --no-restart]
+      register: postal_tls_waited
+      until: >-
+        postal_tls_waited.rc == 0
+        or now().timestamp() - postal_tls_start | float >= postal_health_timeout | int
+      retries: "{{ postal_health_retries }}"
+      delay: 5
+      changed_when: postal_tls_waited.stdout | trim == 'updated'
+      failed_when: false
+      when: postal_tls_copied.rc != 0
+
+    - name: Fail without Traefik's certificate
+      ansible.builtin.fail:
+        msg: >-
+          Traefik stored no certificate for {{ postal_smtp_hostname }} in
+          {{ postal_traefik_acme_file }} within {{ postal_health_timeout }}
+          seconds ({{ (postal_tls_waited.stderr | default('') | trim).splitlines() | last | default('no output') }}),
+          so Postal's SMTP services would offer STARTTLS without one. Check
+          that {{ postal_smtp_hostname }} resolves to {{ inventory_hostname }},
+          that the entrypoints of Postal's routers have a certificate resolver
+          (postal_traefik_entrypoints) and Traefik's log, or set
+          postal_smtp_tls to files or off.
+      when:
+        - postal_tls_copied.rc != 0
+        - postal_tls_waited.rc != 0
+
+    - name: Note whether the certificate changed
+      ansible.builtin.set_fact:
+        postal_tls_changed: >-
+          {{ postal_tls_changed | bool
+             or [postal_tls_copied, postal_tls_waited] | selectattr('stdout', 'defined')
+                | map(attribute='stdout') | map('trim') | select('eq', 'updated') | list | length > 0 }}
+
+    - name: Start the timer of the script
+      ansible.builtin.systemd_service:
+        name: "{{ postal_tls_unit }}.timer"
+        state: started
+        enabled: true
+        daemon_reload: "{{ postal_tls_units is changed }}"
+
+- name: Copy the certificate files
+  when: postal_smtp_tls == 'files'
+  block:
+    - name: Copy the certificate
+      ansible.builtin.copy:
+        src: "{{ postal_smtp_tls_cert }}"
+        dest: "{{ postal_smtp_cert_file }}"
+        remote_src: true
+        owner: root
+        group: "999"
+        mode: "0440"
+      register: postal_tls_cert_copied
+
+    - name: Copy the key
+      ansible.builtin.copy:
+        src: "{{ postal_smtp_tls_key }}"
+        dest: "{{ postal_smtp_key_file }}"
+        remote_src: true
+        owner: root
+        group: "999"
+        mode: "0440"
+      register: postal_tls_key_copied
+      no_log: true
+
+    - name: Note whether the certificate changed
+      ansible.builtin.set_fact:
+        postal_tls_changed: "{{ postal_tls_changed | bool or postal_tls_cert_copied is changed or postal_tls_key_copied is changed }}"
+
+  rescue:
+    - name: Fail with the file that could not be copied
+      ansible.builtin.fail:
+        msg: >-
+          The certificate of the SMTP services could not be copied
+          ({{ ansible_failed_task.name }}) into {{ postal_config_dir }}; the
+          error is not shown, as it can quote the key. Check
+          postal_smtp_tls_cert and postal_smtp_tls_key and the directory,
+          then run the role again.
+
+# Without traefik: the script must not copy a certificate over the files.
+- name: Remove the timer of the script
+  when: postal_smtp_tls != 'traefik'
+  block:
+    - name: Look for the timer of the script
+      ansible.builtin.stat:
+        path: "{{ postal_tls_timer_file }}"
+        get_checksum: false
+      register: postal_tls_timer_stat
+
+    - name: Stop the timer of the script
+      ansible.builtin.systemd_service:
+        name: "{{ postal_tls_unit }}.timer"
+        state: stopped
+        enabled: false
+      when: postal_tls_timer_stat.stat.exists
+
+    - name: Remove the script and its units
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ postal_tls_timer_file }}"
+        - "{{ postal_tls_service_file }}"
+        - "{{ postal_tls_script_file }}"
+      register: postal_tls_removed
+
+    - name: Reload systemd without the units
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: postal_tls_removed.results | selectattr('changed') | list | length > 0
+
+- name: Remove the certificate files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: ["{{ postal_smtp_cert_file }}", "{{ postal_smtp_key_file }}"]
+  when: postal_smtp_tls == 'off'

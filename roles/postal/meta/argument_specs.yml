@@ -163,16 +163,22 @@ argument_specs:
         type: str
         choices: [traefik, files, "off"]
         description: >-
-          STARTTLS: traefik (the certificate Traefik obtained), files
-          (postal_smtp_tls_cert and _key on the host) or off.
+          STARTTLS: traefik (the certificate Traefik obtained for
+          postal_smtp_hostname, copied by /usr/local/sbin/postal-smtp-cert on
+          every run and twice a day by its systemd timer; the run waits up to
+          postal_health_timeout for the first), files (postal_smtp_tls_cert
+          and _key on the host) or off. A new certificate restarts smtp and
+          submission.
       postal_traefik_acme_file:
         type: path
         description: >-
           Traefik's acme.json, where the certificate for postal_smtp_hostname
-          is read.
+          is read (under any resolver; the one that expires last wins).
       postal_smtp_tls_cert:
         type: path
-        description: Certificate (PEM) on the host, with postal_smtp_tls files.
+        description: >-
+          Certificate (PEM, with its chain) on the host, with postal_smtp_tls
+          files; copied on every run, a change restarts smtp and submission.
       postal_smtp_tls_key:
         type: path
         description: Its key (PEM) on the host, with postal_smtp_tls files.

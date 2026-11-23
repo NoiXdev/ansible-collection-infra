@@ -46,3 +46,8 @@ postal_health_timeout: 900
 # resolver answers localhost with 127.0.0.1.
 postal_smtp_relays: [smtp://localhost:1025]
 postal_allowed_request_destinations: [127.0.0.1]
+# No STARTTLS but in the TLS scenarios: the role's default (traefik) waits
+# for Traefik's first certificate, which the ACME server above never issues.
+# smtp_tls and cert_rotation point Traefik at Pebble and switch traefik on,
+# smtp_files switches files on (run.sh).
+postal_smtp_tls: "off"

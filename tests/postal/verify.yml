@@ -21,7 +21,11 @@
 # verify_track_hostnames (the tracking host names besides track.mail.test)
 # and verify_track_customers (the verified customer tracking domains, sorted,
 # of the router postal-track-customers with the resolver http; empty: no such
-# router).
+# router), verify_smtp_hostname (postal_smtp_hostname) and verify_smtp_tls
+# (postal_smtp_tls: off, the suite's default, files or traefik; with traefik
+# and an SMTP host name of its own the router postal-smtp, the script and its
+# timer; with files or traefik smtp.cert and smtp.key 0440 root:999 and
+# STARTTLS on in postal.yml, with off none of these).
 - name: Verify
   hosts: all
   gather_facts: false
@@ -40,6 +44,8 @@
     verify_ui_middlewares: ""
     verify_track_hostnames: ""
     verify_track_customers: ""
+    verify_smtp_hostname: postal.test
+    verify_smtp_tls: "off"
     verify_services: "{{ ['mariadb', 'smtp', 'web', 'worker'] + (['submission'] if verify_submission | bool else []) }}"
     verify_all: "{{ verify_inspect.stdout | from_json }}"
     # One container per service (the worker has one replica).
@@ -143,6 +149,10 @@
           {{ [{'name': 'postal-track-customers', 'rule': verify_customers_rule, 'entrypoints': verify_entrypoints,
                'priority': '101', 'middlewares': 'postal-set-track', 'certresolver': 'http'}]
              if verify_customers | length > 0 else [] }}
+        verify_smtp_routers: >-
+          {{ [{'name': 'postal-smtp', 'rule': 'Host(`' ~ verify_smtp_hostname ~ '`) && (' ~ verify_api ~ ')',
+               'entrypoints': verify_entrypoints, 'priority': '101', 'middlewares': 'postal-strip-track'}]
+             if verify_smtp_tls == 'traefik' and verify_smtp_hostname != 'postal.test' else [] }}
         verify_expected: >-
           {%- set found = {
             'traefik.enable': 'true',
@@ -151,7 +161,7 @@
             'traefik.http.middlewares.postal-set-track.headers.customrequestheaders.X-Postal-Track-Host': '1',
             'traefik.http.services.postal.loadbalancer.server.port': '5000',
           } -%}
-          {%- for r in verify_routers + verify_customer_routers -%}
+          {%- for r in verify_routers + verify_customer_routers + verify_smtp_routers -%}
           {%-   set prefix = 'traefik.http.routers.' ~ r.name -%}
           {%-   set _ = found.update({prefix ~ '.rule': r.rule, prefix ~ '.priority': r.priority,
                                      prefix ~ '.middlewares': r.middlewares, prefix ~ '.service': 'postal'}) -%}
@@ -271,7 +281,7 @@
           - >-
             verify_config.web_server == {'default_bind_address': '0.0.0.0', 'default_port': 5000}
           - verify_config.postal.web_hostname == 'postal.test'
-          - verify_config.postal.smtp_hostname == 'postal.test'
+          - verify_config.postal.smtp_hostname == verify_smtp_hostname
           - verify_config.postal.trusted_proxies == ['172.31.255.254']
           - verify_config.postal.signing_key_path == '/config/signing.key'
           - verify_config.main_db.host == 'postal-mariadb'
@@ -283,6 +293,9 @@
           - verify_config.smtp_server.default_port == 25
           - verify_config.smtp_server.default_bind_address == verify_smtp_bind
           - verify_config.smtp_server.default_health_server_port == 9091
+          - verify_config.smtp_server.tls_enabled == (verify_smtp_tls != 'off')
+          - verify_config.smtp_server.tls_certificate_path == '/config/smtp.cert'
+          - verify_config.smtp_server.tls_private_key_path == '/config/smtp.key'
           - verify_config.worker.default_health_server_port == 9090
           - verify_config.dns.return_path_domain == 'rp.mail.test'
           - verify_config.dns.mx_records == ['mx.mail.test']
@@ -300,6 +313,10 @@
           with the prefix {{ verify_config.message_db.database_name_prefix | default('') }},
           the spam threshold {{ verify_config.postal.default_spam_threshold | default('none') }},
           the SMTP address {{ verify_config.smtp_server.default_bind_address | default('') }},
+          the SMTP host name {{ verify_config.postal.smtp_hostname | default('') }}, STARTTLS
+          {{ verify_config.smtp_server.tls_enabled | default('') }} with
+          {{ verify_config.smtp_server.tls_certificate_path | default('') }} and
+          {{ verify_config.smtp_server.tls_private_key_path | default('') }},
           the relays {{ verify_config.postal.smtp_relays | default('') }}, the
           allowed request destinations
           {{ verify_config.postal.allowed_request_destinations | default('') }},
@@ -311,6 +328,49 @@
           {{ {'from_name': 'Postal', 'from_address': 'postal@mail.test'}
              | combine({'host': verify_mail_host, 'port': verify_mail_port | int, 'authentication_type': none}
                        if verify_mail_host | length > 0 else {}) }}
+
+    - name: Stat the files of SMTP TLS
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop:
+        - "{{ verify_dir }}/config/smtp.cert"
+        - "{{ verify_dir }}/config/smtp.key"
+        - /usr/local/sbin/postal-smtp-cert
+        - /etc/systemd/system/postal-smtp-cert.service
+        - /etc/systemd/system/postal-smtp-cert.timer
+      register: verify_tls_stat
+
+    - name: Read the state of the timer of SMTP TLS
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=ActiveState, --property=UnitFileState, postal-smtp-cert.timer]
+      register: verify_timer
+      changed_when: false
+
+    - name: Check the files of SMTP TLS
+      ansible.builtin.assert:
+        that:
+          - verify_certs | map(attribute='exists') | unique == [verify_smtp_tls != 'off']
+          - verify_smtp_tls == 'off' or verify_certs | map(attribute='mode') | unique == ['0440']
+          - verify_smtp_tls == 'off' or verify_certs | map(attribute='uid') | unique == [0]
+          - verify_smtp_tls == 'off' or verify_certs | map(attribute='gid') | unique == [999]
+          - verify_tools | map(attribute='exists') | unique == [verify_smtp_tls == 'traefik']
+          - verify_smtp_tls != 'traefik' or verify_tools[0].mode == '0755'
+          - >-
+            verify_timer.stdout_lines | sort
+            == (['ActiveState=active', 'UnitFileState=enabled'] if verify_smtp_tls == 'traefik'
+                else ['ActiveState=inactive', 'UnitFileState='])
+        fail_msg: >-
+          With postal_smtp_tls {{ verify_smtp_tls }} smtp.cert and smtp.key
+          must {{ 'not exist' if verify_smtp_tls == 'off' else 'be 0440 root:999' }}
+          and the script with its units and an active timer
+          {{ 'must exist' if verify_smtp_tls == 'traefik' else 'must not' }}:
+          {{ verify_tls_stat.results | map(attribute='stat') | map('dict2items')
+             | map('selectattr', 'key', 'in', ['path', 'exists', 'mode', 'uid', 'gid']) | map('items2dict') | list }},
+          {{ verify_timer.stdout_lines }}.
+      vars:
+        verify_certs: "{{ verify_tls_stat.results[:2] | map(attribute='stat') | list }}"
+        verify_tools: "{{ verify_tls_stat.results[2:] | map(attribute='stat') | list }}"
 
     - name: Read the database target
       ansible.builtin.slurp:

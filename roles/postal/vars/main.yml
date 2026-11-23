@@ -150,6 +150,7 @@ postal_smtp_services: >-
   {{ [{'service': 'smtp', 'port': postal_smtp_port | int}]
      + ([{'service': 'submission', 'port': postal_smtp_submission_port | int}]
         if postal_smtp_submission_port | int != 0 else []) }}
+postal_smtp_service_names: "{{ postal_smtp_services | map(attribute='service') | list }}"
 
 # Where Postal reaches its database. The own MariaDB listens on
 # postal_mariadb_port inside its container too, under a name of the project
@@ -227,6 +228,24 @@ postal_config: "{{ lookup('ansible.builtin.template', 'postal.yml.j2') }}"
 postal_container_config_dir: /config
 postal_config_file: "{{ postal_config_dir }}/postal.yml"
 postal_signing_key_file: "{{ postal_config_dir }}/signing.key"
+
+# SMTP TLS (tls.yml): the certificate (with its chain) and the key Postal's
+# SMTP servers read from postal_config_dir, once per process. With
+# postal_smtp_tls traefik a script copies Traefik's certificate there, on
+# every run of the role and by a systemd timer; it writes
+# postal_smtp_cert_marker before it replaces the files and removes it once
+# the SMTP services restarted, so a failed restart is done by the next run of
+# the script or of the role (state.yml).
+postal_smtp_cert_file: "{{ postal_config_dir }}/smtp.cert"
+postal_smtp_key_file: "{{ postal_config_dir }}/smtp.key"
+postal_smtp_cert_marker: "{{ postal_dir }}/smtp-restart-pending"
+postal_tls_script_file: /usr/local/sbin/postal-smtp-cert
+postal_tls_unit: postal-smtp-cert
+postal_tls_service_file: /etc/systemd/system/postal-smtp-cert.service
+postal_tls_timer_file: /etc/systemd/system/postal-smtp-cert.timer
+postal_tls_script: "{{ lookup('ansible.builtin.template', 'postal-smtp-cert.py.j2') }}"
+postal_tls_service: "{{ lookup('ansible.builtin.template', 'postal-smtp-cert.service.j2') }}"
+postal_tls_timer: "{{ lookup('ansible.builtin.template', 'postal-smtp-cert.timer.j2') }}"
 # The health servers health.yml asks, and the upper bound of the attempts of
 # each of its waits (the deadline of postal_health_timeout ends them).
 postal_health_servers: >-

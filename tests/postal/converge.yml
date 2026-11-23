@@ -26,6 +26,11 @@
       ansible.builtin.include_role:
         name: noixdev.infra.traefik
 
+    # A new ACME server (the TLS scenarios of run.sh) must reach the running
+    # Traefik before the postal role waits for its certificate.
+    - name: Restart Traefik on a new configuration
+      ansible.builtin.meta: flush_handlers
+
     - name: Look for Mailpit
       ansible.builtin.command:
         argv: [docker, ps, --all, --quiet, --filter, name=^mailpit$]

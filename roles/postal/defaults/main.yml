@@ -99,8 +99,14 @@ postal_rails_secret_key: ""
 postal_smtp_port: 25
 postal_smtp_submission_port: 587
 # STARTTLS: traefik (the certificate Traefik obtained for
-# postal_smtp_hostname, read from postal_traefik_acme_file), files (the
-# paths below, on the host) or off.
+# postal_smtp_hostname, read from postal_traefik_acme_file by
+# /usr/local/sbin/postal-smtp-cert on every run and by its systemd timer
+# twice a day; a wildcard that covers the host counts; a host name other than
+# postal_web_hostname gets a router of its own with the API's paths, so that
+# Traefik obtains it with the resolver of postal_traefik_entrypoints; the run
+# waits up to postal_health_timeout for the first one), files (the paths
+# below, on the host: the certificate with its chain and its key, PEM) or
+# off. A new certificate restarts smtp and submission.
 postal_smtp_tls: traefik
 postal_traefik_acme_file: /opt/traefik/acme/acme.json
 postal_smtp_tls_cert: ""
