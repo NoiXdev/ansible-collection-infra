@@ -114,19 +114,22 @@
 #   forward   on a second test host (sender, the same image without rsyslog;
 #             sender.yml, forward.yml): the syslog_forward role refuses a
 #             protocol sctp, tls over udp, a target without host, queue_size
-#             on udp and a ca_file that does not exist, installing nothing;
-#             then UDP to 1514, TCP to 1515 and TCP with TLS through Traefik
-#             to syslog.test:6514 (a certificate from a test CA, which the
-#             sender trusts): a logger line found through each of the three
-#             inputs; idempotent; with syslog_forward_filter auth.* a
-#             user.info line not forwarded and an auth.info line forwarded
+#             and queue_max_disk on udp, a bad queue_max_disk and a ca_file
+#             that does not exist, changing nothing; a queue_max_disk of its
+#             own; then UDP to 1514, TCP to 1515 and TCP with TLS through
+#             Traefik to syslog.test:6514 (a certificate from a test CA, which
+#             the sender trusts): a logger line found through each of the three
+#             inputs; idempotent; with syslog_forward_filter auth.* a user.info
+#             line not forwarded and an auth.info line forwarded
 #   forward_queue
-#             the Graylog server stopped while the sender logs 50 lines: all
-#             50 arrive through the TCP target once it is back
+#             the TCP queues limited to 512m on disk; the Graylog server
+#             stopped while the sender logs 50 lines: all 50 arrive through
+#             the TCP target once it is back
 #   forward_invalid
 #             a filter rsyslog refuses (an unknown facility): the run fails
 #             with rsyslog's error, the previous drop-in is in place and
-#             rsyslog runs
+#             rsyslog runs; a play that fails after the role still restarts
+#             rsyslog for the new drop-in
 #   forward_remove
 #             no targets: the drop-in removed, rsyslog restarted
 #   forward_down
@@ -1457,12 +1460,20 @@ test_forward() {
   expect_in_log "missing required arguments: host"
   sender_refused -e '{"syslog_forward_targets": [{"host": "graylog.test", "protocol": "udp", "queue_size": 5}]}'
   expect_in_log "Target number 1 of syslog_forward_targets is not valid"
+  sender_refused -e '{"syslog_forward_targets": [{"host": "graylog.test", "protocol": "udp", "queue_max_disk": "1g"}]}'
+  expect_in_log "Target number 1 of syslog_forward_targets is not valid"
+  sender_refused -e '{"syslog_forward_targets": [{"host": "graylog.test", "queue_max_disk": "lots"}]}'
+  expect_in_log "Target number 1 of syslog_forward_targets is not valid"
   sender_refused -e '{"syslog_forward_targets": [{"host": "syslog.test", "tls": true, "ca_file": "/etc/ssl/none.pem"}]}'
   expect_in_log "/etc/ssl/none.pem of syslog_forward_targets do not exist on the host"
   [ "$had_rsyslog" = yes ] || ! s sh -c 'command -v rsyslogd' >/dev/null || fail "a refused run installed rsyslog"
   [ "$(s sh -c "sha256sum $dropin 2>/dev/null || echo none")" = "$dropin_before" ] || fail "a refused run changed $dropin"
 
   echo "== forward: to UDP, TCP and TCP with TLS (ubuntu $1)"
+  sender_converge -e "@$out/forward-targets.json"
+  # A disk limit of its own for one target.
+  sender_converge -e '{"syslog_forward_targets": [{"host": "graylog.test", "port": 1515, "queue_max_disk": "64m"}]}'
+  s grep -qF 'queue.maxDiskSpace="64m"' "$dropin" || { s cat "$dropin" >&2; fail "queue_max_disk 64m is not the target's disk limit"; }
   sender_converge -e "@$out/forward-targets.json"
   [ "$(s systemctl is-active rsyslog)" = active ] || fail "rsyslog does not run on the sender"
   s dpkg -s rsyslog-gnutls >/dev/null 2>&1 || fail "rsyslog-gnutls is not installed for the TLS target"
@@ -1493,6 +1504,9 @@ test_forward_queue() {
   ensure_forward forward_queue "$1"
   sender_converge -e "@$out/forward-targets.json"
   expect_input syslog-tcp 1515 >/dev/null
+  # Each TCP target's queue is bounded on disk too (512m by default).
+  [ "$(s grep -c 'queue.maxDiskSpace="512m"' "$dropin")" = 2 ] \
+    || { s cat "$dropin" >&2; fail "the TCP targets' queues have no disk limit of 512m"; }
   tag="forward-queue-$(openssl rand -hex 6)"
   compose stop graylog >/dev/null 2>&1
   # rsyslog finds a closed connection only on a send, which plain TCP can
@@ -1525,6 +1539,17 @@ test_forward_invalid() {
   expect_in_log "The previous drop-in is back in place"
   [ "$(s sha256sum "$dropin")" = "$before" ] || fail "the refused drop-in was left in place"
   [ "$(s systemctl is-active rsyslog)" = active ] || fail "rsyslog does not run after the refused drop-in"
+
+  # A play that fails after the role (a later role): rsyslog runs on the
+  # new drop-in all the same.
+  sender_converge_fails -e "@$out/forward-targets.json" -e 'syslog_forward_filter=*.info' -e sender_fail_after=true
+  expect_in_log "The task after the role failed"
+  s grep -qF '*.info action(' "$dropin" || fail "the play that failed after the role did not write the drop-in"
+  local started written
+  started="$(s date -d "$(s systemctl show rsyslog -p ActiveEnterTimestamp --value)" +%s)"
+  written="$(s stat -c %Y "$dropin")"
+  [ "$started" -ge "$written" ] \
+    || fail "rsyslog was not restarted for the drop-in of a play that failed after the role (started $started, written $written)"
 }
 
 # No targets: the drop-in goes, and rsyslog restarts without it.

@@ -1,7 +1,9 @@
 ---
 # The sender host of the forward scenarios: the syslog_forward role with the
 # targets run.sh passes, and with sender_docker=true the docker role first
-# (forward_down starts containers with the GELF log driver there).
+# (forward_down starts containers with the GELF log driver there); with
+# sender_fail_after=true a task after the role fails, as a later role of a
+# play would.
 - name: Converge the sender
   hosts: all
   tasks:
@@ -13,3 +15,8 @@
     - name: Run the syslog_forward role
       ansible.builtin.include_role:
         name: noixdev.infra.syslog_forward
+
+    - name: Fail after the role
+      ansible.builtin.fail:
+        msg: The task after the role failed.
+      when: sender_fail_after | default(false) | bool

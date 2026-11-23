@@ -2,7 +2,8 @@
 # The syslog receivers this host forwards to; empty removes the role's
 # drop-in. Each entry: host (required), port (514), protocol (tcp; udp or
 # tcp), tls (false; TCP only), ca_file ("" = the system's CA bundle; TLS
-# only), queue_size (10000; TCP only). See meta/argument_specs.yml.
+# only), queue_size (10000; TCP only), queue_max_disk (512m; TCP only). See
+# meta/argument_specs.yml.
 syslog_forward_targets: []
 # The rsyslog selector of what is forwarded (facility.priority).
 syslog_forward_filter: "*.*"

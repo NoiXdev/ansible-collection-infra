@@ -1,7 +1,8 @@
 # Written by the noixdev.infra.syslog_forward role; changes here are
 # overwritten. What rsyslog receives, as RFC 5424, to each target; a TCP
-# target queues on disk while its receiver is down, and a full queue drops
-# new messages at once rather than hold up local logging.
+# target queues while its receiver is down (queue.size messages in memory,
+# then up to queue.maxDiskSpace on disk), and a full queue drops new
+# messages at once rather than hold up local logging.
 {% for target in syslog_forward_targets %}
 {%   set name = 'noixdev-forward-' ~ loop.index %}
 {%   set protocol = target.protocol | default('tcp') %}
@@ -10,6 +11,7 @@
     template="RSYSLOG_SyslogProtocol23Format"
 {%   if protocol == 'tcp' %}
     queue.type="LinkedList" queue.filename="{{ name }}" queue.size="{{ target.queue_size | default(10000) }}"
+    queue.maxDiskSpace="{{ target.queue_max_disk | default('512m') }}"
     queue.saveOnShutdown="on" queue.timeoutEnqueue="0" action.resumeRetryCount="-1"
 {%   endif %}
 {%   if target.tls | default(false) %}

@@ -9,7 +9,8 @@ argument_specs:
       - The whole configuration is checked with rsyslogd -N1 before rsyslog restarts; a drop-in
         it refuses is replaced by the previous one again, and the run fails.
       - A TCP target gets a disk-assisted queue, so an outage of the receiver neither loses the
-        messages up to queue_size nor stalls local logging. UDP has no queue.
+        messages up to queue_size in memory and queue_max_disk on disk nor stalls local logging.
+        UDP has no queue.
     options:
       syslog_forward_targets:
         type: list
@@ -44,7 +45,13 @@ argument_specs:
                 certificate; empty for the system's CA bundle. It must exist.
           queue_size:
             type: int
-            description: TCP only, the number of messages the queue holds (default 10000).
+            description: TCP only, the number of messages the queue holds in memory (default 10000).
+          queue_max_disk:
+            type: str
+            description:
+              - TCP only, the space the queue may take on disk under /var/spool/rsyslog beyond
+                queue_size, as a number with k, m or g (default 512m). A full queue drops new
+                messages.
       syslog_forward_filter:
         type: str
         default: "*.*"

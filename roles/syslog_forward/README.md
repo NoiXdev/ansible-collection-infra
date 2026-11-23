@@ -29,7 +29,8 @@ Each target:
 | `protocol` | `tcp` | `udp` or `tcp` |
 | `tls` | `false` | TLS, TCP only |
 | `ca_file` | `""` | With TLS, the CA file on the host that signs the receiver's certificate; empty for the system's CA bundle. It must exist, readable by the `syslog` user |
-| `queue_size` | `10000` | TCP only, the messages the disk-assisted queue holds |
+| `queue_size` | `10000` | TCP only, the messages the queue holds in memory |
+| `queue_max_disk` | `512m` | TCP only, the space the queue may take on disk beyond that (`k`, `m` or `g`) |
 
 ```yaml
 syslog_forward_targets:
@@ -46,9 +47,11 @@ syslog_forward_targets:
 UDP sends and forgets, so messages are lost while the receiver is down or
 the network drops them. TCP keeps a queue per target, in memory and on disk
 under `/var/spool/rsyslog`. While the receiver is down, the queue holds up to
-`queue_size` messages, sends them once the receiver is back and keeps them
-across a restart of rsyslog. Local logging never waits for the receiver:
-once the queue is full, new messages for that target are dropped.
+`queue_size` messages in memory and up to `queue_max_disk` on disk, sends
+them once the receiver is back and keeps them across a restart of rsyslog.
+Local logging never waits for the receiver: once the queue is full, new
+messages for that target are dropped. Leave room for `queue_max_disk` per
+TCP target on the filesystem of `/var/spool/rsyslog`.
 
 With TLS the receiver's certificate must carry `host` as its name, which
 rsyslog also sends as the server name (SNI). A receiver behind a TLS proxy

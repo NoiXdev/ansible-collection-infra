@@ -1,9 +1,9 @@
 ---
 # Checks the settings, then writes the drop-in syslog_forward_dropin (or
 # removes it when syslog_forward_targets is empty), checks the whole
-# configuration with rsyslogd -N1 and restarts rsyslog. A drop-in rsyslogd
-# refuses is replaced by the previous one (or removed when there was none),
-# and the run fails with rsyslogd's error.
+# configuration with rsyslogd -N1 and restarts rsyslog before the role ends.
+# A drop-in rsyslogd refuses is replaced by the previous one (or removed when
+# there was none), and the run fails with rsyslogd's error.
 
 - name: Check the targets
   ansible.builtin.assert:
@@ -21,12 +21,15 @@
       - syslog_forward_target.queue_size is not defined or syslog_forward_target.protocol | default('tcp') == 'tcp'
       - syslog_forward_target.queue_size | default(10000) | string is match('^[0-9]+$')
       - syslog_forward_target.queue_size | default(10000) | int >= 1
+      - syslog_forward_target.queue_max_disk is not defined or syslog_forward_target.protocol | default('tcp') == 'tcp'
+      - syslog_forward_target.queue_max_disk | default('512m') | string is match('^[1-9][0-9]*[kmgKMG]?$')
     fail_msg: >-
       Target number {{ syslog_forward_index + 1 }} of syslog_forward_targets is
       not valid: host is required (a host name or address), protocol is udp
-      or tcp, port is 1 to 65535, tls and queue_size are for tcp only, ca_file
-      only with tls and an absolute path, and queue_size is a positive whole
-      number. The role changes nothing.
+      or tcp, port is 1 to 65535, tls, queue_size and queue_max_disk are for
+      tcp only, ca_file only with tls and an absolute path, queue_size is a
+      positive whole number and queue_max_disk one with k, m or g, as 512m.
+      The role changes nothing.
     quiet: true
   loop: "{{ syslog_forward_targets }}"
   loop_control:
@@ -139,3 +142,9 @@
     state: absent
   notify: Restart rsyslog
   when: syslog_forward_targets | length == 0
+
+# Now rather than at the end of the play: a later role that fails would
+# skip the restart, and the next run, finding the drop-in unchanged, would
+# not restart rsyslog either.
+- name: Restart rsyslog for the drop-in
+  ansible.builtin.meta: flush_handlers
