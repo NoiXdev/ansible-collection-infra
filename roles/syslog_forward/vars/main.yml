@@ -1,0 +1,10 @@
+---
+syslog_forward_dropin: /etc/rsyslog.d/60-noixdev-forward.conf
+# The CA bundle of the ca-certificates package, for a TLS target without
+# ca_file.
+syslog_forward_system_ca: /etc/ssl/certs/ca-certificates.crt
+# Whether a target uses TLS, and the CA files the targets name.
+syslog_forward_tls: "{{ syslog_forward_targets | selectattr('tls', 'defined') | selectattr('tls') | list | length > 0 }}"
+syslog_forward_ca_files: >-
+  {{ syslog_forward_targets | selectattr('tls', 'defined') | selectattr('tls')
+     | map(attribute='ca_file', default='') | map('default', syslog_forward_system_ca, true) | unique | list }}

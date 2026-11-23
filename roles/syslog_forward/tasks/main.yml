@@ -1,0 +1,141 @@
+---
+# Checks the settings, then writes the drop-in syslog_forward_dropin (or
+# removes it when syslog_forward_targets is empty), checks the whole
+# configuration with rsyslogd -N1 and restarts rsyslog. A drop-in rsyslogd
+# refuses is replaced by the previous one (or removed when there was none),
+# and the run fails with rsyslogd's error.
+
+- name: Check the targets
+  ansible.builtin.assert:
+    that:
+      - syslog_forward_target.host | default('', true) | string | length > 0
+      - syslog_forward_target.host | string is match('^[A-Za-z0-9:.\[\]-]+$')
+      - syslog_forward_target.protocol | default('tcp') in ['udp', 'tcp']
+      - syslog_forward_target.port | default(514) | string is match('^[0-9]+$')
+      - syslog_forward_target.port | default(514) | int >= 1
+      - syslog_forward_target.port | default(514) | int <= 65535
+      - not (syslog_forward_target.tls | default(false) | bool) or syslog_forward_target.protocol | default('tcp') == 'tcp'
+      - syslog_forward_target.ca_file is not defined or syslog_forward_target.tls | default(false) | bool
+      - syslog_forward_target.ca_file | default('', true) | string in ['']
+        or syslog_forward_target.ca_file | string is match('^/[^"\n]*$')
+      - syslog_forward_target.queue_size is not defined or syslog_forward_target.protocol | default('tcp') == 'tcp'
+      - syslog_forward_target.queue_size | default(10000) | string is match('^[0-9]+$')
+      - syslog_forward_target.queue_size | default(10000) | int >= 1
+    fail_msg: >-
+      Target number {{ syslog_forward_index + 1 }} of syslog_forward_targets is
+      not valid: host is required (a host name or address), protocol is udp
+      or tcp, port is 1 to 65535, tls and queue_size are for tcp only, ca_file
+      only with tls and an absolute path, and queue_size is a positive whole
+      number. The role changes nothing.
+    quiet: true
+  loop: "{{ syslog_forward_targets }}"
+  loop_control:
+    loop_var: syslog_forward_target
+    index_var: syslog_forward_index
+    label: "{{ syslog_forward_target.host | default('?') }}"
+
+- name: Check the filter
+  ansible.builtin.assert:
+    that:
+      - syslog_forward_filter | string | length > 0
+      - "'\n' not in syslog_forward_filter | string"
+    fail_msg: >-
+      syslog_forward_filter must be an rsyslog selector on one line, as
+      *.* or auth,authpriv.*. The role changes nothing.
+    quiet: true
+
+- name: Forward the logs
+  when: syslog_forward_targets | length > 0
+  block:
+    # Before any change: rsyslogd -N1 does not open the CA file, and rsyslog
+    # would only log the missing one on its first connection. The system's
+    # bundle comes with ca-certificates, installed below.
+    - name: Look for the CA files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ syslog_forward_ca_files | difference([syslog_forward_system_ca]) }}"
+      register: syslog_forward_ca_stat
+
+    - name: Refuse a CA file that does not exist
+      ansible.builtin.fail:
+        msg: >-
+          The CA files {{ syslog_forward_ca_missing | join(', ') }} of
+          syslog_forward_targets do not exist on the host, so rsyslog could
+          not check the receivers' certificates. Put them there (readable by
+          the syslog user) or leave ca_file empty for the system's CA
+          bundle. The role changes nothing.
+      vars:
+        syslog_forward_ca_missing: >-
+          {{ syslog_forward_ca_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+      when: syslog_forward_ca_missing | length > 0
+
+    - name: Install rsyslog
+      ansible.builtin.apt:
+        name: "{{ ['rsyslog'] + (['rsyslog-gnutls', 'ca-certificates'] if syslog_forward_tls else []) }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Read the drop-in before the change
+      ansible.builtin.slurp:
+        src: "{{ syslog_forward_dropin }}"
+      register: syslog_forward_before
+      failed_when: false
+
+    - name: Write the drop-in and check the configuration
+      block:
+        - name: Write the drop-in
+          ansible.builtin.template:
+            src: forward.conf.j2
+            dest: "{{ syslog_forward_dropin }}"
+            owner: root
+            group: root
+            mode: "0644"
+          notify: Restart rsyslog
+
+        # On every run: another drop-in can break the configuration too, and
+        # rsyslog would then fail on its next restart.
+        - name: Check the configuration with the drop-in
+          ansible.builtin.command:
+            argv: [rsyslogd, -N1]
+          register: syslog_forward_check
+          changed_when: false
+      rescue:
+        - name: Put the previous drop-in back
+          ansible.builtin.copy:
+            dest: "{{ syslog_forward_dropin }}"
+            content: "{{ syslog_forward_before.content | b64decode }}"
+            owner: root
+            group: root
+            mode: "0644"
+          when: syslog_forward_before.content is defined
+
+        - name: Remove the refused drop-in
+          ansible.builtin.file:
+            path: "{{ syslog_forward_dropin }}"
+            state: absent
+          when: syslog_forward_before.content is not defined
+
+        - name: Fail with rsyslog's error
+          ansible.builtin.fail:
+            msg: >-
+              rsyslogd refused the configuration with the new
+              {{ syslog_forward_dropin }}
+              ({{ syslog_forward_error | join('; ') }}). The previous drop-in is
+              back in place{{ '' if syslog_forward_before.content is defined else ' (there was none)' }}
+              and rsyslog was not restarted. Check syslog_forward_targets and
+              syslog_forward_filter.
+          vars:
+            syslog_forward_lines: >-
+              {{ (syslog_forward_check.stdout_lines | default([])) + (syslog_forward_check.stderr_lines | default([])) }}
+            syslog_forward_error: >-
+              {{ syslog_forward_lines | reject('match', '^rsyslogd: (version|End of)') | list
+                 or [ansible_failed_result.msg | default('?')] }}
+
+- name: Remove the drop-in
+  ansible.builtin.file:
+    path: "{{ syslog_forward_dropin }}"
+    state: absent
+  notify: Restart rsyslog
+  when: syslog_forward_targets | length == 0

@@ -1,0 +1,51 @@
+---
+argument_specs:
+  main:
+    short_description: Forward the host's logs to syslog receivers
+    description:
+      - Installs rsyslog (and rsyslog-gnutls when a target uses TLS) and writes one drop-in,
+        /etc/rsyslog.d/60-noixdev-forward.conf, that forwards what rsyslog receives from the
+        journal to each target in RFC 5424 format.
+      - The whole configuration is checked with rsyslogd -N1 before rsyslog restarts; a drop-in
+        it refuses is replaced by the previous one again, and the run fails.
+      - A TCP target gets a disk-assisted queue, so an outage of the receiver neither loses the
+        messages up to queue_size nor stalls local logging. UDP has no queue.
+    options:
+      syslog_forward_targets:
+        type: list
+        elements: dict
+        default: []
+        description: The receivers; an empty list removes the drop-in.
+        options:
+          host:
+            type: str
+            required: true
+            description:
+              - The receiver's host name or address. With tls, the name its certificate must carry
+                (also sent as the server name, SNI, when it is a name).
+          port:
+            type: int
+            default: 514
+            description: The receiver's port.
+          protocol:
+            type: str
+            choices: [udp, tcp]
+            default: tcp
+            description: The transport.
+          tls:
+            type: bool
+            default: false
+            description: TLS (TCP only), the receiver's certificate checked against host.
+          ca_file:
+            type: str
+            default: ""
+            description:
+              - With tls, the CA certificate file on the host that signs the receiver's
+                certificate; empty for the system's CA bundle. It must exist.
+          queue_size:
+            type: int
+            description: TCP only, the number of messages the queue holds (default 10000).
+      syslog_forward_filter:
+        type: str
+        default: "*.*"
+        description: The rsyslog selector of what is forwarded, for example auth,authpriv.*.

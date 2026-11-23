@@ -1,0 +1,9 @@
+---
+# The second test host of the forward scenarios, a sender of logs on the
+# same Docker network as the Graylog test host (run.sh, start_sender).
+all:
+  hosts:
+    senderhost:
+      ansible_connection: community.docker.docker
+      ansible_host: "{{ sender_host }}"
+      ansible_python_interpreter: /usr/bin/python3

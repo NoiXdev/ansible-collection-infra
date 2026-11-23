@@ -108,6 +108,28 @@
 #   secrets   the processes of the test host sampled while an update dumps
 #             the database and while a failed one restores it: no test
 #             secret, and no SHA-256 of one, in a command line
+#   forward   on a second test host (sender, the same image without rsyslog;
+#             sender.yml, forward.yml): the syslog_forward role refuses a
+#             protocol sctp, tls over udp, a target without host, queue_size
+#             on udp and a ca_file that does not exist, installing nothing;
+#             then UDP to 1514, TCP to 1515 and TCP with TLS through Traefik
+#             to syslog.test:6514 (a certificate from a test CA, which the
+#             sender trusts): a logger line found through each of the three
+#             inputs; idempotent; with syslog_forward_filter auth.* a
+#             user.info line not forwarded and an auth.info line forwarded
+#   forward_queue
+#             the Graylog server stopped while the sender logs 50 lines: all
+#             50 arrive through the TCP target once it is back
+#   forward_invalid
+#             a filter rsyslog refuses (an unknown facility): the run fails
+#             with rsyslog's error, the previous drop-in is in place and
+#             rsyslog runs
+#   forward_remove
+#             no targets: the drop-in removed, rsyslog restarted
+#   forward_down
+#             Graylog stopped: on the sender (with Docker) a container with
+#             the GELF driver to udp://<address>:12201 starts, one to
+#             udp://nowhere.invalid:12201 does not
 # Every converge runs at least at -v, and its output must hold neither a test
 # secret nor the SHA-256 of one; every successful converge of a scenario is
 # repeated and must change nothing.
@@ -158,6 +180,8 @@ for secret in "${secrets[@]}"; do secrets+=("$(sha256 "$secret")"); done
 
 cleanup() {
   [ "${KEEP:-0}" = 1 ] || [ -z "$host" ] || docker rm -f -v "$host" >/dev/null 2>&1 || true
+  [ "${KEEP:-0}" = 1 ] || [ -z "${sender:-}" ] || docker rm -f -v "$sender" >/dev/null 2>&1 || true
+  sender=
 }
 # shellcheck source=/dev/null
 . "$here/../lib/suite.sh"
@@ -382,7 +406,7 @@ expect_no_input() {
 # before its install and updates) that hold <text>, one per line, as
 # "<container_name>|<message>": search <text>.
 search() {
-  api "/search/messages?query=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.quote("\"%s\"" % sys.argv[1]))' "$1")&fields=container_name,message&timerange=7200s" \
+  api "/search/messages?query=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.quote("\"%s\"" % sys.argv[1]))' "$1")&fields=container_name,message&timerange=7200s&size=500" \
     | py '"\n".join("%s|%s" % (row[0], row[1]) for row in d["datarows"])'
 }
 # Waits up to 60 seconds until a message with <text> is found, and checks
@@ -1265,13 +1289,261 @@ test_secrets() {
   remove_installation
 }
 
+# The forward scenarios: a second test host (sender, the same image, without
+# rsyslog) on the test host's Docker network forwards with the
+# syslog_forward role to Graylog's inputs on the test host: syslog over UDP
+# on 1514 and over TCP on 1515, bound to the test host's address, and syslog
+# over TCP with TLS through Traefik's logs-tls (bound to that address too, in
+# forward-traefik.json) with a certificate for syslog.test from a test CA.
+sender=
+# s <cmd...>: run in the sender host.
+s() { docker exec "$sender" "$@"; }
+dropin=/etc/rsyslog.d/60-noixdev-forward.conf
+test_ca=/etc/ssl/noixdev-test-ca.pem
+
+# The inputs of the forward scenarios, their own.
+forward_inputs_json() {
+  printf '%s' '[{"name": "gelf-udp", "type": "gelf_udp", "port": 12201, "bind": ["'"$host_ip"'"]},
+    {"name": "syslog-udp", "type": "syslog_udp", "port": 1514, "bind": ["'"$host_ip"'"]},
+    {"name": "syslog-tcp", "type": "syslog_tcp", "port": 1515, "bind": ["'"$host_ip"'"]},
+    {"name": "syslog-tls", "type": "syslog_tcp", "port": 1517,
+     "traefik": {"hostname": "syslog.test", "entrypoints": ["logs-tls"]}}]'
+}
+# vars.yml's entrypoints with logs-tls also on the test host's address, for
+# the sender.
+write_forward_traefik() {
+  python3 -I -c '
+import json, sys
+print(json.dumps({"traefik_entrypoints": [
+    {"name": "web", "port": 80, "bind": ["127.0.0.1"]},
+    {"name": "websecure", "port": 443, "bind": ["127.0.0.1"], "tls": True, "as_default": True},
+    {"name": "logs-tls", "port": 6514, "protocol": "tcp", "bind": ["127.0.0.1", sys.argv[1]]},
+    {"name": "logs-any", "port": 6515, "protocol": "tcp", "bind": ["127.0.0.1"]}]}))' "$host_ip" >"$out/forward-traefik.json"
+}
+# The Graylog test host with the forward inputs: fw_converge <what> [-e ...].
+fw_converge() { role_converge "$1" -e "@$out/forward-inputs.json" -e "@$out/forward-traefik.json" "${@:2}"; }
+
+# A test CA and a certificate for syslog.test it signs, made on the test
+# host; Traefik serves the certificate from a dynamic file (the traefik role
+# leaves files it does not write), the sender trusts the CA.
+install_test_certificate() {
+  h sh -c 'set -e; d=$(mktemp -d); cd $d
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj "/CN=noixdev test CA" 2>/dev/null
+    openssl req -newkey rsa:2048 -nodes -keyout tls.key -out tls.csr -subj "/CN=syslog.test" 2>/dev/null
+    printf "subjectAltName=DNS:syslog.test\n" >ext.cnf
+    openssl x509 -req -in tls.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out tls.pem -days 2 -extfile ext.cnf 2>/dev/null
+    { echo "tls:"; echo "  certificates:"; echo "    - certFile: |"; sed "s/^/        /" tls.pem
+      echo "      keyFile: |"; sed "s/^/        /" tls.key; } >/opt/traefik/dynamic/noixdev-test-tls.yml
+    cp ca.pem /tmp/noixdev-test-ca.pem; rm -rf $d'
+  h cat /tmp/noixdev-test-ca.pem | docker exec -i "$sender" sh -c "mkdir -p ${test_ca%/*} && cat >$test_ca && chmod 0644 $test_ca"
+}
+
+start_sender() {
+  local ubuntu="$1"
+  sender="noixdev-graylog-sender-$ubuntu"
+  docker rm -f -v "$sender" >/dev/null 2>&1 || true
+  docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+    --tmpfs /run --tmpfs /run/lock -v /var/lib/docker -v /var/lib/containerd \
+    --name "$sender" "noixdev-infra-host:$ubuntu" >/dev/null
+  until (s systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
+  s rm -f /usr/sbin/policy-rc.d
+  s sh -c "echo '$host_ip graylog.test syslog.test' >>/etc/hosts"
+  ! s sh -c 'command -v rsyslogd' >/dev/null || fail "the sender image has rsyslog already"
+}
+# The sender's playbook at -v: sender_play [-e ...]; its output goes to
+# converge.log.
+sender_play() {
+  ansible-playbook -v -i "$here/sender.yml" -e "sender_host=$sender" "$here/forward.yml" "$@" >"$out/converge.log" 2>&1
+}
+sender_converge() {
+  sender_play "$@" || { cat "$out/converge.log" >&2; fail "the sender's converge failed"; }
+}
+sender_converge_unchanged() {
+  sender_converge "$@"
+  grep -Eq 'changed=0 +unreachable=0 +failed=0' "$out/converge.log" \
+    || { cat "$out/converge.log" >&2; fail "the repeated sender converge changed something"; }
+}
+sender_converge_fails() {
+  if sender_play "$@"; then cat "$out/converge.log" >&2; fail "the sender's converge succeeded, but must fail"; fi
+}
+# A sender converge refused before any change: sender_refused [-e ...].
+sender_refused() {
+  sender_converge_fails "$@"
+  grep -Eq 'changed=0 +unreachable=0 +failed=1' "$out/converge.log" \
+    || { cat "$out/converge.log" >&2; fail "a refused sender converge changed something"; }
+}
+# The sender's targets: the three inputs, by the names in its /etc/hosts.
+write_forward_targets() {
+  python3 -I -c '
+import json, sys
+print(json.dumps({"syslog_forward_targets": [
+    {"host": "graylog.test", "port": 1514, "protocol": "udp"},
+    {"host": "graylog.test", "port": 1515},
+    {"host": "syslog.test", "port": 6514, "tls": True, "ca_file": sys.argv[1]}]}))' "$test_ca" >"$out/forward-targets.json"
+}
+# The inputs that stored a message with <text>, by title (the search API
+# names gl2_source_input so), sorted and unique, one per line:
+# source_inputs <text>.
+source_inputs() {
+  api "/search/messages?query=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.quote("\"%s\"" % sys.argv[1]))' "$1")&fields=gl2_source_input,message&timerange=7200s&size=500" \
+    | py '"\n".join(sorted({row[0] for row in d["datarows"]}))' | LC_ALL=C sort -u
+}
+# Waits up to 90 seconds until messages with <text> came through every input
+# named: expect_through <text> <input name...>.
+expect_through() {
+  local text="$1" name wanted found
+  shift
+  wanted="$(for name in "$@"; do expect_input "$name" "$(input_port "$name")" >/dev/null; echo "ansible: $name"; done | LC_ALL=C sort -u)"
+  for _ in $(seq 45); do
+    found="$(source_inputs "$text")"
+    [ "$found" = "$wanted" ] && return 0
+    sleep 2
+  done
+  fail "the message $text came through the inputs $(printf '%s' "$found" | tr '\n' ' '), not those of $*"
+}
+input_port() { case "$1" in syslog-udp) echo 1514 ;; syslog-tcp) echo 1515 ;; syslog-tls) echo 1517 ;; *) echo 12201 ;; esac; }
+
+# The sender with the forward inputs: Graylog installed (and converged with
+# them), the sender started; ensure_forward <scenario>.
+ensure_forward() {
+  ensure_installed "$1"
+  write_inputs_vars forward-inputs.json "$(forward_inputs_json)" ''
+  write_forward_traefik
+  fw_converge "the forward inputs for $1"
+  if [ -z "$sender" ] || ! s true 2>/dev/null; then
+    start_sender "$2"
+    install_test_certificate
+  fi
+  write_forward_targets
+}
+
+test_forward() {
+  local marker
+  echo "== forward (ubuntu $1)"
+  ensure_forward forward "$1"
+  # Refused before any change: nothing changed, no package installed, the
+  # drop-in as it was. An earlier scenario on this sender may have left both.
+  local had_rsyslog=no dropin_before
+  s sh -c 'command -v rsyslogd' >/dev/null && had_rsyslog=yes
+  dropin_before="$(s sh -c "sha256sum $dropin 2>/dev/null || echo none")"
+  sender_refused -e '{"syslog_forward_targets": [{"host": "graylog.test", "protocol": "sctp"}]}'
+  expect_in_log "value of protocol must be one of: udp, tcp"
+  sender_refused -e '{"syslog_forward_targets": [{"host": "graylog.test", "protocol": "udp", "tls": true}]}'
+  expect_in_log "Target number 1 of syslog_forward_targets is not valid"
+  sender_refused -e '{"syslog_forward_targets": [{"port": 1514}]}'
+  expect_in_log "missing required arguments: host"
+  sender_refused -e '{"syslog_forward_targets": [{"host": "graylog.test", "protocol": "udp", "queue_size": 5}]}'
+  expect_in_log "Target number 1 of syslog_forward_targets is not valid"
+  sender_refused -e '{"syslog_forward_targets": [{"host": "syslog.test", "tls": true, "ca_file": "/etc/ssl/none.pem"}]}'
+  expect_in_log "/etc/ssl/none.pem of syslog_forward_targets do not exist on the host"
+  [ "$had_rsyslog" = yes ] || ! s sh -c 'command -v rsyslogd' >/dev/null || fail "a refused run installed rsyslog"
+  [ "$(s sh -c "sha256sum $dropin 2>/dev/null || echo none")" = "$dropin_before" ] || fail "a refused run changed $dropin"
+
+  echo "== forward: to UDP, TCP and TCP with TLS (ubuntu $1)"
+  sender_converge -e "@$out/forward-targets.json"
+  [ "$(s systemctl is-active rsyslog)" = active ] || fail "rsyslog does not run on the sender"
+  s dpkg -s rsyslog-gnutls >/dev/null 2>&1 || fail "rsyslog-gnutls is not installed for the TLS target"
+  marker="forward-$(openssl rand -hex 6)"
+  s logger -t noixdev-test "$marker"
+  expect_through "$marker" syslog-udp syslog-tcp syslog-tls
+  sender_converge_unchanged -e "@$out/forward-targets.json"
+
+  echo "== forward: only auth.* (ubuntu $1)"
+  sender_converge -e "@$out/forward-targets.json" -e 'syslog_forward_filter=auth.*'
+  local user_line auth_line since
+  user_line="forward-user-$(openssl rand -hex 6)"
+  auth_line="forward-auth-$(openssl rand -hex 6)"
+  s logger -p user.info -t noixdev-test "$user_line"
+  s logger -p auth.info -t noixdev-test "$auth_line"
+  since="$(date +%s)"
+  expect_through "$auth_line" syslog-udp syslog-tcp syslog-tls
+  sleep "$((20 - ($(date +%s) - since) > 0 ? 20 - ($(date +%s) - since) : 0))"
+  [ -z "$(source_inputs "$user_line")" ] || fail "the user.info line was forwarded with the filter auth.*"
+  sender_converge -e "@$out/forward-targets.json"
+}
+
+# The Graylog server stopped: the TCP target's queue on disk keeps what
+# rsyslog cannot send, and sends it once the server is back.
+test_forward_queue() {
+  local tag i count
+  echo "== forward_queue (ubuntu $1)"
+  ensure_forward forward_queue "$1"
+  sender_converge -e "@$out/forward-targets.json"
+  expect_input syslog-tcp 1515 >/dev/null
+  tag="forward-queue-$(openssl rand -hex 6)"
+  compose stop graylog >/dev/null 2>&1
+  # rsyslog finds a closed connection only on a send, which plain TCP can
+  # lose: one line first that the test does not count.
+  s logger -t noixdev-test "forward-queue-warm-up"
+  sleep 5
+  for i in $(seq 50); do s logger -t noixdev-test "$tag-$i"; done
+  sleep 10
+  compose start graylog >/dev/null 2>&1
+  wait_healthy
+  for _ in $(seq 60); do
+    count="$(api "/search/messages?query=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.quote("\"%s\"" % sys.argv[1]))' "$tag")&fields=gl2_source_input,message&timerange=7200s&size=500" \
+      | py 'len({row[1] for row in d["datarows"] if row[0] == "ansible: syslog-tcp"})')"
+    [ "$count" = 50 ] && return 0
+    sleep 3
+  done
+  fail "$count of the 50 lines sent while the server was stopped came through the TCP target"
+}
+
+# A setting rsyslog refuses (an unknown facility): the run fails with its
+# error, the previous drop-in is back, and rsyslog runs on.
+test_forward_invalid() {
+  local before
+  echo "== forward_invalid (ubuntu $1)"
+  ensure_forward forward_invalid "$1"
+  sender_converge -e "@$out/forward-targets.json"
+  before="$(s sha256sum "$dropin")"
+  sender_converge_fails -e "@$out/forward-targets.json" -e 'syslog_forward_filter=nonsense.info'
+  expect_in_log 'unknown facility name "nonsense"'
+  expect_in_log "The previous drop-in is back in place"
+  [ "$(s sha256sum "$dropin")" = "$before" ] || fail "the refused drop-in was left in place"
+  [ "$(s systemctl is-active rsyslog)" = active ] || fail "rsyslog does not run after the refused drop-in"
+}
+
+# No targets: the drop-in goes, and rsyslog restarts without it.
+test_forward_remove() {
+  local started
+  echo "== forward_remove (ubuntu $1)"
+  ensure_forward forward_remove "$1"
+  sender_converge -e "@$out/forward-targets.json"
+  started="$(s systemctl show -p ActiveEnterTimestampMonotonic --value rsyslog)"
+  sender_converge -e '{"syslog_forward_targets": []}'
+  s test ! -e "$dropin" || fail "$dropin is left without targets"
+  [ "$(s systemctl is-active rsyslog)" = active ] || fail "rsyslog does not run after the drop-in was removed"
+  [ "$(s systemctl show -p ActiveEnterTimestampMonotonic --value rsyslog)" != "$started" ] || fail "rsyslog was not restarted"
+  sender_converge_unchanged -e '{"syslog_forward_targets": []}'
+}
+
+# The GELF log driver while Graylog is down: a container with an address
+# starts (UDP needs no receiver), one with a name that does not resolve does
+# not (the docs warn of it).
+test_forward_down() {
+  echo "== forward_down (ubuntu $1)"
+  ensure_forward forward_down "$1"
+  sender_converge -e '{"syslog_forward_targets": []}' -e sender_docker=true
+  s docker pull -q "$busybox" >/dev/null
+  compose stop >/dev/null 2>&1
+  s docker run --rm --log-driver gelf --log-opt "gelf-address=udp://$host_ip:12201" --entrypoint echo "$busybox" up >/dev/null \
+    || fail "a container logging to GELF over UDP on an address did not start while Graylog was down"
+  if s docker run --rm --log-driver gelf --log-opt gelf-address=udp://nowhere.invalid:12201 --entrypoint echo "$busybox" up \
+    >"$out/gelf-unresolved.log" 2>&1; then
+    fail "a container logging to GELF on a name that does not resolve started"
+  fi
+  compose start >/dev/null 2>&1
+  wait_healthy
+}
+
 # All scenarios by default; NOIXDEV_INFRA_GRAYLOG_TESTS="refusals" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
 # update, failed_update, interrupted and secrets install the previous release
 # afresh and remove their installation at the end.
 all_scenarios="refusals install self_logging missing_data mountpoint noop_down reconfigure secret_changed inputs reconcile
-  update failed_update interrupted secrets"
+  update failed_update interrupted secrets forward forward_queue forward_invalid forward_remove forward_down"
 scenarios="${NOIXDEV_INFRA_GRAYLOG_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -1291,6 +1563,11 @@ for ubuntu in $releases; do
       failed_update) test_failed_update "$ubuntu" ;;
       interrupted) test_interrupted "$ubuntu" ;;
       secrets) test_secrets "$ubuntu" ;;
+      forward) test_forward "$ubuntu" ;;
+      forward_queue) test_forward_queue "$ubuntu" ;;
+      forward_invalid) test_forward_invalid "$ubuntu" ;;
+      forward_remove) test_forward_remove "$ubuntu" ;;
+      forward_down) test_forward_down "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done
