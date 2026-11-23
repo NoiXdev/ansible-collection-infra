@@ -67,12 +67,14 @@
 #             then back to the default inputs
 #   update    an installation of the previous release (7.2.1, MongoDB
 #             7.0.48) with inputs of its own and a message, a jump to
-#             MongoDB 9 refused before any change; updated to the defaults
+#             MongoDB 9 and an update with a new root password refused
+#             before any change; updated to the defaults
 #             (7.2.2, MongoDB 8.0.38) in one run: the backup (root's 0700,
 #             the compose file and versions of 7.2.1, the secrets,
 #             inputs.json, a dump that mongorestore --dryRun reads, the Data
 #             Node's data), the message and the inputs (the same ids) still
 #             there, featureCompatibilityVersion 8.0, no marker, idempotent;
+#             without inputs.json each input updated in place once;
 #             a downgrade of Graylog and of MongoDB refused before any
 #             change; a backup directory with 1 MiB free refused before any
 #             change, naming the size and graylog_update_backup_logs; a
@@ -86,7 +88,9 @@
 #             featureCompatibilityVersion 7.0, the data of the failed attempt
 #             set aside, update-failed naming the versions; a run with them
 #             refused before any change; a run with the installed versions
-#             removes the marker
+#             removes the marker; then an update whose new input cannot
+#             start (GELF over TCP on the server's API port) rolled back the
+#             same way
 # Every converge runs at least at -v, and its output must not hold a test
 # secret; every successful converge of a scenario is repeated and must change
 # nothing.
@@ -915,6 +919,11 @@ test_update() {
   up_converge_fails "${old_args[@]}" -e graylog_mongodb_version=9.0.0
   expect_in_log "graylog_mongodb_version 9.0.0 is not a release the role runs"
   expect_untouched
+  # The versions and the root password at once: a rollback would check the
+  # restored Graylog with the new password.
+  up_converge_fails -e "@$out/new-root-vars.json"
+  expect_in_log "Change the versions or the root password, one per run"
+  expect_untouched
 
   echo "== update: to $new_version with MongoDB $new_mongodb (ubuntu $1)"
   up_converge update
@@ -928,6 +937,13 @@ test_update() {
   expect_data_kept "after the update"
   expect_compose_clean
   up_converge_unchanged update
+  # Without the state of the inputs (as after a rollback to a backup without
+  # one) every input is updated once with the configuration it has: Graylog
+  # restarts it, and the run waits for the restarted one.
+  h rm "$app_dir/inputs.json"
+  up_converge "the inputs without their state"
+  [ "$(expect_input gelf-udp 12201)" = "$old_input" ] || fail "the GELF input was replaced without the state of the inputs"
+  up_converge_unchanged "the inputs without their state"
 
   # Neither Graylog nor MongoDB migrates its data down.
   note_untouched
@@ -944,8 +960,11 @@ test_update() {
   h docker tag "docker.io/graylog/graylog-datanode:$new_version" "$test_repo/graylog-datanode:$next_version"
   h mount -t tmpfs -o size=1m tmpfs "$backups"
   note_untouched
-  up_converge_fails "${next_args[@]}"
+  # Unmounted before any check can end the script.
+  local refused=0
+  play -e "@$out/role-vars.json" -e "@$out/update-inputs.json" "${next_args[@]}" || refused=1
   h umount "$backups"
+  [ "$refused" = 1 ] || { cat "$out/converge.log" >&2; fail "the update without space for its backup succeeded"; }
   expect_in_log "MiB free"
   expect_in_log "graylog_update_backup_logs: false"
   expect_untouched
@@ -1002,6 +1021,21 @@ test_failed_update() {
   up_converge "another version" "${old_args[@]}"
   h test ! -e "$failed_marker" || fail "a successful run with $old_version kept the marker"
   up_converge_unchanged "another version" "${old_args[@]}"
+
+  # An input that cannot start after the new versions are healthy (GELF over
+  # TCP on the port of the server's API) fails the update too.
+  echo "== failed_update: an input that fails after the update (ubuntu $1)"
+  write_inputs_vars clash-inputs.json "$(update_inputs_json | sed 's/}]$/}, {"name": "gelf-tcp", "type": "gelf_tcp", "port": 9000}]/')" ''
+  up_converge_fails -e "@$out/clash-inputs.json"
+  expect_in_log "update from $old_version to $new_version in $app_dir failed"
+  expect_in_log "gelf-tcp (FAILED)"
+  expect_in_log "was rolled back: Graylog $old_version with MongoDB $old_mongodb runs again"
+  [ "$(service_line graylog)" = "docker.io/graylog/graylog:$old_version running healthy" ] \
+    || fail "the server after the rollback of the failed input: $(service_line graylog)"
+  h grep -qx "failed_version: $new_version" "$failed_marker" || fail "the marker does not name $new_version: $(h cat "$failed_marker")"
+  expect_no_progress "after the rollback of the failed input"
+  expect_no_input gelf-tcp
+  expect_data_kept "after the rollback of the failed input"
   remove_installation
 }
 

@@ -21,9 +21,9 @@
 # when its rollback failed too, else the failed versions, an install that did
 # not complete (its marker), an update that did not finish (its marker), an
 # installation without a versions file the role can read, a Graylog or
-# MongoDB version older than the installed one, and a
-# graylog_password_secret that is not the one of the installation. It makes
-# no change.
+# MongoDB version older than the installed one, a graylog_password_secret
+# that is not the one of the installation, and an update together with a new
+# root password. It makes no change.
 
 # A block volume that is not mounted leaves its mountpoint as an empty
 # directory on the root filesystem; an install there would put the data
@@ -381,3 +381,24 @@
          else 'reconfigure' if graylog_compose_before != graylog_compose or graylog_secrets_changed | length > 0
                                or graylog_restart_marker_stat.stat.exists
          else 'noop' }}
+
+# A rollback puts the previous root password's SHA-256 back, then checks
+# Graylog with graylog_root_password, which the restored Graylog would refuse:
+# a rollback that worked would count as failed and refuse every version.
+- name: Refuse an update together with a new root password
+  ansible.builtin.fail:
+    msg: >-
+      The settings name Graylog {{ graylog_version }} with MongoDB
+      {{ graylog_mongodb_version }} in place of the installed
+      {{ graylog_installed_version }} with MongoDB
+      {{ graylog_installed_mongodb_version }}, and another
+      graylog_root_password than the installation's (neither value is
+      shown). A rollback of the update would check Graylog with the new
+      password, which the previous one does not take, so the role refuses
+      both at once and changes nothing. Change the versions or the root
+      password, one per run: set graylog_root_password back to the
+      installation's for the update, or the versions back to the installed
+      ones for the new password.
+  when:
+    - graylog_state == 'update'
+    - "'root_password_sha2' in graylog_secrets_changed"

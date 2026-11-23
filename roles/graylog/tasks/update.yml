@@ -23,39 +23,77 @@
 # between leaves only the marker, never a copy without it).
 
 # The database's dump is at most as large as its files; the Data Node's
-# data is copied as it is.
+# data is copied as it is. du runs on live directories: a file that vanishes
+# while it counts makes it exit 1 with the sizes still printed.
 - name: Measure the data of the backup
   ansible.builtin.command:
     argv: [du, --summarize, --block-size=1M, "{{ graylog_data_dir }}/mongodb", "{{ graylog_data_dir }}/datanode"]
   register: graylog_backup_sizes
   changed_when: false
+  failed_when: >-
+    graylog_backup_sizes.stdout_lines | default([]) | length != 2
+    or graylog_backup_sizes.stdout_lines | reject('match', '^[0-9]+') | list | length > 0
 
-- name: Measure the free space for the backup
+# The file systems of the backups and of the data directory, where a
+# rollback copies the Data Node's data back before it sets the failed
+# attempt's aside below the backups.
+- name: Measure the free space for the backup and a rollback
   ansible.builtin.command:
-    argv: [df, --output=avail, --block-size=1M, "{{ graylog_backup_dir }}"]
+    argv: [df, "--output=target,avail", --block-size=1M, "{{ graylog_backup_dir }}", "{{ graylog_data_dir }}"]
   register: graylog_backup_free
   changed_when: false
 
-- name: Refuse an update without the space for its backup
+# With the copy of the Data Node's data (size D): the backups need the dump
+# and the copy, and a rollback copies it back into the data directory, then
+# moves the failed attempt's data below the backups. On one file system the
+# move is a rename: dump + 2 D there. On two: the backups need dump + 2 D
+# (the copy and the data set aside), the data directory D.
+- name: Refuse an update without the space for its backup and a rollback
   ansible.builtin.fail:
     msg: >-
-      The backup before the update of Graylog in {{ graylog_dir }} from
-      {{ graylog_installed_version }} to {{ graylog_version }} needs about
-      {{ graylog_backup_needed }} MiB in {{ graylog_backup_dir }} (the database
-      dump, at most {{ graylog_backup_mongodb }} MiB{{ (", and the copy of the Data Node's data, "
-      ~ graylog_backup_datanode ~ ' MiB') if graylog_update_backup_logs | bool else '' }}), but it has
-      {{ graylog_backup_available }} MiB free. The role changes nothing. Free
-      space there{{ (", or set graylog_update_backup_logs: false to update without the copy of the"
-      ~ " Data Node's data: a rollback then starts the previous Data Node on the data the new one may"
-      ~ " have migrated, and fails when it cannot open it") if graylog_update_backup_logs | bool else '' }},
-      then run the role again.
+      The update of Graylog in {{ graylog_dir }} from
+      {{ graylog_installed_version }} to {{ graylog_version }} needs more free
+      space than there is: {{ graylog_space_short | join('; ') }}. The role
+      changes nothing. Free space there{{ (", or set graylog_update_backup_logs: false to update"
+      ~ " without the copy of the Data Node's data: a rollback then starts the previous Data Node on"
+      ~ " the data the new one may have migrated, and fails when it cannot open it")
+      if graylog_update_backup_logs | bool else '' }}, then run the role again.
   vars:
     graylog_backup_mongodb: "{{ graylog_backup_sizes.stdout_lines[0].split()[0] | int }}"
-    graylog_backup_datanode: "{{ graylog_backup_sizes.stdout_lines[1].split()[0] | int }}"
-    graylog_backup_needed: >-
-      {{ graylog_backup_mongodb | int + (graylog_backup_datanode | int if graylog_update_backup_logs | bool else 0) }}
-    graylog_backup_available: "{{ graylog_backup_free.stdout_lines[-1] | trim | int }}"
-  when: graylog_backup_needed | int > graylog_backup_available | int
+    graylog_backup_datanode: >-
+      {{ graylog_backup_sizes.stdout_lines[1].split()[0] | int if graylog_update_backup_logs | bool else 0 }}
+    graylog_space_short: >-
+      {%- set mongodb = graylog_backup_mongodb | int -%}
+      {%- set datanode = graylog_backup_datanode | int -%}
+      {%- set backups = (graylog_backup_free.stdout_lines[1] | trim).rsplit(none, 1) -%}
+      {%- set data = (graylog_backup_free.stdout_lines[2] | trim).rsplit(none, 1) -%}
+      {%- set needs = [] -%}
+      {%- if datanode > 0 -%}
+      {%-   set what = 'the database dump (at most ' ~ mongodb ~ " MiB), the copy of the Data Node's data ("
+                       ~ datanode ~ ' MiB) and ' -%}
+      {%-   if backups[0] == data[0] -%}
+      {%-     set _ = needs.append({'path': graylog_backup_dir, 'fs': backups[0], 'free': backups[1] | int,
+                                    'need': mongodb + 2 * datanode,
+                                    'what': what ~ 'as much again for a rollback to copy it back'}) -%}
+      {%-   else -%}
+      {%-     set _ = needs.append({'path': graylog_backup_dir, 'fs': backups[0], 'free': backups[1] | int,
+                                    'need': mongodb + 2 * datanode,
+                                    'what': what ~ 'as much again for the data a rollback sets aside there'}) -%}
+      {%-     set _ = needs.append({'path': graylog_data_dir, 'fs': data[0], 'free': data[1] | int,
+                                    'need': datanode,
+                                    'what': 'the copy a rollback puts back (' ~ datanode ~ ' MiB)'}) -%}
+      {%-   endif -%}
+      {%- else -%}
+      {%-   set _ = needs.append({'path': graylog_backup_dir, 'fs': backups[0], 'free': backups[1] | int,
+                                  'need': mongodb, 'what': 'the database dump (at most ' ~ mongodb ~ ' MiB)'}) -%}
+      {%- endif -%}
+      {%- set short = [] -%}
+      {%- for need in needs if need.need > need.free -%}
+      {%-   set _ = short.append(need.path ~ ' (file system ' ~ need.fs ~ ') needs about ' ~ need.need ~ ' MiB for '
+                                 ~ need.what ~ ', but has ' ~ need.free ~ ' MiB free') -%}
+      {%- endfor -%}
+      {{ short }}
+  when: graylog_space_short | length > 0
 
 - name: Update Graylog
   vars:
