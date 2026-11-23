@@ -61,7 +61,32 @@
 #             deleted), the syslog_udp input on 514 (published from 10514 in
 #             the container), a new token (the old one refused), a retention
 #             of 7 days; an input made through the API without the prefix
-#             survives two runs; then back to the default inputs
+#             survives two runs; the gelf_tcp input moved onto the port of the
+#             server's API (9000): the run waits for the restarted input, not
+#             the state from before the change, and fails naming it FAILED;
+#             then back to the default inputs
+#   update    an installation of the previous release (7.2.1, MongoDB
+#             7.0.48) with inputs of its own and a message, a jump to
+#             MongoDB 9 refused before any change; updated to the defaults
+#             (7.2.2, MongoDB 8.0.38) in one run: the backup (root's 0700,
+#             the compose file and versions of 7.2.1, the secrets,
+#             inputs.json, a dump that mongorestore --dryRun reads, the Data
+#             Node's data), the message and the inputs (the same ids) still
+#             there, featureCompatibilityVersion 8.0, no marker, idempotent;
+#             a downgrade of Graylog and of MongoDB refused before any
+#             change; a backup directory with 1 MiB free refused before any
+#             change, naming the size and graylog_update_backup_logs; a
+#             second update (the defaults' images tagged 7.2.3) with
+#             graylog_backups_keep 1 and graylog_update_backup_logs false:
+#             only its backup kept, without a copy of the Data Node's data
+#   failed_update
+#             that installation updated to a server image that exits (tagged
+#             7.2.2) and MongoDB 8.0.38: rolled back to 7.2.1 and MongoDB
+#             7.0.48 with the message and the inputs, healthy,
+#             featureCompatibilityVersion 7.0, the data of the failed attempt
+#             set aside, update-failed naming the versions; a run with them
+#             refused before any change; a run with the installed versions
+#             removes the marker
 # Every converge runs at least at -v, and its output must not hold a test
 # secret; every successful converge of a scenario is repeated and must change
 # nothing.
@@ -328,10 +353,11 @@ expect_no_input() {
   if printf '%s\n' "$lines" | grep -qF " ansible: $1|"; then fail "the input \"ansible: $1\" is still there"; fi
 }
 
-# The messages of the last 10 minutes that hold <text>, one per line, as
+# The messages of the last 2 hours (an update scenario looks for one sent
+# before its install and updates) that hold <text>, one per line, as
 # "<container_name>|<message>": search <text>.
 search() {
-  api "/search/messages?query=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.quote("\"%s\"" % sys.argv[1]))' "$1")&fields=container_name,message&timerange=600s" \
+  api "/search/messages?query=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.quote("\"%s\"" % sys.argv[1]))' "$1")&fields=container_name,message&timerange=7200s" \
     | py '"\n".join("%s|%s" % (row[0], row[1]) for row in d["datarows"])'
 }
 # Waits up to 60 seconds until a message with <text> is found, and checks
@@ -747,6 +773,17 @@ test_reconcile() {
   lines="$(inputs_lines)"
   printf '%s\n' "$lines" | grep -qF "$manual_id manual gelf|" || fail "the input without the prefix was removed"
 
+  # The gelf_tcp input moved onto the port of the server's API: Graylog
+  # restarts it after the change, and the new one cannot open its port. The
+  # first answer after the change can still be the RUNNING input from before
+  # it, which must not count.
+  write_inputs_vars clash-vars.json "$(inputs_json 9000 0 514)" "$new_gelf_token"
+  role_converge_fails -e "@$out/clash-vars.json" -e graylog_retention_days=7
+  expect_in_log "The inputs gelf-tcp (FAILED) of graylog_inputs are not RUNNING"
+  role_converge "reconcile after the port clash" -e "@$out/reconcile-vars.json" -e graylog_retention_days=7
+  moved_id="$(expect_input gelf-tcp 12203)"
+  [ "$moved_id" = "$gelf_tcp_id" ] || fail "the gelf_tcp input was replaced ($moved_id) after the port clash"
+
   # Back to the default inputs and retention.
   api "/system/inputs/$manual_id" -X DELETE >/dev/null
   role_converge "reconcile back"
@@ -759,10 +796,222 @@ test_reconcile() {
   verify
 }
 
+# The update scenarios: the previous release with the latest MongoDB 7.0
+# patch, updated to the defaults; the defaults' images tagged as next_version
+# under test_repo are a newer release that works.
+defaults="$root/roles/graylog/defaults/main.yml"
+# The value of a top-level key in a YAML file: value_of <file> <key>.
+value_of() { sed -n "s/^$2: *//p" "$1" 2>/dev/null || true; }
+old_version=7.2.1
+old_mongodb=7.0.48
+new_version="$(value_of "$defaults" graylog_version)"
+new_mongodb="$(value_of "$defaults" graylog_mongodb_version)"
+next_version=7.2.3
+test_repo=test.invalid
+busybox=busybox:1.37.0
+backups="$data_dir/backups"
+failed_marker="$app_dir/update-failed"
+progress="$app_dir/update-in-progress"
+old_args=(-e "graylog_version=$old_version" -e "graylog_mongodb_version=$old_mongodb")
+next_args=(-e "graylog_image=$test_repo/graylog" -e "graylog_datanode_image=$test_repo/graylog-datanode"
+  -e "graylog_version=$next_version")
+
+# The inputs of the update scenarios, their own: GELF over UDP bound to the
+# test host (a container sends its message there) and syslog over UDP.
+update_inputs_json() {
+  printf '%s' '[{"name": "gelf-udp", "type": "gelf_udp", "port": 12201, "bind": ["'"$host_ip"'"]},
+    {"name": "syslog-udp", "type": "syslog_udp", "port": 1514}]'
+}
+# role_converge and its variants with those inputs: up_converge <what> [-e ...].
+up_converge() { role_converge "$1" -e "@$out/update-inputs.json" "${@:2}"; }
+up_converge_unchanged() { role_converge_unchanged "$1" -e "@$out/update-inputs.json" "${@:2}"; }
+up_converge_fails() { role_converge_fails -e "@$out/update-inputs.json" "$@"; }
+up_verify() { verify -e "@$out/update-published.json" "$@"; }
+
+# A message through the bound GELF input: send_gelf <text>.
+send_gelf() {
+  h docker run --rm --log-driver gelf --log-opt "gelf-address=udp://$host_ip:12201" --entrypoint echo "$probe_image" "$1" >/dev/null
+}
+# The featureCompatibilityVersion of MongoDB.
+fcv() {
+  compose "exec -T mongodb mongosh --quiet --eval 'db.adminCommand({getParameter: 1, featureCompatibilityVersion: 1}).featureCompatibilityVersion.version'"
+}
+# The image, state and health of a service: service_line <service>.
+service_line() { compose ps --all --format "'{{.Image}} {{.State}} {{.Health}}'" "$1"; }
+# The complete backups (not partial, not -failed), oldest first.
+complete_backups() { h sh -c "ls $backups 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z-[0-9.]+-to-[0-9.]+\$' || true"; }
+# The newest backup of an update from <from> to <to>: newest_backup <from> <to>.
+newest_backup() {
+  local name
+  name="$(complete_backups | grep -F -- "-$1-to-$2" | tail -n 1)"
+  [ -n "$name" ] || fail "no backup of the update from $1 to $2 in $backups: $(h ls -A "$backups" 2>&1)"
+  printf '%s\n' "$backups/$name"
+}
+# Fails when the marker of an update in progress or one of its copies is left.
+expect_no_progress() {
+  h sh -c "test ! -e $progress && test ! -e $progress.compose.yaml && test ! -e $progress.secrets" \
+    || fail "an update left $progress or a copy of it ($1): $(h sh -c "ls -d $progress*")"
+}
+
+# A fresh installation of old_version with the update inputs and a message
+# (old_message), whose GELF input's id is old_input: install_old <scenario>.
+install_old() {
+  echo "== install $old_version with MongoDB $old_mongodb for $1"
+  write_inputs_vars update-inputs.json "$(update_inputs_json)" ''
+  write_published update-published.json "$host_ip:12201:12201/udp"
+  remove_installation
+  up_converge "install $old_version for $1" "${old_args[@]}"
+  up_verify -e "verify_version=$old_version" -e "verify_mongodb_version=$old_mongodb"
+  old_input="$(expect_input gelf-udp 12201)"
+  old_message="before-the-update-$(openssl rand -hex 6)"
+  send_gelf "$old_message"
+  expect_found "$old_message"
+}
+# Fails unless the message and the inputs of install_old are still there and
+# a new message is found: expect_data_kept <what>.
+expect_data_kept() {
+  expect_found "$old_message"
+  [ "$(expect_input gelf-udp 12201)" = "$old_input" ] || fail "the GELF input is not the one from before ($1)"
+  expect_input syslog-udp 1514 >/dev/null
+  local message
+  message="after-$(openssl rand -hex 6)"
+  send_gelf "$message"
+  expect_found "$message"
+}
+# Fails unless <dir> holds the backup of an update from Graylog <from> with
+# MongoDB <from mongodb>: root's 0700, compose.yaml (0600) and versions of
+# that release, the secrets in use (0700, files 0600), inputs.json (0600), a
+# dump that mongorestore --dryRun reads with the inputs' collection, and
+# with <copy> 1 the Data Node's data, with 0 none:
+# expect_backup <dir> <from> <from mongodb> <copy>.
+expect_backup() {
+  local dir="$1" from="$2" from_mongodb="$3" copy="$4"
+  [ "$(h stat -c '%U %a' "$backups" "$dir" | sort -u)" = "root 700" ] || fail "$backups or $dir is not root's 0700"
+  [ "$(h stat -c '%U %a' "$dir/compose.yaml")" = "root 600" ] || fail "$dir/compose.yaml is not root's 0600"
+  h grep -qF "graylog:$from\"" "$dir/compose.yaml" || fail "$dir/compose.yaml is not the one of $from"
+  [ "$(h sed -n 's/^graylog: *//p' "$dir/versions") $(h sed -n 's/^mongodb: *//p' "$dir/versions")" = "$from $from_mongodb" ] \
+    || fail "$dir/versions does not name $from and $from_mongodb: $(h sed -n '/^[gm]/p' "$dir/versions" | grep -v sha256)"
+  [ "$(h stat -c '%a' "$dir/secrets")" = 700 ] || fail "$dir/secrets is not 0700"
+  [ "$(h sh -c "stat -c '%a' $dir/secrets/* $dir/versions $dir/inputs.json | sort -u")" = 600 ] \
+    || fail "the secrets, the versions or inputs.json in $dir are not 0600"
+  [ "$(h ls "$dir/secrets")" = "$(h ls "$secrets_dir")" ] || fail "$dir/secrets does not hold the secrets in use: $(h ls "$dir/secrets")"
+  h sh -c "cd $app_dir && docker compose exec -T mongodb mongorestore --archive --gzip --dryRun --verbose <$dir/mongodb.archive" \
+    >"$out/dryrun.log" 2>&1 || { cat "$out/dryrun.log" >&2; fail "mongorestore --dryRun cannot read $dir/mongodb.archive"; }
+  grep -qF 'graylog.inputs' "$out/dryrun.log" || { cat "$out/dryrun.log" >&2; fail "the dump in $dir has no inputs"; }
+  if [ "$copy" = 1 ]; then
+    [ -n "$(h ls -A "$dir/datanode")" ] || fail "the backup $dir has no copy of the Data Node's data"
+  else
+    h test ! -e "$dir/datanode" || fail "the backup $dir has a copy of the Data Node's data"
+  fi
+}
+
+test_update() {
+  local backup next_backup
+  echo "== update (ubuntu $1)"
+  install_old update
+
+  # Task 1's check of the version: MongoDB 9 is no release the role runs.
+  note_untouched
+  up_converge_fails "${old_args[@]}" -e graylog_mongodb_version=9.0.0
+  expect_in_log "graylog_mongodb_version 9.0.0 is not a release the role runs"
+  expect_untouched
+
+  echo "== update: to $new_version with MongoDB $new_mongodb (ubuntu $1)"
+  up_converge update
+  grep -qF 'update.yml' "$out/converge.log" || fail "the new versions were not an update"
+  up_verify
+  expect_no_progress "after the update"
+  h test ! -e "$failed_marker" || fail "the update left $failed_marker"
+  backup="$(newest_backup "$old_version" "$new_version")"
+  expect_backup "$backup" "$old_version" "$old_mongodb" 1
+  [ "$(fcv)" = 8.0 ] || fail "featureCompatibilityVersion is $(fcv), not 8.0"
+  expect_data_kept "after the update"
+  expect_compose_clean
+  up_converge_unchanged update
+
+  # Neither Graylog nor MongoDB migrates its data down.
+  note_untouched
+  up_converge_fails -e "graylog_version=$old_version"
+  expect_in_log "graylog_version $old_version is lower than the installed version $new_version"
+  expect_untouched
+  up_converge_fails -e "graylog_mongodb_version=$old_mongodb"
+  expect_in_log "graylog_mongodb_version $old_mongodb is lower than the installed version $new_mongodb"
+  expect_untouched
+
+  # The backup directory on a file system with 1 MiB free.
+  echo "== update: no space for the backup (ubuntu $1)"
+  h docker tag "docker.io/graylog/graylog:$new_version" "$test_repo/graylog:$next_version"
+  h docker tag "docker.io/graylog/graylog-datanode:$new_version" "$test_repo/graylog-datanode:$next_version"
+  h mount -t tmpfs -o size=1m tmpfs "$backups"
+  note_untouched
+  up_converge_fails "${next_args[@]}"
+  h umount "$backups"
+  expect_in_log "MiB free"
+  expect_in_log "graylog_update_backup_logs: false"
+  expect_untouched
+
+  echo "== update: to $next_version, one backup kept, no copy of the logs (ubuntu $1)"
+  up_converge "second update" "${next_args[@]}" -e graylog_backups_keep=1 -e '{"graylog_update_backup_logs": false}'
+  [ "$(service_line graylog)" = "$test_repo/graylog:$next_version running healthy" ] \
+    || fail "the server after the second update: $(service_line graylog)"
+  h test ! -e "$backup" || fail "the older backup $backup was not pruned"
+  [ "$(complete_backups | wc -l | tr -d ' ')" = 1 ] || fail "graylog_backups_keep 1 kept more: $(complete_backups)"
+  next_backup="$(newest_backup "$new_version" "$next_version")"
+  expect_backup "$next_backup" "$new_version" "$new_mongodb" 0
+  expect_data_kept "after the second update"
+  up_converge_unchanged "second update" "${next_args[@]}" -e graylog_backups_keep=1 -e '{"graylog_update_backup_logs": false}'
+  remove_installation
+}
+
+test_failed_update() {
+  local backup
+  echo "== failed_update (ubuntu $1)"
+  install_old failed_update
+
+  echo "== failed_update: a server image that exits (ubuntu $1)"
+  h docker pull -q "$busybox" >/dev/null
+  h docker tag "$busybox" "$test_repo/graylog:$new_version"
+  up_converge_fails -e "graylog_image=$test_repo/graylog" -e graylog_health_timeout=60 -e graylog_rollback_timeout=600
+  expect_in_log "update from $old_version to $new_version in $app_dir failed"
+  expect_in_log "was rolled back: Graylog $old_version with MongoDB $old_mongodb runs again"
+  [ "$(service_line graylog)" = "docker.io/graylog/graylog:$old_version running healthy" ] \
+    || fail "the server after the rollback: $(service_line graylog)"
+  [ "$(service_line mongodb)" = "docker.io/library/mongo:$old_mongodb running healthy" ] \
+    || fail "MongoDB after the rollback: $(service_line mongodb)"
+  h grep -qx "failed_version: $new_version" "$failed_marker" || fail "the marker does not name $new_version: $(h cat "$failed_marker")"
+  h grep -qx "failed_mongodb_version: $new_mongodb" "$failed_marker" || fail "the marker does not name MongoDB $new_mongodb: $(h cat "$failed_marker")"
+  h grep -qx "rolled_back_to: $old_version" "$failed_marker" || fail "the marker does not name $old_version: $(h cat "$failed_marker")"
+  backup="$(h sed -n 's/^backup: //p' "$failed_marker")"
+  expect_backup "$backup" "$old_version" "$old_mongodb" 1
+  [ -n "$(h ls -A "$backup-failed/datanode")" ] || fail "the Data Node's data of the failed update was not set aside to $backup-failed"
+  expect_in_log "$backup"
+  expect_no_progress "after the rollback"
+  up_verify -e "verify_version=$old_version" -e "verify_mongodb_version=$old_mongodb"
+  [ "$(fcv)" = 7.0 ] || fail "featureCompatibilityVersion is $(fcv), not 7.0"
+  expect_data_kept "after the rollback"
+  expect_compose_clean
+  h docker rmi "$test_repo/graylog:$new_version" >/dev/null
+
+  echo "== failed_update: the failed versions refused (ubuntu $1)"
+  note_untouched
+  up_converge_fails
+  expect_in_log "$failed_marker exists: the Graylog update to $new_version with MongoDB $new_mongodb failed"
+  expect_in_log "rolled back to $old_version"
+  expect_untouched
+  # Another version (the installed one) succeeds and removes the marker.
+  up_converge "another version" "${old_args[@]}"
+  h test ! -e "$failed_marker" || fail "a successful run with $old_version kept the marker"
+  up_converge_unchanged "another version" "${old_args[@]}"
+  remove_installation
+}
+
 # All scenarios by default; NOIXDEV_INFRA_GRAYLOG_TESTS="refusals" runs only
 # these. A new scenario is a test_<name> function and one line in the case
 # below.
-all_scenarios="refusals install self_logging missing_data mountpoint noop_down reconfigure secret_changed inputs reconcile"
+# update and failed_update install the previous release afresh and remove
+# their installation at the end.
+all_scenarios="refusals install self_logging missing_data mountpoint noop_down reconfigure secret_changed inputs reconcile
+  update failed_update"
 scenarios="${NOIXDEV_INFRA_GRAYLOG_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
   start_host "$ubuntu"
@@ -778,6 +1027,8 @@ for ubuntu in $releases; do
       secret_changed) test_secret_changed "$ubuntu" ;;
       inputs) test_inputs "$ubuntu" ;;
       reconcile) test_reconcile "$ubuntu" ;;
+      update) test_update "$ubuntu" ;;
+      failed_update) test_failed_update "$ubuntu" ;;
       *) fail "unknown scenario $scenario ($all_scenarios)" ;;
     esac
   done

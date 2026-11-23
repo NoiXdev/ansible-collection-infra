@@ -8,7 +8,8 @@
 #                restart is pending (graylog_restart_marker)
 #   noop         everything as the role writes it
 # Also sets graylog_installed (a compose file exists), graylog_compose_before
-# (the compose file on disk), graylog_installed_version and
+# (the compose file on disk), graylog_marker_read and graylog_marker (the
+# marker of a failed update), graylog_installed_version and
 # graylog_installed_mongodb_version (from graylog_versions_file, empty
 # without an installation), graylog_secrets (file name to content of the
 # secrets the role writes), graylog_secrets_changed (the names of the secrets
@@ -16,8 +17,11 @@
 # services that are not running). Refuses, before any change and in this
 # order: a graylog_data_dir that is not a mountpoint (with
 # graylog_data_dir_mountpoint), an installation without its data
-# subdirectories (an unmounted volume), an install that did not complete (its
-# marker), an installation without a versions file the role can read, and a
+# subdirectories (an unmounted volume), after a failed update every version
+# when its rollback failed too, else the failed versions, an install that did
+# not complete (its marker), an update that did not finish (its marker), an
+# installation without a versions file the role can read, a Graylog or
+# MongoDB version older than the installed one, and a
 # graylog_password_secret that is not the one of the installation. It makes
 # no change.
 
@@ -85,6 +89,76 @@
     - graylog_installed
     - graylog_data_missing | length > 0
 
+# Written by update.yml after a failed update; it names the failed versions.
+# Not secret: the versions, the backup, the time and the error.
+- name: Read the marker of a failed update
+  ansible.builtin.slurp:
+    src: "{{ graylog_marker_file }}"
+  register: graylog_marker_read
+  failed_when: false
+
+# A marker that is not YAML cannot say which update failed.
+- name: Check the marker of a failed update
+  when: graylog_marker_read.content is defined
+  block:
+    - name: Parse the marker of a failed update
+      ansible.builtin.set_fact:
+        graylog_marker: "{{ graylog_marker_yaml if graylog_marker_yaml is mapping else {} }}"
+      vars:
+        graylog_marker_yaml: "{{ graylog_marker_read.content | b64decode | from_yaml }}"
+  rescue:
+    - name: Fail on a marker of a failed update that is not YAML
+      ansible.builtin.fail:
+        msg: >-
+          {{ graylog_marker_file }} exists, but it is not YAML, so the role
+          cannot tell which Graylog update failed and changes nothing. Check
+          Graylog, then remove the file (rm {{ graylog_marker_file }}).
+
+# The rollback failed (or the marker does not say it worked): the database
+# and the Data Node's data may be empty, half restored or migrated, and the
+# backup holds them. Any version would take a backup of that state and,
+# healthy, remove the marker, the last pointer to the real backup, so every
+# version is refused, before the version checks: a rollback that failed
+# before it put the previous versions file back leaves the failed versions in
+# it, and an older pin must hear this, not the downgrade refusal.
+- name: Refuse every version after a failed rollback
+  ansible.builtin.fail:
+    msg: >-
+      {{ graylog_marker_file }} exists: the Graylog update to
+      {{ graylog_marker.failed_version | default('?') }} with MongoDB
+      {{ graylog_marker.failed_mongodb_version | default('?') }} failed on
+      {{ graylog_marker.time | default('?') }}, and rolling back failed too
+      ({{ graylog_marker.restore_error | default('?') }}). The database and
+      the Data Node's data may be empty, half restored or as the new versions
+      left them; they are in the backup {{ graylog_backup }}. The role
+      refuses every version and changes nothing until Graylog is restored.
+      {{ graylog_restore_hint }} Then check Graylog (log in, search the
+      messages) and remove the marker (rm {{ graylog_marker_file }}).
+  vars:
+    graylog_backup: "{{ graylog_marker.backup | default('?', true) }}"
+  when:
+    - graylog_marker_read.content is defined
+    - not graylog_marker.rolled_back_to | default(none)
+
+# A marker that names no versions refuses every version.
+- name: Refuse the versions of a failed update
+  ansible.builtin.fail:
+    msg: >-
+      {{ graylog_marker_file }} exists: the Graylog update to
+      {{ graylog_version }} with MongoDB {{ graylog_mongodb_version }} failed
+      on {{ graylog_marker.time | default('?') }} (rolled back to
+      {{ graylog_marker.rolled_back_to }} with MongoDB
+      {{ graylog_marker.rolled_back_to_mongodb | default('?') }}; backup
+      {{ graylog_marker.backup | default('?') }}). The role does not try
+      these versions again and changes nothing while the marker names them.
+      To try again, remove it (rm {{ graylog_marker_file }}); or set
+      graylog_version or graylog_mongodb_version to another version, and the
+      marker is removed once a run with it succeeds.
+  when:
+    - graylog_marker_read.content is defined
+    - (graylog_marker.failed_version | default(graylog_version) | string) == graylog_version | string
+    - (graylog_marker.failed_mongodb_version | default(graylog_mongodb_version) | string) == graylog_mongodb_version | string
+
 - name: Look for the marker of an install in progress
   ansible.builtin.stat:
     path: "{{ graylog_install_marker }}"
@@ -98,6 +172,44 @@
       {{ graylog_dir }} did not complete. The role changes nothing.
       {{ graylog_install_hint }}
   when: graylog_install_marker_stat.stat.exists
+
+# Left by a run that stopped during an update (update.yml). Not secret: the
+# versions, the step, the backup and the time.
+- name: Read the marker of an update in progress
+  ansible.builtin.slurp:
+    src: "{{ graylog_update_marker }}"
+  register: graylog_update_marker_read
+  failed_when: false
+
+# Whether it exists, which a read that failed does not tell.
+- name: Look for the marker of an update in progress
+  ansible.builtin.stat:
+    path: "{{ graylog_update_marker }}"
+    get_checksum: false
+  register: graylog_update_marker_stat
+
+# The compose file, the secrets, the database and the Data Node's data may
+# be either version's, and Graylog may run either or neither; rolling back on
+# its own would lose what changed since, if the update had in fact finished
+# and only the marker's removal was lost. The operator decides.
+- name: Refuse to run after an update that did not finish
+  ansible.builtin.fail:
+    msg: >-
+      {{ graylog_update_marker }} exists: an update of Graylog in
+      {{ graylog_dir }} did not finish (the run that started it stopped), so
+      Graylog may run either version or neither; the role changes nothing.
+      Check Graylog. To keep it as it is, remove the marker with its copies
+      (rm -r {{ graylog_update_marker_files | join(' ') }}) and run the role
+      again. To go back to the versions before it, restore its backup
+      {{ graylog_backup }} by hand. {{ graylog_restore_hint }}
+  vars:
+    graylog_update_in_progress: >-
+      {{ (graylog_update_marker_read.content | default('') | b64decode | from_yaml)
+         if graylog_update_marker_read.content is defined else {} }}
+    graylog_backup: >-
+      {{ (graylog_update_in_progress.backup | default('?', true))
+         if graylog_update_in_progress is mapping else '?' }}
+  when: graylog_update_marker_stat.stat.exists
 
 # Mode 0600: beside the versions it holds the SHA-256 of the password secret,
 # so it is read and parsed in no_log tasks.
@@ -143,6 +255,33 @@
       not graylog_installed_version is match('^\d+\.\d+\.\d+$')
       or not graylog_installed_mongodb_version is match('^\d+\.\d+\.\d+$')
       or not graylog_versions.password_secret_sha256 | default('', true) | string is match('^[0-9a-f]{64}$')
+
+# Graylog migrates its database on start, and MongoDB its data files once
+# the featureCompatibilityVersion is raised (update.yml); neither goes back.
+- name: Refuse a downgrade of Graylog
+  ansible.builtin.fail:
+    msg: >-
+      graylog_version {{ graylog_version }} is lower than the installed
+      version {{ graylog_installed_version }} in {{ graylog_dir }}; the role
+      refuses to downgrade, as Graylog cannot migrate its database down, and
+      changes nothing. Set graylog_version to {{ graylog_installed_version }}
+      or newer.
+  when:
+    - graylog_installed
+    - graylog_version is version(graylog_installed_version, '<')
+
+- name: Refuse a downgrade of MongoDB
+  ansible.builtin.fail:
+    msg: >-
+      graylog_mongodb_version {{ graylog_mongodb_version }} is lower than the
+      installed version {{ graylog_installed_mongodb_version }} in
+      {{ graylog_dir }}; the role refuses to downgrade MongoDB, which cannot
+      open data files a newer release has raised, and changes nothing. Set
+      graylog_mongodb_version to {{ graylog_installed_mongodb_version }} or
+      newer.
+  when:
+    - graylog_installed
+    - graylog_mongodb_version is version(graylog_installed_mongodb_version, '<')
 
 # The secret encrypts values in the database (access tokens, the Data Node's
 # certificates and credentials): with another one Graylog cannot read them.

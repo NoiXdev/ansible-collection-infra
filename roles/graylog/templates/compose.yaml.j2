@@ -14,7 +14,7 @@
           create_host_path: false
 {%- endmacro %}
 {%- set secrets = graylog_container_secrets_dir -%}
-{%- set mongodb_uri = 'mongodb://mongodb:27017/graylog' -%}
+{%- set mongodb_uri = 'mongodb://mongodb:27017/' ~ graylog_mongodb_database -%}
 {#- graylog_env first, then the settings the role owns, which main.yml
     refuses in graylog_env (graylog_env_owned), so none of them replaces a
     value given there. GRAYLOG_SELFSIGNED_STARTUP makes the server create

@@ -112,6 +112,27 @@
          | map(attribute='item.title') | map('to_json') | list }}
   when: graylog_inputs_undeleted | length > 0
 
+# Graylog restarts an input it updated a moment after it answers, so the
+# first states asked for after the change can be those of the input from
+# before it: when each input to update last started, to tell them apart.
+- name: Read the states of the inputs before the change
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    graylog_api_path: /system/inputstates
+  when: graylog_inputs_plan.apply | selectattr('id', 'defined') | list | length > 0
+
+- name: Note when the inputs to update started
+  ansible.builtin.set_fact:
+    graylog_inputs_started: >-
+      {%- set started = {} -%}
+      {%- set ids = graylog_inputs_plan.apply | selectattr('id', 'defined') | map(attribute='id') | list -%}
+      {%- if ids | length > 0 -%}
+      {%-   for state in (graylog_api_result.json | default({})).states | default([]) if state.id in ids -%}
+      {%-     set _ = started.update({state.id: state.started_at | default('')}) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ started }}
+
 # By name, so that no body reaches the output; no_log, as the result echoes
 # the body. Graylog answers 201 to both (with the id).
 - name: Create and update the inputs
@@ -181,47 +202,58 @@
   no_log: true
 
 # An input that was created, updated or restarted takes a moment; one that
-# cannot open its port stays FAILED, so the wait ends there too.
-- name: Wait until the inputs of the role are RUNNING
-  ansible.builtin.uri:
-    url: "{{ graylog_api_url }}/api/system/inputstates"
-    url_username: "{{ graylog_root_username }}"
-    url_password: "{{ graylog_root_password | string }}"
-    force_basic_auth: true
-    headers:
-      Accept: application/json
-    return_content: true
-    timeout: 10
-  register: graylog_inputs_states
-  until: >-
-    graylog_inputs_applied.values() | difference(graylog_inputs_states.json.states | default([])
-      | selectattr('state', 'eq', 'RUNNING') | map(attribute='id') | list) | length == 0
-    or graylog_inputs_states.json.states | default([]) | selectattr('id', 'in', graylog_inputs_applied.values())
-       | selectattr('state', 'eq', 'FAILED') | list | length > 0
-  retries: 24
-  delay: 5
-  failed_when: false
-  changed_when: false
-  no_log: true
-  when: graylog_inputs_applied | length > 0
-
-- name: Fail when an input of the role is not RUNNING
-  ansible.builtin.fail:
-    msg: >-
-      The inputs {{ graylog_inputs_down | join(', ') }} of graylog_inputs are
-      not RUNNING in Graylog in {{ graylog_dir }}. An input that cannot open
-      its port is FAILED (another input on the same port and transport, one
-      made in the web interface among them); see the input's messages in the
-      web interface (System, Inputs) and docker compose logs graylog.
+# cannot open its port stays FAILED, so the wait ends there too. Of an input
+# this run updated, only a state that started after the change counts (its
+# started_at is not the one from before it): the state of the input from
+# before the change, RUNNING or FAILED, is not its answer. An input this run
+# created has no state from before.
+- name: Check that the inputs of the role run
   vars:
-    graylog_inputs_down: >-
-      {%- set states = {} -%}
-      {%- for state in graylog_inputs_states.json.states | default([]) -%}
-      {%-   set _ = states.update({state.id: state.state}) -%}
+    # Input id to its state, for the states that count.
+    graylog_inputs_current: >-
+      {%- set current = {} -%}
+      {%- for state in graylog_inputs_states.json.states | default([]) if state.id in graylog_inputs_applied.values() -%}
+      {%-   if state.id not in graylog_inputs_started or state.started_at | default('') != graylog_inputs_started[state.id] -%}
+      {%-     set _ = current.update({state.id: state.state}) -%}
+      {%-   endif -%}
       {%- endfor -%}
-      {%- set down = [] -%}
-      {%- for name, id in graylog_inputs_applied | dictsort if states[id] | default('') != 'RUNNING' -%}
-      {%-   set _ = down.append(name ~ ' (' ~ states[id] | default('not started') ~ ')') -%}
-      {%- endfor -%}
-      {{ down }}
-  when: graylog_inputs_down | length > 0
+      {{ current }}
+  block:
+    - name: Wait until the inputs of the role are RUNNING
+      ansible.builtin.uri:
+        url: "{{ graylog_api_url }}/api/system/inputstates"
+        url_username: "{{ graylog_root_username }}"
+        url_password: "{{ graylog_root_password | string }}"
+        force_basic_auth: true
+        headers:
+          Accept: application/json
+        return_content: true
+        timeout: 10
+      register: graylog_inputs_states
+      until: >-
+        graylog_inputs_applied.values() | reject('in', graylog_inputs_current | dict2items
+          | selectattr('value', 'eq', 'RUNNING') | map(attribute='key') | list) | list | length == 0
+        or graylog_inputs_current.values() | select('eq', 'FAILED') | list | length > 0
+      retries: 24
+      delay: 5
+      failed_when: false
+      changed_when: false
+      no_log: true
+      when: graylog_inputs_applied | length > 0
+
+    - name: Fail when an input of the role is not RUNNING
+      ansible.builtin.fail:
+        msg: >-
+          The inputs {{ graylog_inputs_down | join(', ') }} of graylog_inputs are
+          not RUNNING in Graylog in {{ graylog_dir }}. An input that cannot open
+          its port is FAILED (another input on the same port and transport, one
+          made in the web interface among them); see the input's messages in the
+          web interface (System, Inputs) and docker compose logs graylog.
+      vars:
+        graylog_inputs_down: >-
+          {%- set down = [] -%}
+          {%- for name, id in graylog_inputs_applied | dictsort if graylog_inputs_current[id] | default('') != 'RUNNING' -%}
+          {%-   set _ = down.append(name ~ ' (' ~ graylog_inputs_current[id] | default('not started') ~ ')') -%}
+          {%- endfor -%}
+          {{ down }}
+      when: graylog_inputs_down | length > 0

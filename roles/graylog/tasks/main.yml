@@ -384,23 +384,11 @@
 
 # What is installed and what to do (graylog_state); refuses, before any
 # change, a data directory that is not mounted, an installation without its
-# data or its versions file, an install that did not complete and another
-# graylog_password_secret.
+# data or its versions file, the versions of a failed update (every version
+# after a failed rollback), an install or an update that did not complete, a
+# downgrade and another graylog_password_secret.
 - name: Read the installation
   ansible.builtin.include_tasks: state.yml
-
-# Until the update with its backup and rollback comes with the next task of
-# the plan, another version is refused.
-- name: Refuse another version
-  ansible.builtin.fail:
-    msg: >-
-      Graylog {{ graylog_installed_version }} with MongoDB
-      {{ graylog_installed_mongodb_version }} is installed in {{ graylog_dir }},
-      but the settings name Graylog {{ graylog_version }} with MongoDB
-      {{ graylog_mongodb_version }}; this version of the role does not update
-      yet and changes nothing. Set graylog_version and graylog_mongodb_version
-      to the installed versions.
-  when: graylog_state == 'update'
 
 # The Data Node's search engine refuses to start below the minimum. The
 # drop-in keeps a higher value the host has, and is applied only when the
@@ -430,6 +418,13 @@
 - name: Install Graylog
   ansible.builtin.include_tasks: install.yml
   when: graylog_state == 'install'
+
+# A backup first, then the new versions, checked with the inputs and the
+# retention; a failed update is rolled back to the backup, and update-failed
+# keeps the role from trying those versions again.
+- name: Update Graylog
+  ansible.builtin.include_tasks: update.yml
+  when: graylog_state == 'update'
 
 - name: Reconfigure Graylog
   ansible.builtin.include_tasks: reconfigure.yml
@@ -463,12 +458,23 @@
 
 # Reached only by a run that ended healthy (installed, reconfigured or
 # without changes): the inputs and the retention are Graylog's own settings,
-# kept through its API on every run.
+# kept through its API on every run. An update has kept them already, as part
+# of its checks.
 - name: Reconcile the inputs
   ansible.builtin.include_tasks: inputs.yml
+  when: graylog_state != 'update'
 
 - name: Set the retention
   ansible.builtin.include_tasks: retention.yml
+  when: graylog_state != 'update'
+
+# Reached only by a run that succeeded, so the marker names other versions
+# and records a rollback that worked.
+- name: Remove the marker of a failed update of other versions
+  ansible.builtin.file:
+    path: "{{ graylog_marker_file }}"
+    state: absent
+  when: graylog_marker_read.content is defined
 
 # Graylog was (re)started on the compose file and the secrets files as they
 # are and is healthy: the restart a stopped reconfigure left pending is

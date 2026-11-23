@@ -1,0 +1,272 @@
+---
+# Rolls Graylog back to the backup graylog_backup (snapshot.yml), with the
+# installed versions graylog_installed_version and
+# graylog_installed_mongodb_version from its includer: every container of
+# the project stopped; the compose file, the secrets, the versions file and
+# the state of the inputs put back from the backup; the previous MongoDB
+# started (the compose file comes first), the database dropped (collections
+# the new version added among it) and loaded from the dump with mongorestore
+# --drop; when the backup has the copy of the Data Node's data, the entries
+# of the Data Node's subdirectory moved aside to <backup>-failed/datanode
+# (<backup>-failed-<UTC time> when that exists) and the copy put in their
+# place, the subdirectory itself kept (compose never creates it); then the
+# previous Graylog started and checked as an update is (health.yml, and every
+# input the backup's state of the inputs names RUNNING), both waits bounded
+# by graylog_rollback_timeout. Without the copy the Data Node starts on the
+# data the new version left, which it may not open; the role never moves or
+# wipes that data. Never fails by itself: graylog_healthy says whether
+# Graylog is healthy again, graylog_restore_error what failed, and
+# graylog_restore_datanode whether the backup had the copy.
+
+- name: Look for the copy of the Data Node's data
+  ansible.builtin.stat:
+    path: "{{ graylog_backup }}/datanode"
+    get_checksum: false
+  register: graylog_restore_datanode_stat
+
+- name: Note whether the backup has the copy of the Data Node's data
+  ansible.builtin.set_fact:
+    graylog_restore_datanode: "{{ graylog_restore_datanode_stat.stat.isdir | default(false) }}"
+
+- name: Roll back to the backup
+  block:
+    # All of it: the failed versions must not write to the database or the
+    # search index while they are restored.
+    - name: Stop Graylog for the rollback
+      ansible.builtin.command:
+        argv: [docker, compose, stop]
+        chdir: "{{ graylog_dir }}"
+      changed_when: true
+
+    # Then every other container of the project that still runs (one of a
+    # service the compose file on disk does not name).
+    - name: Find the containers of Graylog that still run
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --quiet
+          - --filter
+          - label=com.docker.compose.project={{ graylog_project }}
+      register: graylog_still_running
+      changed_when: false
+
+    # One that is gone since docker ps needs no stop; any other error fails
+    # the rollback: a container may still run and write to the data.
+    - name: Stop the containers of Graylog that still run
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'stop'] + graylog_still_running.stdout_lines }}"
+      register: graylog_stopped
+      changed_when: true
+      failed_when: >-
+        graylog_stopped.rc != 0
+        and (graylog_stopped.stderr_lines | length == 0
+             or graylog_stopped.stderr_lines | reject('search', 'No such container') | list | length > 0)
+      when: graylog_still_running.stdout_lines | length > 0
+
+    # The secrets files in place, the directory itself kept (the containers
+    # bind its files): no_log, with a failure message of its own.
+    - name: Put the previous compose file, secrets, versions and state of the inputs back
+      block:
+        - name: Put the previous compose file back
+          ansible.builtin.copy:
+            src: "{{ graylog_backup }}/compose.yaml"
+            dest: "{{ graylog_compose_file }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0644"
+          no_log: true
+
+        # Without a state of the inputs in the backup there is none: each
+        # input of the role is then updated once by the next run.
+        - name: Put the previous secrets, versions and state of the inputs back
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              backup={{ graylog_backup | quote }}
+              dir={{ graylog_secrets_dir | quote }}
+              test -d "$backup/secrets"
+              mkdir -p -m 0700 "$dir"
+              find "$dir" -mindepth 1 -delete
+              cp -a "$backup/secrets/." "$dir/"
+              chmod 0700 "$dir"
+              cp -a "$backup/versions" {{ graylog_versions_file | quote }}
+              if [ -e "$backup/inputs.json" ]; then
+                cp -a "$backup/inputs.json" {{ graylog_inputs_state | quote }}
+              else
+                rm -f {{ graylog_inputs_state | quote }}
+              fi
+          changed_when: true
+          no_log: true
+      rescue:
+        - name: Fail on the previous compose file, secrets, versions or state of the inputs
+          ansible.builtin.fail:
+            msg: >-
+              Putting the compose file, the secrets, the versions file or the
+              state of the inputs of {{ graylog_backup }} back into
+              {{ graylog_dir }} failed ({{ ansible_failed_task.name }}); the
+              error is not shown, as it can quote a secret. Check the backup
+              and that {{ graylog_dir }} is writable and has space.
+
+    - name: Start the previous MongoDB
+      community.docker.docker_compose_v2:
+        project_src: "{{ graylog_dir }}"
+        services: [mongodb]
+        state: present
+        pull: missing
+
+    - name: Note when the wait for MongoDB starts
+      ansible.builtin.set_fact:
+        graylog_wait_start: "{{ now().timestamp() }}"
+
+    # Fails after graylog_rollback_timeout seconds; retries is an upper
+    # bound.
+    - name: Wait for MongoDB
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, mongodb, mongosh, --quiet, --eval, db.adminCommand("ping").ok]
+        chdir: "{{ graylog_dir }}"
+      register: graylog_mongodb_ready
+      until: >-
+        graylog_mongodb_ready.rc == 0
+        or now().timestamp() - graylog_wait_start | float >= graylog_rollback_timeout | int
+      retries: "{{ (graylog_rollback_timeout | int / 2) | round(0, 'ceil') | int + 1 }}"
+      delay: 2
+      changed_when: false
+
+    # The whole database, not mongorestore --drop alone: --drop drops only
+    # the collections in the dump, so those the new version added would stay.
+    - name: Put the database back
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          docker compose exec -T mongodb mongosh --quiet --eval \
+            'db.getSiblingDB("{{ graylog_mongodb_database }}").dropDatabase().ok' >/dev/null
+          docker compose exec -T mongodb mongorestore --quiet --archive --gzip --drop \
+            <{{ (graylog_backup ~ '/mongodb.archive') | quote }}
+        chdir: "{{ graylog_dir }}"
+      changed_when: true
+
+    # The copy first; then the entries of the subdirectory are moved, one
+    # rename each (the first that fails stops the restore, which then fails,
+    # before the copy is put in place), so the subdirectory itself never goes
+    # missing and a restore stopped anywhere in between can be run again: a
+    # leftover copy is made afresh, and every entry is in the subdirectory,
+    # in the copy or set aside.
+    - name: Put the data of the Data Node back
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          backup={{ graylog_backup | quote }}
+          root={{ graylog_data_dir | quote }}
+          aside="$backup-failed"
+          if [ -e "$aside" ]; then aside="$backup-failed-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+          # Every entry of $1 into the directory $2, one rename each; the
+          # first that fails stops the script (set -e).
+          move_entries() {
+            for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+              if [ -e "$entry" ] || [ -L "$entry" ]; then
+                mv -- "$entry" "$2/"
+              fi
+            done
+          }
+          test -d "$backup/datanode"
+          rm -rf "$root/.datanode.restore"
+          cp -a "$backup/datanode" "$root/.datanode.restore"
+          mkdir -m 0700 "$aside"
+          mkdir "$aside/datanode"
+          move_entries "$root/datanode" "$aside/datanode"
+          if [ -n "$(ls -A "$root/datanode")" ]; then
+            echo "Error: $root/datanode is not empty after it was set aside" >&2
+            exit 1
+          fi
+          move_entries "$root/.datanode.restore" "$root/datanode"
+          chown --reference="$backup/datanode" "$root/datanode"
+          chmod --reference="$backup/datanode" "$root/datanode"
+          rmdir "$root/.datanode.restore"
+      changed_when: true
+      when: graylog_restore_datanode | bool
+
+    # MongoDB first, then the Data Node, then the server (depends_on).
+    - name: Start the previous Graylog
+      community.docker.docker_compose_v2:
+        project_src: "{{ graylog_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+
+    - name: Check that the previous Graylog is healthy
+      ansible.builtin.include_tasks: health.yml
+      vars:
+        graylog_health_wait: "{{ graylog_rollback_timeout }}"
+
+    # The inputs the database is back to, by the ids of the backup's state
+    # of the inputs (no_log: its hashes cover the tokens), RUNNING within
+    # what is left of the same deadline.
+    - name: Read the state of the inputs of the backup
+      ansible.builtin.slurp:
+        src: "{{ graylog_backup }}/inputs.json"
+      register: graylog_restore_inputs_read
+      failed_when: false
+      no_log: true
+      when: graylog_healthy | bool
+
+    - name: Note the inputs of the backup
+      ansible.builtin.set_fact:
+        graylog_restore_inputs: >-
+          {{ (graylog_restore_inputs_json.values() | map(attribute='id') | list)
+             if graylog_restore_inputs_json is mapping else [] }}
+      vars:
+        graylog_restore_inputs_json: "{{ (graylog_restore_inputs_read.content | default('') | b64decode or '{}') | from_json }}"
+      no_log: true
+      when: graylog_healthy | bool
+
+    - name: Wait until the inputs of the backup are RUNNING
+      ansible.builtin.uri:
+        url: "{{ graylog_api_url }}/api/system/inputstates"
+        url_username: "{{ graylog_root_username }}"
+        url_password: "{{ graylog_root_password | string }}"
+        force_basic_auth: true
+        headers:
+          Accept: application/json
+        return_content: true
+        timeout: 10
+      register: graylog_restore_states
+      until: >-
+        graylog_restore_inputs | difference(graylog_restore_states.json.states | default([])
+          | selectattr('state', 'eq', 'RUNNING') | map(attribute='id') | list) | length == 0
+        or now().timestamp() - graylog_health_start | float >= graylog_health_deadline | int
+      retries: "{{ (graylog_rollback_timeout | int / 5) | round(0, 'ceil') | int + 1 }}"
+      delay: 5
+      failed_when: false
+      changed_when: false
+      no_log: true
+      when:
+        - graylog_healthy | bool
+        - graylog_restore_inputs | length > 0
+
+    - name: Note the rollback
+      ansible.builtin.set_fact:
+        graylog_restore_inputs_down: "{{ graylog_restore_down }}"
+        graylog_healthy: "{{ graylog_healthy | bool and graylog_restore_down | length == 0 }}"
+        graylog_restore_error: >-
+          {{ '' if graylog_healthy | bool and graylog_restore_down | length == 0
+             else 'Graylog ' ~ graylog_installed_version ~ ' with MongoDB ' ~ graylog_installed_mongodb_version
+                  ~ ' is not healthy within ' ~ graylog_rollback_timeout ~ ' seconds ('
+                  ~ (graylog_health_lines + graylog_restore_down) | join('; ') ~ ')'
+                  ~ ('' if graylog_restore_datanode | bool
+                     else ". The backup has no copy of the Data Node's data (graylog_update_backup_logs was"
+                          ~ ' false), so the Data Node runs on the data the new version left, which it may not'
+                          ~ ' open; the role does not move or wipe that data') }}
+      vars:
+        graylog_restore_down: >-
+          {%- set running = graylog_restore_states.json.states | default([]) | selectattr('state', 'eq', 'RUNNING')
+                            | map(attribute='id') | list -%}
+          {%- set down = graylog_restore_inputs | default([]) | reject('in', running) | list -%}
+          {{ ([down | length ~ ' input(s) of the backup not RUNNING'] if down | length > 0 else []) }}
+
+  rescue:
+    - name: Note the failed rollback
+      ansible.builtin.set_fact:
+        graylog_healthy: false
+        graylog_restore_error: "{{ graylog_failure | trim }}"

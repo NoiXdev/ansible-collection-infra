@@ -1,0 +1,111 @@
+---
+# The backup before an update, with the server and the Data Node stopped
+# (MongoDB keeps running for its dump): graylog_backup_dir/<UTC time>-<installed
+# version>-to-<new version>/ (root's, mode 0700) with
+#   compose.yaml     the compose file the installed versions ran with (0600)
+#   secrets/         a copy of graylog_secrets_dir (0700, files 0600)
+#   inputs.json      a copy of graylog_inputs_state (0600), when it exists
+#   versions         a copy of graylog_versions_file (0600)
+#   mongodb.archive  the database graylog_mongodb_database, mongodump
+#                    --archive --gzip in the mongodb container, read back with
+#                    mongorestore --dryRun
+#   datanode/        with graylog_update_backup_logs, a copy of the Data Node's
+#                    data (cp -a): the new Data Node migrates its search index
+#                    in place, which the previous one cannot open afterwards
+# Made below <name>.partial and renamed once complete; sets graylog_backup
+# last, so a failure before that has changed nothing but the partial
+# directory, which the caller removes.
+
+- name: Create the backup directory
+  ansible.builtin.file:
+    path: "{{ graylog_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Name the backup
+  ansible.builtin.set_fact:
+    graylog_backup_next: >-
+      {{ graylog_backup_dir }}/{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ graylog_installed_version }}-to-{{ graylog_version }}
+
+# The name holds the current second, so it is new.
+- name: Create the partial backup
+  ansible.builtin.file:
+    path: "{{ graylog_backup_next }}.partial"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# In the running mongodb container, which needs no login; nothing writes to
+# the database while the server and the Data Node are stopped.
+- name: Dump the database
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 077
+      dump={{ (graylog_backup_next ~ '.partial/mongodb.archive') | quote }}
+      docker compose exec -T mongodb mongodump --quiet --archive --gzip \
+        --db={{ graylog_mongodb_database | quote }} >"$dump"
+      docker compose exec -T mongodb mongorestore --quiet --archive --gzip --dryRun <"$dump"
+    chdir: "{{ graylog_dir }}"
+  changed_when: true
+
+# With the Data Node stopped, so the copy is consistent; cp -a keeps the
+# owner (the Data Node's user) and the modes.
+- name: Copy the data of the Data Node
+  ansible.builtin.command:
+    argv: [cp, -a, "{{ graylog_data_dir }}/datanode", "{{ graylog_backup_next }}.partial/datanode"]
+  changed_when: true
+  when: graylog_update_backup_logs | bool
+
+# The compose file holds no secret, but the copies of the backup are kept as
+# the secrets are: no_log, with a failure message of their own. The versions
+# file holds the SHA-256 of the password secret, inputs.json those of the
+# inputs' configurations (tokens among them).
+- name: Keep the compose file, the secrets, the versions and the state of the inputs with the backup
+  block:
+    - name: Keep the compose file with the backup
+      ansible.builtin.copy:
+        dest: "{{ graylog_backup_next }}.partial/compose.yaml"
+        content: "{{ graylog_compose_before }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Keep the secrets, the versions and the state of the inputs with the backup
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          backup={{ (graylog_backup_next ~ '.partial') | quote }}
+          cp -a {{ graylog_secrets_dir | quote }} "$backup/secrets"
+          cp -a {{ graylog_versions_file | quote }} "$backup/versions"
+          if [ -e {{ graylog_inputs_state | quote }} ]; then cp -a {{ graylog_inputs_state | quote }} "$backup/inputs.json"; fi
+      changed_when: true
+      no_log: true
+  rescue:
+    - name: Fail on the compose file, the secrets, the versions or the state of the inputs of the backup
+      ansible.builtin.fail:
+        msg: >-
+          Writing the copy of the compose file, the secrets, the versions file
+          or the state of the inputs in {{ graylog_backup_next }}.partial
+          failed ({{ ansible_failed_task.name }}); the error is not shown, as
+          it can quote a secret. Check that {{ graylog_backup_dir }} is
+          writable and has space.
+
+# Not into a backup of that name (the same second), which mv would move it
+# into.
+- name: Complete the backup
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      backup={{ graylog_backup_next | quote }}
+      if [ -e "$backup" ]; then echo "Error: $backup exists" >&2; exit 1; fi
+      mv "$backup.partial" "$backup"
+  changed_when: true
+
+- name: Note the backup
+  ansible.builtin.set_fact:
+    graylog_backup: "{{ graylog_backup_next }}"

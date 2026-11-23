@@ -11,7 +11,9 @@
 # directory root's 0700 with password_secret and root_password_sha2, each
 # 0600, the versions file; and vm.max_map_count of at least 262144, at
 # runtime and in the role's drop-in.
-# Extra variables: verify_server_heap (default the one of vars.yml) and
+# Extra variables: verify_server_heap (default the one of vars.yml),
+# verify_version and verify_mongodb_version (default the role's defaults: the
+# Graylog and MongoDB versions the images and the versions file name) and
 # verify_published, the server's published ports as
 # <address>:<host port>:<container port>/<protocol> (default none).
 - name: Verify
@@ -22,8 +24,9 @@
     verify_dir: /opt/graylog
     verify_defaults: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../roles/graylog/defaults/main.yml') | from_yaml }}"
     verify_version: "{{ verify_defaults.graylog_version }}"
+    verify_mongodb_version: "{{ verify_defaults.graylog_mongodb_version }}"
     verify_images:
-      mongodb: "{{ verify_defaults.graylog_mongodb_image }}:{{ verify_defaults.graylog_mongodb_version }}"
+      mongodb: "{{ verify_defaults.graylog_mongodb_image }}:{{ verify_mongodb_version }}"
       datanode: "{{ verify_defaults.graylog_datanode_image }}:{{ verify_version }}"
       graylog: "{{ verify_defaults.graylog_image }}:{{ verify_version }}"
     verify_server_heap: "{{ graylog_server_heap }}"
@@ -204,11 +207,11 @@
       ansible.builtin.assert:
         that:
           - verify_versions_parsed.graylog | string == verify_version | string
-          - verify_versions_parsed.mongodb | string == verify_defaults.graylog_mongodb_version | string
+          - verify_versions_parsed.mongodb | string == verify_mongodb_version | string
           - verify_versions_parsed.password_secret_sha256 | default('') is match('^[0-9a-f]{64}$')
         fail_msg: >-
           The versions file does not name Graylog {{ verify_version }}, MongoDB
-          {{ verify_defaults.graylog_mongodb_version }} and the SHA-256 of the
+          {{ verify_mongodb_version }} and the SHA-256 of the
           password secret.
       vars:
         verify_versions_parsed: "{{ verify_versions.content | b64decode | from_yaml }}"

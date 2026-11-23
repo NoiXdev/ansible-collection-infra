@@ -1,0 +1,384 @@
+---
+# The settings name other versions than the installed ones (newer: state.yml
+# refuses older ones), of Graylog, of MongoDB or of both. Before any change
+# the free space the backup needs is checked; then the new images (a failed
+# pull changes nothing), the server and the Data Node stopped (MongoDB keeps
+# running for its dump), the backup (snapshot.yml), the secrets, the compose
+# file and the versions file written with the new versions, Graylog started
+# in the order Graylog documents (MongoDB, then the Data Node, then the
+# server: the compose file's depends_on) and checked: health.yml, the inputs
+# (inputs.yml) and the retention (retention.yml), each of them a failed
+# update when it fails. Last, MongoDB's featureCompatibilityVersion raised to
+# the new version's, so that a rollback never meets data files of a newer
+# one, which the previous MongoDB could not open; then the backups pruned to
+# the newest graylog_backups_keep. A failure before the backup is complete
+# removes the partial backup, starts Graylog as it was and fails. After it,
+# restore.yml rolls back to the backup, the marker graylog_marker_file names
+# the failed versions, and the run fails.
+# From the first change on, graylog_update_marker says how far the update
+# got (step backup, then step update with the backup), with a copy of the
+# compose file and of the secrets directory it replaces; it is removed once
+# the update is healthy, or after the recovery or the rollback, so that only a
+# run that stopped leaves it (the marker before its copies: a run stopped in
+# between leaves only the marker, never a copy without it).
+
+# The database's dump is at most as large as its files; the Data Node's
+# data is copied as it is.
+- name: Measure the data of the backup
+  ansible.builtin.command:
+    argv: [du, --summarize, --block-size=1M, "{{ graylog_data_dir }}/mongodb", "{{ graylog_data_dir }}/datanode"]
+  register: graylog_backup_sizes
+  changed_when: false
+
+- name: Measure the free space for the backup
+  ansible.builtin.command:
+    argv: [df, --output=avail, --block-size=1M, "{{ graylog_backup_dir }}"]
+  register: graylog_backup_free
+  changed_when: false
+
+- name: Refuse an update without the space for its backup
+  ansible.builtin.fail:
+    msg: >-
+      The backup before the update of Graylog in {{ graylog_dir }} from
+      {{ graylog_installed_version }} to {{ graylog_version }} needs about
+      {{ graylog_backup_needed }} MiB in {{ graylog_backup_dir }} (the database
+      dump, at most {{ graylog_backup_mongodb }} MiB{{ (", and the copy of the Data Node's data, "
+      ~ graylog_backup_datanode ~ ' MiB') if graylog_update_backup_logs | bool else '' }}), but it has
+      {{ graylog_backup_available }} MiB free. The role changes nothing. Free
+      space there{{ (", or set graylog_update_backup_logs: false to update without the copy of the"
+      ~ " Data Node's data: a rollback then starts the previous Data Node on the data the new one may"
+      ~ " have migrated, and fails when it cannot open it") if graylog_update_backup_logs | bool else '' }},
+      then run the role again.
+  vars:
+    graylog_backup_mongodb: "{{ graylog_backup_sizes.stdout_lines[0].split()[0] | int }}"
+    graylog_backup_datanode: "{{ graylog_backup_sizes.stdout_lines[1].split()[0] | int }}"
+    graylog_backup_needed: >-
+      {{ graylog_backup_mongodb | int + (graylog_backup_datanode | int if graylog_update_backup_logs | bool else 0) }}
+    graylog_backup_available: "{{ graylog_backup_free.stdout_lines[-1] | trim | int }}"
+  when: graylog_backup_needed | int > graylog_backup_available | int
+
+- name: Update Graylog
+  vars:
+    graylog_new_images:
+      - "{{ graylog_image }}:{{ graylog_version }}"
+      - "{{ graylog_datanode_image }}:{{ graylog_version }}"
+      - "{{ graylog_mongodb_image }}:{{ graylog_mongodb_version }}"
+    graylog_update_marker_content: |
+      # Written by the noixdev.infra.graylog role while it updates Graylog,
+      # and removed once the update is healthy or rolled back. A run that
+      # finds it refuses until it is dealt with.
+      {{ {'from_version': graylog_installed_version, 'from_mongodb_version': graylog_installed_mongodb_version,
+          'to_version': graylog_version | string, 'to_mongodb_version': graylog_mongodb_version | string,
+          'step': graylog_update_step}
+         | combine({'backup': graylog_backup} if graylog_update_step == 'update' else {})
+         | combine({'time': graylog_update_started})
+         | to_nice_yaml(sort_keys=false) }}
+  block:
+    - name: Look for the new images
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ item }}"]
+      loop: "{{ graylog_new_images }}"
+      register: graylog_new_images_local
+      changed_when: false
+      failed_when: false
+
+    - name: Pull the new images
+      ansible.builtin.command:
+        argv: [docker, pull, --quiet, "{{ item.item }}"]
+      loop: "{{ graylog_new_images_local.results | rejectattr('rc', 'eq', 0) | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+      changed_when: true
+
+    - name: Note when the update starts
+      ansible.builtin.set_fact:
+        graylog_update_started: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    # Right before the first change. The marker first: a run stopped before
+    # the copies are written leaves the marker, but never a copy without a
+    # marker.
+    - name: Write the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ graylog_update_marker }}"
+        content: "{{ graylog_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        graylog_update_step: backup
+
+    # The secrets as they are, and the compose file (which holds none, but is
+    # kept as they are): no_log, with a failure message of their own.
+    - name: Keep the compose file and the secrets from before the update
+      block:
+        - name: Keep the compose file from before the update
+          ansible.builtin.copy:
+            dest: "{{ graylog_update_marker_compose }}"
+            content: "{{ graylog_compose_before }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+
+        - name: Keep the secrets from before the update
+          ansible.builtin.shell:
+            cmd: |
+              set -eu
+              copy={{ graylog_update_marker_secrets | quote }}
+              rm -rf "$copy"
+              cp -a {{ graylog_secrets_dir | quote }} "$copy"
+          changed_when: true
+          no_log: true
+      rescue:
+        - name: Fail on the copies from before the update
+          ansible.builtin.fail:
+            msg: >-
+              Writing {{ graylog_update_marker_compose }} or
+              {{ graylog_update_marker_secrets }}, the copies of the compose
+              file and the secrets from before the update, failed
+              ({{ ansible_failed_task.name }}); the error is not shown, as it
+              can quote a secret. Check that {{ graylog_dir }} is writable and
+              has space, then run the role again.
+
+    # Nothing writes to the database or to the search index during the
+    # backup.
+    - name: Stop the server and the Data Node for the update
+      ansible.builtin.command:
+        argv: [docker, compose, stop, graylog, datanode]
+        chdir: "{{ graylog_dir }}"
+      changed_when: true
+
+    - name: Back up the database and the data
+      ansible.builtin.include_tasks: snapshot.yml
+
+    # From here on the secrets, the compose file, the database and the
+    # search index change; the backup holds them as they were.
+    - name: Note the backup in the marker of the update in progress
+      ansible.builtin.copy:
+        dest: "{{ graylog_update_marker }}"
+        content: "{{ graylog_update_marker_content }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        graylog_update_step: update
+
+    - name: Write the secrets
+      ansible.builtin.include_tasks: secrets.yml
+
+    - name: Write the compose file with the new versions
+      ansible.builtin.copy:
+        dest: "{{ graylog_compose_file }}"
+        content: "{{ graylog_compose }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Write the versions file with the new versions
+      ansible.builtin.copy:
+        dest: "{{ graylog_versions_file }}"
+        content: |
+          # Written by the noixdev.infra.graylog role: the installed versions,
+          # and the SHA-256 of the password secret (not the secret).
+          graylog: {{ graylog_version }}
+          mongodb: {{ graylog_mongodb_version }}
+          password_secret_sha256: {{ graylog_password_secret | string | hash('sha256') }}
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    # MongoDB first, then the Data Node, then the server (depends_on); each
+    # migrates its data on start.
+    - name: Start the new versions
+      community.docker.docker_compose_v2:
+        project_src: "{{ graylog_dir }}"
+        state: present
+        pull: missing
+        remove_orphans: true
+        recreate: "{{ 'always' if graylog_secrets_changed | length > 0 or graylog_restart_pending | bool else 'auto' }}"
+
+    - name: Check the health of Graylog {{ graylog_version }}
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Fail when Graylog is not healthy
+      ansible.builtin.fail:
+        msg: >-
+          Graylog {{ graylog_version }} with MongoDB {{ graylog_mongodb_version }}
+          is not healthy within {{ graylog_health_timeout }} seconds
+          ({{ graylog_health_lines | join('; ') }})
+      when: not graylog_healthy
+
+    - name: Reconcile the inputs
+      ansible.builtin.include_tasks: inputs.yml
+
+    - name: Set the retention
+      ansible.builtin.include_tasks: retention.yml
+
+    # Once raised, the previous MongoDB cannot open the data files, so only
+    # after every check passed; a failure here rolls back too.
+    - name: Read the featureCompatibilityVersion of MongoDB
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - exec
+          - -T
+          - mongodb
+          - mongosh
+          - --quiet
+          - --eval
+          - "db.adminCommand({getParameter: 1, featureCompatibilityVersion: 1}).featureCompatibilityVersion.version"
+        chdir: "{{ graylog_dir }}"
+      register: graylog_fcv
+      changed_when: false
+
+    - name: Raise the featureCompatibilityVersion of MongoDB to {{ graylog_mongodb_fcv }}
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - exec
+          - -T
+          - mongodb
+          - mongosh
+          - --quiet
+          - --eval
+          - 'db.adminCommand({setFeatureCompatibilityVersion: "{{ graylog_mongodb_fcv }}", confirm: true})'
+        chdir: "{{ graylog_dir }}"
+      changed_when: true
+      when: graylog_fcv.stdout | trim != graylog_mongodb_fcv
+
+  rescue:
+    - name: Note what failed
+      ansible.builtin.set_fact:
+        graylog_update_error: "{{ graylog_failure | trim }}"
+
+    - name: Recover from a failure before the backup was complete
+      when: graylog_backup is not defined
+      block:
+        - name: Remove the partial backup
+          ansible.builtin.file:
+            path: "{{ graylog_backup_next }}.partial"
+            state: absent
+          when: graylog_backup_next is defined
+
+        # The compose file and the secrets are still the ones the run started
+        # with.
+        - name: Start Graylog again
+          block:
+            - name: Start the installed Graylog again
+              community.docker.docker_compose_v2:
+                project_src: "{{ graylog_dir }}"
+                state: present
+          rescue:
+            - name: Note the failed start
+              ansible.builtin.set_fact:
+                graylog_restart_error: "{{ graylog_failure | trim }}"
+
+        # Nothing but the partial backup had changed.
+        - name: Remove the marker of the update that failed before the backup
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ graylog_update_marker_files }}"
+
+        - name: Fail when the update failed before the backup
+          ansible.builtin.fail:
+            msg: >-
+              The Graylog update from {{ graylog_installed_version }} to
+              {{ graylog_version }} in {{ graylog_dir }} failed before
+              anything changed ({{ graylog_update_error }}).
+              {{ ('Graylog ' ~ graylog_installed_version ~ ' was started again; run the role again once the'
+                  ~ ' cause is fixed.')
+                 if graylog_restart_error is not defined
+                 else ('Starting Graylog ' ~ graylog_installed_version ~ ' again failed too ('
+                       ~ graylog_restart_error ~ '); start it with docker compose up -d in '
+                       ~ graylog_dir ~ '.') }}
+
+    - name: Roll back to the backup
+      ansible.builtin.include_tasks: restore.yml
+
+    # Written whether or not the rollback worked: the failed versions are not
+    # tried again on the next run.
+    - name: Write the marker of the failed update
+      ansible.builtin.copy:
+        dest: "{{ graylog_marker_file }}"
+        content: |
+          # Written by the noixdev.infra.graylog role: the update to Graylog
+          # failed_version with MongoDB failed_mongodb_version failed. The
+          # role does not try those versions again while this file exists (no
+          # version at all when rolled_back_to is null: the rollback failed
+          # too); remove it to retry.
+          {{ {'failed_version': graylog_version | string,
+              'failed_mongodb_version': graylog_mongodb_version | string,
+              'rolled_back_to': graylog_installed_version if graylog_healthy else none,
+              'rolled_back_to_mongodb': graylog_installed_mongodb_version if graylog_healthy else none,
+              'backup': graylog_backup,
+              'time': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')}
+             | combine({} if graylog_healthy else {'restore_error': graylog_restore_error})
+             | to_nice_yaml(sort_keys=false) }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    # After update-failed: a run stopped before leaves this marker, and the
+    # next one refuses as for an update that did not finish.
+    - name: Remove the marker of the rolled back update
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ graylog_update_marker_files }}"
+
+    - name: Fail with the rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Graylog update from {{ graylog_installed_version }} to
+          {{ graylog_version }} in {{ graylog_dir }} failed
+          ({{ graylog_update_error }}) and was rolled back: Graylog
+          {{ graylog_installed_version }} with MongoDB
+          {{ graylog_installed_mongodb_version }} runs again, healthy, with
+          the compose file, the secrets, the database{{ " and the Data Node's data" if graylog_restore_datanode else '' }}
+          of the backup {{ graylog_backup }}{{ ("; the Data Node's data of the failed attempt is in "
+          ~ graylog_backup ~ '-failed') if graylog_restore_datanode else '' }}. The role does not try
+          Graylog {{ graylog_version }} with MongoDB {{ graylog_mongodb_version }}
+          again while {{ graylog_marker_file }} exists: remove it to retry (rm
+          {{ graylog_marker_file }}), or set graylog_version or
+          graylog_mongodb_version to another version.
+      when: graylog_healthy
+
+    - name: Fail with the failed rollback
+      ansible.builtin.fail:
+        msg: >-
+          The Graylog update from {{ graylog_installed_version }} to
+          {{ graylog_version }} in {{ graylog_dir }} failed
+          ({{ graylog_update_error }}), and rolling back to
+          {{ graylog_installed_version }} with MongoDB
+          {{ graylog_installed_mongodb_version }} failed too
+          ({{ graylog_restore_error }}), so Graylog may be down.
+          {{ graylog_restore_hint }} {{ graylog_marker_file }} refuses every
+          version; remove it once Graylog runs again.
+
+# Only after a successful update (the rescue always fails), and outside the
+# block, so that nothing after the checks can roll it back.
+- name: Remove the marker of the update in progress
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ graylog_update_marker_files }}"
+
+# Only after a successful update; the names start with the time, so they
+# sort by age. <backup>-failed directories of rolled back updates stay.
+- name: Find the backups
+  ansible.builtin.find:
+    paths: "{{ graylog_backup_dir }}"
+    file_type: directory
+    patterns: ["{{ graylog_backup_pattern }}"]
+    use_regex: true
+  register: graylog_backups
+
+- name: Remove the oldest backups
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ (graylog_backups.files | map(attribute='path') | sort)[: -(graylog_backups_keep | int)] }}"

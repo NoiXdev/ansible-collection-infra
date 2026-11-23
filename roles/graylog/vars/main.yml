@@ -22,7 +22,27 @@ graylog_marker_file: "{{ graylog_dir }}/update-failed"
 graylog_install_marker: "{{ graylog_dir }}/install-incomplete"
 # Written before the first change of an update and removed once it is healthy
 # or rolled back; a run that stopped in between leaves it for the next run.
+# Beside it, copies of the compose file and the secrets it replaces.
 graylog_update_marker: "{{ graylog_dir }}/update-in-progress"
+graylog_update_marker_compose: "{{ graylog_dir }}/update-in-progress.compose.yaml"
+graylog_update_marker_secrets: "{{ graylog_dir }}/update-in-progress.secrets"
+# Removed together, the marker first: a run stopped in between leaves only a
+# copy, never a marker without its copies.
+graylog_update_marker_files:
+  - "{{ graylog_update_marker }}"
+  - "{{ graylog_update_marker_compose }}"
+  - "{{ graylog_update_marker_secrets }}"
+# The name of a complete backup below graylog_backup_dir:
+# <UTC time>-<from version>-to-<to version>, the Graylog versions (the
+# backup's versions file names MongoDB's). Pruning takes only these, not the
+# <backup>-failed directories of rolled back updates.
+graylog_backup_pattern: '^\d{8}T\d{6}Z-\d+\.\d+\.\d+-to-\d+\.\d+\.\d+$'
+# The database of Graylog and the Data Node in MongoDB (compose.yaml.j2),
+# which the backup dumps.
+graylog_mongodb_database: graylog
+# The featureCompatibilityVersion of graylog_mongodb_version (its major and
+# minor), which an update raises to once the new versions are healthy.
+graylog_mongodb_fcv: "{{ (graylog_mongodb_version | string).split('.')[:2] | join('.') }}"
 # The installed Graylog and MongoDB versions and a SHA-256 of the password
 # secret (never the secret itself), so that a changed secret is refused.
 graylog_versions_file: "{{ graylog_dir }}/versions"
@@ -151,6 +171,24 @@ graylog_install_hint: >-
   {{ graylog_versions_file }}, {{ graylog_install_marker }} and the
   subdirectories {{ graylog_data_subdirs | join(', ') }} of
   {{ graylog_data_dir }}, then run the role again.
+
+# After a failed rollback: what restore.yml does, by hand, from the backup
+# graylog_restore_from.
+graylog_restore_hint: >-
+  Roll back by hand in {{ graylog_dir }}: run docker compose stop; copy
+  {{ graylog_restore_from }}/compose.yaml to {{ graylog_compose_file }},
+  {{ graylog_restore_from }}/versions to {{ graylog_versions_file }},
+  {{ graylog_restore_from }}/inputs.json to {{ graylog_inputs_state }} and the
+  files of {{ graylog_restore_from }}/secrets into {{ graylog_secrets_dir }};
+  run docker compose up -d mongodb; drop the database (docker compose exec -T
+  mongodb mongosh --quiet --eval
+  'db.getSiblingDB("{{ graylog_mongodb_database }}").dropDatabase()') and load
+  the dump (docker compose exec -T mongodb mongorestore --archive --gzip
+  --drop < {{ graylog_restore_from }}/mongodb.archive); put the entries of
+  {{ graylog_restore_from }}/datanode, when the backup has that copy, in place
+  of those of {{ graylog_data_dir }}/datanode (cp -a; keep the directory
+  itself); then run docker compose up -d.
+graylog_restore_from: "{{ graylog_backup | default('?', true) }}"
 
 # Prints the address of the server's container on the project's network
 # (compose names it <project>-<service>-1), where the role asks the API from
