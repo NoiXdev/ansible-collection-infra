@@ -42,21 +42,38 @@
       register: waf_plugin_cache_stat
 
     # A missing or damaged archive. get_url refuses one whose checksum is not
-    # sha256 (its message names the file) and keeps nothing of it.
+    # sha256 and keeps nothing of it; its own message does not name the plugin,
+    # so the rescue says which one it was.
     - name: Download the plugin archives
-      ansible.builtin.get_url:
-        url: "{{ item.item.url }}"
-        dest: "{{ waf_plugin_cache_dir }}/{{ item.item.sha256 }}.tar.gz"
-        checksum: "sha256:{{ item.item.sha256 }}"
-        owner: root
-        group: root
-        mode: "0600"
-      loop: "{{ waf_plugin_cache_stat.results }}"
-      loop_control:
-        label: "{{ item.item.name }}"
-      when:
-        - not ansible_check_mode
-        - not (item.stat.exists and item.stat.checksum == item.item.sha256)
+      block:
+        - name: Download the missing plugin archives
+          ansible.builtin.get_url:
+            url: "{{ item.item.url }}"
+            dest: "{{ waf_plugin_cache_dir }}/{{ item.item.sha256 }}.tar.gz"
+            checksum: "sha256:{{ item.item.sha256 }}"
+            owner: root
+            group: root
+            mode: "0600"
+          loop: "{{ waf_plugin_cache_stat.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+          when:
+            - not ansible_check_mode
+            - not (item.stat.exists and item.stat.checksum == item.item.sha256)
+      rescue:
+        - name: Refuse a plugin archive that did not download
+          ansible.builtin.fail:
+            msg: >-
+              {%- set bad = ansible_failed_result.results | default([]) | selectattr('failed', 'defined')
+                            | selectattr('failed') | list -%}
+              {%- if bad | length == 0 -%}
+              waf: plugins: {{ ansible_failed_result.msg | default('the download failed') }}
+              {%- elif 'did not match' in bad[0].msg | default('') -%}
+              waf: plugin {{ bad[0].item.item.name }}: the archive at {{ bad[0].item.item.url }} does not have sha256 {{ bad[0].item.item.sha256 }}
+              {%- else -%}
+              waf: plugin {{ bad[0].item.item.name }}: {{ bad[0].msg | default('the download failed') }}
+              {{- ': ' ~ bad[0].response if bad[0].response is defined else '' }}
+              {%- endif -%}
 
     # Every archive is at hand now, except in check mode the ones that are
     # not in the cache yet.

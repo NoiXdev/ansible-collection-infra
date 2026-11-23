@@ -44,14 +44,19 @@
     mode: "0700"
 
 # A checksum of both nginx files (nginx.conf without the id itself) and the
-# plugins' files (modsecurity.conf names them), which the health check
-# server answers: after a reload the role waits until nginx serves it.
+# plugins' files, each led by its name and kind (modsecurity.conf names
+# them), which the health check server answers: after a reload the role
+# waits until nginx serves it.
 - name: Note the id of the new settings
   ansible.builtin.set_fact:
     waf_config_id: >-
+      {%- set plugin_text = [] -%}
+      {%- for file in waf_plugin_files -%}
+      {%- set _ = plugin_text.append(file.name ~ '-' ~ file.kind ~ ':\n' ~ file.content) -%}
+      {%- endfor -%}
       {{ (lookup('ansible.builtin.template', 'nginx.conf.j2', template_vars={'waf_config_id': ''})
           ~ lookup('ansible.builtin.template', 'modsecurity.conf.j2')
-          ~ waf_plugin_files | map(attribute='content') | join) | hash('sha256') }}
+          ~ plugin_text | join('\n----\n')) | hash('sha256') }}
 
 - name: Render the new settings
   ansible.builtin.template:
