@@ -234,12 +234,6 @@
     {{ waf_staged_stat.results | selectattr('stat.exists') | map(attribute='item')
        | select('in', waf_plugin_paths) | list }}
 
-- name: Remove the plugin files of no plugin
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop: "{{ waf_plugin_stale }}"
-
 - name: Put the new settings in place
   ansible.builtin.copy:
     src: "{{ waf_staged_dir }}/{{ item }}"
@@ -249,6 +243,14 @@
     group: root
     mode: "0644"
   loop: [modsecurity.conf, nginx.conf, compose.yaml]
+
+# Only once modsecurity.conf no longer includes them: a run that stops
+# before this leaves them to the next run, which still finds them stale.
+- name: Remove the plugin files of no plugin
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ waf_plugin_stale }}"
 
 # Recreates the container on a new image or compose setting, and starts a
 # stopped one; either reads the files in place.
