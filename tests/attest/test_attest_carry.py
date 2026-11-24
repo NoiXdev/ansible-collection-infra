@@ -472,6 +472,22 @@ class VersionOnly(unittest.TestCase):
     def test_removed(self):
         self.check(self.GALAXY.encode(), None, False)
 
+    def test_more_than_a_version_on_the_line(self):
+        # YAML also breaks lines at NEL, U+2028 and U+2029, and a flow mapping
+        # or a comment could hide more: the version line holds a version only.
+        for line in ("version: 0.7.0\u2028description: e", "version: 0.7.0\x85build_ignore: []",
+                     "version: {a: 1}", "version: 0.7.0 # x", "version: 0.7.0, x"):
+            with self.subTest(line=line):
+                after = self.GALAXY.replace("version: 0.6.0", line)
+                self.check(self.GALAXY.encode(), after.encode(), False)
+
+    def test_version_spellings(self):
+        for line in ("version: 0.7.0-rc.1", "version: 1.0.0+build.5", 'version: "0.7.0"', "version: '0.7.0'",
+                     "version:  0.7.0 "):
+            with self.subTest(line=line):
+                after = self.GALAXY.replace("version: 0.6.0", line)
+                self.check(self.GALAXY.encode(), after.encode(), True)
+
     def test_crlf_on_both_sides(self):
         crlf = self.GALAXY.replace("\n", "\r\n")
         self.check(crlf.encode(), crlf.replace("0.6.0", "0.7.0").encode(), True)

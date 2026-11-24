@@ -328,10 +328,17 @@ def _blob(repo: str, commit: str, path: str) -> Optional[bytes]:
     return r.stdout if r.returncode == 0 else None
 
 
+# The version: line of galaxy.yml: a version, plain or quoted, and nothing
+# else. No comment, flow value or other YAML line break (NEL, U+2028, U+2029)
+# can hide another key on it.
+VERSION_LINE_RE = re.compile(rb"""version: *(?:[0-9A-Za-z.+-]+|"[0-9A-Za-z.+-]+"|'[0-9A-Za-z.+-]+') *(?:\r\n|\n|\r)?""")
+
+
 def version_only(repo: str, a: str, b: str, path: str = VERSIONED_PATH) -> bool:
     """Whether path differs between a and b in its version: line only: it is
     a file at both, each side has exactly one line starting with "version:",
-    and every other line is the same, in the same order, byte for byte (line
+    that line holds a plain version and nothing else (VERSION_LINE_RE), and
+    every other line is the same, in the same order, byte for byte (line
     endings included). An unchanged file is version-only too."""
     sides = []
     for commit in (a, b):
@@ -340,7 +347,7 @@ def version_only(repo: str, a: str, b: str, path: str = VERSIONED_PATH) -> bool:
             return False
         lines = data.splitlines(keepends=True)
         hits = [i for i, line in enumerate(lines) if line.startswith(b"version:")]
-        if len(hits) != 1:
+        if len(hits) != 1 or not VERSION_LINE_RE.fullmatch(lines[hits[0]]):
             return False
         sides.append((hits[0], lines[:hits[0]] + lines[hits[0] + 1:]))
     return sides[0] == sides[1]
