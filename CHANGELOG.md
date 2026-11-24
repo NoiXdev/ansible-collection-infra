@@ -303,7 +303,7 @@
   against the SHA-256 before use, so a run with the same checksum downloads nothing; an archive
   is a gzip-compressed tar (`.tar.gz` or `.tgz`), not a `.zip`. A plugin file may hold `SecRule`,
   `SecAction` and `SecMarker` only, one directive per line (no `Sec…` or `Include` word after the
-  first word, also not after a `\` continuation, and no comment inside a continued directive),
+  first word outside double quotes, also not after a `\` continuation, and no comment inside a continued directive),
   `SecMarker` with one name, every rule with exactly one `id` in 9500000-9999999 (the CRS plugin
   registry range), no `ctl:auditEngine` or `ctl:auditLogParts`, no `%{REQUEST_HEADERS…}` or
   `%{REQUEST_COOKIES…}` macro and no `FULL_REQUEST` target, no chain left open and no comment
