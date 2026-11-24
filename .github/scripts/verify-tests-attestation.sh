@@ -9,7 +9,7 @@
 # Which commit must be attested:
 #   - the release commit itself, when it has a note;
 #   - otherwise its first parent, but only when between the two nothing but
-#     CHANGELOG.md and the `version:` line of galaxy.yml changed (the version
+#     CHANGELOG.md and the single `version:` line of galaxy.yml changed (the version
 #     bump of CONTRIBUTING.md's "Releasing"), so the tested code is exactly
 #     the released code.
 #
@@ -26,7 +26,9 @@
 # note passes the same note checks, the entry ran and passed there at most 30
 # days ago, no valid note between C and the tested commit ran it again, and no
 # file changed since C is shared, unmatched or of the entry's suite in
-# tests/suites.conf at the tested commit. Schema 1 notes (everything ran)
+# tests/suites.conf at the tested commit; galaxy.yml changed in its single
+# version: line only is no change there, as for the version bump above
+# (attest_carry.py version_only). Schema 1 notes (everything ran)
 # still pass. Needs full history and refs/notes/tests fetched
 # (git fetch origin '+refs/notes/tests:refs/notes/tests'), git, ssh-keygen and
 # python3. Exit 0 = release allowed.
@@ -62,8 +64,8 @@ elif parent="$(git rev-parse --verify --quiet "$release^1")"; then
     [ "$more" -le 0 ] || files="$files(and $more more) "
     error "${release:0:7} has no tests attestation, and its parent ${tested:0:7} differs from it beyond CHANGELOG.md and the version: line of galaxy.yml: $files- attest ${release:0:7} itself."
   fi
-  without_version() { git show "$1:galaxy.yml" 2>/dev/null | grep -v '^version:' || true; }
-  if [ "$(without_version "$tested")" != "$(without_version "$release")" ]; then
+  # The rule the plan and the carry checks use too (attest_carry.py version_only).
+  if ! python3 -I "$here/attest_carry.py" version-only --repo . --from "$tested" --to "$release" >/dev/null; then
     error "${release:0:7} has no tests attestation, and galaxy.yml changed beyond its version: line since its parent ${tested:0:7} - attest ${release:0:7} itself."
   fi
 else

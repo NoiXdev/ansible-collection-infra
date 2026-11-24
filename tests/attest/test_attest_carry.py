@@ -415,6 +415,117 @@ class BuildPayload(unittest.TestCase):
                 self.build(summary)
 
 
+class VersionOnly(unittest.TestCase):
+    """A change of galaxy.yml in its version: line only touches no suite."""
+
+    GALAXY = "namespace: noixdev\nname: infra\nversion: 0.6.0\ndescription: d\n"
+
+    git = Rename.git
+
+    def commits(self, before: bytes, after):
+        """Two commits with galaxy.yml as before and after (None: removed)."""
+        path = os.path.join(self.repo, "galaxy.yml")
+        self.git("init", "-q")
+        with open(path, "wb") as f:
+            f.write(before)
+        with open(os.path.join(self.repo, "other"), "w") as f:
+            f.write("x\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "one")
+        a = self.git("rev-parse", "HEAD")
+        if after is None:
+            os.remove(path)
+        else:
+            with open(path, "wb") as f:
+                f.write(after)
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", "two")
+        return a, self.git("rev-parse", "HEAD")
+
+    def check(self, before, after, expected):
+        with tempfile.TemporaryDirectory() as self.repo:
+            a, b = self.commits(before, after)
+            self.assertIs(ac.version_only(self.repo, a, b), expected)
+            changed, dropped = ac.relevant_changes(self.repo, a, b)
+            self.assertIs(dropped, expected)
+            self.assertEqual("galaxy.yml" in changed, not expected)
+
+    def test_version_only(self):
+        self.check(self.GALAXY.encode(), self.GALAXY.replace("0.6.0", "0.7.0").encode(), True)
+
+    def test_another_line_too(self):
+        after = self.GALAXY.replace("0.6.0", "0.7.0").replace("description: d", "description: e")
+        self.check(self.GALAXY.encode(), after.encode(), False)
+
+    def test_whitespace_change_too(self):
+        after = self.GALAXY.replace("0.6.0", "0.7.0").replace("name: infra", "name:  infra")
+        self.check(self.GALAXY.encode(), after.encode(), False)
+
+    def test_second_version_line(self):
+        after = self.GALAXY.replace("0.6.0", "0.7.0") + "version: 0.7.0\n"
+        self.check(self.GALAXY.encode(), after.encode(), False)
+
+    def test_version_line_moved(self):
+        after = "version: 0.7.0\nnamespace: noixdev\nname: infra\ndescription: d\n"
+        self.check(self.GALAXY.encode(), after.encode(), False)
+
+    def test_removed(self):
+        self.check(self.GALAXY.encode(), None, False)
+
+    def test_crlf_on_both_sides(self):
+        crlf = self.GALAXY.replace("\n", "\r\n")
+        self.check(crlf.encode(), crlf.replace("0.6.0", "0.7.0").encode(), True)
+
+    def test_crlf_on_one_side(self):
+        after = self.GALAXY.replace("0.6.0", "0.7.0").replace("\n", "\r\n")
+        self.check(self.GALAXY.encode(), after.encode(), False)
+
+    def test_unchanged_galaxy(self):
+        with tempfile.TemporaryDirectory() as self.repo:
+            a, b = self.commits(self.GALAXY.encode(), self.GALAXY.encode())
+            self.assertEqual(ac.relevant_changes(self.repo, a, b), ([], False))
+            self.assertIs(ac.version_only(self.repo, a, b), True)
+
+    def test_cli(self):
+        with tempfile.TemporaryDirectory() as self.repo:
+            a, b = self.commits(self.GALAXY.encode(), self.GALAXY.replace("0.6.0", "0.7.0").encode())
+            cli = [sys.executable, "-I", ac.__file__, "version-only", "--repo", self.repo]
+            self.assertEqual(subprocess.run(cli + ["--from", a, "--to", b]).returncode, 0)
+            self.assertEqual(subprocess.run(cli + ["--from", a, "--to", a]).returncode, 0)
+        with tempfile.TemporaryDirectory() as self.repo:
+            a, b = self.commits(self.GALAXY.encode(), b"version: 0.7.0\n")
+            cli[-1] = self.repo
+            r = subprocess.run(cli + ["--from", a, "--to", b], stdout=subprocess.PIPE)
+            self.assertEqual(r.returncode, 1)
+
+
+class ReleaseSuites(unittest.TestCase):
+    """A suite with a <suite>_releases=(...) line has one entry per release."""
+
+    def test_split_suite(self):
+        allsh = ALLSH.replace("tandoor)", "tandoor postal)") + "postal_releases=(24.04 26.04)\n"
+        self.assertEqual(ac.expected_entries(allsh)[-3:], [
+            ("tandoor", "tandoor"), ("postal-24.04", "postal"), ("postal-26.04", "postal")])
+
+    def test_old_all_sh(self):
+        # The array lines of tests/all.sh at 538f4c8 (the v0.7.0 candidate).
+        old = ("all_suites=(e2e host services harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel "
+               "pulsix_agent backrest vaultwarden postal waf varnish graylog)\n"
+               "host_releases=(24.04 26.04)\nservices_releases=(24.04 26.04)\n")
+        labels = [label for label, _ in ac.expected_entries(old)]
+        self.assertEqual(len(labels), 20)
+        self.assertIn("postal", labels)
+        self.assertIn("services-26.04", labels)
+
+    def test_two_release_lines(self):
+        with self.assertRaises(ValueError):
+            ac.expected_entries(ALLSH + "host_releases=(24.04)\n")
+
+    def test_empty_release_line(self):
+        with self.assertRaises(ValueError):
+            ac.expected_entries(ALLSH.replace("tandoor)", "tandoor postal)") + "postal_releases=()\n")
+
+
 class ReleaseCheck(unittest.TestCase):
     """verify_release itself runs in tests/attest/selftest.sh (section 15)."""
 

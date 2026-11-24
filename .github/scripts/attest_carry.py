@@ -11,6 +11,12 @@ library only, Python 3.9 or later, run as `python3 -I`.
                        --signer S --arch A --os O --docker D --started TIME --finished TIME
                        [--dry-run]
   attest_carry.py verify --repo DIR --tested C --release R --notes-ref REF --now EPOCH
+  attest_carry.py version-only --repo DIR --from A --to B
+
+version-only exits 0 when galaxy.yml differs between A and B in its single
+version: line only (or not at all), else 1; plan and verify drop such a
+galaxy.yml from the files changed since a carry source, so a release's
+version bump makes no entry run again.
 
 Errors print "::error::<message>" on stdout and exit 1; verify prints one
 such line per problem (every carried entry that cannot be proven), or its
@@ -23,7 +29,11 @@ fnmatch pattern ("*" also matches "/", except in [ignore], where each "/"-
 separated segment is matched on its own). Per changed file: [ignore] touches
 no suite, [shared] every suite, a suite pattern that suite (a file may touch
 several), and a file no pattern matches every suite. The attestation's own
-files (ALWAYS_ALL) touch every suite whatever the map says.
+files (ALWAYS_ALL) touch every suite whatever the map says. galaxy.yml changed
+in its version: line only is no change (version_only).
+
+The entries are those of tests/all.sh: each suite of all_suites, and a suite
+with a <suite>_releases=(...) line once per release as <suite>-<release>.
 
 check-map also checks that each suite lists, as roles/<r>/, every role that
 its listed roles (their tasks/, handlers/ and meta/ files) and its own test
@@ -59,7 +69,8 @@ IGNORABLE_TOP_LEVEL = ("LICENSE", ".ansible-lint", ".yamllint", ".gitignore")
 # the map says, so a map cannot unmap itself or the code that reads it.
 ALWAYS_ALL = ("tests/suites.conf", "tests/all.sh", "tests/attest.sh", "tests/attest/", "tests/lib/",
               ".github/scripts/")
-RELEASE_SUITES = ("host", "services")  # one entry per release: <suite>-<release>
+RELEASE_SUITES = ("host", "services")  # always one entry per release; others when all.sh says so
+VERSIONED_PATH = "galaxy.yml"  # a change of its version: line alone touches no suite
 ROLE_REF_RE = re.compile(r"noixdev\.infra\.([a-z0-9_]+)")
 ROLE_REF_DIRS = ("tasks", "handlers", "meta")  # where a role references other roles
 
@@ -162,10 +173,12 @@ def _array(allsh: str, name: str) -> list:
 
 
 def expected_entries(allsh: str) -> list:
+    """(label, suite) per entry: a suite with a <suite>_releases=(...) line in
+    all.sh has one entry <suite>-<release> per release, any other one entry."""
     entries = []
     for suite in _array(allsh, "all_suites"):
-        if suite in RELEASE_SUITES:
-            entries += [(f"{suite}-{r}", suite) for r in _array(allsh, suite + "_releases")]
+        if suite in RELEASE_SUITES or re.search(r"^" + re.escape(suite) + r"_releases=\(", allsh, re.M):
+            entries += [(f"{suite}-{r}", suite) for r in _array(allsh, re.escape(suite) + "_releases")]
         else:
             entries.append((suite, suite))
     labels = [label for label, _ in entries]
@@ -303,6 +316,43 @@ def changed_files(repo: str, a: str, b: str) -> list:
     """Paths that differ between the trees of a and b; a rename counts as both paths."""
     out = _git(repo, "diff", "--name-only", "--no-renames", "-z", a, b).stdout
     return [p for p in out.split("\0") if p]
+
+
+def _blob(repo: str, commit: str, path: str) -> Optional[bytes]:
+    """The bytes of path at commit, or None when it is not a file there."""
+    try:
+        r = subprocess.run(["git", "-C", repo, "cat-file", "blob", f"{commit}:{path}"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        raise GitError(f"cannot run git: {e}")
+    return r.stdout if r.returncode == 0 else None
+
+
+def version_only(repo: str, a: str, b: str, path: str = VERSIONED_PATH) -> bool:
+    """Whether path differs between a and b in its version: line only: it is
+    a file at both, each side has exactly one line starting with "version:",
+    and every other line is the same, in the same order, byte for byte (line
+    endings included). An unchanged file is version-only too."""
+    sides = []
+    for commit in (a, b):
+        data = _blob(repo, commit, path)
+        if data is None:
+            return False
+        lines = data.splitlines(keepends=True)
+        hits = [i for i, line in enumerate(lines) if line.startswith(b"version:")]
+        if len(hits) != 1:
+            return False
+        sides.append((hits[0], lines[:hits[0]] + lines[hits[0] + 1:]))
+    return sides[0] == sides[1]
+
+
+def relevant_changes(repo: str, a: str, b: str) -> tuple:
+    """(changed files, dropped): changed_files without galaxy.yml when it
+    changed in its version: line only (dropped is then True)."""
+    changed = changed_files(repo, a, b)
+    if VERSIONED_PATH in changed and version_only(repo, a, b):
+        return [p for p in changed if p != VERSIONED_PATH], True
+    return changed, False
 
 
 # --- notes ------------------------------------------------------------------
@@ -476,8 +526,9 @@ def _decide(repo, m, head, label, suite, candidates, at_head, now, cache) -> dic
         days = -(-age // 86400)  # rounded up, so always more than the limit
         return dict(run, reason=f"the run at {c[:7]} is {days} days old (a run is carried for up to {limit} days)")
     if ("changed", c) not in cache:
-        cache[("changed", c)] = changed_files(repo, c, head)
-    kinds = [(path,) + classify(m, path) for path in cache[("changed", c)]]
+        cache[("changed", c)] = relevant_changes(repo, c, head)
+    changed, bumped = cache[("changed", c)]
+    kinds = [(path,) + classify(m, path) for path in changed]
     for path, kind, _ in kinds:
         if kind == "shared":
             return dict(run, reason=f"{path} changed since {c[:7]} (a shared path)")
@@ -490,7 +541,8 @@ def _decide(repo, m, head, label, suite, candidates, at_head, now, cache) -> dic
              "finishedAt": p["finishedAt"]}
     if entry.get("notes"):
         carry["notes"] = entry["notes"]
-    carry["reason"] = f"no file of {suite} changed since {c[:7]}"
+    carry["reason"] = f"no file of {suite} changed since {c[:7]}" + (
+        f"; {VERSIONED_PATH} changed in its version: line only" if bumped else "")
     return carry
 
 
@@ -629,8 +681,8 @@ def _carry_error(repo, notes_ref, m, tested, label, suite, c, signers_path, tmp,
         x, e = newer[0]
         return f"{label} is carried from {c7}, but {label} ran again at {x[:7]} ({e['result']}), after {c7}"
     if ("changed", c) not in cache:
-        cache[("changed", c)] = changed_files(repo, c, tested)
-    changed = cache[("changed", c)]
+        cache[("changed", c)] = relevant_changes(repo, c, tested)
+    changed, _ = cache[("changed", c)]
     hit = affected_suites(m, changed)
     if hit == "ALL":
         for path in changed:
@@ -761,6 +813,10 @@ def _cmd_build_payload(a) -> int:
     return 0
 
 
+def _cmd_version_only(a) -> int:
+    return 0 if version_only(a.repo, _commit(a.repo, a.from_), _commit(a.repo, a.to)) else 1
+
+
 def _cmd_verify(a) -> int:
     try:
         print(verify_release(a.repo, a.tested, a.release, a.notes_ref, a.now))
@@ -792,6 +848,11 @@ def main(argv=None) -> int:
         c.add_argument(name, required=True)
     c.add_argument("--dry-run", action="store_true")
     c.set_defaults(func=_cmd_build_payload)
+    c = sub.add_parser("version-only")
+    c.add_argument("--repo", required=True)
+    c.add_argument("--from", required=True, dest="from_")
+    c.add_argument("--to", required=True)
+    c.set_defaults(func=_cmd_version_only)
     c = sub.add_parser("verify")
     for name in ("--repo", "--tested", "--release", "--notes-ref"):
         c.add_argument(name, required=True)

@@ -1019,8 +1019,45 @@ expect "15. gate: a version bump on top of a carrying note passes with the paren
   "Tests attestation OK for ${t1:0:7}" -- "$VS" HEAD
 check "15. gate: the bump is checked through its parent" grep -qF "version bump only" "$tmp/out"
 check "15. gate: the bump's parent carries entries" grep -qF "$((entry_count - 1)) carried" "$tmp/out"
+
+# A later attestation carries across a release's version bump (galaxy.yml
+# shared, its version: line alone changed), and only across that.
+g checkout -q -b g-version "$g1"
+map_edit 'l.insert(l.index("[shared]") + 1, "galaxy.yml")'
+v0="$(head_sha)"
+gate_full "$v0" 1
+sed -i.bak 's/^version: .*/version: 0.2.0/' "$repo/galaxy.yml" && rm "$repo/galaxy.yml.bak"
+g add -A && g commit -q -m "chore: bump the collection to 0.2.0"
+change roles/harbor/main.yml
+t="$(head_sha)"
+gate_plan
+check "15. gate: across a version-only bump the plan runs only the changed suite" plan_count run 1
+check "15. gate: across a version-only bump the plan runs harbor" plan_is harbor run "roles/harbor/main.yml changed since ${v0:0:7}"
+check "15. gate: the carry across the bump says so" plan_is e2e carry "galaxy.yml changed in its version: line only" "$v0"
+gate_note "$t" 0.1 "$tmp/plan.json" "$tmp/gate-harbor"
+expect "15. gate: the release check accepts a carry across a version-only bump" 0 \
+  "Tests attestation OK for ${t:0:7}" -- "$VS" "$t"
+check "15. gate: the accepted carries come from before the bump" grep -qF "e2e from ${v0:0:7}" "$tmp/out"
+g checkout -q -b g-galaxy "$v0"
+sed -i.bak 's/^version: .*/version: 0.2.0/' "$repo/galaxy.yml" && rm "$repo/galaxy.yml.bak"
+echo "description: changed" >>"$repo/galaxy.yml"
+g add -A && g commit -q -m "chore: bump the collection and describe it"
+t="$(head_sha)"
+gate_plan
+check "15. gate: galaxy.yml changed beyond its version: line runs every entry" \
+  plan_is "*" run "galaxy.yml changed since ${v0:0:7} (a shared path)"
+gate_carry "$t" "$v0"
+expect "15. gate: the release check refuses a carry across galaxy.yml changed beyond version:" 1 \
+  "e2e is carried from ${v0:0:7}, but galaxy.yml changed since then (a shared path)" -- "$VS" "$t"
+g checkout -q -b g-galaxy2 "$v0"
+printf 'namespace: noixdev\nname: infra\nversion: 0.2.0\nversion: 0.2.0\n' >"$repo/galaxy.yml"
+g add -A && g commit -q -m "chore: a second version line"
+t="$(head_sha)"
+gate_carry "$t" "$v0"
+expect "15. gate: a second version: line is no version-only change" 1 \
+  "but galaxy.yml changed since then (a shared path)" -- "$VS" "$t"
 repo="$selftest_repo"
-unset selftest_repo gb0 g1 t1 t s1 o x k r d f m1 tagobj entry_count
+unset selftest_repo gb0 g1 t1 t s1 o x k r d f m1 tagobj entry_count v0
 
 # --- 16. tests/attest.sh: run or carry ---------------------------------------------------------
 # Dry runs in the selftest repository; a recording runner keeps the argv of
