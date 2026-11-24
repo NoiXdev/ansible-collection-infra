@@ -40,8 +40,10 @@
 # listed) and that of the running entries fit in ram_budget (alone, when it
 # needs more). Each entry's output goes to tests/output/all/<label>.log, with
 # -j 1 also to the terminal; with more, the terminal gets a line when an
-# entry starts and when it ends. INT or TERM stop the running entries (TERM,
-# so their cleanup runs) and exit 130 or 143 without a summary.
+# entry starts and when it ends. Each entry runs in a process group of its
+# own: INT or TERM send TERM to the groups of the running entries (the suites'
+# cleanup runs), wait for them and exit 130 or 143 without a summary; a second
+# INT or TERM while they clean up kills them.
 #
 # An entry that fails and whose log names a network error upstream (a
 # mirror's or registry's 5xx, a DNS failure, a timeout on the way to a host on
@@ -159,7 +161,7 @@ while [ "$#" -gt 0 ]; do
     --keep-going) keep_going=1 ;;
     -j)
       case "${1:-}" in
-        "" | *[!0-9]* | 0*) usage ;;
+        "" | *[!0-9]* | 0* | ????*) usage ;; # 1 to 999
       esac
       jobs="$1"
       shift
@@ -269,12 +271,17 @@ ram_used=0
 failed=0
 stopped=0
 
-# start_entry I: starts entry I in the background; its output goes to its log
-# (with -j 1 also to the terminal). With -j above 1 the pid is the suite's
-# own process (exec), with -j 1 the one of the subshell that tees.
+# start_entry I: starts entry I in the background, in a process group of its
+# own (set -m) whose id is its pid, with stdin from /dev/null; its output goes
+# to its log (with -j 1 also to the terminal). With -j above 1 the pid is the
+# suite's own process (exec), with -j 1 the one of a subshell that waits for
+# the suite and tee: the subshell only notes a TERM (so it still returns the
+# suite's exit code), tee ignores it (so it keeps the suite's last lines).
 start_entry() {
   local i="$1" log="$out/${e_label[$1]}.log" vars
   read -r -a vars <<<"${e_vars[i]}"
+  # The first log of an earlier run's retry is not this run's.
+  [ "${e_tries[i]}" != 0 ] || rm -f "$out/${e_label[i]}.try1.log"
   e_tries[i]=$((e_tries[i] + 1))
   e_state[i]=running
   e_start[i]="$(date +%s)"
@@ -282,15 +289,22 @@ start_entry() {
   ram_used=$((ram_used + $(ram_of "${e_suite[i]}")))
   if [ "$jobs" = 1 ]; then
     echo "==== ${e_label[i]}: ${vars[*]+${vars[*]} }${e_script[i]}"
+    set -m
     (
-      env ${vars[@]+"${vars[@]}"} "${e_script[i]}" 2>&1 | tee "$log"
+      trap : INT TERM
+      env ${vars[@]+"${vars[@]}"} "${e_script[i]}" 2>&1 | (
+        trap '' INT TERM
+        exec tee "$log"
+      )
       exit "${PIPESTATUS[0]}"
-    ) &
+    ) </dev/null &
   else
     echo "==== ${e_label[i]} started: ${vars[*]+${vars[*]} }${e_script[i]}"
-    (exec env ${vars[@]+"${vars[@]}"} "${e_script[i]}" >"$log" 2>&1) &
+    set -m
+    (exec env ${vars[@]+"${vars[@]}"} "${e_script[i]}" </dev/null >"$log" 2>&1) &
   fi
   e_pid[i]=$!
+  set +m
 }
 
 # finish_entry I RC [FINAL]: entry I ended with RC. A failure whose log
@@ -356,25 +370,25 @@ reap() {
   done
 }
 
-# shellcheck disable=SC2317 # run by the INT and TERM traps
-# On INT or TERM: TERM to every running suite (its EXIT trap cleans up), wait
-# for them and exit without a summary, so no run claims a result it has not
-# finished.
-interrupted() {
-  local i c
-  trap '' INT TERM
-  echo "tests/all.sh: interrupted, stopping the running entries" >&2
+# shellcheck disable=SC2317 # run by interrupted and its trap
+# signal_entries SIGNAL: sends SIGNAL to the process group of every running
+# entry: the suite and whatever it runs (ansible-playbook, docker, sleep).
+signal_entries() {
+  local i
   for ((i = 0; i < n; i++)); do
-    [ "${e_state[i]}" = running ] || continue
-    if [ "$jobs" = 1 ] && command -v pgrep >/dev/null 2>&1; then
-      # The subshell runs the suite and tee; stop the suite, let tee drain.
-      for c in $(pgrep -P "${e_pid[i]}"); do
-        [ "$(basename "$(ps -o comm= -p "$c" 2>/dev/null)")" = tee ] || kill -TERM "$c" 2>/dev/null
-      done
-    else
-      kill -TERM "${e_pid[i]}" 2>/dev/null
-    fi
+    [ "${e_state[i]}" != running ] || kill -"$1" -- -"${e_pid[i]}" 2>/dev/null || true
   done
+}
+
+# shellcheck disable=SC2317 # run by the INT and TERM traps
+# On INT or TERM: TERM to the running entries (the suites' EXIT traps clean
+# up), wait for them and exit without a summary, so no run claims a result it
+# has not finished. A second INT or TERM kills them and exits at once.
+interrupted() {
+  # shellcheck disable=SC2064 # $1 is the exit code now
+  trap "signal_entries KILL; exit $1" INT TERM
+  echo "tests/all.sh: interrupted, stopping the running entries" >&2
+  signal_entries TERM
   wait
   exit "$1"
 }
@@ -403,6 +417,7 @@ done
 for ((i = 0; i < n; i++)); do
   if [ "${e_state[i]}" = pending ] && [ "${e_tries[i]}" -gt 0 ]; then
     mv -f "$out/${e_label[i]}.try1.log" "$out/${e_label[i]}.log"
+    echo "==== ${e_label[i]} not run again: the run stopped at another entry's failure"
     finish_entry "$i" "${e_rc[i]}" final
   fi
 done
@@ -431,4 +446,6 @@ if [ -n "$summary" ]; then
     exit 2
   }
 fi
+# 0 only when every entry passed, whatever path led here.
+for ((i = 0; i < n; i++)); do [ "${e_result[i]}" = passed ] || failed=1; done
 exit "$failed"

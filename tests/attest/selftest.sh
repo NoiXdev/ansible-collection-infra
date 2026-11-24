@@ -31,7 +31,7 @@ read -r -a knobs <<<"$(sed -nE 's/^coverage_knobs=\(([^)]*)\)$/\1/p' "$src/tests
   echo "selftest: no coverage_knobs=(...) line in tests/attest.sh" >&2
   exit 1
 }
-unset SSH_AUTH_SOCK TESTS_SIGNING_KEY TESTS_SIGNER ATTEST_RUNNER ATTEST_JOBS ALL_POLL STUB_FAIL STUB_FAIL_ONCE STUB_NOTE STUB_NET_LINE STUB_HOOK STUB_SLEEP STUB_STATE STUB_TRACE "${knobs[@]}"
+unset SSH_AUTH_SOCK TESTS_SIGNING_KEY TESTS_SIGNER ATTEST_RUNNER ATTEST_JOBS ALL_POLL STUB_FAIL STUB_FAIL_ONCE STUB_FG_SLEEP STUB_NOTE STUB_NET_LINE STUB_NET_ONLY STUB_HOOK STUB_SLEEP STUB_SLOW STUB_STATE STUB_TRACE "${knobs[@]}"
 
 failures=0
 count=0
@@ -167,8 +167,12 @@ release_var() {
   done
   printf '%s_UBUNTU\n' "$1" | tr '[:lower:]' '[:upper:]'
 }
-# A stub per suite. It prints the line STUB_NET_LINE and the note STUB_NOTE,
-# runs the executable STUB_HOOK first, sleeps STUB_SLEEP seconds, fails when
+# A stub per suite. It prints the line STUB_NET_LINE (only when its label is
+# in STUB_NET_ONLY, if that is set) and the note STUB_NOTE,
+# runs the executable STUB_HOOK first, sleeps STUB_SLEEP seconds (2 more when
+# its label is in STUB_SLOW), then STUB_FG_SLEEP seconds in the foreground
+# (its TERM trap runs only once that sleep ends, as with a real suite's
+# ansible-playbook), fails when
 # its label is in STUB_FAIL, and on its first call only when it is in
 # STUB_FAIL_ONCE (a marker in STUB_STATE). With STUB_TRACE it appends
 # "start <label>", "end <label>" and, on SIGTERM, "term <label>" to that file.
@@ -182,7 +186,9 @@ trap 'trace term; exit 143' TERM
 [ -z "${STUB_HOOK:-}" ] || "$STUB_HOOK"
 trace start
 [ -z "${STUB_SLEEP:-}" ] || { sleep "$STUB_SLEEP" & wait "$!"; }
-[ -z "${STUB_NET_LINE:-}" ] || echo "$STUB_NET_LINE"
+case " ${STUB_SLOW:-} " in *" $label "*) sleep 2 & wait "$!" ;; esac
+[ -z "${STUB_FG_SLEEP:-}" ] || sleep "$STUB_FG_SLEEP"
+case " ${STUB_NET_ONLY:-$label} " in *" $label "*) [ -z "${STUB_NET_LINE:-}" ] || echo "$STUB_NET_LINE" ;; esac
 case " ${STUB_FAIL_ONCE:-} " in
   *" $label "*)
     if [ ! -e "$STUB_STATE/$label.failed" ]; then
@@ -1271,8 +1277,10 @@ expect "16. the runner gets -j 4 by default" 0 "green: " -- r16 "$A" --all
 check "16. -j 4" test "$(sed -n 5p "$tmp/runner-argv")" = 4
 expect "16. ATTEST_JOBS sets -j" 0 "green: " -- r16 env ATTEST_JOBS=2 "$A" --all
 check "16. -j 2" test "$(sed -n 5p "$tmp/runner-argv")" = 2
-expect "16. ATTEST_JOBS=0 is refused" 2 "ATTEST_JOBS must be a positive number" -- env ATTEST_JOBS=0 "$A" --all
-expect "16. ATTEST_JOBS=x is refused" 2 "ATTEST_JOBS must be a positive number" -- env ATTEST_JOBS=x "$A" --all
+expect "16. ATTEST_JOBS=0 is refused" 2 "ATTEST_JOBS must be a number from 1 to 999" -- env ATTEST_JOBS=0 "$A" --all
+expect "16. ATTEST_JOBS=x is refused" 2 "ATTEST_JOBS must be a number from 1 to 999" -- env ATTEST_JOBS=x "$A" --all
+expect "16. ATTEST_JOBS too large for a number is refused" 2 "ATTEST_JOBS must be a number from 1 to 999" -- \
+  env ATTEST_JOBS=99999999999999999999 "$A" --all
 unset q0 q1 q2 q3 q4 q5 q6 all16 n16
 
 # --- 17. tests/all.sh: entries at the same time, one retry on a network error -----------------
@@ -1324,7 +1332,7 @@ check "17. RAM budget: an entry above the budget runs alone" \
 check "17. RAM budget: every entry ran" test "$(grep -c ' pass ' "$tmp/s")" = 5
 g checkout -q -- tests/all.sh
 
-rm -f "$tmp/state"/* "$repo/tests/output/all/listmonk.try1.log"
+rm -f "$tmp/state"/*
 expect "17. retry: a failure on a network error runs once more and passes" 0 "running it once more: $net_line" -- \
   env STUB_FAIL_ONCE=listmonk STUB_NET_LINE="$net_line" STUB_STATE="$tmp/state" \
   tests/all.sh -j 2 --summary "$tmp/s" e2e listmonk
@@ -1347,11 +1355,11 @@ check "17. retry: the second failure is a fail with the note" \
 check "17. retry: both logs are kept" sh -c 'grep -qx "listmonk failed" "$1/listmonk.try1.log" && grep -qx "listmonk failed" "$1/listmonk.log"' _ \
   "$repo/tests/output/all"
 
-rm -f "$repo/tests/output/all/listmonk.try1.log"
+check "17. retry: an earlier run's first log is there before the next run" test -e "$repo/tests/output/all/listmonk.try1.log"
 expect "17. no retry: a failure without a network error is final" 1 "summary" -- \
   env STUB_FAIL=listmonk tests/all.sh -j 2 --keep-going --summary "$tmp/s" e2e listmonk
 check "17. no retry: a plain fail" grep -qE '^listmonk fail [0-9]+$' "$tmp/s"
-check "17. no retry: no first log" test ! -e "$repo/tests/output/all/listmonk.try1.log"
+check "17. no retry: no first log, not even the earlier run's" test ! -e "$repo/tests/output/all/listmonk.try1.log"
 check "17. no retry: nothing says it ran once more" sh -c '! grep -q "once more" "$1"' _ "$tmp/out"
 expect "17. no retry: a local 502 is no network error upstream" 1 "summary" -- \
   env STUB_FAIL=listmonk STUB_NET_LINE='unexpected status from GET request to http://listmonk.test/api: 502 Bad Gateway' \
@@ -1360,30 +1368,66 @@ check "17. no retry: the local 502 fails at once" grep -qE '^listmonk fail [0-9]
 
 rm -f "$tmp/trace"
 expect "17. -j 2 without --keep-going: the first failure stops new starts" 1 "stopped after the first failure" -- \
-  env STUB_FAIL=e2e STUB_SLEEP=1 STUB_TRACE="$tmp/trace" tests/all.sh -j 2 --summary "$tmp/s" e2e harbor listmonk anubis
+  env STUB_FAIL=e2e STUB_SLEEP=1 STUB_SLOW=harbor STUB_TRACE="$tmp/trace" tests/all.sh -j 2 --summary "$tmp/s" \
+  e2e harbor listmonk anubis
 check "17. -j 2 without --keep-going: the running entry finished, the rest is skipped" \
   test "$(cut -d' ' -f1,2 "$tmp/s" | tr '\n' ' ')" = "e2e fail harbor pass listmonk skipped anubis skipped "
 check "17. -j 2 without --keep-going: nothing started after the failure" sh -c '! grep -qE "start (listmonk|anubis)" "$1"' _ "$tmp/trace"
 
-rm -f "$tmp/trace" "$tmp/s"
-(cd "$repo" && exec env STUB_SLEEP=30 STUB_TRACE="$tmp/trace" tests/all.sh -j 3 --summary "$tmp/s" e2e harbor listmonk \
-  >"$tmp/term.out" 2>&1) &
-all_pid=$!
-for _ in $(seq 100); do
-  [ "$(grep -c '^start ' "$tmp/trace" 2>/dev/null)" = 3 ] && break
-  sleep 0.1
-done
-kill -TERM "$all_pid"
-rc=0
-wait "$all_pid" || rc=$?
+# e2e fails on a network error and listmonk for real in the same look (both
+# end at once, one poll of a second): e2e is not run again, its first result
+# and log are final.
+rm -f "$tmp/state"/*
+expect "17. a stop with a retry pending: red" 1 "e2e not run again: the run stopped at another entry's failure" -- \
+  env ALL_POLL=1 STUB_FAIL_ONCE=e2e STUB_FAIL=listmonk STUB_NET_LINE="$net_line" STUB_NET_ONLY=e2e \
+  STUB_STATE="$tmp/state" tests/all.sh -j 2 --summary "$tmp/s" e2e listmonk anubis
+check "17. a stop with a retry pending: both fail, no note, the rest skipped" \
+  test "$(awk '{print $1, $2, NF}' "$tmp/s" | tr '\n' ' ')" = "e2e fail 3 listmonk fail 3 anubis skipped 3 "
+check "17. a stop with a retry pending: the first log is the log" \
+  sh -c 'grep -qx "e2e failed once" "$1/e2e.log" && [ ! -e "$1/e2e.try1.log" ]' _ "$repo/tests/output/all"
+
+# term_run J ENTRY...: starts all.sh -j J on the entries, each in a 31.25 s
+# foreground sleep, sends it TERM once all have started and sets rc and
+# term_seconds (from the TERM to all.sh's exit).
+term_run() {
+  local j="$1" t0
+  shift
+  rm -f "$tmp/trace" "$tmp/s"
+  (cd "$repo" && exec env STUB_FG_SLEEP=31.25 STUB_TRACE="$tmp/trace" tests/all.sh -j "$j" --summary "$tmp/s" "$@" \
+    >"$tmp/term.out" 2>&1) &
+  all_pid=$!
+  for _ in $(seq 100); do
+    [ "$(grep -c '^start ' "$tmp/trace" 2>/dev/null)" = "$#" ] && break
+    sleep 0.1
+  done
+  t0="$(date +%s)"
+  kill -TERM "$all_pid"
+  rc=0
+  wait "$all_pid" || rc=$?
+  term_seconds=$(($(date +%s) - t0))
+}
+no_orphans() { ! pgrep -f "sleep 31.25" >/dev/null; }
+term_run 3 e2e harbor listmonk
 check "17. TERM: all.sh exits 143" test "$rc" = 143
 check "17. TERM: every running entry got TERM" test "$(grep -c '^term ' "$tmp/trace")" = 3
 check "17. TERM: no summary is written" test ! -e "$tmp/s"
 check "17. TERM: it says so" grep -qF "interrupted, stopping the running entries" "$tmp/term.out"
+check "17. TERM: it ends at once, though the suites were in a foreground sleep" test "$term_seconds" -le 5
+check "17. TERM: no process of a suite is left" no_orphans
+term_run 1 listmonk
+check "17. TERM with -j 1: all.sh exits 143" test "$rc" = 143
+check "17. TERM with -j 1: the entry got TERM" grep -qx "term listmonk" "$tmp/trace"
+check "17. TERM with -j 1: it ends at once" test "$term_seconds" -le 5
+check "17. TERM with -j 1: no process of the suite is left" no_orphans
+pkill -f "sleep 31.25" 2>/dev/null || true
 
 expect "17. -j 0 is refused" 2 "usage: tests/all.sh [-j N]" -- tests/all.sh -j 0 e2e
 expect "17. -j x is refused" 2 "usage: tests/all.sh [-j N]" -- tests/all.sh -j x e2e
 expect "17. -j without N is refused" 2 "usage: tests/all.sh [-j N]" -- tests/all.sh -j
+expect "17. -j 1000 is refused" 2 "usage: tests/all.sh [-j N]" -- tests/all.sh -j 1000 e2e
+expect "17. a -j too large for a number is refused" 2 "usage: tests/all.sh [-j N]" -- \
+  tests/all.sh -j 99999999999999999999 e2e
+expect "17. -j 999 runs" 0 "summary" -- tests/all.sh -j 999 --summary "$tmp/s" e2e
 
 commit_change "feat: seventeen"
 rm -f "$tmp/state"/*
@@ -1394,7 +1438,7 @@ payload_of "$1" HEAD | python3 -I -c "import json,sys
 p = json.load(sys.stdin)
 e = [s for s in p[\"suites\"] if s[\"label\"] == \"listmonk\"][0]
 assert e == {\"label\": \"listmonk\", \"result\": \"pass\", \"seconds\": e[\"seconds\"], \"notes\": [\"retried after a network error\"]}, e"' _ "$DRY"
-unset net_line six all_pid rc
+unset net_line six all_pid rc term_seconds
 
 # --- suite helpers (tests/lib/suite.sh) ---------------------------------------------------------
 # A suite that stops on an unbound variable must not exit 0: bash 3.2 (macOS)
@@ -1482,21 +1526,25 @@ check "suite helpers: a real directory at the link path adds nothing to the root
 unset p1 p2 rc1 rc2 link_root
 
 # --- coverage knobs ----------------------------------------------------------------------
-# Every variable with a default that a suite reads either narrows or changes
-# what it runs (a coverage knob of tests/attest.sh, refused there) or is
-# harmless: a name of a container or output directory of one suite, a port,
-# the collections path.
-harmless='ANSIBLE_COLLECTIONS_PATH CLOUDPANEL_STUB_PORT NOIXDEV_INFRA_*_TEST_HOST NOIXDEV_INFRA_*_TEST_OUT'
+# Every variable with a default that a suite or its helpers read (any shell
+# script under tests/ but the runners and this selftest) either narrows or
+# changes what it runs (a coverage knob of tests/attest.sh, refused there) or
+# is harmless: a name of a container or output directory of one suite, a
+# port, the collections path, a variable set inside a test container. Named
+# one by one, so a new variable (a split suite's container name read by the
+# others too, say) is a decision.
+harmless=(ANSIBLE_COLLECTIONS_PATH CLOUDPANEL_STUB_PORT FAIL_POSTINST MAILCOW_BACKUP_LOCATION
+  NOIXDEV_INFRA_ANUBIS_TEST_HOST NOIXDEV_INFRA_CLOUDPANEL_TEST_HOST NOIXDEV_INFRA_HARBOR_TEST_HOST
+  NOIXDEV_INFRA_LISTMONK_TEST_HOST NOIXDEV_INFRA_MAILCOW_TEST_HOST NOIXDEV_INFRA_N8N_TEST_HOST
+  NOIXDEV_INFRA_PAPERLESS_TEST_HOST NOIXDEV_INFRA_TANDOOR_TEST_HOST NOIXDEV_INFRA_N8N_TEST_OUT
+  NOIXDEV_INFRA_PAPERLESS_TEST_OUT NOIXDEV_INFRA_TANDOOR_TEST_OUT)
 unguarded=
 while read -r v; do
   case " ${knobs[*]} " in *" $v "*) continue ;; esac
-  known=0
-  for h in $harmless; do
-    # shellcheck disable=SC2254 # $h is a pattern
-    case "$v" in $h) known=1 ;; esac
-  done
-  [ "$known" = 1 ] || unguarded="$unguarded $v"
-done < <(grep -ohE '\$\{[A-Z][A-Z0-9_]*:?[-+=?]' "$src/tests/run.sh" "$src"/tests/*/run.sh |
+  case " ${harmless[*]} " in *" $v "*) continue ;; esac
+  unguarded="$unguarded $v"
+done < <(find "$src/tests" -name '*.sh' -not -path "$src/tests/attest/*" -not -path "$src/tests/output/*" \
+  -not -path "$src/tests/attest.sh" -not -path "$src/tests/all.sh" -exec grep -ohE '\$\{[A-Z][A-Z0-9_]*:?[-+=?]' {} + |
   sed -E 's/^\$\{//;s/:?[-+=?]$//' | sort -u)
 check "knobs: every variable a suite reads is a coverage knob of tests/attest.sh or harmless" \
   sh -c '[ -z "$1" ] || { echo "neither a knob nor harmless:$1"; exit 1; }' _ "$unguarded"
@@ -1507,7 +1555,7 @@ case " ${knobs[*]} " in
     not_ok "knobs: NOIXDEV_INFRA_TEST_HOST (e2e, host and services share it) is refused"
     ;;
 esac
-unset harmless unguarded v known h
+unset harmless unguarded v
 
 # --- preconditions -----------------------------------------------------------------------
 expect "precondition: a suite argument is refused with the usage" 2 "usage: tests/attest.sh [--all | --plan]" -- tests/attest.sh e2e

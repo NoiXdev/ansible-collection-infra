@@ -37,13 +37,16 @@ unless you pass `--keep-going`, and ends with a summary of each entry's result a
 output of each entry is in `tests/output/all/<label>.log`. `--summary FILE` writes a
 machine-readable summary, one line per entry (`<label> <pass|fail|skipped> <seconds>[ <note>...]`).
 
-`-j N` runs up to N entries at the same time (default 1). The suites keep their containers,
+`-j N` runs up to N entries at the same time (1 to 999, default 1). The suites keep their containers,
 ports and output directories apart, so any entry can run beside any other; the limit is the
 Docker VM. An entry starts only while the RAM its suite needs (`ram_gb` in `tests/all.sh`, 1 GB
 when not listed) fits in `ram_budget` (16 GB) beside the running ones, the long suites
 (`long_first`) start first, and with more than one job the terminal shows a line per start and
-end (the output is in the logs). A suite that shares a cache between its entries takes a lock
-for it (`noix_lock` in `tests/lib/suite.sh`, as postal does for its ClamAV signatures).
+end (the output is in the logs). Each entry runs in a process group of its own: Ctrl-C or a TERM
+sends TERM to the whole group of every running entry (the suite and what it runs, so its cleanup
+runs), waits for them and writes no summary; a second one kills them. A suite that shares a
+cache between its entries takes a lock for it (`noix_lock` in `tests/lib/suite.sh`, a lock that
+ends with the suite's process, as postal does for its ClamAV signatures).
 
 An entry that fails and whose log names a network error upstream (a mirror's or registry's 5xx,
 a DNS failure or a timeout on the way to a host on the internet; `tests/lib/network_error.py`

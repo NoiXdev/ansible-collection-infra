@@ -140,7 +140,7 @@ fi
 runner="${ATTEST_RUNNER:-$root/tests/all.sh}"
 jobs="${ATTEST_JOBS:-4}"
 case "$jobs" in
-  "" | *[!0-9]* | 0*) fail "ATTEST_JOBS must be a positive number (entries that run at the same time), not \"$jobs\"" ;;
+  "" | *[!0-9]* | 0* | ????*) fail "ATTEST_JOBS must be a number from 1 to 999 (entries that run at the same time), not \"$jobs\"" ;;
 esac
 notes_ref="$NOTES_REF"
 [ "$dry_run" != 1 ] || notes_ref="$DRY_RUN_NOTES_REF"
