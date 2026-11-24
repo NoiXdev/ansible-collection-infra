@@ -119,6 +119,9 @@ location ^~ /.within.website/ {
 location @noix_anubis_401 {
     auth_request off;
     add_header WWW-Authenticate $noix_anubis_mark always;
+    # mailcow's own challenge of ActiveSync, which the error_page dropped
+    # (noix.conf).
+    add_header WWW-Authenticate $noix_anubis_basic always;
     # An add_header here ends the inheritance of mailcow's (sites-default.conf),
     # so its security headers are repeated, on every answer of this location.
     add_header Strict-Transport-Security "max-age=15768000;" always;

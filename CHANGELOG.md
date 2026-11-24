@@ -392,6 +392,11 @@
   is missing or not the `varnish` role's. Existing sites, and hosts without `varnish: true`, are
   unchanged.
 
+- `mailcow` with `mailcow_anubis_url`: a mail client that asks `/Microsoft-Server-ActiveSync`
+  without a password gets mailcow's `WWW-Authenticate: Basic` challenge again. mailcow 2026-11a
+  answers such a request itself, and the role's handling of Anubis's challenge dropped the header,
+  so a client was not asked to log in.
+
 ## 0.6.0 — 2026-11-17
 
 - `portainer`: an agent registers itself as an environment on a Portainer server. Set

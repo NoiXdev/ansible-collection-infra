@@ -71,4 +71,16 @@ map "$server_port:$noix_anubis_status:$sent_http_www_authenticate" $noix_anubis_
     "~^[0-9]+:([0-9]+, )*401:" 1;
     "~^[0-9]+:[^:]*:noix-anubis$" 1;
 }
+# mailcow's /Microsoft-Server-ActiveSync (since 2026-11a) answers a request
+# without Authorization itself: a 401 with WWW-Authenticate: Basic, added in
+# its own location. The server's error_page 401 (site.noix.custom) takes that
+# 401 to @noix_anubis_401, where the location's headers no longer apply; the
+# challenge goes back on there, as mailcow sends it, so that a mail client
+# still learns it should log in. Empty (not sent) for every other 401, and
+# when the answer has a WWW-Authenticate already (SOGo's auth check of an
+# older release).
+map "$noix_anubis_challenge:$sent_http_www_authenticate:$http_authorization:$uri" $noix_anubis_basic {
+    default "";
+    "~^0:::/Microsoft-Server-ActiveSync" 'Basic realm="SOGo"';
+}
 {% endif %}
