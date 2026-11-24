@@ -1012,11 +1012,31 @@ test_db_check() {
   expect_idempotent -e "tandoor_version=$old_version"
   # The postmaster stopped from the test host, as a database that hangs: the
   # container runs and stays healthy for a minute (until its check has timed
-  # out six times), while no new connection gets an answer.
+  # out six times), while no new connection gets an answer. It is stopped
+  # once the run reaches the health check, not before the run: a run that
+  # takes longer than that minute to get there would find the container
+  # unhealthy and never start the database check this case is about.
   db_pid="$(hx docker inspect --format '{{.State.Pid}}' "$(db_id)")"
-  hx kill -STOP "$db_pid"
+  rm -f "$out/noop-db-down.log"
+  (
+    for _ in $(seq 1800); do
+      if grep -qF 'TASK [noixdev.infra.tandoor : Note when the health check starts]' "$out/noop-db-down.log" 2>/dev/null; then
+        hx kill -STOP "$db_pid"
+        exit 0
+      fi
+      sleep 0.1
+    done
+    exit 1
+  ) &
+  stopper=$!
   play_fails_within 180 noop-db-down "$here/converge.yml" -v -e "tandoor_version=$old_version" -e tandoor_health_timeout=30
+  # A run that ended without reaching the health check leaves the stopper
+  # waiting: it stops nothing any more.
+  stopped=0
+  kill "$stopper" 2>/dev/null || true
+  wait "$stopper" || stopped=$?
   hx kill -CONT "$db_pid"
+  [ "$stopped" = 0 ] || fail "noop-db-down did not reach the health check: $(tail -n 5 "$out/noop-db-down.log")"
   expect_in_log noop-db-down "Tandoor in $dir is unhealthy"
   # The message says what bounds the check: the health timeout, and at least
   # 10 seconds for each database check.
