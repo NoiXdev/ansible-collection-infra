@@ -2,7 +2,8 @@
 # shellcheck disable=SC2016 # single-quoted $ is intended: stub scripts, sh -c
 # Self-test of the attestation: tests/attest.sh, tests/all.sh --summary,
 # .github/scripts/verify-tests-attestation.sh and their shared helper
-# .github/scripts/attest_carry.py (its unit tests, check-map on this
+# .github/scripts/attest_carry.py (its unit tests, the unit tests of
+# tests/lib/network_error.py, check-map on this
 # repository's HEAD, the run-or-carry plan). No Docker, no network: it works
 # in a throwaway git repository with throwaway ed25519 keys, a copy of the
 # scripts, stub suites behind the real tests/all.sh and a stub
@@ -601,6 +602,8 @@ unset root_commit
 # --- 14. the shared helper (.github/scripts/attest_carry.py) -----------------------------------
 H="$src/.github/scripts/attest_carry.py"
 check "14. helper: the unit tests pass" python3 -I -m unittest discover -s "$src/tests/attest" -p test_attest_carry.py
+check "14. classifier: the unit tests of tests/lib/network_error.py pass" \
+  python3 -I -m unittest discover -s "$src/tests/attest" -p test_network_error.py
 expect "14. helper: check-map passes on this repository's HEAD" 0 "tests/suites.conf OK at" -- \
   python3 -I "$H" check-map --repo "$src" --commit HEAD
 
