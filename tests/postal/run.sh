@@ -2001,18 +2001,18 @@ clamav_signatures() {
   local image
   image="$(sed -n 's/^postal_clamav_image: *//p' "$root/roles/postal/defaults/main.yml")"
   mkdir -p "$clamav_db"
-  noix_lock "$clamav_db.lock"
+  noix_lock "$clamav_db.lock" || fail "cannot lock $clamav_db.lock"
   docker run --rm -v "$clamav_db:/var/lib/clamav" --entrypoint sh "$image" -c '
 chown -R clamav:clamav /var/lib/clamav
 sed -e "s|^\(TestDatabases \)|#\1|" -e "\$a TestDatabases no" -e "s|^\(NotifyClamd \)|#\1|" \
   /etc/clamav/freshclam.conf >/tmp/freshclam.conf
-freshclam --foreground --stdout --config-file=/tmp/freshclam.conf' >"$out/freshclam.log" 2>&1 || true
+freshclam --foreground --stdout --config-file=/tmp/freshclam.conf' >"$out/freshclam.log" 2>&1 9>&- || true
   if [ ! -s "$clamav_db/main.cvd" ]; then
     noix_unlock "$clamav_db.lock"
     fail "freshclam downloaded no main.cvd: $(tail -n 5 "$out/freshclam.log")"
   fi
-  h mkdir -p "$app_dir/data/clamav"
-  docker cp "$clamav_db/." "$host:$app_dir/data/clamav/" >/dev/null || {
+  h mkdir -p "$app_dir/data/clamav" 9>&-
+  docker cp "$clamav_db/." "$host:$app_dir/data/clamav/" >/dev/null 9>&- || {
     noix_unlock "$clamav_db.lock"
     fail "cannot copy the ClamAV signatures into the test host"
   }

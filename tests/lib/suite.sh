@@ -63,24 +63,19 @@ noix_link_collection() {
   }
 }
 
-# noix_lock DIR: waits until this suite holds the lock directory DIR, for a
-# cache that two suites running at the same time (tests/all.sh -j) share.
-# mkdir is atomic; DIR/pid names the holder, and a lock whose holder is gone
-# (a suite that was killed) is taken over. noix_unlock DIR releases it.
+# noix_lock FILE: waits until this suite holds an exclusive lock on FILE, for
+# a cache that two suites running at the same time (tests/all.sh -j) share.
+# The lock is a flock on file descriptor 9, which the shell keeps open (python3
+# takes it on that descriptor and exits); it ends with noix_unlock or when the
+# suite's process ends, however it ends, so a killed suite leaves no stale
+# lock. A command run while it is held inherits the descriptor and holds the
+# lock as long as it runs: give each one 9>&-, so that one left behind does
+# not. One lock at a time per suite.
 noix_lock() {
-  local dir="$1" pid
-  until mkdir "$dir" 2>/dev/null; do
-    pid="$(cat "$dir/pid" 2>/dev/null || true)"
-    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-      # Read again: another waiter may have taken the stale lock meanwhile.
-      [ "$(cat "$dir/pid" 2>/dev/null || true)" != "$pid" ] || rm -rf "$dir"
-      continue
-    fi
-    sleep 1
-  done
-  echo "$$" >"$dir/pid"
+  exec 9>>"$1" || return 1
+  python3 -I -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'
 }
 
 noix_unlock() {
-  [ "$(cat "$1/pid" 2>/dev/null || true)" != "$$" ] || rm -rf "$1"
+  exec 9>&-
 }
