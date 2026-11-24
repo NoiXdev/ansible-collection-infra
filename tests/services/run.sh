@@ -609,11 +609,12 @@ suite_mysql() {
     8.4.*-1ubuntu"$ubuntu") echo "   installed the vendor's $version" ;;
     *) fail "mysql: after a failed refresh the role installed $version, not the vendor's" ;;
   esac
-  # The vendor's versions win by origin; every other version of the MySQL
+  # The vendor's versions (8.4.13-1ubuntu24.04, or with a fourth part such as
+  # 8.4.13.1-1ubuntu24.04) win by origin; every other version of the MySQL
   # packages (the distro's 8.0 on 24.04, its 8.4 on 26.04) is never installed.
   policy="$(hx mysql apt-cache policy mysql-community-server mysql-common mysql-client)"
   awk '$NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); p = $NF
-         if ((v ~ /^8\.4\.[0-9]+-1ubuntu2[46]\.04$/ && p != 990) || (v !~ /^8\.4\.[0-9]+-1ubuntu2[46]\.04$/ && p != -1)) { print v, p; bad = 1 } }
+         if ((v ~ /^8\.4\.[0-9]+(\.[0-9]+)?-1ubuntu2[46]\.04$/ && p != 990) || (v !~ /^8\.4\.[0-9]+(\.[0-9]+)?-1ubuntu2[46]\.04$/ && p != -1)) { print v, p; bad = 1 } }
        END { exit bad }' <<<"$policy" || fail "mysql: the pin gives the wrong priorities: $policy"
 
   echo "== mysql: converge (the first run with --diff -v) and idempotence"

@@ -57,8 +57,8 @@
 # - the distro's versions are never installed (the distro ships 8.0 on 24.04
 #   and an 8.4 of its own on 26.04; the vendor's wins by origin, not by
 #   version number);
-# - the series wins; the vendor's versions look like 8.4.13-1ubuntu24.04
-#   (no epoch), the regex takes one with or without;
+# - the series wins; the vendor's versions look like 8.4.13-1ubuntu24.04 or
+#   8.4.13.1-1ubuntu24.04 (no epoch), the regex takes one with or without;
 # - any other version is never installed.
 # Without the vendor's package lists there is no candidate, and the install
 # fails instead of falling back to another series.
