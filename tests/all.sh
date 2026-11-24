@@ -63,25 +63,60 @@ set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$here/output/all"
-# The required suites and the default releases of the host and services
-# suites. tests/attest.sh and .github/scripts/verify-tests-attestation.sh read
-# these lines (keep each on one line): an attestation needs every suite, host
-# and services once per release.
+# The required suites and the default releases of the release suites (a
+# suite with a <suite>_releases line runs once per release, as the entry
+# <suite>-<release>). tests/attest.sh and
+# .github/scripts/verify-tests-attestation.sh read these lines (keep each on
+# one line): an attestation needs every entry.
 all_suites=(e2e host services harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel pulsix_agent backrest vaultwarden postal waf varnish graylog)
+# shellcheck disable=SC2034 # read by releases_of (eval) and attest_carry.py
+{
 host_releases=(24.04 26.04)
 services_releases=(24.04 26.04)
+pulsix_agent_releases=(24.04 26.04)
+vaultwarden_releases=(24.04 26.04)
+postal_releases=(24.04 26.04)
+waf_releases=(24.04 26.04)
+varnish_releases=(24.04 26.04)
+graylog_releases=(24.04 26.04)
+}
+# The variable that gives a release suite its one release, when it is not
+# <SUITE>_UBUNTU (the suite name in capitals); <SUITE>_UBUNTU always selects
+# the releases all.sh runs.
+release_vars=(host:UBUNTU services:UBUNTU pulsix_agent:UBUNTU)
 
 usage() {
-  echo "usage: tests/all.sh [--keep-going] [--summary FILE] [suite|entry...]; suites: ${all_suites[*]}; entries: host-<release>, services-<release>" >&2
+  echo "usage: tests/all.sh [--keep-going] [--summary FILE] [suite|entry...]; suites: ${all_suites[*]}; entries: <suite>-<release> of a release suite" >&2
   exit 2
 }
 
-# valid_arg ARG: a suite name, or an entry label of a release of the matching array.
+# releases_of SUITE: the default releases of a release suite (its
+# <suite>_releases line), nothing for another suite.
+releases_of() {
+  eval "[ -n \"\${${1}_releases+set}\" ]" || return 0
+  eval "printf '%s\n' \"\${${1}_releases[*]}\""
+}
+# release_var SUITE: the variable that gives the suite its one release.
+release_var() {
+  local pair
+  for pair in "${release_vars[@]}"; do
+    [ "${pair%%:*}" != "$1" ] || {
+      echo "${pair#*:}"
+      return
+    }
+  done
+  selector_var "$1"
+}
+# selector_var SUITE: <SUITE>_UBUNTU, the releases all.sh runs of the suite.
+selector_var() { printf '%s_UBUNTU\n' "$1" | tr '[:lower:]' '[:upper:]'; }
+
+# valid_arg ARG: a suite name, or an entry label of a release of a release suite.
 valid_arg() {
-  local arg="$1" r
+  local arg="$1" suite r
   case " ${all_suites[*]} " in *" $arg "*) return 0 ;; esac
-  for r in "${host_releases[@]}"; do [ "$arg" != "host-$r" ] || return 0; done
-  for r in "${services_releases[@]}"; do [ "$arg" != "services-$r" ] || return 0; done
+  for suite in "${all_suites[@]}"; do
+    for r in $(releases_of "$suite"); do [ "$arg" != "$suite-$r" ] || return 0; done
+  done
   return 1
 }
 
@@ -132,17 +167,17 @@ add_runs() {
 }
 runs=()
 for suite in "${all_suites[@]}"; do
-  case "$suite" in
-    host) add_runs host "$here/host/run.sh" UBUNTU "${HOST_UBUNTU:-${host_releases[*]}}" "${host_releases[*]}" ;;
-    services) add_runs services "$here/services/run.sh" UBUNTU "${SERVICES_UBUNTU:-${services_releases[*]}}" "${services_releases[*]}" ;;
-    *)
-      case "$wanted" in
-        " " | *" $suite "*)
-          if [ "$suite" = e2e ]; then runs+=("e2e|$here/run.sh|"); else runs+=("$suite|$here/$suite/run.sh|"); fi
-          ;;
-      esac
-      ;;
-  esac
+  script="$here/$suite/run.sh"
+  [ "$suite" != e2e ] || script="$here/run.sh"
+  defaults="$(releases_of "$suite" | tr '\n' ' ')"
+  if [ -n "$defaults" ]; then
+    selector="$(selector_var "$suite")"
+    add_runs "$suite" "$script" "$(release_var "$suite")" "${!selector:-$defaults}" "$defaults"
+  else
+    case "$wanted" in
+      " " | *" $suite "*) runs+=("$suite|$script|") ;;
+    esac
+  fi
 done
 
 mkdir -p "$out"

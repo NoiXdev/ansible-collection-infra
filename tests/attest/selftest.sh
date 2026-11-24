@@ -140,23 +140,73 @@ if [ "${#suites[@]}" -eq 0 ] || [ "${#releases[@]}" -lt 2 ] || [ "${#sreleases[@
   echo "selftest: tests/all.sh needs all_suites=(...), host_releases=(...) and services_releases=(...) with two releases or more each" >&2
   exit 1
 fi
-last_suite="${suites[${#suites[@]} - 1]}"
 last_host="host-${releases[${#releases[@]} - 1]}"
-# A stub per suite: fails when its label is in STUB_FAIL, prints the note
-# STUB_NOTE, runs the executable STUB_HOOK first.
+# The entries of tests/all.sh ("<label> <suite>" per line), as the planner and
+# the release check read them.
+entry_lines="$(python3 -I -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import attest_carry as ac
+for label, suite in ac.expected_entries(open(sys.argv[2]).read()):
+    print(label, suite)' "$src/.github/scripts" "$repo/tests/all.sh")" || {
+  echo "selftest: cannot read the entries of tests/all.sh" >&2
+  exit 1
+}
+# release_var SUITE: the variable tests/all.sh gives a release suite its one
+# release in (release_vars, else <SUITE>_UBUNTU).
+release_var() {
+  local pair pairs
+  read -r -a pairs <<<"$(sed -nE 's/^release_vars=\(([^)]*)\)$/\1/p' "$repo/tests/all.sh")"
+  for pair in "${pairs[@]}"; do
+    [ "${pair%%:*}" != "$1" ] || {
+      echo "${pair#*:}"
+      return
+    }
+  done
+  printf '%s_UBUNTU\n' "$1" | tr '[:lower:]' '[:upper:]'
+}
+# A stub per suite. It prints the line STUB_NET_LINE and the note STUB_NOTE,
+# runs the executable STUB_HOOK first, sleeps STUB_SLEEP seconds, fails when
+# its label is in STUB_FAIL, and on its first call only when it is in
+# STUB_FAIL_ONCE (a marker in STUB_STATE). With STUB_TRACE it appends
+# "start <label>", "end <label>" and, on SIGTERM, "term <label>" to that file.
 stub() { # stub PATH LABEL-EXPRESSION
   mkdir -p "$(dirname "$1")"
-  printf '#!/usr/bin/env bash\nlabel="%s"\n[ -z "${STUB_HOOK:-}" ] || "$STUB_HOOK"\ncase " ${STUB_FAIL:-} " in *" $label "*) echo "$label failed"; exit 1 ;; esac\n[ -z "${STUB_NOTE:-}" ] || echo "noix-attest-note: $STUB_NOTE"\necho "$label passed"\n' "$2" >"$1"
+  sed "s/@LABEL@/$2/" >"$1" <<'STUB'
+#!/usr/bin/env bash
+label="@LABEL@"
+trace() { [ -z "${STUB_TRACE:-}" ] || echo "$1 $label" >>"$STUB_TRACE"; }
+trap 'trace term; exit 143' TERM
+[ -z "${STUB_HOOK:-}" ] || "$STUB_HOOK"
+trace start
+[ -z "${STUB_SLEEP:-}" ] || { sleep "$STUB_SLEEP" & wait "$!"; }
+[ -z "${STUB_NET_LINE:-}" ] || echo "$STUB_NET_LINE"
+case " ${STUB_FAIL_ONCE:-} " in
+  *" $label "*)
+    if [ ! -e "$STUB_STATE/$label.failed" ]; then
+      touch "$STUB_STATE/$label.failed"
+      echo "$label failed once"
+      trace end
+      exit 1
+    fi
+    ;;
+esac
+case " ${STUB_FAIL:-} " in *" $label "*) echo "$label failed"; trace end; exit 1 ;; esac
+[ -z "${STUB_NOTE:-}" ] || echo "noix-attest-note: $STUB_NOTE"
+echo "$label passed"
+trace end
+STUB
   chmod +x "$1"
 }
 for suite in "${suites[@]}"; do
-  case "$suite" in
-    e2e) stub "$repo/tests/run.sh" e2e ;;
-    host) stub "$repo/tests/host/run.sh" 'host-$UBUNTU' ;;
-    services) stub "$repo/tests/services/run.sh" 'services-$UBUNTU' ;;
-    *) stub "$repo/tests/$suite/run.sh" "$suite" ;;
-  esac
+  script="$repo/tests/$suite/run.sh"
+  [ "$suite" != e2e ] || script="$repo/tests/run.sh"
+  if printf '%s\n' "$entry_lines" | grep -q "^$suite-[^ ]* $suite\$"; then
+    stub "$script" "$suite-\$$(release_var "$suite")"
+  else
+    stub "$script" "$suite"
+  fi
 done
+unset script
 # A stub map: each suite has its stub and a roles/<suite>/ of its own.
 # roles.txt (commit_change) is in no section, so a commit_change reruns every
 # entry; CHANGELOG.md is ignored.
@@ -195,15 +245,18 @@ fi
 exit "\${FAKE_RC:-0}"
 EOF
 chmod +x "$tmp/runner"
-all_pass="$(for s in "${suites[@]}"; do
-  if [ "$s" = host ]; then
-    for r in "${releases[@]}"; do echo "host-$r pass 3"; done
-  elif [ "$s" = services ]; then
-    for r in "${sreleases[@]}"; do echo "services-$r pass 3"; done
-  else
-    echo "$s pass 2"
-  fi
+# The summary of a green run: an entry of a release suite takes 3 s, the others 2.
+all_pass="$(printf '%s\n' "$entry_lines" | while read -r label suite; do
+  if [ "$label" = "$suite" ]; then echo "$label pass 2"; else echo "$label pass 3"; fi
 done)"
+entry_n="$(printf '%s\n' "$entry_lines" | wc -l | tr -d ' ')"
+# The last suite that is one entry (not one per release).
+last_suite="$(printf '%s\n' "$entry_lines" | awk '$1 == $2 { s = $1 } END { print s }')"
+split_suites="$(printf '%s\n' "$entry_lines" | awk '$1 != $2 && $2 != "host" && $2 != "services" { print $2 }' | sort -u | tr '\n' ' ')"
+[ -n "$split_suites" ] || {
+  echo "selftest: tests/all.sh has no release suite besides host and services" >&2
+  exit 1
+}
 
 # Dry run with the real tests/all.sh of the repo (stub suites) by default.
 export ATTEST_DRY_RUN=1 ATTEST_RUNNER="$repo/tests/all.sh"
@@ -231,6 +284,24 @@ expect "all.sh: a note of a suite lands in the summary line" 0 "summary" -- \
   env STUB_NOTE="mysql via systemctl shim" tests/all.sh --summary "$tmp/s" "services-${sreleases[0]}"
 check "all.sh: the note has its spaces replaced by underscores" \
   test "$(cut -d' ' -f1,2,4 "$tmp/s")" = "services-${sreleases[0]} pass mysql_via_systemctl_shim"
+# A release suite besides host and services (postal, graylog, ...): its
+# entries get the suite's own variable, <SUITE>_UBUNTU selects them.
+s1="${split_suites%% *}"
+s1var="$(release_var "$s1")"
+read -r -a s1rels <<<"$(printf '%s\n' "$entry_lines" | awk -v s="$s1" '$2 == s { sub("^" s "-", "", $1); print $1 }' | tr '\n' ' ')"
+s1first="${s1rels[0]}"
+s1last="${s1rels[${#s1rels[@]} - 1]}"
+expect "all.sh: a split suite runs once per release" 0 "summary" -- tests/all.sh --summary "$tmp/s" "$s1"
+check "all.sh: the split suite's entries pass, each with its release in $s1var" \
+  test "$(cut -d' ' -f1,2 "$tmp/s")" = "$(printf "$s1-%s pass\n" "${s1rels[@]}")"
+expect "all.sh: one entry of a split suite" 0 "summary" -- tests/all.sh --summary "$tmp/s" "$s1-$s1last"
+check "all.sh: only that entry ran" test "$(cut -d' ' -f1,2 "$tmp/s")" = "$s1-$s1last pass"
+expect "all.sh: <SUITE>_UBUNTU selects the releases of a split suite" 0 "summary" -- \
+  env "$(printf '%s_UBUNTU' "$s1" | tr '[:lower:]' '[:upper:]')=$s1first" tests/all.sh --summary "$tmp/s" "$s1"
+check "all.sh: only the selected release ran" test "$(cut -d' ' -f1,2 "$tmp/s")" = "$s1-$s1first pass"
+expect "all.sh: an entry of a split suite's unknown release is rejected" 2 "unknown suite or entry" -- \
+  tests/all.sh "$s1-22.04"
+unset s1 s1var s1rels s1first s1last
 
 # --- 1. green run -------------------------------------------------------------
 c1="$(head_sha)"
@@ -445,7 +516,7 @@ expect "13. real: Docker without amd64 emulation refuses to start" 2 "cannot run
 expect "13. real: a first run (no notes on origin yet) is green" 0 "pushed, status tests/local set" -- real "$A"
 check "13. real: origin has the note of the run" git --git-dir="$origin" notes --ref="$REAL" show "$c13"
 check "13. real: the stale local note was not pushed" sh -c '! git --git-dir="$1" notes --ref=refs/notes/tests show "$2" >/dev/null 2>&1' _ "$origin" "$c1"
-entries=$((${#releases[@]} + ${#sreleases[@]} + ${#suites[@]} - 1)) # host and services per release, newsuite from case 8
+entries=$((entry_n + 1)) # every entry of tests/all.sh, newsuite from case 8
 check "13. real: the status call" sh -c 'a="$(tr "\n" " " <"$1")"; [ "$a" = "$2" ] || { echo "got: $a"; exit 1; }' _ "$tmp/gh-call" \
   "api --method POST repos/example/selftest/statuses/$c13 -f state=success -f context=tests/local -f description=$entries ran, $entries passed, 0 failed, 0 carried (0 min, $(uname -m), signed) "
 commit_change "feat: thirteen b"
@@ -1094,7 +1165,7 @@ exec(sys.argv[2])' "$tmp/pcheck.json" "$2"
 }
 r16() { env ATTEST_RUNNER="$tmp/rec-runner" "$@"; }
 all16="$(printf '%s\n' "$all_pass" | cut -d' ' -f1 | tr '\n' ' ')newsuite" # newsuite from case 8
-n16=$((${#releases[@]} + ${#sreleases[@]} + ${#suites[@]} - 1))
+n16=$((entry_n + 1))
 
 commit_change "feat: sixteen base"
 q0="$(head_sha)"
@@ -1274,6 +1345,34 @@ check "suite helpers: a real directory at the link path gains no link inside" \
   test ! -e "$tmp/suite/out3/ansible_collections/noixdev/infra/root"
 check "suite helpers: a real directory at the link path adds nothing to the root" test ! -e "$link_root/infra"
 unset p1 p2 rc1 rc2 link_root
+
+# --- coverage knobs ----------------------------------------------------------------------
+# Every variable with a default that a suite reads either narrows or changes
+# what it runs (a coverage knob of tests/attest.sh, refused there) or is
+# harmless: a name of a container or output directory of one suite, a port,
+# the collections path.
+harmless='ANSIBLE_COLLECTIONS_PATH CLOUDPANEL_STUB_PORT NOIXDEV_INFRA_*_TEST_HOST NOIXDEV_INFRA_*_TEST_OUT'
+unguarded=
+while read -r v; do
+  case " ${knobs[*]} " in *" $v "*) continue ;; esac
+  known=0
+  for h in $harmless; do
+    # shellcheck disable=SC2254 # $h is a pattern
+    case "$v" in $h) known=1 ;; esac
+  done
+  [ "$known" = 1 ] || unguarded="$unguarded $v"
+done < <(grep -ohE '\$\{[A-Z][A-Z0-9_]*:?[-+=?]' "$src/tests/run.sh" "$src"/tests/*/run.sh |
+  sed -E 's/^\$\{//;s/:?[-+=?]$//' | sort -u)
+check "knobs: every variable a suite reads is a coverage knob of tests/attest.sh or harmless" \
+  sh -c '[ -z "$1" ] || { echo "neither a knob nor harmless:$1"; exit 1; }' _ "$unguarded"
+case " ${knobs[*]} " in
+  *" NOIXDEV_INFRA_TEST_HOST "*) ok "knobs: NOIXDEV_INFRA_TEST_HOST (e2e, host and services share it) is refused" ;;
+  *)
+    echo "    NOIXDEV_INFRA_TEST_HOST is not in coverage_knobs" >"$tmp/out"
+    not_ok "knobs: NOIXDEV_INFRA_TEST_HOST (e2e, host and services share it) is refused"
+    ;;
+esac
+unset harmless unguarded v known h
 
 # --- preconditions -----------------------------------------------------------------------
 expect "precondition: a suite argument is refused with the usage" 2 "usage: tests/attest.sh [--all | --plan]" -- tests/attest.sh e2e

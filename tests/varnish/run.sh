@@ -67,6 +67,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 tests="$(dirname "$here")"
 root="$(dirname "$tests")"
+# Each release writes to tests/output/varnish-<release> (set in the loop at the end), so
+# tests/all.sh can run the entries varnish-24.04 and varnish-26.04 at the same time.
 out="$tests/output/varnish"
 releases="${VARNISH_UBUNTU:-24.04 26.04}"
 host=
@@ -1416,6 +1418,8 @@ test_foreign() {
 # All scenarios by default; "tests/varnish/run.sh invalid" runs only these.
 scenarios="${*:-invalid valid install badvcl cache purge shopware grace nginx waf foreign}"
 for ubuntu in $releases; do
+  out="$tests/output/varnish-$ubuntu"
+  mkdir -p "$out"
   host_state=
   for scenario in $scenarios; do
     case "$scenario" in

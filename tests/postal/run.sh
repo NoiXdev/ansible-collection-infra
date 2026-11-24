@@ -157,9 +157,9 @@
 #             it and Postal's checks still pass; off again removes both
 #             services. ClamAV starts from signatures this script downloads
 #             once into tests/output/postal/clamav-db (freshclam in the pinned
-#             image on this machine, updated on every run) and copies into the
-#             data directory first, so that no test host downloads the full
-#             database
+#             image on this machine, updated on every run, under a lock that
+#             the release entries share) and copies into the data directory
+#             first, so that no test host downloads the full database
 #   oidc_gelf postal_oidc (the login page offers the provider, local logins
 #             stay), postal_gelf to a UDP listener on the test host's
 #             loopback, postal_use_ip_pools, postal_worker_replicas 2 and
@@ -247,6 +247,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 tests="$(dirname "$here")"
 root="$(dirname "$tests")"
+# Each release writes to tests/output/postal-<release> (set in the loop at the end), so
+# tests/all.sh can run the entries postal-24.04 and postal-26.04 at the same time.
 out="$tests/output/postal"
 releases="${POSTAL_UBUNTU:-24.04 26.04}"
 host=
@@ -1992,19 +1994,29 @@ expect_loopback_only() {
 # download) and copied into the data directory of the test host before
 # ClamAV first starts there, so that no test host downloads the full
 # database. Its first start sees main.cvd and skips its own download.
+# Both release entries share it (tests/all.sh -j): freshclam and the copy run
+# under its lock.
 clamav_db="$out/clamav-db"
 clamav_signatures() {
   local image
   image="$(sed -n 's/^postal_clamav_image: *//p' "$root/roles/postal/defaults/main.yml")"
   mkdir -p "$clamav_db"
+  noix_lock "$clamav_db.lock"
   docker run --rm -v "$clamav_db:/var/lib/clamav" --entrypoint sh "$image" -c '
 chown -R clamav:clamav /var/lib/clamav
 sed -e "s|^\(TestDatabases \)|#\1|" -e "\$a TestDatabases no" -e "s|^\(NotifyClamd \)|#\1|" \
   /etc/clamav/freshclam.conf >/tmp/freshclam.conf
 freshclam --foreground --stdout --config-file=/tmp/freshclam.conf' >"$out/freshclam.log" 2>&1 || true
-  [ -s "$clamav_db/main.cvd" ] || fail "freshclam downloaded no main.cvd: $(tail -n 5 "$out/freshclam.log")"
+  if [ ! -s "$clamav_db/main.cvd" ]; then
+    noix_unlock "$clamav_db.lock"
+    fail "freshclam downloaded no main.cvd: $(tail -n 5 "$out/freshclam.log")"
+  fi
   h mkdir -p "$app_dir/data/clamav"
-  docker cp "$clamav_db/." "$host:$app_dir/data/clamav/" >/dev/null
+  docker cp "$clamav_db/." "$host:$app_dir/data/clamav/" >/dev/null || {
+    noix_unlock "$clamav_db.lock"
+    fail "cannot copy the ClamAV signatures into the test host"
+  }
+  noix_unlock "$clamav_db.lock"
 }
 # clamav_ping: what ClamAV answers on 127.0.0.1:3310 to zPING.
 clamav_ping() {
@@ -2715,6 +2727,8 @@ test_secrets() {
 all_scenarios="refusals install noop_down reconfigure takeover_refusals takeover row_format custom_names ipv6_off routers mail track_domains smtp_tls cert_rotation smtp_files smtp_off missing_data mountpoint spam oidc_gelf install_external postal_dump update failed_update broken_db interrupted no_space failed_update_external secrets"
 scenarios="${NOIXDEV_INFRA_POSTAL_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
+  out="$tests/output/postal-$ubuntu"
+  mkdir -p "$out"
   start_host "$ubuntu"
   for scenario in $scenarios; do
     case "$scenario" in

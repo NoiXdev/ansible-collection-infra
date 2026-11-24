@@ -62,3 +62,25 @@ noix_link_collection() {
     return 1
   }
 }
+
+# noix_lock DIR: waits until this suite holds the lock directory DIR, for a
+# cache that two suites running at the same time (tests/all.sh -j) share.
+# mkdir is atomic; DIR/pid names the holder, and a lock whose holder is gone
+# (a suite that was killed) is taken over. noix_unlock DIR releases it.
+noix_lock() {
+  local dir="$1" pid
+  until mkdir "$dir" 2>/dev/null; do
+    pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+      # Read again: another waiter may have taken the stale lock meanwhile.
+      [ "$(cat "$dir/pid" 2>/dev/null || true)" != "$pid" ] || rm -rf "$dir"
+      continue
+    fi
+    sleep 1
+  done
+  echo "$$" >"$dir/pid"
+}
+
+noix_unlock() {
+  [ "$(cat "$1/pid" 2>/dev/null || true)" != "$$" ] || rm -rf "$1"
+}

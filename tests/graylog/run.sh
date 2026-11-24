@@ -150,6 +150,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 tests="$(dirname "$here")"
 root="$(dirname "$tests")"
+# Each release writes to tests/output/graylog-<release> (set in the loop at the end), so
+# tests/all.sh can run the entries graylog-24.04 and graylog-26.04 at the same time.
 out="$tests/output/graylog"
 releases="${GRAYLOG_UBUNTU:-24.04 26.04}"
 host=
@@ -1594,6 +1596,8 @@ all_scenarios="refusals install self_logging missing_data mountpoint noop_down r
   update failed_update interrupted secrets forward forward_queue forward_invalid forward_remove forward_down"
 scenarios="${NOIXDEV_INFRA_GRAYLOG_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
+  out="$tests/output/graylog-$ubuntu"
+  mkdir -p "$out"
   start_host "$ubuntu"
   for scenario in $scenarios; do
     case "$scenario" in

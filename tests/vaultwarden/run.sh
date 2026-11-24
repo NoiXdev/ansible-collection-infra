@@ -143,6 +143,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 tests="$(dirname "$here")"
 root="$(dirname "$tests")"
+# Each release writes to tests/output/vaultwarden-<release> (set in the loop at the end), so
+# tests/all.sh can run the entries vaultwarden-24.04 and vaultwarden-26.04 at the same time.
 out="$tests/output/vaultwarden"
 releases="${VAULTWARDEN_UBUNTU:-24.04 26.04}"
 host=
@@ -1829,6 +1831,8 @@ test_secrets() {
 all_scenarios="refusals install config_json missing_data mountpoint noop_down reconfigure interrupted failed_update_sqlite update_sqlite install_postgres mode_switch db_password failed_update_postgres update_postgres external_refusals install_external target_changed failed_update_external update_external secrets"
 scenarios="${NOIXDEV_INFRA_VAULTWARDEN_TESTS:-$all_scenarios}"
 for ubuntu in $releases; do
+  out="$tests/output/vaultwarden-$ubuntu"
+  mkdir -p "$out"
   start_host "$ubuntu"
   for scenario in $scenarios; do
     case "$scenario" in

@@ -17,6 +17,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 tests="$(dirname "$here")"
 root="$(dirname "$tests")"
+# Each release writes to tests/output/waf-<release> (set in the loop at the end), so
+# tests/all.sh can run the entries waf-24.04 and waf-26.04 at the same time.
 out="$tests/output/waf"
 releases="${WAF_UBUNTU:-24.04 26.04}"
 # The test host the helpers act on, and every host this run started (cleanup
@@ -1352,6 +1354,8 @@ test_host() {
 # All scenarios by default; NOIXDEV_INFRA_WAF_TESTS="refusals" runs only these.
 scenarios="${NOIXDEV_INFRA_WAF_TESTS:-refusals traefik report plugins host}"
 for ubuntu in $releases; do
+  out="$tests/output/waf-$ubuntu"
+  mkdir -p "$out"
   start_host "$ubuntu" waf
   for scenario in $scenarios; do
     case "$scenario" in
