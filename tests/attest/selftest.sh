@@ -31,7 +31,7 @@ read -r -a knobs <<<"$(sed -nE 's/^coverage_knobs=\(([^)]*)\)$/\1/p' "$src/tests
   echo "selftest: no coverage_knobs=(...) line in tests/attest.sh" >&2
   exit 1
 }
-unset SSH_AUTH_SOCK TESTS_SIGNING_KEY TESTS_SIGNER ATTEST_RUNNER STUB_FAIL STUB_NOTE STUB_HOOK "${knobs[@]}"
+unset SSH_AUTH_SOCK TESTS_SIGNING_KEY TESTS_SIGNER ATTEST_RUNNER ATTEST_JOBS ALL_POLL STUB_FAIL STUB_FAIL_ONCE STUB_NOTE STUB_NET_LINE STUB_HOOK STUB_SLEEP STUB_STATE STUB_TRACE "${knobs[@]}"
 
 failures=0
 count=0
@@ -129,6 +129,8 @@ repo="$tmp/repo"
 mkdir -p "$repo/tests" "$repo/.github/scripts"
 git init -q -b main "$repo"
 cp "$src/tests/all.sh" "$src/tests/attest.sh" "$repo/tests/"
+mkdir -p "$repo/tests/lib"
+cp "$src/tests/lib/network_error.py" "$repo/tests/lib/"
 cp "$src/.github/scripts/verify-tests-attestation.sh" "$src/.github/scripts/attest_carry.py" "$repo/.github/scripts/"
 echo "maintainer@example.com namespaces=\"noixdev-infra-tests\" $(cat "$tmp/key.pub")" >"$repo/.github/tests-allowed-signers"
 printf 'tests/output/\n' >"$repo/.gitignore"
@@ -237,7 +239,7 @@ docs_change() { # docs_change: a commit that changes only CHANGELOG.md (ignored)
 cat >"$tmp/runner" <<EOF
 #!/usr/bin/env bash
 touch "$tmp/runner-ran"
-[ "\$1" = --keep-going ] && [ "\$2" = --summary ] || exit 9
+[ "\$1" = --keep-going ] && [ "\$2" = --summary ] && [ "\$4" = -j ] || exit 9
 printf '%s\n' "\${FAKE_SUMMARY:-}" >"\$3"
 if [ "\${FAKE_COMMIT:-0}" = 1 ]; then
   echo during >>"$repo/roles.txt"
@@ -259,8 +261,9 @@ split_suites="$(printf '%s\n' "$entry_lines" | awk '$1 != $2 && $2 != "host" && 
   exit 1
 }
 
-# Dry run with the real tests/all.sh of the repo (stub suites) by default.
-export ATTEST_DRY_RUN=1 ATTEST_RUNNER="$repo/tests/all.sh"
+# Dry run with the real tests/all.sh of the repo (stub suites) by default;
+# with -j above 1 it looks at the stubs every 0.1 s.
+export ATTEST_DRY_RUN=1 ATTEST_RUNNER="$repo/tests/all.sh" ALL_POLL=0.1
 
 # --- tests/all.sh --summary -------------------------------------------------
 expect "all.sh: --summary without a file is rejected" 2 "usage:" -- tests/all.sh --summary
@@ -1145,8 +1148,8 @@ chmod +x "$tmp/rec-runner"
 # runner_labels: the labels the last runner call got ("none" when not called).
 runner_labels() {
   if [ -e "$tmp/runner-argv" ]; then
-    [ "$(sed -n 1,2p "$tmp/runner-argv" | tr '\n' ' ')" = "--keep-going --summary " ] || echo "bad argv: "
-    sed -n '4,$p' "$tmp/runner-argv" | tr '\n' ' '
+    [ "$(sed -n '1,2p;4p' "$tmp/runner-argv" | tr '\n' ' ')" = "--keep-going --summary -j " ] || echo "bad argv: "
+    sed -n '6,$p' "$tmp/runner-argv" | tr '\n' ' '
   else
     echo none
   fi
@@ -1262,7 +1265,136 @@ check "16. a map error writes no note and runs nothing" \
   sh -c '! git notes --ref="$1" show "$2" >/dev/null 2>&1 && [ ! -e "$3" ]' _ "$DRY" "$q6" "$tmp/runner-argv"
 expect "16. --plan refuses on a map error too" 2 "roles/zzz/ is in no [suite] section" -- r16 "$A" --plan
 g rm -rq roles/zzz && g commit -q -m "fix: drop the unmapped role"
+
+rm -f "$tmp/runner-argv"
+expect "16. the runner gets -j 4 by default" 0 "green: " -- r16 "$A" --all
+check "16. -j 4" test "$(sed -n 5p "$tmp/runner-argv")" = 4
+expect "16. ATTEST_JOBS sets -j" 0 "green: " -- r16 env ATTEST_JOBS=2 "$A" --all
+check "16. -j 2" test "$(sed -n 5p "$tmp/runner-argv")" = 2
+expect "16. ATTEST_JOBS=0 is refused" 2 "ATTEST_JOBS must be a positive number" -- env ATTEST_JOBS=0 "$A" --all
+expect "16. ATTEST_JOBS=x is refused" 2 "ATTEST_JOBS must be a positive number" -- env ATTEST_JOBS=x "$A" --all
 unset q0 q1 q2 q3 q4 q5 q6 all16 n16
+
+# --- 17. tests/all.sh: entries at the same time, one retry on a network error -----------------
+# The real tests/all.sh with the stubs; ALL_POLL makes it look often. A trace
+# of the stubs' start, end and term lines shows what ran at the same time.
+net_line='Error response from daemon: unknown: failed to resolve reference "docker.n8n.io/n8nio/n8n:2.46.7": unexpected status from HEAD request to https://docker.n8n.io/v2/n8nio/n8n/manifests/2.46.7: 502 Bad Gateway'
+mkdir -p "$tmp/state"
+# trace_stats RAM BUDGET: "<most running at once> <most RAM of two or more
+# running at once> <times an entry above BUDGET ran beside another>" of
+# $tmp/trace, RAM "suite:gb ..." (1 when not listed).
+trace_stats() {
+  python3 -I -c 'import sys
+ram = dict((k, int(v)) for k, v in (x.split(":") for x in sys.argv[2].split()))
+budget = int(sys.argv[3])
+gb = lambda label: ram.get(label.split("-")[0], 1)
+running, most, most_ram, beside = set(), 0, 0, 0
+for line in open(sys.argv[1]):
+    event, label = line.split()
+    if event == "start":
+        running.add(label)
+    else:
+        running.discard(label)
+    most = max(most, len(running))
+    if len(running) > 1:
+        most_ram = max(most_ram, sum(gb(l) for l in running))
+        beside += any(gb(l) > budget for l in running)
+print(most, most_ram, beside)' "$tmp/trace" "$1" "$2"
+}
+six="e2e harbor listmonk paperless tandoor n8n"
+rm -f "$tmp/trace"
+# shellcheck disable=SC2086 # $six is a list of entries
+expect "17. -j 3 runs six entries" 0 "summary" -- \
+  env STUB_SLEEP=1 STUB_TRACE="$tmp/trace" tests/all.sh -j 3 --summary "$tmp/s" $six
+check "17. -j 3: three ran at the same time, never more" test "$(trace_stats "" 16 | cut -d' ' -f1)" = 3
+check "17. -j 3: the summary is in entry order" test "$(cut -d' ' -f1,2 "$tmp/s" | tr '\n' ' ')" = \
+  "e2e pass harbor pass listmonk pass paperless pass tandoor pass n8n pass "
+check "17. -j 3: each entry has its own log" sh -c 'for l in $2; do grep -qx "$l passed" "$1/$l.log" || exit 1; done' _ \
+  "$repo/tests/output/all" "$six"
+
+sed -i.bak -e 's/^ram_gb=(.*)$/ram_gb=(e2e:6 harbor:6 listmonk:6 anubis:20)/' -e 's/^ram_budget=.*$/ram_budget=12/' \
+  "$repo/tests/all.sh" && rm "$repo/tests/all.sh.bak"
+rm -f "$tmp/trace"
+expect "17. RAM budget: five entries at -j 9" 0 "summary" -- \
+  env STUB_SLEEP=1 STUB_TRACE="$tmp/trace" tests/all.sh -j 9 --summary "$tmp/s" e2e harbor listmonk anubis cloudpanel
+check "17. RAM budget: never more than 12 GB at once" \
+  sh -c 'set -- $(cat); [ "$2" -le 12 ] && [ "$1" -ge 2 ]' <<<"$(trace_stats "e2e:6 harbor:6 listmonk:6 anubis:20" 12)"
+check "17. RAM budget: an entry above the budget runs alone" \
+  test "$(trace_stats "e2e:6 harbor:6 listmonk:6 anubis:20" 12 | cut -d' ' -f3)" = 0
+check "17. RAM budget: every entry ran" test "$(grep -c ' pass ' "$tmp/s")" = 5
+g checkout -q -- tests/all.sh
+
+rm -f "$tmp/state"/* "$repo/tests/output/all/listmonk.try1.log"
+expect "17. retry: a failure on a network error runs once more and passes" 0 "running it once more: $net_line" -- \
+  env STUB_FAIL_ONCE=listmonk STUB_NET_LINE="$net_line" STUB_STATE="$tmp/state" \
+  tests/all.sh -j 2 --summary "$tmp/s" e2e listmonk
+check "17. retry: the summary has the pass and the note" \
+  grep -qE '^listmonk pass [0-9]+ retried_after_a_network_error$' "$tmp/s"
+check "17. retry: an entry that passed with the same line in its log has no note" grep -qE '^e2e pass [0-9]+$' "$tmp/s"
+check "17. retry: the first log is kept" grep -qx "listmonk failed once" "$repo/tests/output/all/listmonk.try1.log"
+check "17. retry: the log is the second run's" grep -qx "listmonk passed" "$repo/tests/output/all/listmonk.log"
+check "17. retry: the summary table says so" grep -qE '^listmonk +passed +[0-9]+ s \(retried after a network error\)$' "$tmp/out"
+
+rm -f "$tmp/state"/*
+expect "17. retry with -j 1 too" 0 "running it once more" -- \
+  env STUB_FAIL_ONCE=listmonk STUB_NET_LINE="$net_line" STUB_STATE="$tmp/state" tests/all.sh --summary "$tmp/s" listmonk
+check "17. retry with -j 1: pass and note" grep -qE '^listmonk pass [0-9]+ retried_after_a_network_error$' "$tmp/s"
+
+expect "17. retry: a second failure is final" 1 "running it once more" -- \
+  env STUB_FAIL=listmonk STUB_NET_LINE="$net_line" tests/all.sh -j 2 --keep-going --summary "$tmp/s" e2e listmonk
+check "17. retry: the second failure is a fail with the note" \
+  grep -qE '^listmonk fail [0-9]+ retried_after_a_network_error$' "$tmp/s"
+check "17. retry: both logs are kept" sh -c 'grep -qx "listmonk failed" "$1/listmonk.try1.log" && grep -qx "listmonk failed" "$1/listmonk.log"' _ \
+  "$repo/tests/output/all"
+
+rm -f "$repo/tests/output/all/listmonk.try1.log"
+expect "17. no retry: a failure without a network error is final" 1 "summary" -- \
+  env STUB_FAIL=listmonk tests/all.sh -j 2 --keep-going --summary "$tmp/s" e2e listmonk
+check "17. no retry: a plain fail" grep -qE '^listmonk fail [0-9]+$' "$tmp/s"
+check "17. no retry: no first log" test ! -e "$repo/tests/output/all/listmonk.try1.log"
+check "17. no retry: nothing says it ran once more" sh -c '! grep -q "once more" "$1"' _ "$tmp/out"
+expect "17. no retry: a local 502 is no network error upstream" 1 "summary" -- \
+  env STUB_FAIL=listmonk STUB_NET_LINE='unexpected status from GET request to http://listmonk.test/api: 502 Bad Gateway' \
+  tests/all.sh --summary "$tmp/s" listmonk
+check "17. no retry: the local 502 fails at once" grep -qE '^listmonk fail [0-9]+$' "$tmp/s"
+
+rm -f "$tmp/trace"
+expect "17. -j 2 without --keep-going: the first failure stops new starts" 1 "stopped after the first failure" -- \
+  env STUB_FAIL=e2e STUB_SLEEP=1 STUB_TRACE="$tmp/trace" tests/all.sh -j 2 --summary "$tmp/s" e2e harbor listmonk anubis
+check "17. -j 2 without --keep-going: the running entry finished, the rest is skipped" \
+  test "$(cut -d' ' -f1,2 "$tmp/s" | tr '\n' ' ')" = "e2e fail harbor pass listmonk skipped anubis skipped "
+check "17. -j 2 without --keep-going: nothing started after the failure" sh -c '! grep -qE "start (listmonk|anubis)" "$1"' _ "$tmp/trace"
+
+rm -f "$tmp/trace" "$tmp/s"
+(cd "$repo" && exec env STUB_SLEEP=30 STUB_TRACE="$tmp/trace" tests/all.sh -j 3 --summary "$tmp/s" e2e harbor listmonk \
+  >"$tmp/term.out" 2>&1) &
+all_pid=$!
+for _ in $(seq 100); do
+  [ "$(grep -c '^start ' "$tmp/trace" 2>/dev/null)" = 3 ] && break
+  sleep 0.1
+done
+kill -TERM "$all_pid"
+rc=0
+wait "$all_pid" || rc=$?
+check "17. TERM: all.sh exits 143" test "$rc" = 143
+check "17. TERM: every running entry got TERM" test "$(grep -c '^term ' "$tmp/trace")" = 3
+check "17. TERM: no summary is written" test ! -e "$tmp/s"
+check "17. TERM: it says so" grep -qF "interrupted, stopping the running entries" "$tmp/term.out"
+
+expect "17. -j 0 is refused" 2 "usage: tests/all.sh [-j N]" -- tests/all.sh -j 0 e2e
+expect "17. -j x is refused" 2 "usage: tests/all.sh [-j N]" -- tests/all.sh -j x e2e
+expect "17. -j without N is refused" 2 "usage: tests/all.sh [-j N]" -- tests/all.sh -j
+
+commit_change "feat: seventeen"
+rm -f "$tmp/state"/*
+expect "17. attest: a retried entry is green" 0 "notes: listmonk retried after a network error" -- \
+  env STUB_FAIL_ONCE=listmonk STUB_NET_LINE="$net_line" STUB_STATE="$tmp/state" "$A" --all
+check "17. attest: the payload has the note on the entry" sh -c 'payload_of() { git notes --ref="$1" show "$2" | sed -n "s/^payload: //p" | python3 -I -c "import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read().strip()))"; }
+payload_of "$1" HEAD | python3 -I -c "import json,sys
+p = json.load(sys.stdin)
+e = [s for s in p[\"suites\"] if s[\"label\"] == \"listmonk\"][0]
+assert e == {\"label\": \"listmonk\", \"result\": \"pass\", \"seconds\": e[\"seconds\"], \"notes\": [\"retried after a network error\"]}, e"' _ "$DRY"
+unset net_line six all_pid rc
 
 # --- suite helpers (tests/lib/suite.sh) ---------------------------------------------------------
 # A suite that stops on an unbound variable must not exit 0: bash 3.2 (macOS)

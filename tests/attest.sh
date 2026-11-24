@@ -27,7 +27,10 @@
 # (check-map at HEAD); a map error refuses to start (exit 2), so no carry is
 # published that the release check would refuse for the map.
 #
-# The entries to run go to tests/all.sh --keep-going --summary FILE <label>...;
+# The entries to run go to tests/all.sh --keep-going --summary FILE -j N
+# <label>..., N from ATTEST_JOBS (default 4: entries that run at the same time,
+# within all.sh's RAM budget; it does not change what runs, so it is no
+# coverage knob);
 # when nothing runs (a docs-only commit), no runner is called and no Docker
 # is needed. It refuses to start while a variable that narrows or changes
 # what the suites run is set (coverage_knobs below; add a suite's new knob
@@ -90,7 +93,7 @@
 #   ATTEST_RUNNER=FILE (only with ATTEST_DRY_RUN=1) runs FILE (one
 #                      executable, no arguments of its own) instead of
 #                      tests/all.sh, with the same arguments (--keep-going
-#                      --summary FILE <label>...); Docker is then not
+#                      --summary FILE -j N <label>...); Docker is then not
 #                      required and the payload's docker field is "unknown"
 #                      when anything ran, which the release check refuses too.
 set -euo pipefail
@@ -135,6 +138,10 @@ if [ -n "${ATTEST_RUNNER+set}" ] && [ "$dry_run" != 1 ]; then
   fail "ATTEST_RUNNER is for the self-test only and needs ATTEST_DRY_RUN=1; unset it"
 fi
 runner="${ATTEST_RUNNER:-$root/tests/all.sh}"
+jobs="${ATTEST_JOBS:-4}"
+case "$jobs" in
+  "" | *[!0-9]* | 0*) fail "ATTEST_JOBS must be a positive number (entries that run at the same time), not \"$jobs\"" ;;
+esac
 notes_ref="$NOTES_REF"
 [ "$dry_run" != 1 ] || notes_ref="$DRY_RUN_NOTES_REF"
 
@@ -322,8 +329,8 @@ started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 start_epoch="$(date +%s)"
 rc=0
 if [ "${#to_run[@]}" -gt 0 ]; then
-  echo "==== attesting ${commit:0:7}: $runner --keep-going --summary <file> ${to_run[*]}"
-  "$runner" --keep-going --summary "$work/summary" "${to_run[@]}" || rc=$?
+  echo "==== attesting ${commit:0:7}: $runner --keep-going --summary <file> -j $jobs ${to_run[*]}"
+  "$runner" --keep-going --summary "$work/summary" -j "$jobs" "${to_run[@]}" || rc=$?
 else
   echo "==== attesting ${commit:0:7}: nothing to run, every entry is carried"
   : >"$work/summary"
