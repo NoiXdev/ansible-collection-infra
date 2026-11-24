@@ -20,42 +20,59 @@ in CI:
 ansible-lint                     # configured in .ansible-lint (production profile)
 shellcheck tests/**/*.sh         # the test scripts; CI also checks the stubs (ci.yml)
 tests/all.sh                     # the Docker test suites, one after the other
+tests/all.sh -j 4 --keep-going   # up to 4 entries at the same time
 tests/all.sh mailcow listmonk    # only the named suites
-tests/all.sh host-24.04          # or entries by label (host-<release>, services-<release>)
+tests/all.sh host-24.04          # or entries by label (<suite>-<release>: host-24.04, postal-26.04)
 UBUNTU=24.04 tests/services/run.sh  # the service roles, on their own (also UBUNTU=26.04)
 ```
 
 `tests/all.sh` runs the suites `e2e` (`tests/run.sh`, the container roles in Docker-in-Docker),
 `host` (`tests/host/run.sh` on Ubuntu 24.04 and 26.04, set `HOST_UBUNTU` for fewer),
-`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow`, `cloudpanel`, `pulsix_agent`, `backrest`, `vaultwarden`, `postal`, `waf`, `varnish` and `graylog` (`tests/<suite>/run.sh`). It stops at
-the first failing suite unless you pass `--keep-going`, and ends with a summary of each
-suite's result and runtime; the output of each suite is also in
-`tests/output/all/<suite>.log`. `--summary FILE` writes a machine-readable summary, one line
-per run (`<label> <pass|fail|skipped> <seconds>[ <note>...]`). The `harbor` suite needs amd64 images: its test host
+`harbor`, `listmonk`, `paperless`, `tandoor`, `n8n`, `anubis`, `mailcow`, `cloudpanel`, `pulsix_agent`, `backrest`, `vaultwarden`, `postal`, `waf`, `varnish` and `graylog` (`tests/<suite>/run.sh`).
+A release suite (`host`, `services`, `pulsix_agent`, `vaultwarden`, `postal`, `waf`, `varnish`,
+`graylog`: a `<suite>_releases` line in `tests/all.sh`) runs once per Ubuntu release, as the
+entry `<suite>-<release>`; `<SUITE>_UBUNTU` (`HOST_UBUNTU`, `POSTAL_UBUNTU`,
+`PULSIX_AGENT_UBUNTU`, ...) selects fewer. It stops starting entries at the first failing one
+unless you pass `--keep-going`, and ends with a summary of each entry's result and runtime; the
+output of each entry is in `tests/output/all/<label>.log`. `--summary FILE` writes a
+machine-readable summary, one line per entry (`<label> <pass|fail|skipped> <seconds>[ <note>...]`).
+
+`-j N` runs up to N entries at the same time (default 1). The suites keep their containers,
+ports and output directories apart, so any entry can run beside any other; the limit is the
+Docker VM. An entry starts only while the RAM its suite needs (`ram_gb` in `tests/all.sh`, 1 GB
+when not listed) fits in `ram_budget` (16 GB) beside the running ones, the long suites
+(`long_first`) start first, and with more than one job the terminal shows a line per start and
+end (the output is in the logs). A suite that shares a cache between its entries takes a lock
+for it (`noix_lock` in `tests/lib/suite.sh`, as postal does for its ClamAV signatures).
+
+An entry that fails and whose log names a network error upstream (a mirror's or registry's 5xx,
+a DNS failure or a timeout on the way to a host on the internet; `tests/lib/network_error.py`
+decides, and the tests' own hosts never count) runs once more from scratch. Only the second
+run counts, the first log stays as `<label>.try1.log`, and the entry gets the note "retried
+after a network error". A second failure is final. Only the entry's own log is read: a suite
+that keeps such an error in a log of its own without printing it is not retried. The `harbor` suite needs amd64 images: its test host
 runs natively, and on another architecture (an arm64 Mac) the Harbor images inside it
 run as `linux/amd64` under emulation, which is slow. Docker Desktop on Apple silicon needs
 Rosetta 2 (`softwareupdate --install-rosetta`) and a restart; the suite and `tests/attest.sh`
 check this first. The `pulsix_agent` suite runs a stub agent and manager, but its
 `release_match` scenario downloads the pinned Pulsix release and needs network access. The
 `backrest` suite downloads the pinned Backrest release, runs MinIO and PostgreSQL beside it and
-checks Ubuntu 24.04 and 26.04 in one entry (`BACKREST_UBUNTU` for fewer); the
-`vaultwarden` suite does the same with Traefik and PostgreSQL (`VAULTWARDEN_UBUNTU`,
-`NOIXDEV_INFRA_VAULTWARDEN_TESTS` picks scenarios). The `postal`
-suite runs Postal with Traefik and Mailpit on Ubuntu 24.04 and 26.04 (`POSTAL_UBUNTU` for fewer,
-`NOIXDEV_INFRA_POSTAL_TESTS` picks scenarios); Postal's image is amd64 only, so on another
+checks Ubuntu 24.04 and 26.04 in one entry (`BACKREST_UBUNTU` for fewer), since it compares the
+two; the `vaultwarden` suite runs Traefik and PostgreSQL beside Vaultwarden, once per release
+(`NOIXDEV_INFRA_VAULTWARDEN_TESTS` picks scenarios). The `postal`
+suite runs Postal with Traefik and Mailpit, once per release (`NOIXDEV_INFRA_POSTAL_TESTS` picks
+scenarios); Postal's image is amd64 only, so on another
 architecture it runs under emulation like Harbor's. The `waf`
 suite runs Traefik, Anubis, nginx and PHP beside the WAF on a systemd test host with Docker
 inside, sends its attack payloads only to its own containers there, publishes no port on your
-machine and checks Ubuntu 24.04 and 26.04 in one entry (`WAF_UBUNTU` for fewer,
-`NOIXDEV_INFRA_WAF_TESTS` picks scenarios). The
-`varnish` suite installs Varnish Software's packages from their repository (network access) and
-checks Ubuntu 24.04 and 26.04 in one entry (`VARNISH_UBUNTU` for fewer): the cache scenarios put
+machine and runs once per release (`NOIXDEV_INFRA_WAF_TESTS` picks scenarios). The
+`varnish` suite installs Varnish Software's packages from their repository (network access),
+once per release: the cache scenarios put
 a small backend behind Varnish, the `nginx` and `waf` scenarios run the php, varnish, nginx and
 waf roles on one host with Docker inside (WebSocket upgrades, the path around a stopped Varnish,
 the nginx run's refusals). The
-`graylog` suite runs Graylog with Traefik on a systemd test host with Docker inside and checks
-Ubuntu 24.04 and 26.04 in one entry (`GRAYLOG_UBUNTU` for fewer, `NOIXDEV_INFRA_GRAYLOG_TESTS`
-picks scenarios). The
+`graylog` suite runs Graylog with Traefik on a systemd test host with Docker inside, once per
+release (`NOIXDEV_INFRA_GRAYLOG_TESTS` picks scenarios). The
 `mailcow` suite needs network
 access and about 5 GB of images, `paperless` about 4 GB of images and half an hour
 (`NOIXDEV_INFRA_PAPERLESS_TESTS` picks scenarios), `tandoor` about 2 GB and `n8n` about 3 GB of images, `cloudpanel` runs CloudPanel's real installer.
@@ -90,17 +107,22 @@ git push                         # the commit has to be on GitHub first
 tests/attest.sh --plan           # what would run or be carried; runs and signs nothing
 tests/attest.sh                  # runs the entries that need it, signs, publishes
 tests/attest.sh --all            # runs every entry, carries nothing
+ATTEST_JOBS=6 tests/attest.sh    # entries at the same time (default 4, within the RAM budget)
 ```
 
 `--plan` runs and signs nothing, but it still replaces your local `refs/notes/tests` with
 origin's first, so the plan sees what the release check will see. A note that exists only
 locally (for example from a run whose push was refused) is dropped.
 
-The entries are those of `tests/all.sh`: each suite, `host` once per release as `host-<release>`
-and `services` once per release as `services-<release>`. For each entry it either runs or
+The entries are those of `tests/all.sh`: each suite, and each release suite once per release as
+`<suite>-<release>`. They run through `tests/all.sh --keep-going -j "$ATTEST_JOBS"`, so the
+network retry above applies, and a retried entry's note is in the payload, the `tests/local`
+status and the release check's OK line. For each entry it either runs or
 carries it from the newest valid, signed run of an ancestor of HEAD that RAN it. It runs when
 any of these holds: a file of its suite changed since that run; that run was red; that run
 is older than 28 days; a shared path changed; a changed file is in no section of the map.
+`galaxy.yml` changed in its single `version:` line only (a release's bump) is no change; any
+other change of it is a shared path. The release check applies the same rule.
 HEAD's own red run counts. `--plan` prints one line per entry, `run <reason>` or
 `carry from <sha7> (<N> days)`. A commit that changes only ignored files (such as
 `CHANGELOG.md`) is attested without running anything and without Docker.
@@ -125,8 +147,10 @@ selftest, and `tests/attest.sh` runs it first.
 It refuses to start while a variable that narrows or changes what the suites run is set
 (`HOST_UBUNTU`, `SERVICES_UBUNTU`, `UBUNTU`, `KEEP`, `STUB_ONLY`, `NOIXDEV_INFRA_SERVICES`,
 `NOIXDEV_INFRA_N8N_TESTS`, `NOIXDEV_INFRA_PAPERLESS_TESTS`, `NOIXDEV_INFRA_TANDOOR_TESTS`,
-`NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME` and the others in `coverage_knobs` of `tests/attest.sh`;
-a new suite knob belongs there). It needs a clean working tree
+`NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME`, every `<SUITE>_UBUNTU`, `NOIXDEV_INFRA_TEST_HOST` (e2e,
+host and services share it) and the others in `coverage_knobs` of `tests/attest.sh`; a new
+suite knob belongs there, and the selftest fails on a variable with a default that a suite reads
+and that is neither a knob nor on its short harmless list). It needs a clean working tree
 (untracked files included), HEAD on a branch of `origin`, Docker,
 `python3`, `ssh-keygen`, `gh` logged in (`gh auth login`) and an SSH signing key:
 `TESTS_SIGNING_KEY`, else `git config user.signingkey`, else `~/.ssh/id_ed25519.pub` (a
@@ -191,8 +215,9 @@ Maintainers cut a release with the `release` workflow:
 
 1. Attest the last commit before the bump, once it is on `main` and CI is green: run
    a real amd64 mysql test by hand first when the run would use the systemctl shim,
-   then `tests/attest.sh`, and push the notes. Do not attest the bump commit itself: it
-   always changes `galaxy.yml`, a shared file, so that would rerun every entry (hours).
+   then `tests/attest.sh`, and push the notes. The bump commit needs no attestation of its
+   own: the release check takes its parent's, and later attestations carry across the bump
+   (it changes only the `version:` line of `galaxy.yml`).
 2. Make sure `## Unreleased` in `CHANGELOG.md` has the entries of the release.
 3. Run the workflow `release` from the Actions tab on `main`: first with `dry_run` on (the
    default), read its summary, then again with `dry_run` off. `bump` is `patch`, `minor`

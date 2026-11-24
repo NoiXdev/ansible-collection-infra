@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Tests: `tests/all.sh -j N` runs up to N entries at the same time within a RAM budget for the
+  Docker VM, and `tests/attest.sh` runs with `ATTEST_JOBS` (default 4). `pulsix_agent`,
+  `vaultwarden`, `postal`, `waf`, `varnish` and `graylog` run once per Ubuntu release, as the
+  entries `<suite>-<release>`, so both releases run at the same time. An entry that fails on a
+  network error upstream runs once more from scratch and carries the note "retried after a
+  network error". A release's version bump of `galaxy.yml` no longer makes the next attestation
+  run every entry, in the plan and in the release check alike.
+
 ## 0.7.0 — 2026-11-26
 
 - `postal`: new role that runs Postal (`postal_version`, pinned, 3.0.0 or newer, default
