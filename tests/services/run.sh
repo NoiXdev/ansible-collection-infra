@@ -1603,7 +1603,7 @@ suite_php_switch() {
   local dir="$here/php" old="$out/v0.6.0" tree="$out/v0.6.0/ansible_collections/noixdev/infra"
   local old_files='sources.list.d/ondrej-php.sources keyrings/ondrej-php.asc preferences.d/ondrej-php apt.conf.d/52noixdev-php-ppa'
   local new_files='sources.list.d/sury-php.sources keyrings/sury-php.gpg preferences.d/sury-php apt.conf.d/52noixdev-php-sury'
-  local message log rc before after prod staging pkg='' candidate versions down count journal k p v pool was installed sury now ahead=''
+  local message log rc before after prod staging pkg='' candidate arch codename sury_list sury_names candidates takes versions down count journal k p v pool was installed sury now ahead=''
   if [ "$ubuntu" != 24.04 ]; then
     echo "== php_switch: skipped on $ubuntu: the ondrej/php PPA has packages for 24.04 only"
     return 0
@@ -1653,19 +1653,45 @@ suite_php_switch() {
   [ "$(pid php_switch php-fpm@staging)" = "$staging" ] || fail "php_switch: staging restarted in --check"
 
   echo "== php_switch: a package only the PPA has keeps the host on the PPA, as found"
-  # sqlsrv is built for amd64 only, libvirt-php for arm64 too; neither is on
-  # packages.sury.org for noble. The first the PPA offers here is the one.
-  for candidate in php8.3-sqlsrv php8.3-libvirt-php; do
-    if hx php_switch apt-cache policy "$candidate" | awk '/^ *Candidate:/ { c = $2; next }
-        $NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); next }
-        v == c && $2 ~ /^https?:\/\/ppa\.launchpadcontent\.net\// { found = 1 }
-        END { exit !found }'; then
+  # Which packages only the PPA has changes upstream: packages.sury.org added
+  # php8.3-sqlsrv and php8.3-libvirt-php for noble in November 2026, which
+  # this scenario named before. So the package comes from both lists as they
+  # are now: the first php8.3-* or php-* package that packages.sury.org has no
+  # version of and whose candidate here is the PPA's, when its install takes
+  # nothing else only the PPA has (the role's message would name that too).
+  arch="$(hx php_switch dpkg --print-architecture)"
+  codename="$(hx php_switch sh -c '. /etc/os-release && echo "$VERSION_CODENAME"')"
+  sury_list="https://packages.sury.org/php/dists/$codename/main/binary-$arch/Packages.gz"
+  sury_names="$(hx php_switch python3 -c 'import gzip, sys, urllib.request
+with urllib.request.urlopen(sys.argv[1], timeout=60) as answer:
+    for line in gzip.decompress(answer.read()).decode().splitlines():
+        if line.startswith("Package: "):
+            print(line[len("Package: "):])' "$sury_list" | sort -u)" \
+    || fail "php_switch: cannot read $sury_list"
+  [ -n "$sury_names" ] || fail "php_switch: $sury_list names no package"
+  # only_ppa: of the names on stdin, in their order, those packages.sury.org
+  # has no version of and whose candidate here is the PPA's. One apt-cache
+  # call for all of them: Ubuntu has hundreds of php-* packages.
+  only_ppa() {
+    local names
+    names="$(grep -vxF -f <(printf '%s\n' "$sury_names") || true)"
+    [ -n "$names" ] || return 0
+    # shellcheck disable=SC2086 # one name per word
+    hx php_switch apt-cache policy $names | awk '/^[^ ].*:$/ { name = substr($0, 1, length($0) - 1); c = ""; v = ""; next }
+      /^ *Candidate:/ { c = $2; next }
+      $NF ~ /^-?[0-9]+$/ && NF <= 3 { v = $(NF-1); next }
+      v == c && $2 ~ /^https?:\/\/ppa\.launchpadcontent\.net\// && !(name in seen) { seen[name]; print name }'
+  }
+  candidates="$({ hx php_switch apt-cache pkgnames php8.3- | sort; hx php_switch apt-cache pkgnames php- | sort; } | only_ppa)"
+  for candidate in $candidates; do
+    takes="$(hx php_switch apt-get install -s -q "$candidate" 2>/dev/null | awk '$1 == "Inst" { print $2 }')" || continue
+    if [ -z "$(grep -vxF -e "$candidate" <<<"$takes" | only_ppa)" ]; then
       pkg="$candidate"
       break
     fi
   done
-  [ -n "$pkg" ] || fail "php_switch: the PPA offers neither php8.3-sqlsrv nor php8.3-libvirt-php on $(hx php_switch dpkg --print-architecture)"
-  echo "   the PPA-only package on $(hx php_switch dpkg --print-architecture): $pkg"
+  [ -n "$pkg" ] || fail "php_switch: the PPA has no php8.3-* or php-* package for $arch that packages.sury.org lacks"
+  echo "   the PPA-only package on $arch: $pkg"
   hx php_switch env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$pkg" >/dev/null || fail "php_switch: $pkg could not be installed"
   before="$(switch_state)"
   prod="$(pid php_switch php-fpm@production)"
