@@ -1749,6 +1749,22 @@ with urllib.request.urlopen(sys.argv[1], timeout=60) as answer:
       echo "   $p: packages.sury.org's $sury is not ahead of the installed $installed: it stays (no downgrade)"
     fi
   done
+  # Ubuntu's own pending updates first, with every PHP package held: this
+  # scenario is about packages.sury.org's. An Ubuntu update of a library
+  # unattended-upgrade-shutdown uses (libexpat1, libc6 in November 2026) makes
+  # needrestart restart unattended-upgrades.service during the run, and its
+  # stop signals the running unattended-upgrade, which then fails.
+  hx php_switch bash -c 'set -euo pipefail
+    held="$(dpkg-query -W -f "\${db:Status-Abbrev} \${Package}\n" "php*" | awk "\$1 == \"ii\" { print \$2 }")"
+    [ -n "$held" ] || exit 1
+    # shellcheck disable=SC2086 # one name per word
+    apt-mark hold $held >/dev/null
+    rc=0
+    DEBIAN_FRONTEND=noninteractive apt-get -y -q -o Dpkg::Options::=--force-confold upgrade || rc=$?
+    # shellcheck disable=SC2086
+    apt-mark unhold $held >/dev/null
+    exit "$rc"' >"$out/php_switch-ubuntu-upgrade.log" 2>&1 \
+    || { cat "$out/php_switch-ubuntu-upgrade.log" >&2; fail "php_switch: Ubuntu's pending updates could not be installed"; }
   versions="$(switch_php_versions)"
   prod="$(pid php_switch php-fpm@production)"
   staging="$(pid php_switch php-fpm@staging)"
