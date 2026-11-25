@@ -1079,12 +1079,21 @@ done
 
 echo "== Anubis: without the sync rule DAV and ActiveSync are challenged, and the checks above see it"
 play_ok anubis-no-sync "$here/anubis.yml" -e "@$here/anubis-no-sync-vars.yml"
-for path in /SOGo/dav/ /Microsoft-Server-ActiveSync /SOGo/Microsoft-Server-ActiveSync; do
+for path in /SOGo/dav/ /SOGo/Microsoft-Server-ActiveSync; do
   expect_browser "401 challenge" outside 192.0.2.10 "$path"
   if (expect_unchallenged "$path") 2>/dev/null; then
     fail "expect_unchallenged $path passed while Anubis challenges it"
   fi
 done
+# mailcow (since 2026-11a) answers /Microsoft-Server-ActiveSync without
+# Authorization itself, before any check: a 401 with WWW-Authenticate: Basic,
+# which serves nothing. Anubis decides the requests that carry a password.
+expect_browser "401 challenge" outside 192.0.2.10 /Microsoft-Server-ActiveSync \
+  --header "Authorization:Basic $(printf '%s' noix@example.test:wrong | base64)"
+if (expect_unchallenged /Microsoft-Server-ActiveSync -u noix@example.test:wrong) 2>/dev/null; then
+  fail "expect_unchallenged /Microsoft-Server-ActiveSync with a password passed while Anubis challenges it"
+fi
+expect_unchallenged /Microsoft-Server-ActiveSync
 play_ok anubis-sync-back "$here/anubis.yml"
 expect_unchallenged /SOGo/dav/
 
@@ -1166,7 +1175,11 @@ for path in / /SOGo/ /rc/; do
 done
 for path in / /SOGo/ /SOGo/dav/ /Microsoft-Server-ActiveSync /Autodiscover/Autodiscover.xml /api/v1/get/status/version \
   /.well-known/acme-challenge/noix-test /mail/config-v1.1.xml; do
-  got="$(request outside 192.0.2.10 "$path")"
+  # ActiveSync with a password: without one mailcow answers its 401 itself,
+  # before the check (see above).
+  auth=()
+  [ "$path" != /Microsoft-Server-ActiveSync ] || auth=(-u noix@example.test:wrong)
+  got="$(request outside 192.0.2.10 "$path" ${auth[@]+"${auth[@]}"})"
   down="$down curl:$path=$got"
   [ "$got" = 500 ] || fail "curl $path answered $got while Anubis is down, expected 500"
 done

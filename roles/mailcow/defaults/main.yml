@@ -145,8 +145,10 @@ mailcow_error_pages_codes: [502, 504, 413, 414, 403]
 # mailcow's own auth check for SOGo; a browser without Anubis's cookie gets
 # Anubis's challenge page (401) at the URL it asked for, and that URL, query
 # and all, once solved. Requests nginx answers before the check are never
-# checked: the 403 of the admin restriction and mailcow's own redirects
-# (/.well-known/caldav, /principals, /sogo).
+# checked: the 403 of the admin restriction, mailcow's own redirects
+# (/.well-known/caldav, /principals, /sogo) and, since mailcow 2026-11a, its
+# own 401 (WWW-Authenticate: Basic) to /Microsoft-Server-ActiveSync without
+# Authorization.
 # Fails closed: while Anubis is down every checked request answers 500, also
 # the paths the policy ALLOWs (mail clients, the API, ACME), because Anubis
 # decides them. Mail clients pass by the anubis role's policy; for mailcow:
