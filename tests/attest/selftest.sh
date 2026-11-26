@@ -1634,7 +1634,7 @@ done
 check "cache helpers: noix_cache_run_args gives the logging resolver" \
   sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_run_args)" = "$(printf "%s\n" --dns 172.17.0.7)" ]' _ "$all_up"
 check "cache helpers: noix_cache_dind_args gives dockerd the mirror and the resolver" \
-  sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_dind_args)" = "$(printf "%s\n" --registry-mirror=http://172.17.0.6:5000 --insecure-registry=172.17.0.6:5000 --dns=172.17.0.7)" ]' _ "$all_up"
+  sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_dind_args)" = "$(printf "%s\n" --registry-mirror=http://172.17.0.6:5000 --insecure-registry=172.17.0.6:5000 --insecure-registry=127.0.0.0/8 --dns=172.17.0.7)" ]' _ "$all_up"
 check "cache helpers: noix_cache_host_setup writes the apt proxy into the host" \
   sh -c 'FAKE_RUNNING="$1" cache_call noix_cache_host_setup h1 | grep -q "^#exec -i h1 .*00noixdev-test-cache.*http://172.17.0.5:3142"' _ "$all_up"
 check "cache helpers: noix_cache_host_setup keeps https direct (apt would tunnel it through the http proxy)" \
@@ -1643,9 +1643,9 @@ check "cache helpers: noix_cache_play_args points at a vars file" \
   sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_play_args)" = "$(printf "%s\n" -e "@$2/cache/vars/docker-vars.yml")" ]' _ "$all_up" "$tmp"
 check "cache helpers: the vars file sets the mirror, the insecure registry and the resolver" \
   sh -c 'f="$1/cache/vars/docker-vars.yml"; grep -q "registry-mirrors: \[\"http://172.17.0.6:5000\"\]" "$f" &&
-    grep -q "insecure-registries: \[\"172.17.0.6:5000\"\]" "$f" && grep -q "dns: \[\"172.17.0.7\"\]" "$f"' _ "$tmp"
+    grep -q "insecure-registries: \[\"172.17.0.6:5000\", \"127.0.0.0/8\"\]" "$f" && grep -q "dns: \[\"172.17.0.7\"\]" "$f"' _ "$tmp"
 check "cache helpers: noix_cache_array collects a helper's lines into an array" \
-  sh -c '[ "$(FAKE_RUNNING="$1" cache_call bash -c ". \"\$0/tests/lib/suite.sh\"; noix_cache_array a noix_cache_dind_args; echo \${#a[@]} \${a[2]}" "$2")" = "3 --dns=172.17.0.7" ]' _ "$all_up" "$src"
+  sh -c '[ "$(FAKE_RUNNING="$1" cache_call bash -c ". \"\$0/tests/lib/suite.sh\"; noix_cache_array a noix_cache_dind_args; echo \${#a[@]} \${a[3]}" "$2")" = "4 --dns=172.17.0.7" ]' _ "$all_up" "$src"
 unset helper all_up
 
 # --- coverage knobs ----------------------------------------------------------------------
