@@ -62,6 +62,14 @@ class Upstream(unittest.TestCase):
         self.no_match("W: Failed to fetch http://repo.example.test/dists/noble/InRelease  503  Host not found"
                       " [IP: 172.17.0.4 3142]")
 
+    def test_apt_cacher_ng_remote_or_cache_error(self):
+        """The cache's 500 for an upstream that fails it (archive.ubuntu.com
+        and security.ubuntu.com for 35 minutes on 2026-11-26)."""
+        self.match("E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/p/perl/perl-base_5.40.1-7ubuntu0.4"
+                   "_arm64.deb  500  Remote or cache error [IP: 172.17.0.4 3142]")
+        self.no_match("E: Failed to fetch http://repo.example.test/pool/x.deb  500  Remote or cache error"
+                      " [IP: 172.17.0.4 3142]")
+
     def test_apt_hash_sum_mismatch(self):
         self.match("E: Failed to fetch https://repo.mysql.com/apt/ubuntu/dists/noble/x.gz  "
                    "Hash Sum mismatch")
