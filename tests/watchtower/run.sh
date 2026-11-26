@@ -119,25 +119,36 @@ registry_up() {
 }
 login() { hx sh -c 'printf "%s" "$3" | docker login -u "$2" --password-stdin "$1"' sh "$registry" "$user" "$1" >/dev/null; }
 # push_image NAME VERSION: a tiny image NAME:stable whose label noix.version
-# is VERSION, pushed to the registry.
+# is VERSION, pushed to the registry. It is built here, as noix-build/NAME:
+# VERSION; after the push the registry's tag goes back to the version it named
+# before (if any), whose build tag goes: as on a server, the new version is in
+# the registry only, and the running container's image keeps its one tag
+# until Watchtower pulls.
 push_image() {
-  hxi docker build -q -t "$registry/$1:stable" - >/dev/null <<EOF
+  local before
+  before="$(hx docker image inspect -f '{{index .Config.Labels "noix.version"}}' "$registry/$1:stable" 2>/dev/null || true)"
+  hxi docker build -q -t "noix-build/$1:$2" - >/dev/null <<EOF
 FROM busybox:1.37
 LABEL noix.version=$2
 CMD ["sleep", "infinity"]
 EOF
+  hx docker tag "noix-build/$1:$2" "$registry/$1:stable"
   hx docker push -q "$registry/$1:stable" >/dev/null
+  if [ -n "$before" ]; then
+    hx docker tag "noix-build/$1:$before" "$registry/$1:stable"
+    hx docker rmi -f "noix-build/$1:$before" >/dev/null
+  fi
 }
 version_of() { hx docker inspect -f '{{index .Config.Labels "noix.version"}}' "$1"; }
 image_of() { hx docker inspect -f '{{.Image}}' "$1"; }
 wt_ip() { hx docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$wt"; }
-# trigger: one update run through the HTTP API (it answers when the run is
-# over).
+# trigger: one update run through the HTTP API, a POST (it answers when the
+# run is over).
 trigger() {
   local ip
   ip="$(wt_ip)"
   for _ in $(seq 30); do
-    hx curl -fsS -m 300 -H "Authorization: Bearer $token" "http://$ip:8080/v1/update" >/dev/null 2>&1 && return 0
+    hx curl -fsS -m 300 -X POST -H "Authorization: Bearer $token" "http://$ip:8080/v1/update" >/dev/null 2>&1 && return 0
     sleep 1
   done
   fail "Watchtower's HTTP API does not answer on $ip:8080"
@@ -213,12 +224,12 @@ test_settings() {
   converge zone-set -e watchtower_timezone=Europe/Berlin
   wt_env | grep -qx 'TZ=Europe/Berlin' || fail "TZ is not Europe/Berlin: $(wt_env | grep '^TZ=' || true)"
   for _ in $(seq 30); do
-    hx docker logs "$wt" 2>&1 | grep -Eq 'Scheduling first run: .* \+0[12]00 CES?T' && break
+    hx docker logs "$wt" 2>&1 | grep -Eq 'Next scheduled run: [0-9-]+ [0-9:]+ CES?T ' && break
     sleep 1
   done
-  hx docker logs "$wt" 2>&1 | grep -Eq 'Scheduling first run: .* \+0[12]00 CES?T' \
+  hx docker logs "$wt" 2>&1 | grep -Eq 'Next scheduled run: [0-9-]+ [0-9:]+ CES?T ' \
     || { hx docker logs "$wt" >&2; fail "Watchtower does not schedule in Berlin's time"; }
-  echo "   $(hx docker logs "$wt" 2>&1 | grep -o 'Scheduling first run: .*' | head -1)"
+  echo "   $(hx docker logs "$wt" 2>&1 | grep -o 'Next scheduled run: [^"]*' | head -1)"
 
   hx ln -sf /usr/share/zoneinfo/America/New_York /etc/localtime
   converge zone-host
