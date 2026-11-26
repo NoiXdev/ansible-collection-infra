@@ -1,0 +1,6 @@
+1795678000|I|500|172.17.0.5|archive.ubuntu.com/ubuntu/dists/noble/InRelease
+1795678000|O|500|172.17.0.5|archive.ubuntu.com/ubuntu/dists/noble/InRelease
+1795679578|I|3000|172.17.0.5|ports.ubuntu.com/ubuntu-ports/pool/main/c/curl/curl_8.5.0_arm64.deb
+1795679578|O|3000|172.17.0.5|ports.ubuntu.com/ubuntu-ports/pool/main/c/curl/curl_8.5.0_arm64.deb
+1795679600|O|3000|172.17.0.6|ports.ubuntu.com/ubuntu-ports/pool/main/c/curl/curl_8.5.0_arm64.deb
+1795679601|O|1000|172.17.0.6|ports.ubuntu.com/ubuntu-ports/pool/main/t/tzdata/tzdata_2026a_all.deb

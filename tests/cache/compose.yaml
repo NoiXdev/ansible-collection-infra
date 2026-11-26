@@ -1,0 +1,46 @@
+# The tests' caching stack (tests/cache.sh up): apt over http, Docker Hub
+# pulls and a logging resolver, on Docker's default bridge where the test
+# hosts run. Nothing is published on the Mac; the helpers in tests/lib/suite.sh
+# read the containers' addresses.
+name: noixdev-infra-test-cache
+services:
+  apt:
+    build: apt
+    image: noixdev-infra-test-apt
+    container_name: noix-test-apt
+    network_mode: bridge
+    restart: unless-stopped
+    volumes:
+      - noix-test-apt:/var/cache/apt-cacher-ng
+      - noix-test-apt-log:/var/log/apt-cacher-ng
+  hub:
+    image: registry:3.0.0
+    container_name: noix-test-hub
+    network_mode: bridge
+    restart: unless-stopped
+    environment:
+      REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
+      OTEL_TRACES_EXPORTER: none
+    # Docker Hub credentials, if the owner put them there (never in the repo).
+    env_file:
+      - path: ${HOME}/.config/noixdev-infra/test-cache-hub.env
+        required: false
+    volumes:
+      - noix-test-hub:/var/lib/registry
+  dns:
+    build: dns
+    image: noixdev-infra-test-dns
+    container_name: noix-test-dns
+    network_mode: bridge
+    restart: unless-stopped
+    volumes:
+      - noix-test-dns:/var/log/noix-dns
+volumes:
+  noix-test-apt:
+    name: noix-test-apt
+  noix-test-apt-log:
+    name: noix-test-apt-log
+  noix-test-hub:
+    name: noix-test-hub
+  noix-test-dns:
+    name: noix-test-dns

@@ -1,0 +1,8 @@
+Nov 26 07:40:00 dnsmasq[1]: query[A] old.example.com from 172.17.0.5
+Nov 26 07:52:58 dnsmasq[1]: query[A] download.docker.com from 172.17.0.5
+Nov 26 07:52:58 dnsmasq[1]: forwarded download.docker.com to 192.168.65.7
+Nov 26 07:52:58 dnsmasq[1]: reply download.docker.com is 3.165.102.10
+Nov 26 07:52:58 dnsmasq[1]: query[AAAA] download.docker.com from 172.17.0.5
+Nov 26 07:52:59 dnsmasq[1]: query[A] ghcr.io from 172.17.0.6
+Nov 26 07:53:00 dnsmasq[1]: query[A] download.docker.com from 172.17.0.6
+Nov 26 07:53:01 dnsmasq[1]: query[A] Download.Docker.com. from 172.17.0.6

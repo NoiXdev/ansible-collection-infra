@@ -1,0 +1,8 @@
+172.17.0.5 - - [26/Nov/2026:07:40:00 +0000] "GET /v2/library/old/manifests/1 HTTP/1.1" 200 100 "" "docker/29"
+time="2026-11-26T07:52:59.62Z" level=info msg="Adding new scheduler entry for library/busybox@sha256:a7db with ttl=167h59m59s" service=registry version=3.0.0
+172.17.0.5 - - [26/Nov/2026:07:52:59 +0000] "GET /v2/library/busybox/manifests/1.37 HTTP/1.1" 200 9535 "" "docker/29"
+172.17.0.5 - - [26/Nov/2026:07:53:00 +0000] "GET /v2/library/busybox/blobs/sha256:abcd HTTP/1.1" 200 2048 "" "docker/29"
+172.17.0.6 - - [26/Nov/2026:07:53:05 +0000] "GET /v2/library/busybox/manifests/1.37 HTTP/1.1" 200 9535 "" "docker/29"
+time="2026-11-26T07:53:06Z" level=error msg="response completed with error" err.code=toomanyrequests err.message="You have reached your unauthenticated pull rate limit" http.response.status=429 service=registry
+172.17.0.6 - - [26/Nov/2026:07:53:06 +0000] "GET /v2/library/postgres/manifests/16 HTTP/1.1" 429 120 "" "docker/29"
+172.17.0.6 - - [26/Nov/2026:07:53:07 +0000] "GET /v2/library/redis/manifests/7 HTTP/1.1" 503 80 "" "docker/29"
