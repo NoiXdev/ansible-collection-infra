@@ -30,7 +30,12 @@ separated segment is matched on its own). Per changed file: [ignore] touches
 no suite, [shared] every suite, a suite pattern that suite (a file may touch
 several), and a file no pattern matches every suite. The attestation's own
 files (ALWAYS_ALL) touch every suite whatever the map says. galaxy.yml changed
-in its version: line only is no change (version_only).
+in its version: line only is no change (version_only). A change of the map or
+of tests/all.sh touches only the suites whose own lines changed (map_changes):
+a section of the map, or a name, <suite>_releases line or item of
+release_vars, long_first and ram_gb in tests/all.sh. Comments never count; a
+change of [ignore] or [shared], a removed or reordered suite, or any other
+line of tests/all.sh touches every suite.
 
 The entries are those of tests/all.sh: each suite of all_suites, and a suite
 with a <suite>_releases=(...) line once per release as <suite>-<release>.
@@ -351,6 +356,130 @@ def version_only(repo: str, a: str, b: str, path: str = VERSIONED_PATH) -> bool:
             return False
         sides.append((hits[0], lines[:hits[0]] + lines[hits[0] + 1:]))
     return sides[0] == sides[1]
+
+
+# --- a change of the map or the suite list ----------------------------------
+
+MAP_FILES = (MAP_PATH, "tests/all.sh")
+# The declaration lines of tests/all.sh that the scheduler reads, besides one
+# <suite>_releases=(...) line per split suite.
+DECLARATIONS = ("all_suites", "release_vars", "long_first", "ram_gb")
+DECLARATION_RE = re.compile(r"([a-z0-9_]+)=\(([^)]*)\)[ \t]*")
+
+
+def suites_conf_changes(old_text: str, new_text: str):
+    """The suites a change of tests/suites.conf touches, or "ALL": the
+    sections whose patterns (as sets) differ, new sections included; "ALL"
+    when [ignore] or [shared] differ, a section is gone, or a side does not
+    parse. Comments, blank lines and the order of patterns never count."""
+    try:
+        old, new = parse_map(old_text), parse_map(new_text)
+    except ValueError:
+        return "ALL"
+    if set(old["ignore"]) != set(new["ignore"]) or set(old["shared"]) != set(new["shared"]):
+        return "ALL"
+    if set(old["suites"]) - set(new["suites"]):
+        return "ALL"
+    return {name for name, patterns in new["suites"].items()
+            if name not in old["suites"] or set(patterns) != set(old["suites"][name])}
+
+
+def _is_declaration(name: str) -> bool:
+    return name in DECLARATIONS or name.endswith("_releases")
+
+
+def _allsh_lines(text: str, keep_comments: bool):
+    """(sequence, declarations): the lines of all.sh with every declaration
+    line replaced by a token, and the declarations' items by name. None when
+    a declaration occurs twice."""
+    seq, decls = [], {}
+    for line in text.splitlines():
+        if not keep_comments and line.lstrip().startswith("#"):
+            continue
+        m = DECLARATION_RE.fullmatch(line)
+        if m and _is_declaration(m.group(1)):
+            if m.group(1) in decls:
+                return None
+            decls[m.group(1)] = m.group(2).split()
+            seq.append("\0decl:" + m.group(1))
+        else:
+            seq.append(line)
+    return seq, decls
+
+
+HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)")  # "<<" or "<<-", not a here-string's "<<<"
+
+
+def _has_heredoc(text: str) -> bool:
+    return any(HEREDOC_RE.search(line) for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def allsh_changes(old_text: str, new_text: str):
+    """The suites a change of tests/all.sh touches, or "ALL". Comment lines
+    never count while the file has no here-document. Every other line must
+    stay as it was, in place, except the declaration lines: all_suites may
+    only gain names at its end (the new suites), a new suite may get a
+    <suite>_releases line, and a changed <suite>_releases line or a changed,
+    added or removed item of release_vars, long_first or ram_gb names its
+    suite. A reordered list, a removed suite or an item of a name in neither
+    all_suites: "ALL"."""
+    keep = _has_heredoc(old_text) or _has_heredoc(new_text)
+    old_p, new_p = _allsh_lines(old_text, keep), _allsh_lines(new_text, keep)
+    if old_p is None or new_p is None:
+        return "ALL"
+    (old_seq, old_d), (new_seq, new_d) = old_p, new_p
+    old_suites, new_suites = old_d.get("all_suites"), new_d.get("all_suites")
+    if old_suites is None or new_suites is None or new_suites[:len(old_suites)] != old_suites:
+        return "ALL"
+    added = set(new_suites[len(old_suites):])
+    if len(set(new_suites)) != len(new_suites):
+        return "ALL"
+    new_only = {"\0decl:" + s + "_releases" for s in added}
+    if old_seq != [line for line in new_seq if line not in new_only]:
+        return "ALL"
+    known = set(new_suites)
+    hit = set(added)
+    for name in set(old_d) | set(new_d):
+        if name == "all_suites":
+            continue
+        if name.endswith("_releases"):
+            suite = name[:-len("_releases")]
+            if suite not in known:
+                return "ALL"
+            if old_d.get(name) != new_d.get(name):
+                hit.add(suite)
+            continue
+        # Items are keyed by their suite (release_vars, ram_gb: "suite:value").
+        old_by = {item.split(":", 1)[0]: item for item in old_d.get(name, [])}
+        new_by = {item.split(":", 1)[0]: item for item in new_d.get(name, [])}
+        if len(old_by) != len(old_d.get(name, [])) or len(new_by) != len(new_d.get(name, [])):
+            return "ALL"  # a suite twice in one list
+        if not set(old_by) | set(new_by) <= known:
+            return "ALL"
+        common = set(old_by) & set(new_by)
+        if [k for k in old_by if k in common] != [k for k in new_by if k in common]:
+            return "ALL"  # the suites both sides list changed their order
+        hit |= {k for k in set(old_by) | set(new_by) if old_by.get(k) != new_by.get(k)}
+    return hit
+
+
+def map_changes(repo: str, a: str, b: str):
+    """The suites a change of tests/suites.conf and tests/all.sh between a
+    and b touches: set() when neither changed, "ALL" when either is missing
+    at a or b or a change is not one of a suite's own lines."""
+    hit = set()
+    for path, compare in ((MAP_PATH, suites_conf_changes), ("tests/all.sh", allsh_changes)):
+        try:
+            old, new = _show(repo, a, path), _show(repo, b, path)
+        except GitError:
+            return "ALL"
+        if old == new:
+            continue
+        got = compare(old, new)
+        if got == "ALL":
+            return "ALL"
+        hit |= got
+    return hit
 
 
 def relevant_changes(repo: str, a: str, b: str) -> tuple:

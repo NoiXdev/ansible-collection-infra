@@ -560,5 +560,149 @@ class Constants(unittest.TestCase):
                          (30, 2, 86400, "noixdev-infra-tests"))
 
 
+MC_ALLSH = """\
+#!/usr/bin/env bash
+# Entries:
+#   e2e          tests/run.sh
+#   tandoor      tests/tandoor/run.sh
+set -euo pipefail
+all_suites=(e2e tandoor n8n)
+tandoor_releases=(24.04 26.04)
+release_vars=()
+long_first=(tandoor n8n)
+ram_gb=(tandoor:2)
+for s in "${all_suites[@]}"; do
+  echo "$s"
+done
+"""
+
+
+class MapChanges(unittest.TestCase):
+    """map_changes: which suites a change of tests/suites.conf or tests/all.sh touches."""
+
+    def sc(self, new):
+        return ac.suites_conf_changes(MAP, new)
+
+    def sh(self, new, old=MC_ALLSH):
+        return ac.allsh_changes(old, new)
+
+    def test_new_section_is_that_suite(self):
+        self.assertEqual(self.sc(MAP + "\n[suite watchtower]\ntests/watchtower/\n"), {"watchtower"})
+
+    def test_pattern_added_is_that_suite(self):
+        new = MAP.replace("tests/tandoor/\n", "tests/tandoor/\nroles/tandoor/extra/\n")
+        self.assertEqual(self.sc(new), {"tandoor"})
+
+    def test_pattern_moved_between_sections(self):
+        new = MAP.replace("tests/tandoor/\n", "").replace("roles/n8n/\n", "roles/n8n/\ntests/tandoor/\n")
+        self.assertEqual(self.sc(new), {"tandoor", "n8n"})
+
+    def test_reorder_and_comments_are_nothing(self):
+        new = MAP.replace("tests/tandoor/\nroles/tandoor/\n", "roles/tandoor/\ntests/tandoor/\n")
+        new = new.replace("# A comment line.", "# Another comment.\n")
+        self.assertNotEqual(new, MAP)
+        self.assertEqual(self.sc(new), set())
+
+    def test_ignore_or_shared_changed_is_all(self):
+        self.assertEqual(self.sc(MAP.replace("[ignore]\n", "[ignore]\nroles/\n")), "ALL")
+        self.assertEqual(self.sc(MAP.replace("[shared]\n", "[shared]\ngalaxy.yml\n")), "ALL")
+
+    def test_section_removed_is_all(self):
+        self.assertEqual(self.sc(MAP.replace("[suite n8n]\nroles/n8n/\n", "")), "ALL")
+
+    def test_unparseable_is_all(self):
+        self.assertEqual(self.sc("roles/x/\n" + MAP), "ALL")
+        self.assertEqual(ac.suites_conf_changes("roles/x/\n" + MAP, MAP), "ALL")
+
+    def test_new_suite_in_allsh(self):
+        new = MC_ALLSH.replace("all_suites=(e2e tandoor n8n)", "all_suites=(e2e tandoor n8n watchtower)")
+        new = new.replace("#   tandoor      tests/tandoor/run.sh\n",
+                          "#   tandoor      tests/tandoor/run.sh\n#   watchtower   tests/watchtower/run.sh\n")
+        new = new.replace("tandoor_releases=(24.04 26.04)\n", "tandoor_releases=(24.04 26.04)\nwatchtower_releases=(24.04)\n")
+        self.assertEqual(self.sh(new), {"watchtower"})
+
+    def test_existing_releases_changed(self):
+        self.assertEqual(self.sh(MC_ALLSH.replace("tandoor_releases=(24.04 26.04)", "tandoor_releases=(24.04)")),
+                         {"tandoor"})
+
+    def test_existing_setting_changed(self):
+        self.assertEqual(self.sh(MC_ALLSH.replace("ram_gb=(tandoor:2)", "ram_gb=(tandoor:3)")), {"tandoor"})
+        self.assertEqual(self.sh(MC_ALLSH.replace("long_first=(tandoor n8n)", "long_first=(tandoor n8n e2e)")),
+                         {"e2e"})
+        self.assertEqual(self.sh(MC_ALLSH.replace("release_vars=()", "release_vars=(tandoor:UBUNTU)")),
+                         {"tandoor"})
+
+    def test_setting_reordered_is_all(self):
+        self.assertEqual(self.sh(MC_ALLSH.replace("long_first=(tandoor n8n)", "long_first=(n8n tandoor)")), "ALL")
+
+    def test_suite_removed_or_reordered_is_all(self):
+        self.assertEqual(self.sh(MC_ALLSH.replace("all_suites=(e2e tandoor n8n)", "all_suites=(e2e tandoor)")), "ALL")
+        self.assertEqual(self.sh(MC_ALLSH.replace("all_suites=(e2e tandoor n8n)", "all_suites=(e2e n8n tandoor)")), "ALL")
+
+    def test_releases_for_unknown_suite_is_all(self):
+        self.assertEqual(self.sh(MC_ALLSH.replace("release_vars=()\n", "release_vars=()\nnope_releases=(24.04)\n")), "ALL")
+        self.assertEqual(self.sh(MC_ALLSH.replace("ram_gb=(tandoor:2)", "ram_gb=(tandoor:2 nope:1)")), "ALL")
+
+    def test_other_line_is_all(self):
+        self.assertEqual(self.sh(MC_ALLSH.replace('  echo "$s"', '  echo "$s" >&2')), "ALL")
+        self.assertEqual(self.sh(MC_ALLSH.replace('  echo "$s"', '   echo "$s"')), "ALL")
+
+    def test_declaration_moved(self):
+        new = MC_ALLSH.replace("all_suites=(e2e tandoor n8n)\n", "").replace("done\n", "done\nall_suites=(e2e tandoor n8n)\n")
+        self.assertEqual(self.sh(new), "ALL")
+
+    def test_declaration_twice_is_all(self):
+        self.assertEqual(self.sh(MC_ALLSH + "ram_gb=(tandoor:2)\n"), "ALL")
+        self.assertEqual(self.sh(MC_ALLSH.replace("ram_gb=(tandoor:2)", "ram_gb=(tandoor:2 tandoor:3)")), "ALL")
+
+    def test_heredoc_makes_comments_count(self):
+        with_heredoc = MC_ALLSH + "cat <<EOF\nx\nEOF\n"
+        changed = with_heredoc.replace("# Entries:", "# The entries:")
+        self.assertEqual(self.sh(changed, with_heredoc), "ALL")
+        self.assertEqual(self.sh(MC_ALLSH.replace("# Entries:", "# The entries:")), set())
+
+    def test_here_string_is_no_heredoc(self):
+        with_here_string = MC_ALLSH + 'read -r a b <<<"$x"\n'
+        changed = with_here_string.replace("# Entries:", "# The entries:")
+        self.assertEqual(self.sh(changed, with_here_string), set())
+
+    def test_unchanged_is_nothing(self):
+        self.assertEqual(self.sc(MAP), set())
+        self.assertEqual(self.sh(MC_ALLSH), set())
+
+    def git(self, *args):
+        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
+                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+        return subprocess.run(["git", "-C", self.repo] + list(args), check=True, env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True).stdout.strip()
+
+    def write(self, path, text):
+        full = os.path.join(self.repo, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as f:
+            f.write(text)
+
+    def test_map_changes_reads_commits(self):
+        with tempfile.TemporaryDirectory() as self.repo:
+            self.git("init", "-q")
+            self.write("tests/suites.conf", MAP)
+            self.write("tests/all.sh", MC_ALLSH)
+            self.git("add", "-A")
+            self.git("commit", "-q", "-m", "one")
+            a = self.git("rev-parse", "HEAD")
+            self.write("tests/suites.conf", MAP + "\n[suite watchtower]\ntests/watchtower/\n")
+            self.write("tests/all.sh", MC_ALLSH.replace("all_suites=(e2e tandoor n8n)",
+                                                        "all_suites=(e2e tandoor n8n watchtower)"))
+            self.git("commit", "-q", "-am", "two")
+            b = self.git("rev-parse", "HEAD")
+            self.assertEqual(ac.map_changes(self.repo, a, b), {"watchtower"})
+            self.assertEqual(ac.map_changes(self.repo, a, a), set())
+            self.git("rm", "-q", "tests/all.sh")
+            self.git("commit", "-q", "-m", "three")
+            self.assertEqual(ac.map_changes(self.repo, a, self.git("rev-parse", "HEAD")), "ALL")
+
+
 if __name__ == "__main__":
     unittest.main()
