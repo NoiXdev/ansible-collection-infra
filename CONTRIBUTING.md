@@ -96,6 +96,23 @@ A suite sources `tests/lib/suite.sh`, links the collection with `noix_link_colle
 Without `noix_done`, macOS bash 3.2 would exit 0 on a `set -u` error under the EXIT trap, and a
 broken run would look green.
 
+`tests/all.sh` (and so `tests/attest.sh`) first starts the tests' caching stack,
+`tests/cache.sh up`: apt-cacher-ng for apt over http, a registry proxy for Docker Hub and a
+resolver that logs every query, on Docker's default bridge next to the test hosts, with their
+caches in Docker volumes that outlive the run. The helpers `noix_cache_*` of `tests/lib/suite.sh`
+point each test host at it: `--dns` to the logging resolver, the apt proxy in
+`/etc/apt/apt.conf.d/00noixdev-test-cache`, and a Docker Hub mirror for the host's Docker daemon
+(the arguments of a `docker:<v>-dind` host, or `docker_daemon_extra` for a suite whose host runs
+the docker role; never for `host` and `cloudpanel`, which check the role's `daemon.json`). A new
+suite uses them at its `docker run` and its plays the same way. https sources and registries other
+than Docker Hub go direct. After the run, `tests/all.sh` writes the check mode's report to
+`tests/output/cache-report-<time>.txt`: the names that went past the caches, and the caches' hits.
+It is a lower bound (a resolver a role brings itself, such as the dns role's, is not seen).
+`tests/cache.sh status`, `report [SINCE]` and `down` (the volumes stay) work by hand too, and
+`NOIXDEV_INFRA_TEST_CACHE=0` runs everything without the stack. Docker Hub credentials, if you
+want the proxy to pull as a user, go in `~/.config/noixdev-infra/test-cache-hub.env`
+(`REGISTRY_PROXY_USERNAME`, `REGISTRY_PROXY_PASSWORD`, mode 0600), never in the repository.
+
 CI (GitHub Actions) runs `ansible-lint`, `shellcheck` and the self-test of the attestation
 (`tests/attest/selftest.sh`, no Docker) only.
 

@@ -101,7 +101,8 @@ h() { docker exec "$host" "$@"; }
 play() {
   local log="$1" book="$2"
   shift 2
-  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$here/$book" "$@" >"$out/$log.log" 2>&1
+  local noix_cache_play=() && noix_cache_array noix_cache_play noix_cache_play_args
+  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" ${noix_cache_play[@]+"${noix_cache_play[@]}"} "$here/$book" "$@" >"$out/$log.log" 2>&1
 }
 # run_ok <log> <playbook> [-e ...]: the playbook must succeed.
 run_ok() {
@@ -135,9 +136,11 @@ start_host() {
   # The anonymous volumes give Docker inside (the nginx scenario's error
   # pages, the WAF) a file system it can mount overlays on; "docker rm -v"
   # removes them with the host.
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /run --tmpfs /run/lock -v /var/lib/docker -v /var/lib/containerd \
-    --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
+    --name "$host" ${noix_cache_run[@]+"${noix_cache_run[@]}"} "noixdev-infra-host:$ubuntu" >/dev/null
+  noix_cache_host_setup "$host"
   until (h systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
   # The image's policy-rc.d (exit 101) keeps package scripts from starting
   # services; servers have none.

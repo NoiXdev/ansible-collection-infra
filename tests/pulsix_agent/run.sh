@@ -331,9 +331,11 @@ start_host() {
   docker build -q --build-arg "UBUNTU=$ubuntu" -t "noixdev-infra-host:$ubuntu" "$tests/host" >/dev/null
   docker rm -f "$host" >/dev/null 2>&1 || true
   # IPv6 on loopback: the manager stub listens on [::1] too.
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-    --tmpfs /run --tmpfs /run/lock --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
+    --tmpfs /run --tmpfs /run/lock --name "$host" ${noix_cache_run[@]+"${noix_cache_run[@]}"} "noixdev-infra-host:$ubuntu" >/dev/null
+  noix_cache_host_setup "$host"
   local state=""
   until [[ $state == *running* || $state == *degraded* ]]; do
     sleep 1

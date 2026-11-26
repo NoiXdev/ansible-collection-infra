@@ -223,7 +223,8 @@ expect_no_secrets() {
 # whether the run failed or not.
 play() {
   local rc=0
-  ansible-playbook -v -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" "$@" >"$out/converge.log" 2>&1 || rc=$?
+  local noix_cache_play=() && noix_cache_array noix_cache_play noix_cache_play_args
+  ansible-playbook -v -i "$here/inventory.yml" -e "test_host=$host" ${noix_cache_play[@]+"${noix_cache_play[@]}"} "$here/converge.yml" "$@" >"$out/converge.log" 2>&1 || rc=$?
   expect_no_secrets "$out/converge.log" "the converge output"
   return "$rc"
 }
@@ -544,9 +545,11 @@ start_host() {
   docker rm -f -v "$host" >/dev/null 2>&1 || true
   # The anonymous volumes give the inner Docker a file system it can mount
   # overlays on; "docker rm -v" removes them with the host.
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /run --tmpfs /run/lock -v /var/lib/docker -v /var/lib/containerd \
-    --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
+    --name "$host" ${noix_cache_run[@]+"${noix_cache_run[@]}"} "noixdev-infra-host:$ubuntu" >/dev/null
+  noix_cache_host_setup "$host"
   until (h systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
   # The image's policy-rc.d (exit 101) keeps package scripts from starting
   # services; servers have none.
@@ -1370,9 +1373,11 @@ start_sender() {
   local ubuntu="$1"
   sender="noixdev-graylog-sender-$ubuntu"
   docker rm -f -v "$sender" >/dev/null 2>&1 || true
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /run --tmpfs /run/lock -v /var/lib/docker -v /var/lib/containerd \
-    --name "$sender" "noixdev-infra-host:$ubuntu" >/dev/null
+    --name "$sender" ${noix_cache_run[@]+"${noix_cache_run[@]}"} "noixdev-infra-host:$ubuntu" >/dev/null
+  noix_cache_host_setup "$sender"
   until (s systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
   s rm -f /usr/sbin/policy-rc.d
   s sh -c "echo '$host_ip graylog.test syslog.test' >>/etc/hosts"
@@ -1381,7 +1386,8 @@ start_sender() {
 # The sender's playbook at -v: sender_play [-e ...]; its output goes to
 # converge.log.
 sender_play() {
-  ansible-playbook -v -i "$here/sender.yml" -e "sender_host=$sender" "$here/forward.yml" "$@" >"$out/converge.log" 2>&1
+  local noix_cache_play=() && noix_cache_array noix_cache_play noix_cache_play_args
+  ansible-playbook -v -i "$here/sender.yml" -e "sender_host=$sender" ${noix_cache_play[@]+"${noix_cache_play[@]}"} "$here/forward.yml" "$@" >"$out/converge.log" 2>&1
 }
 sender_converge() {
   sender_play "$@" || { cat "$out/converge.log" >&2; fail "the sender's converge failed"; }

@@ -83,7 +83,10 @@ hx() { docker exec "$host" "$@"; }
 hxi() { docker exec -i "$host" "$@"; }
 # Extra variables of every play (stub-vars.yml for the stub).
 extra_vars=()
-play() { ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" ${extra_vars[@]+"${extra_vars[@]}"} "$@"; }
+play() {
+  local noix_cache_play=() && noix_cache_array noix_cache_play noix_cache_play_args
+  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" ${noix_cache_play[@]+"${noix_cache_play[@]}"} ${extra_vars[@]+"${extra_vars[@]}"} "$@"
+}
 # A converge that must fail; its output goes to $out/<name>.log.
 play_fails() {
   local name="$1"
@@ -142,11 +145,13 @@ start_host() {
   # share its device with the one of /var/lib/docker). IPv6 on, for mailcow's
   # network and the test clients (add_clients), also where the outer Docker
   # turns it off in containers.
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv6.conf.default.disable_ipv6=0 \
     --tmpfs /run --tmpfs /run/lock --hostname mail.example.test --name "$host" \
     "${docker_volume[@]}" --tmpfs "$backups:rw,size=1g,mode=0755" \
-    noixdev-infra-host:24.04 >/dev/null
+    ${noix_cache_run[@]+"${noix_cache_run[@]}"} noixdev-infra-host:24.04 >/dev/null
+  noix_cache_host_setup "$host"
   until (hx systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
   # The image's policy-rc.d (exit 101) keeps package scripts from starting
   # services; servers have none.

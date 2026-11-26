@@ -41,14 +41,18 @@ start_host() {
   shift 2
   docker build -q --build-arg "UBUNTU=$release" -t "noixdev-infra-host:$release" "$tests/host" >/dev/null
   docker rm -f -v "$name" >/dev/null 2>&1 || true
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-    --tmpfs /run --tmpfs /run/lock --name "$name" "$@" "noixdev-infra-host:$release" >/dev/null
+    --tmpfs /run --tmpfs /run/lock --name "$name" "$@" ${noix_cache_run[@]+"${noix_cache_run[@]}"} "noixdev-infra-host:$release" >/dev/null
+  noix_cache_host_setup "$name"
   wait_running "$name"
 }
 wait_running() {
   until (docker exec "$1" systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
 }
 
+# No noix_cache_play_args here: the verify checks the docker role's
+# daemon.json, which must stay exactly what the role writes.
 play() { ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$@"; }
 hx() { docker exec "$host" "$@"; }
 # A converge that must fail; its output goes to $out/<name>.log.

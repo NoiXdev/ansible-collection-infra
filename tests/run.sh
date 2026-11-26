@@ -19,7 +19,9 @@ export ANSIBLE_COLLECTIONS_PATH="$out:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible
 export ANSIBLE_HOST_KEY_CHECKING=False
 
 docker rm -f "$host" >/dev/null 2>&1 || true
-docker run -d --privileged --name "$host" docker:29-dind >/dev/null
+noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
+noix_cache_dind=() && noix_cache_array noix_cache_dind noix_cache_dind_args
+docker run -d --privileged --name "$host" ${noix_cache_run[@]+"${noix_cache_run[@]}"} docker:29-dind ${noix_cache_dind[@]+"${noix_cache_dind[@]}"} >/dev/null
 until docker exec "$host" docker info >/dev/null 2>&1; do sleep 1; done
 docker exec "$host" apk add --no-cache python3 bind-tools curl >/dev/null
 # A second local address: queries to it come from outside dns_allow.

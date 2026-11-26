@@ -190,7 +190,9 @@ converge() {
 # A fresh Docker-in-Docker host.
 new_host() {
   docker rm -f -v "$host" >/dev/null 2>&1 || true
-  docker run -d --privileged --name "$host" docker:29-dind >/dev/null
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
+  noix_cache_dind=() && noix_cache_array noix_cache_dind noix_cache_dind_args
+  docker run -d --privileged --name "$host" ${noix_cache_run[@]+"${noix_cache_run[@]}"} docker:29-dind ${noix_cache_dind[@]+"${noix_cache_dind[@]}"} >/dev/null
   until hx docker info >/dev/null 2>&1; do sleep 1; done
   # Retried: the host's first DNS lookups fail now and then.
   for _ in 1 2 3; do hx apk add --no-cache python3 curl samba-client >/dev/null && return 0; sleep 3; done

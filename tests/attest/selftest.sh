@@ -31,6 +31,8 @@ read -r -a knobs <<<"$(sed -nE 's/^coverage_knobs=\(([^)]*)\)$/\1/p' "$src/tests
   echo "selftest: no coverage_knobs=(...) line in tests/attest.sh" >&2
   exit 1
 }
+# The stub suites need no caching stack (and no Docker).
+export NOIXDEV_INFRA_TEST_CACHE=0
 unset SSH_AUTH_SOCK TESTS_SIGNING_KEY TESTS_SIGNER ATTEST_RUNNER ATTEST_JOBS ALL_POLL STUB_FAIL STUB_FAIL_ONCE STUB_FG_SLEEP STUB_NOTE STUB_NET_LINE STUB_NET_ONLY STUB_HOOK STUB_SLEEP STUB_SLOW STUB_STATE STUB_TRACE "${knobs[@]}"
 
 failures=0

@@ -21,8 +21,10 @@ export ANSIBLE_HOST_KEY_CHECKING=False
 
 docker rm -f -v "$host" >/dev/null 2>&1 || true
 # Traefik serves Harbor on plain HTTP at harbor.test (127.0.0.1:80 inside).
+noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
+noix_cache_dind=() && noix_cache_array noix_cache_dind noix_cache_dind_args
 docker run -d --privileged --name "$host" --add-host harbor.test:127.0.0.1 \
-  docker:29-dind --insecure-registry harbor.test >/dev/null
+  ${noix_cache_run[@]+"${noix_cache_run[@]}"} docker:29-dind ${noix_cache_dind[@]+"${noix_cache_dind[@]}"} --insecure-registry harbor.test >/dev/null
 until docker exec "$host" docker info >/dev/null 2>&1; do sleep 1; done
 # GNU tar for the unarchive module, bash for the installer's prepare script.
 docker exec "$host" apk add --no-cache python3 tar bash >/dev/null

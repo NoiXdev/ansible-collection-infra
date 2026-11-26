@@ -229,6 +229,19 @@ if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$classifier" ]; then
   echo "tests/all.sh: warning: no python3 or no $classifier, so a network error upstream is not retried" >&2
 fi
 
+# The tests' caching stack (tests/cache.sh): apt over http, Docker Hub pulls
+# and a logging resolver for the test hosts, unless NOIXDEV_INFRA_TEST_CACHE=0.
+# It stays up after the run; its report of what went past it is written below.
+cache_since=
+if [ "${NOIXDEV_INFRA_TEST_CACHE:-1}" != 0 ]; then
+  echo "==== test cache"
+  "$here/cache.sh" up || {
+    echo "tests/all.sh: the test cache does not start (NOIXDEV_INFRA_TEST_CACHE=0 runs without it)" >&2
+    exit 2
+  }
+  cache_since="$(date +%s)"
+fi
+
 # Per entry i, in entry order: label, script, variables, suite, and while it
 # runs or after: state (pending, running, finished), pid, start, seconds, tries,
 # result (passed, failed (exit N), not run) and notes.
@@ -448,6 +461,19 @@ if [ -n "$summary" ]; then
     echo "tests/all.sh: cannot write the summary to $summary" >&2
     exit 2
   }
+fi
+# The check mode's report of this run, kept under tests/output (tests/attest.sh
+# removes its own work directory, where the summary goes).
+if [ -n "$cache_since" ]; then
+  mkdir -p "$here/output"
+  cache_report="$here/output/cache-report-$(date -u +%Y%m%dT%H%M%SZ).txt"
+  if "$here/cache.sh" report "$cache_since" >"$cache_report" 2>&1; then
+    echo
+    echo "==== test cache: $cache_report"
+    head -n 15 "$cache_report"
+  else
+    echo "tests/all.sh: warning: no test cache report: $(tail -n 1 "$cache_report")" >&2
+  fi
 fi
 # 0 only when every entry passed, whatever path led here.
 for ((i = 0; i < n; i++)); do [ "${e_result[i]}" = passed ] || failed=1; done

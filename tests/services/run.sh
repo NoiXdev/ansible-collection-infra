@@ -50,8 +50,10 @@ start() {
     platform=(--platform linux/amd64)
     docker build -q "${platform[@]}" --build-arg "UBUNTU=$ubuntu" -t "$image" "$tests/host" >/dev/null
   fi
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-    --tmpfs /run --tmpfs /run/lock ${platform[@]+"${platform[@]}"} "$@" --name "$name" "$image" >/dev/null
+    --tmpfs /run --tmpfs /run/lock ${platform[@]+"${platform[@]}"} "$@" --name "$name" ${noix_cache_run[@]+"${noix_cache_run[@]}"} "$image" >/dev/null
+  noix_cache_host_setup "$name"
   started+=("$name")
   local tries=0
   until (docker exec "$name" systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do
@@ -88,6 +90,7 @@ hx() { local role="$1"; shift; docker exec "$prefix-$role" "$@"; }
 
 # play ROLE PLAYBOOK [ansible-playbook args]: run a playbook against the
 # role's container.
+# No noix_cache_play_args here: no test host runs the docker role.
 play() {
   local role="$1"; shift
   ansible-playbook -i "$tests/inventory.yml" -e "test_host=$prefix-$role" "$@"

@@ -29,8 +29,10 @@ export ANSIBLE_COLLECTIONS_PATH="$tests/output:${ANSIBLE_COLLECTIONS_PATH:-$HOME
 
 docker build -q --build-arg "UBUNTU=$ubuntu" -t "noixdev-infra-host:$ubuntu" "$here" >/dev/null
 docker rm -f "$host" >/dev/null 2>&1 || true
+noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
 docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-  --tmpfs /run --tmpfs /run/lock --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
+  --tmpfs /run --tmpfs /run/lock --name "$host" ${noix_cache_run[@]+"${noix_cache_run[@]}"} "noixdev-infra-host:$ubuntu" >/dev/null
+noix_cache_host_setup "$host"
 until (docker exec "$host" systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
 
 # loop_dev NAME: attach a fresh 512 MiB sparse image file (mkfs.xfs needs
@@ -48,6 +50,8 @@ loop_dev ext4; dev_ext4="$dev"
 loop_dev xfs; dev_xfs="$dev"
 loop_dev spare; dev_spare="$dev"
 
+# No noix_cache_play_args here: this suite tests the docker role's own
+# daemon.json, which must stay exactly what the role writes.
 play() {
   ansible-playbook -i "$tests/inventory.yml" -e "test_host=$host" \
     -e "test_mount_dev_ext4=$dev_ext4" -e "test_mount_dev_xfs=$dev_xfs" "$@"

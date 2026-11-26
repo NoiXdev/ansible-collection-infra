@@ -86,7 +86,8 @@ hi() { docker exec -i "$host" "$@"; }
 
 # play [-e ...]: the test host's playbook; its output goes to converge.log.
 play() {
-  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" "$@" >"$out/converge.log" 2>&1
+  local noix_cache_play=() && noix_cache_array noix_cache_play noix_cache_play_args
+  ansible-playbook -i "$here/inventory.yml" -e "test_host=$host" ${noix_cache_play[@]+"${noix_cache_play[@]}"} "$here/converge.yml" "$@" >"$out/converge.log" 2>&1
 }
 # converge [-e ...]: play, which must succeed.
 converge() {
@@ -322,9 +323,11 @@ start_host() {
   docker rm -f -v "$host" >/dev/null 2>&1 || true
   # The anonymous volumes give the inner Docker a file system it can mount
   # overlays on; "docker rm -v" removes them with the host.
+  noix_cache_run=() && noix_cache_array noix_cache_run noix_cache_run_args
   docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     --tmpfs /run --tmpfs /run/lock -v /var/lib/docker -v /var/lib/containerd \
-    --name "$host" "noixdev-infra-host:$ubuntu" >/dev/null
+    --name "$host" ${noix_cache_run[@]+"${noix_cache_run[@]}"} "noixdev-infra-host:$ubuntu" >/dev/null
+  noix_cache_host_setup "$host"
   until (h systemctl is-system-running 2>/dev/null || true) | grep -Eq "running|degraded"; do sleep 1; done
   # The image's policy-rc.d (exit 101) keeps package scripts from starting
   # services; servers have none.
