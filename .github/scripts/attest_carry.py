@@ -367,11 +367,20 @@ DECLARATIONS = ("all_suites", "release_vars", "long_first", "ram_gb")
 DECLARATION_RE = re.compile(r"([a-z0-9_]+)=\(([^)]*)\)[ \t]*")
 
 
+# Characters a line split or strip() treats as whitespace or a line end but
+# bash does not (or the other way round): carriage return, vertical tab, form
+# feed, the Unicode line and paragraph separators, NBSP and the like. A change
+# of a file that holds one anywhere is never judged line by line.
+ODD_WHITESPACE_RE = re.compile(r"[\r\x0b\x0c\x1c-\x1f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]")
+
+
 def suites_conf_changes(old_text: str, new_text: str):
     """The suites a change of tests/suites.conf touches, or "ALL": the
     sections whose patterns (as sets) differ, new sections included; "ALL"
     when [ignore] or [shared] differ, a section is gone, or a side does not
     parse. Comments, blank lines and the order of patterns never count."""
+    if ODD_WHITESPACE_RE.search(old_text) or ODD_WHITESPACE_RE.search(new_text):
+        return "ALL"
     try:
         old, new = parse_map(old_text), parse_map(new_text)
     except ValueError:
@@ -393,8 +402,8 @@ def _allsh_lines(text: str, keep_comments: bool):
     line replaced by a token, and the declarations' items by name. None when
     a declaration occurs twice."""
     seq, decls = [], {}
-    for line in text.splitlines():
-        if not keep_comments and line.lstrip().startswith("#"):
+    for line in text.split("\n"):
+        if not keep_comments and line.lstrip(" \t").startswith("#"):
             continue
         m = DECLARATION_RE.fullmatch(line)
         if m and _is_declaration(m.group(1)):
@@ -411,7 +420,7 @@ HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)")  # "<<" or "<<-", not a here-string's 
 
 
 def _has_heredoc(text: str) -> bool:
-    return any(HEREDOC_RE.search(line) for line in text.splitlines() if not line.lstrip().startswith("#"))
+    return any(HEREDOC_RE.search(line) for line in text.split("\n") if not line.lstrip(" \t").startswith("#"))
 
 
 def allsh_changes(old_text: str, new_text: str):
@@ -423,6 +432,8 @@ def allsh_changes(old_text: str, new_text: str):
     added or removed item of release_vars, long_first or ram_gb names its
     suite. A reordered list, a removed suite or an item of a name in neither
     all_suites: "ALL"."""
+    if ODD_WHITESPACE_RE.search(old_text) or ODD_WHITESPACE_RE.search(new_text):
+        return "ALL"
     keep = _has_heredoc(old_text) or _has_heredoc(new_text)
     old_p, new_p = _allsh_lines(old_text, keep), _allsh_lines(new_text, keep)
     if old_p is None or new_p is None:
@@ -469,13 +480,15 @@ def map_changes(repo: str, a: str, b: str):
     at a or b or a change is not one of a suite's own lines."""
     hit = set()
     for path, compare in ((MAP_PATH, suites_conf_changes), ("tests/all.sh", allsh_changes)):
-        try:
-            old, new = _show(repo, a, path), _show(repo, b, path)
-        except GitError:
+        old_b, new_b = _blob(repo, a, path), _blob(repo, b, path)
+        if old_b is None or new_b is None:
             return "ALL"
-        if old == new:
+        if old_b == new_b:
             continue
-        got = compare(old, new)
+        try:
+            got = compare(old_b.decode("utf-8"), new_b.decode("utf-8"))
+        except UnicodeDecodeError:
+            return "ALL"
         if got == "ALL":
             return "ALL"
         hit |= got

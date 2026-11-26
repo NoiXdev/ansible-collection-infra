@@ -666,6 +666,14 @@ class MapChanges(unittest.TestCase):
         changed = with_here_string.replace("# Entries:", "# The entries:")
         self.assertEqual(self.sh(changed, with_here_string), set())
 
+    def test_odd_whitespace_is_all(self):
+        """Review I1: a carriage return, form feed or NBSP means something else
+        to bash than to a line split; any such change reruns everything."""
+        self.assertEqual(self.sh(MC_ALLSH.replace("done\n", "done\r\n")), "ALL")
+        self.assertEqual(self.sh(MC_ALLSH + "\xa0# x\n"), "ALL")
+        self.assertEqual(self.sh(MC_ALLSH + "\x0c# x\n"), "ALL")
+        self.assertEqual(self.sc(MAP.replace("roles/n8n/\n", "roles/n8n/\r\n")), "ALL")
+
     def test_unchanged_is_nothing(self):
         self.assertEqual(self.sc(MAP), set())
         self.assertEqual(self.sh(MC_ALLSH), set())
@@ -699,6 +707,11 @@ class MapChanges(unittest.TestCase):
             b = self.git("rev-parse", "HEAD")
             self.assertEqual(ac.map_changes(self.repo, a, b), {"watchtower"})
             self.assertEqual(ac.map_changes(self.repo, a, a), set())
+            # Review I1: git's own bytes count, not a newline-translated text.
+            self.write("tests/all.sh", MC_ALLSH.replace("all_suites=(e2e tandoor n8n)",
+                                                        "all_suites=(e2e tandoor n8n watchtower)").replace("done\n", "done\r\n"))
+            self.git("commit", "-q", "-am", "crlf")
+            self.assertEqual(ac.map_changes(self.repo, b, self.git("rev-parse", "HEAD")), "ALL")
             self.git("rm", "-q", "tests/all.sh")
             self.git("commit", "-q", "-m", "three")
             self.assertEqual(ac.map_changes(self.repo, a, self.git("rev-parse", "HEAD")), "ALL")
