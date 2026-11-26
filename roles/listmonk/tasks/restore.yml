@@ -77,7 +77,7 @@
           \getenv password LISTMONK_DB_PASSWORD
           ALTER USER "{{ listmonk_db_user }}" PASSWORD :'password';
       environment:
-        LISTMONK_DB_PASSWORD: "{{ listmonk_db_password_old }}"
+        LISTMONK_DB_PASSWORD: "{{ listmonk_db_password_old | default('listmonk', true) }}"
       changed_when: true
       when: listmonk_db_password_is_old | default(false)
 

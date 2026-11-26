@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `listmonk`: `listmonk_db_password_old` defaults to empty, which means the old role's password
+  `listmonk` as before. With ansible-core 2.22 the default's value, a secret option's, was masked
+  in every line of the run's output, so each mention of listmonk read `$REDACTED$`.
 - `watchtower`: new role that runs Watchtower (`watchtower_image`, default
   `nickfedor/watchtower`, the maintained fork of the archived `containrrr/watchtower`;
   `watchtower_version`, pinned `X.Y.Z`, default `1.23.2`) as one compose project in

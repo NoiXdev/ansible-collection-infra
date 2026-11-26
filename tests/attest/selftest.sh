@@ -1662,6 +1662,32 @@ check "cache helpers: every play of a cache-wired suite that runs the docker rol
   sh -c '[ -z "$1" ] || { echo "without noix_cache_play:$1"; exit 1; }' _ "$cache_unwired"
 unset cache_unwired f hit
 
+# --- secrets without defaults (roles/*/meta/argument_specs.yml) -----------------------------
+# ansible-core 2.22 masks the value of every no_log option wherever it shows,
+# so a no_log option whose default is a word (listmonk's old
+# listmonk_db_password_old: listmonk) turns that word into $REDACTED$ in
+# every log line, the role's and the host's names included.
+nolog_defaults="$(python3 -I - "$src" <<'PY'
+import glob, os, re, sys
+src = sys.argv[1]
+for spec in sorted(glob.glob(os.path.join(src, "roles/*/meta/argument_specs.yml"))):
+    role = spec.split(os.sep)[-3]
+    text = open(spec).read()
+    blocks = re.findall(r"^      ([a-z0-9_]+):\n((?:        .*\n|[ \t]*\n)*)", text, re.M)
+    defaults = os.path.join(src, "roles", role, "defaults", "main.yml")
+    dtext = open(defaults).read() if os.path.exists(defaults) else ""
+    for name, body in blocks:
+        if not re.search(r"^        no_log: true$", body, re.M):
+            continue
+        m = re.search(r"^" + name + r": *(.*?) *$", dtext, re.M)
+        if m and m.group(1) not in ("", '""', "''", "{}", "[]"):
+            print(f"{role}:{name}={m.group(1)}")
+PY
+)"
+check "secrets: no no_log option of a role has a non-empty default (ansible-core 2.22 masks it everywhere)" \
+  sh -c '[ -z "$1" ] || { echo "no_log options with a default:" $1; exit 1; }' _ "$nolog_defaults"
+unset nolog_defaults
+
 # --- coverage knobs ----------------------------------------------------------------------
 # Every variable with a default that a suite or its helpers read (any shell
 # script under tests/ but the runners and this selftest) either narrows or

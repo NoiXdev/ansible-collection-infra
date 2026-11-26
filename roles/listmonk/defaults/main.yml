@@ -20,9 +20,10 @@ listmonk_db_user: listmonk
 listmonk_db_name: listmonk
 # listmonk_db_password is required and has no default; keep it in a vault.
 # The password an existing installation's database uses, if it is not
-# listmonk_db_password yet (the old role used listmonk); the role then sets
-# listmonk_db_password.
-listmonk_db_password_old: listmonk
+# listmonk_db_password yet; the role then sets listmonk_db_password. Empty:
+# the old role's password, listmonk. (Empty rather than that word: a no_log
+# value is masked wherever it shows, and listmonk is in every log line.)
+listmonk_db_password_old: ""
 
 # The first admin, created on a fresh install only (required there).
 listmonk_admin_user: ""

@@ -242,7 +242,7 @@
       ansible.builtin.command:
         argv: *listmonk_psql_check
       environment:
-        PGPASSWORD: "{{ listmonk_db_password_old }}"
+        PGPASSWORD: "{{ listmonk_db_password_old | default('listmonk', true) }}"
       register: listmonk_password_old
       changed_when: false
       failed_when: >-

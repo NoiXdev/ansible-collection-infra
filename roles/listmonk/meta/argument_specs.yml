@@ -44,7 +44,8 @@ argument_specs:
         no_log: true
         description: >-
           The password an existing installation's database uses when it is not
-          listmonk_db_password yet (the old role used listmonk).
+          listmonk_db_password yet. Empty uses the old role's password,
+          listmonk.
       listmonk_admin_user:
         type: str
         description: Name of the first admin; required for a fresh install, unused otherwise.
