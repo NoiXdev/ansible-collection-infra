@@ -140,14 +140,15 @@ noix_cache_dind_args() {
 }
 
 # noix_cache_host_setup CONTAINER: a systemd test host's apt fetches over http
-# go through the apt cache (https stays direct); right after the host booted,
-# before any play. Nothing for a host without apt.
+# go through the apt cache; https stays direct (apt would otherwise tunnel it
+# through the http proxy with CONNECT). Right after the host starts, before
+# any play. Nothing for a host without apt.
 noix_cache_host_setup() {
   noix_cache_on || return 0
   local apt
   apt="$(noix_cache_addr noix-test-apt)"
   [ -n "$apt" ] || return 0
-  printf 'Acquire::http::Proxy "http://%s:3142";\n' "$apt" |
+  printf 'Acquire::http::Proxy "http://%s:3142";\nAcquire::https::Proxy "DIRECT";\n' "$apt" |
     docker exec -i "$1" sh -c '[ -d /etc/apt/apt.conf.d ] || exit 0; cat >/etc/apt/apt.conf.d/00noixdev-test-cache'
 }
 

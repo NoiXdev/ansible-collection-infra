@@ -1609,10 +1609,12 @@ esac
 FAKE
 chmod +x "$tmp/cachebin/docker"
 # cache_call HELPER [ARGS]: the helper's output with the fake docker, one line
-# per argument, then "#exec <args>" per logged docker exec.
+# per argument, then "#exec <args>" per logged docker exec; the cache is on
+# unless CACHE_SWITCH=0 (the selftest itself runs with it off).
 cache_call() {
   : >"$tmp/cache/exec.log"
   env PATH="$tmp/cachebin:$PATH" FAKE_LOG="$tmp/cache/exec.log" NOIX_CACHE_VARS_DIR="$tmp/cache/vars" \
+    NOIXDEV_INFRA_TEST_CACHE="${CACHE_SWITCH:-1}" \
     bash -c '. "$1/tests/lib/suite.sh"; shift
 case "$1" in noix_*) declare -F "$1" >/dev/null || { echo "no helper $1"; exit 1; } ;; esac
 "$@"' _ "$src" "$@"
@@ -1624,7 +1626,7 @@ export tmp src
 for helper in noix_cache_run_args noix_cache_dind_args noix_cache_play_args "noix_cache_host_setup h1"; do
   # shellcheck disable=SC2086 # the helper and its argument
   check "cache helpers: $helper gives nothing with NOIXDEV_INFRA_TEST_CACHE=0" \
-    sh -c '[ -z "$(FAKE_RUNNING="$1" NOIXDEV_INFRA_TEST_CACHE=0 "$2" $3)" ]' _ "$all_up" cache_call "$helper"
+    sh -c '[ -z "$(FAKE_RUNNING="$1" CACHE_SWITCH=0 "$2" $3)" ]' _ "$all_up" cache_call "$helper"
   # shellcheck disable=SC2086
   check "cache helpers: $helper gives nothing while noix-test-hub is down" \
     sh -c '[ -z "$(FAKE_RUNNING="noix-test-apt noix-test-dns" "$1" $2)" ]' _ cache_call "$helper"
@@ -1635,6 +1637,8 @@ check "cache helpers: noix_cache_dind_args gives dockerd the mirror and the reso
   sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_dind_args)" = "$(printf "%s\n" --registry-mirror=http://172.17.0.6:5000 --insecure-registry=172.17.0.6:5000 --dns=172.17.0.7)" ]' _ "$all_up"
 check "cache helpers: noix_cache_host_setup writes the apt proxy into the host" \
   sh -c 'FAKE_RUNNING="$1" cache_call noix_cache_host_setup h1 | grep -q "^#exec -i h1 .*00noixdev-test-cache.*http://172.17.0.5:3142"' _ "$all_up"
+check "cache helpers: noix_cache_host_setup keeps https direct (apt would tunnel it through the http proxy)" \
+  sh -c 'FAKE_RUNNING="$1" cache_call noix_cache_host_setup h1 | grep -q "Acquire::https::Proxy \"DIRECT\";"' _ "$all_up"
 check "cache helpers: noix_cache_play_args points at a vars file" \
   sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_play_args)" = "$(printf "%s\n" -e "@$2/cache/vars/docker-vars.yml")" ]' _ "$all_up" "$tmp"
 check "cache helpers: the vars file sets the mirror, the insecure registry and the resolver" \
