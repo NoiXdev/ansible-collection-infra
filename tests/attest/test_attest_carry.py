@@ -446,7 +446,7 @@ class VersionOnly(unittest.TestCase):
         with tempfile.TemporaryDirectory() as self.repo:
             a, b = self.commits(before, after)
             self.assertIs(ac.version_only(self.repo, a, b), expected)
-            changed, dropped = ac.relevant_changes(self.repo, a, b)
+            changed, dropped, _ = ac.relevant_changes(self.repo, a, b)
             self.assertIs(dropped, expected)
             self.assertEqual("galaxy.yml" in changed, not expected)
 
@@ -499,7 +499,7 @@ class VersionOnly(unittest.TestCase):
     def test_unchanged_galaxy(self):
         with tempfile.TemporaryDirectory() as self.repo:
             a, b = self.commits(self.GALAXY.encode(), self.GALAXY.encode())
-            self.assertEqual(ac.relevant_changes(self.repo, a, b), ([], False))
+            self.assertEqual(ac.relevant_changes(self.repo, a, b), ([], False, None))
             self.assertIs(ac.version_only(self.repo, a, b), True)
 
     def test_cli(self):

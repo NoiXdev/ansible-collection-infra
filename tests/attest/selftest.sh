@@ -1139,6 +1139,62 @@ t="$(head_sha)"
 gate_carry "$t" "$v0"
 expect "15. gate: a second version: line is no version-only change" 1 \
   "but galaxy.yml changed since then (a shared path)" -- "$VS" "$t"
+
+# A change of the map or of tests/all.sh reruns only the suites whose own
+# lines changed (map_changes); anything else in them still reruns every entry.
+# allsh_edit PYTHON: runs PYTHON on the text s of tests/all.sh, commits it.
+allsh_edit() {
+  python3 -I -c 'import sys
+s = open(sys.argv[1]).read()
+exec(sys.argv[2])
+open(sys.argv[1], "w").write(s)' "$repo/tests/all.sh" "$1"
+  g add -A && g commit -q -m "test: edit tests/all.sh"
+}
+g checkout -q -b g-newsuite "$g1"
+mkdir -p "$repo/roles/watchtower" && echo x >"$repo/roles/watchtower/main.yml"
+python3 -I -c 'import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r"^(all_suites=\(.*)\)$", r"\1 watchtower)", s, count=1, flags=re.M)
+s = s.replace("\n#   e2e ", "\n#   watchtower   tests/watchtower/run.sh\n#   e2e ", 1)
+open(p, "w").write(s)' "$repo/tests/all.sh"
+map_edit 'l += ["[suite watchtower]", "roles/watchtower/"]'
+t="$(head_sha)"
+gate_plan
+check "15. gate: a new suite runs only itself" plan_count run 1
+check "15. gate: the new suite has no run to carry" plan_is watchtower run "no signed run of watchtower"
+check "15. gate: the others carry across the map change, which the reason names" \
+  plan_is e2e carry "tests/suites.conf or tests/all.sh changed for other suites only" "$g1"
+printf 'watchtower pass 2\n' >"$tmp/gate-watchtower"
+gate_note "$t" 0.1 "$tmp/plan.json" "$tmp/gate-watchtower"
+expect "15. gate: the release check accepts carries across a new suite" 0 \
+  "Tests attestation OK for ${t:0:7}" -- "$VS" "$t"
+
+g checkout -q -b g-section "$g1"
+map_edit 'l.insert(l.index("[suite harbor]") + 1, "roles/harbor-extra/")'
+t="$(head_sha)"
+gate_plan
+check "15. gate: a changed section runs its suite only" plan_count run 1
+check "15. gate: the changed section's suite runs, naming the map" \
+  plan_is harbor run "harbor's lines in tests/suites.conf or tests/all.sh changed since ${g1:0:7}"
+gate_carry "$t" "$g1"
+expect "15. gate: the release check refuses a carry across a change of the suite's own section" 1 \
+  "harbor is carried from ${g1:0:7}, but its lines in tests/suites.conf or tests/all.sh changed since then" -- "$VS" "$t"
+
+g checkout -q -b g-mapcomment "$g1"
+map_edit 'l.insert(0, "# A new comment.")'
+gate_plan
+check "15. gate: a comment in the map reruns nothing" plan_count run 0
+
+g checkout -q -b g-allsh "$g1"
+allsh_edit 's += "true\n"'
+t="$(head_sha)"
+gate_plan
+check "15. gate: another line of tests/all.sh runs every entry" \
+  plan_is "*" run "tests/all.sh changed since ${g1:0:7} (a shared path)"
+gate_carry "$t" "$g1"
+expect "15. gate: the release check refuses a carry across another line of tests/all.sh" 1 \
+  "e2e is carried from ${g1:0:7}, but tests/all.sh changed since then (a shared path)" -- "$VS" "$t"
 repo="$selftest_repo"
 unset selftest_repo gb0 g1 t1 t s1 o x k r d f m1 tagobj entry_count v0
 

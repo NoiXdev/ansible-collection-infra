@@ -137,7 +137,13 @@ fixtures it reads). A changed file is matched in this order: ignore, shared, sui
 match means all suites. An ignore pattern matches segment by segment, and `check-map` accepts
 only narrow ignore patterns. `tests/suites.conf`, `tests/all.sh`, `tests/attest.sh`,
 `tests/attest/`, `tests/lib/` and `.github/scripts/` always mean all suites, whatever the map
-says. A new suite or role needs a map entry; check it with:
+says, with one exception for the first two. A change of `tests/suites.conf` reruns only the
+suites whose sections changed, unless `[ignore]` or `[shared]` changed or a section is gone. A
+change of `tests/all.sh` that only adds suites at the end of `all_suites` or changes suites'
+`<suite>_releases`, `release_vars`, `long_first` or `ram_gb` items reruns only those suites;
+comments never count (unless the file has a here-document), and any other change of it reruns
+every entry. So adding a suite runs only the new suite. A new suite or role needs a map entry;
+check it with:
 
 ```bash
 python3 -I .github/scripts/attest_carry.py check-map --repo . --commit HEAD

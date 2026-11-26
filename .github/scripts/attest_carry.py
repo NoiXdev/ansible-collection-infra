@@ -483,12 +483,21 @@ def map_changes(repo: str, a: str, b: str):
 
 
 def relevant_changes(repo: str, a: str, b: str) -> tuple:
-    """(changed files, dropped): changed_files without galaxy.yml when it
-    changed in its version: line only (dropped is then True)."""
+    """(changed files, bumped, mapped): changed_files without galaxy.yml when
+    it changed in its version: line only (bumped is then True), and without
+    tests/suites.conf and tests/all.sh when map_changes gives a set of suites
+    (mapped is then that set; else None, and a changed one of them stays a
+    shared path)."""
     changed = changed_files(repo, a, b)
+    bumped = False
     if VERSIONED_PATH in changed and version_only(repo, a, b):
-        return [p for p in changed if p != VERSIONED_PATH], True
-    return changed, False
+        changed, bumped = [p for p in changed if p != VERSIONED_PATH], True
+    mapped = None
+    if any(p in changed for p in MAP_FILES):
+        hit = map_changes(repo, a, b)
+        if hit != "ALL":
+            changed, mapped = [p for p in changed if p not in MAP_FILES], hit
+    return changed, bumped, mapped
 
 
 # --- notes ------------------------------------------------------------------
@@ -663,13 +672,15 @@ def _decide(repo, m, head, label, suite, candidates, at_head, now, cache) -> dic
         return dict(run, reason=f"the run at {c[:7]} is {days} days old (a run is carried for up to {limit} days)")
     if ("changed", c) not in cache:
         cache[("changed", c)] = relevant_changes(repo, c, head)
-    changed, bumped = cache[("changed", c)]
+    changed, bumped, mapped = cache[("changed", c)]
     kinds = [(path,) + classify(m, path) for path in changed]
     for path, kind, _ in kinds:
         if kind == "shared":
             return dict(run, reason=f"{path} changed since {c[:7]} (a shared path)")
         if kind == "unmatched":
             return dict(run, reason=f"{path} changed since {c[:7]} (in no section of {MAP_PATH})")
+    if mapped is not None and suite in mapped:
+        return dict(run, reason=f"{suite}'s lines in {MAP_FILES[0]} or {MAP_FILES[1]} changed since {c[:7]}")
     for path, _, suites in kinds:
         if suite in suites:
             return dict(run, reason=f"{path} changed since {c[:7]}")
@@ -678,7 +689,8 @@ def _decide(repo, m, head, label, suite, candidates, at_head, now, cache) -> dic
     if entry.get("notes"):
         carry["notes"] = entry["notes"]
     carry["reason"] = f"no file of {suite} changed since {c[:7]}" + (
-        f"; {VERSIONED_PATH} changed in its version: line only" if bumped else "")
+        f"; {VERSIONED_PATH} changed in its version: line only" if bumped else "") + (
+        f"; {MAP_FILES[0]} or {MAP_FILES[1]} changed for other suites only" if mapped is not None else "")
     return carry
 
 
@@ -818,7 +830,10 @@ def _carry_error(repo, notes_ref, m, tested, label, suite, c, signers_path, tmp,
         return f"{label} is carried from {c7}, but {label} ran again at {x[:7]} ({e['result']}), after {c7}"
     if ("changed", c) not in cache:
         cache[("changed", c)] = relevant_changes(repo, c, tested)
-    changed, _ = cache[("changed", c)]
+    changed, _, mapped = cache[("changed", c)]
+    if mapped is not None and suite in mapped:
+        return (f"{label} is carried from {c7}, but its lines in {MAP_FILES[0]} or {MAP_FILES[1]} "
+                "changed since then")
     hit = affected_suites(m, changed)
     if hit == "ALL":
         for path in changed:
