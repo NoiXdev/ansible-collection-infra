@@ -11,7 +11,9 @@ Prints the first matching line (stripped, at most 300 characters) and exits
 0; exits 1 when no line matches, 2 when LOG cannot be read.
 
 A line matches when it has a transient phrase (an HTTP 5xx with its reason,
-a registry's unexpected 5xx status, "Temporary failure resolving", "Could not
+the tests' apt cache's 5xx for an upstream it cannot reach ("503  Host not
+found", "Connection timeout"), a registry's unexpected 5xx status,
+"Temporary failure resolving", "Could not
 resolve host", "TLS handshake timeout", "i/o timeout", "connection reset by
 peer", "Connection timed out", "Hash Sum mismatch") AND names an upstream host
 in the same line: in a URL, or as apt's or curl's host that did not resolve.
@@ -31,6 +33,8 @@ LOCAL_SUFFIXES = (".test", ".invalid", ".local", ".localhost", ".internal", ".ex
 
 PHRASE_RE = re.compile(
     r"\b5\d\d\s+(?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)\b"
+    # apt-cacher-ng's status for an upstream it cannot reach (the tests' apt cache)
+    r"|\b5\d\d\s+(?:Host not found|DNS error\b|Connection (?:timeout|timed out|refused|closed|failure))"
     r"|unexpected status from (?:HEAD|GET) request to \S+: 5\d\d\b"
     r"|received unexpected HTTP status: 5\d\d\b"
     r"|Temporary failure resolving|Could not resolve host|TLS handshake timeout|i/o timeout"

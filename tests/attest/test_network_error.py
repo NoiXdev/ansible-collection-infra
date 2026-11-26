@@ -51,6 +51,17 @@ class Upstream(unittest.TestCase):
         self.match("W: Failed to fetch http://ppa.launchpadcontent.net/x/InRelease  "
                    "Temporary failure resolving 'ppa.launchpadcontent.net'")
 
+    def test_apt_cacher_ng_upstream_errors(self):
+        """Through the tests' apt cache, an upstream failure is the cache's
+        status line (captured 2026-11-26 with a host that does not exist)."""
+        self.match("W: Failed to fetch http://no-such-host-4711.ubuntu.com/ubuntu/dists/noble/InRelease"
+                   "  503  Host not found [IP: 172.17.0.4 3142]")
+        self.match('"msg": "Failed to update apt cache: W:Failed to fetch http://ports.ubuntu.com/ubuntu-ports/'
+                   'dists/noble/InRelease  503  Connection timeout [IP: 172.17.0.4 3142]"')
+        self.match("Err:2 http://archive.ubuntu.com/ubuntu noble InRelease 503  Connection refused [IP: 172.17.0.4 3142]")
+        self.no_match("W: Failed to fetch http://repo.example.test/dists/noble/InRelease  503  Host not found"
+                      " [IP: 172.17.0.4 3142]")
+
     def test_apt_hash_sum_mismatch(self):
         self.match("E: Failed to fetch https://repo.mysql.com/apt/ubuntu/dists/noble/x.gz  "
                    "Hash Sum mismatch")
