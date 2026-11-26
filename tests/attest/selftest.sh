@@ -1151,22 +1151,22 @@ open(sys.argv[1], "w").write(s)' "$repo/tests/all.sh" "$1"
   g add -A && g commit -q -m "test: edit tests/all.sh"
 }
 g checkout -q -b g-newsuite "$g1"
-mkdir -p "$repo/roles/watchtower" && echo x >"$repo/roles/watchtower/main.yml"
+mkdir -p "$repo/roles/noixnew" && echo x >"$repo/roles/noixnew/main.yml"
 python3 -I -c 'import re, sys
 p = sys.argv[1]
 s = open(p).read()
-s = re.sub(r"^(all_suites=\(.*)\)$", r"\1 watchtower)", s, count=1, flags=re.M)
-s = s.replace("\n#   e2e ", "\n#   watchtower   tests/watchtower/run.sh\n#   e2e ", 1)
+s = re.sub(r"^(all_suites=\(.*)\)$", r"\1 noixnew)", s, count=1, flags=re.M)
+s = s.replace("\n#   e2e ", "\n#   noixnew   tests/noixnew/run.sh\n#   e2e ", 1)
 open(p, "w").write(s)' "$repo/tests/all.sh"
-map_edit 'l += ["[suite watchtower]", "roles/watchtower/"]'
+map_edit 'l += ["[suite noixnew]", "roles/noixnew/"]'
 t="$(head_sha)"
 gate_plan
 check "15. gate: a new suite runs only itself" plan_count run 1
-check "15. gate: the new suite has no run to carry" plan_is watchtower run "no signed run of watchtower"
+check "15. gate: the new suite has no run to carry" plan_is noixnew run "no signed run of noixnew"
 check "15. gate: the others carry across the map change, which the reason names" \
   plan_is e2e carry "tests/suites.conf or tests/all.sh changed for other suites only" "$g1"
-printf 'watchtower pass 2\n' >"$tmp/gate-watchtower"
-gate_note "$t" 0.1 "$tmp/plan.json" "$tmp/gate-watchtower"
+printf 'noixnew pass 2\n' >"$tmp/gate-noixnew"
+gate_note "$t" 0.1 "$tmp/plan.json" "$tmp/gate-noixnew"
 expect "15. gate: the release check accepts carries across a new suite" 0 \
   "Tests attestation OK for ${t:0:7}" -- "$VS" "$t"
 
@@ -1593,7 +1593,7 @@ harmless=(ANSIBLE_COLLECTIONS_PATH CLOUDPANEL_STUB_PORT FAIL_POSTINST MAILCOW_BA
   NOIXDEV_INFRA_ANUBIS_TEST_HOST NOIXDEV_INFRA_CLOUDPANEL_TEST_HOST NOIXDEV_INFRA_HARBOR_TEST_HOST
   NOIXDEV_INFRA_LISTMONK_TEST_HOST NOIXDEV_INFRA_MAILCOW_TEST_HOST NOIXDEV_INFRA_N8N_TEST_HOST
   NOIXDEV_INFRA_PAPERLESS_TEST_HOST NOIXDEV_INFRA_TANDOOR_TEST_HOST NOIXDEV_INFRA_N8N_TEST_OUT
-  NOIXDEV_INFRA_PAPERLESS_TEST_OUT NOIXDEV_INFRA_TANDOOR_TEST_OUT)
+  NOIXDEV_INFRA_PAPERLESS_TEST_OUT NOIXDEV_INFRA_TANDOOR_TEST_OUT NOIXDEV_INFRA_WATCHTOWER_TEST_HOST)
 unguarded=
 while read -r v; do
   case " ${knobs[*]} " in *" $v "*) continue ;; esac
