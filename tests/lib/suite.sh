@@ -136,10 +136,11 @@ noix_cache_dind_args() {
   hub="$(noix_cache_addr noix-test-hub)"
   dns="$(noix_cache_addr noix-test-dns)"
   [ -n "$hub" ] && [ -n "$dns" ] || return 0
-  # A set insecure registry list replaces Docker's default one, 127.0.0.0/8,
-  # which suites with a registry on localhost rely on: it is named again.
+  # A set insecure registry list replaces Docker's default one (127.0.0.0/8,
+  # ::1/128), which suites with a registry on localhost rely on: it is named
+  # again.
   printf '%s\n' "--registry-mirror=http://$hub:5000" "--insecure-registry=$hub:5000" \
-    --insecure-registry=127.0.0.0/8 "--dns=$dns"
+    --insecure-registry=127.0.0.0/8 --insecure-registry=::1/128 "--dns=$dns"
 }
 
 # noix_cache_host_setup CONTAINER: a systemd test host's apt fetches over http
@@ -158,7 +159,7 @@ noix_cache_host_setup() {
 # noix_cache_play_args: ansible-playbook arguments for the plays of a suite
 # whose test host gets Docker from the docker role: docker_daemon_extra with
 # the Docker Hub mirror and the resolver (and Docker's default insecure
-# 127.0.0.0/8, which a set list replaces). Not for a suite that checks the
+# 127.0.0.0/8 and ::1/128, which a set list replaces). Not for a suite that checks the
 # role's daemon.json or sets docker_daemon_extra itself.
 noix_cache_play_args() {
   noix_cache_on || return 0
@@ -171,7 +172,7 @@ noix_cache_play_args() {
   mkdir -p "$dir"
   # Written whole and renamed: suites running at the same time share it.
   printf '%s\n' "# Written by tests/lib/suite.sh (noix_cache_play_args)." "docker_daemon_extra:" \
-    "  registry-mirrors: [\"http://$hub:5000\"]" "  insecure-registries: [\"$hub:5000\", \"127.0.0.0/8\"]" \
+    "  registry-mirrors: [\"http://$hub:5000\"]" "  insecure-registries: [\"$hub:5000\", \"127.0.0.0/8\", \"::1/128\"]" \
     "  dns: [\"$dns\"]" >"$file.$$"
   mv -f "$file.$$" "$file"
   printf '%s\n' -e "@$file"
