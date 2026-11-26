@@ -25,7 +25,10 @@
   entries `<suite>-<release>`, so both releases run at the same time. An entry that fails on a
   network error upstream runs once more from scratch and carries the note "retried after a
   network error". A release's version bump of `galaxy.yml` no longer makes the next attestation
-  run every entry, in the plan and in the release check alike.
+  run every entry, in the plan and in the release check alike. Neither does a change of
+  `tests/suites.conf` or `tests/all.sh` that touches only some suites' own lines (their map
+  sections, their names and settings in `tests/all.sh`, any comment): those suites run, so a new
+  suite runs only itself.
 
 ## 0.7.0 — 2026-11-26
 
