@@ -1647,6 +1647,20 @@ check "cache helpers: the vars file sets the mirror, the insecure registry and t
 check "cache helpers: noix_cache_array collects a helper's lines into an array" \
   sh -c '[ "$(FAKE_RUNNING="$1" cache_call bash -c ". \"\$0/tests/lib/suite.sh\"; noix_cache_array a noix_cache_dind_args; echo \${#a[@]} \${a[4]}" "$2")" = "5 --dns=172.17.0.7" ]' _ "$all_up" "$src"
 unset helper all_up
+# A suite that gives its plays the cache's docker_daemon_extra gives it to
+# every play that runs the docker role: a play without it rewrites daemon.json
+# back, and the next play's "changed" (an idempotence or untouched check)
+# fails. Those plays are converge.yml, forward.yml and prepare.yml.
+cache_unwired=
+for f in "$src"/tests/*/run.sh; do
+  grep -q 'noix_cache_array noix_cache_play noix_cache_play_args' "$f" || continue
+  while IFS= read -r hit; do
+    cache_unwired="$cache_unwired ${f#"$src"/}:${hit%%:*}"
+  done < <(grep -nE 'ansible-playbook.*(converge|forward|prepare)\.yml' "$f" | grep -v noix_cache_play || true)
+done
+check "cache helpers: every play of a cache-wired suite that runs the docker role gets the cache's vars" \
+  sh -c '[ -z "$1" ] || { echo "without noix_cache_play:$1"; exit 1; }' _ "$cache_unwired"
+unset cache_unwired f hit
 
 # --- coverage knobs ----------------------------------------------------------------------
 # Every variable with a default that a suite or its helpers read (any shell

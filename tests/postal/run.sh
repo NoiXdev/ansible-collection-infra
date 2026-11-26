@@ -2477,8 +2477,9 @@ test_broken_db() {
 play_killed() {
   local condition="$1" pid
   shift
+  local noix_cache_play=() && noix_cache_array noix_cache_play noix_cache_play_args
   set -m
-  ansible-playbook -v -i "$here/inventory.yml" -e "test_host=$host" "$here/converge.yml" \
+  ansible-playbook -v -i "$here/inventory.yml" -e "test_host=$host" ${noix_cache_play[@]+"${noix_cache_play[@]}"} "$here/converge.yml" \
     -e "@$out/role-vars.json" -e "$(db_vars)" -e "@$out/admin-vars.json" "$@" >"$out/converge.log" 2>&1 &
   pid=$!
   set +m
