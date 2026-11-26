@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.0 — 2026-11-26
+
 - `postal`: new role that runs Postal (`postal_version`, pinned, 3.0.0 or newer, default
   `3.5.0`, no `latest`), a mail delivery platform, as one compose project in `postal_dir`
   (default `/opt/postal`) behind Traefik. It needs Docker and an x86_64 host, as Postal's image
