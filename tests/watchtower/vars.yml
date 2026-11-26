@@ -1,0 +1,8 @@
+---
+# Watchtower's HTTP API, so run.sh triggers an update instead of waiting for
+# the schedule (which keeps running: periodic polls). The token is a test
+# value; run.sh checks that it never shows in a log.
+watchtower_env:
+  WATCHTOWER_HTTP_API_UPDATE: "true"
+  WATCHTOWER_HTTP_API_TOKEN: noix-test-api-token-4711
+  WATCHTOWER_HTTP_API_PERIODIC_POLLS: "true"

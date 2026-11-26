@@ -32,6 +32,7 @@
 #   waf          tests/waf/run.sh (the WAF with Traefik and nginx), per release
 #   varnish      tests/varnish/run.sh (the varnish role), per release
 #   graylog      tests/graylog/run.sh (Graylog with Traefik), per release
+#   watchtower   tests/watchtower/run.sh
 #
 # -j N runs up to N entries at the same time (default 1). The suites keep
 # their containers, ports and output directories apart, so any of them can
@@ -91,7 +92,7 @@ out="$here/output/all"
 # <suite>-<release>). tests/attest.sh and
 # .github/scripts/verify-tests-attestation.sh read these lines (keep each on
 # one line): an attestation needs every entry.
-all_suites=(e2e host services harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel pulsix_agent backrest vaultwarden postal waf varnish graylog)
+all_suites=(e2e host services harbor listmonk paperless tandoor n8n anubis mailcow cloudpanel pulsix_agent backrest vaultwarden postal waf varnish graylog watchtower)
 # shellcheck disable=SC2034 # read by releases_of (eval) and attest_carry.py
 {
 host_releases=(24.04 26.04)
@@ -373,6 +374,7 @@ reap() {
 # shellcheck disable=SC2317 # run by interrupted and its trap
 # signal_entries SIGNAL: sends SIGNAL to the process group of every running
 # entry: the suite and whatever it runs (ansible-playbook, docker, sleep).
+# shellcheck disable=SC2329 # invoked by a trap
 signal_entries() {
   local i
   for ((i = 0; i < n; i++)); do
@@ -384,6 +386,7 @@ signal_entries() {
 # On INT or TERM: TERM to the running entries (the suites' EXIT traps clean
 # up), wait for them and exit without a summary, so no run claims a result it
 # has not finished. A second INT or TERM kills them and exits at once.
+# shellcheck disable=SC2329 # invoked by a trap
 interrupted() {
   # shellcheck disable=SC2064 # $1 is the exit code now
   trap "signal_entries KILL; exit $1" INT TERM

@@ -1,0 +1,17 @@
+---
+# Docker on the systemd test host, as on a server before the watchtower role,
+# and what run.sh calls there: curl for Watchtower's HTTP API, htpasswd for
+# the registry's users, tzdata for the time zone scenarios.
+- name: Prepare
+  hosts: all
+  pre_tasks:
+    # The base role installs ca-certificates, curl and tzdata on the servers;
+    # the test image has none of them.
+    - name: Install the packages the tests call
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, tzdata, apache2-utils]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+  roles:
+    - noixdev.infra.docker

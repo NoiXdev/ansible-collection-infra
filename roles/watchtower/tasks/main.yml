@@ -13,8 +13,9 @@
     - watchtower_timezone is string
     - watchtower_timezone | length > 0
 
-# The first failing condition stops the check, so the types come first.
-# watchtower_env may hold a token: then nothing of the check is logged.
+# The first failing condition stops the check, so the types come first. Its
+# result names the expressions and the message, never a value, so a token in
+# watchtower_env does not show (no no_log, which would hide the message too).
 - name: Check the Watchtower settings
   ansible.builtin.assert:
     that:
@@ -47,7 +48,6 @@
       - WATCHTOWER_NOTIFICATION_URL
       - TZ
       - DOCKER_CONFIG
-  no_log: "{{ watchtower_env is mapping and watchtower_env | length > 0 }}"
 
 - name: Run Watchtower
   ansible.builtin.include_tasks: present.yml
