@@ -241,13 +241,16 @@ test_settings() {
     || fail "the network's MTU is not 1500"
 
   local url='generic+http://127.0.0.1:9/noix-secret-notify-path'
-  converge secrets -v -e "{\"watchtower_notification_url\": \"$url\"}" -e "$(env_with '"NOIX_TEST_VALUE": "0123"')"
+  converge secrets -v -e "{\"watchtower_notification_url\": \"$url\"}" \
+    -e "$(env_with '"NOIX_TEST_VALUE": "0123", "NOIX_TEST_DOLLAR": "a$b${c"')"
   [ "$(hx stat -c %a "$dir/compose.yaml")" = 600 ] || fail "compose.yaml is not 0600"
   [ "$(hx stat -c %a "$dir")" = 750 ] || fail "$dir is not 0750"
   for secret in noix-secret-notify-path "$token"; do
     ! grep -qF -- "$secret" "$out/secrets.log" "$out/secrets-again.log" || fail "a secret is in the -v log: $secret"
   done
   wt_env | grep -qx 'NOIX_TEST_VALUE=0123' || fail "0123 did not reach the container as a string"
+  # compose interpolates $ in every value; the role escapes it.
+  wt_env | grep -qxF 'NOIX_TEST_DOLLAR=a$b${c' || fail "a value with \$ did not reach the container as it is: $(wt_env | grep '^NOIX_TEST_DOLLAR=' || true)"
   wt_env | grep -qx "WATCHTOWER_NOTIFICATION_URL=$url" || fail "the notification URL did not reach the container"
 
   converge absent -e watchtower_state=absent

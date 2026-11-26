@@ -1,3 +1,6 @@
+{#- Values go through q: to_json (a valid YAML string) with $ doubled, which
+    compose would otherwise interpolate. -#}
+{%- macro q(value) -%}{{ (value | string | replace('$', '$$')) | to_json }}{%- endmacro -%}
 # {{ ansible_managed }}
 {% set watchtower_with_config = watchtower_registry_dir.stat.isdir | default(false) %}
 services:
@@ -6,22 +9,22 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 {% if watchtower_with_config %}
-      - {{ (watchtower_registry_config_dir ~ ':/config:ro') | to_json }}
+      - {{ q(watchtower_registry_config_dir ~ ':/config:ro') }}
 {% endif %}
     environment:
-      TZ: {{ watchtower_tz | to_json }}
-      WATCHTOWER_SCHEDULE: {{ watchtower_schedule | to_json }}
+      TZ: {{ q(watchtower_tz) }}
+      WATCHTOWER_SCHEDULE: {{ q(watchtower_schedule) }}
       WATCHTOWER_LABEL_ENABLE: "{{ watchtower_label_enable | bool | lower }}"
       WATCHTOWER_CLEANUP: "{{ watchtower_cleanup | bool | lower }}"
       WATCHTOWER_INCLUDE_STOPPED: "{{ watchtower_include_stopped | bool | lower }}"
 {% if watchtower_notification_url | length > 0 %}
-      WATCHTOWER_NOTIFICATION_URL: {{ watchtower_notification_url | to_json }}
+      WATCHTOWER_NOTIFICATION_URL: {{ q(watchtower_notification_url) }}
 {% endif %}
 {% if watchtower_with_config %}
       DOCKER_CONFIG: /config
 {% endif %}
 {% for key in watchtower_env | sort %}
-      {{ key }}: {{ watchtower_env[key] | string | to_json }}
+      {{ key }}: {{ q(watchtower_env[key]) }}
 {% endfor %}
     cpus: "{{ watchtower_cpus }}"
     mem_limit: {{ watchtower_memory }}
