@@ -105,9 +105,11 @@ STATUS_CONTEXT=tests/local
 USAGE="usage: tests/attest.sh [--all | --plan]"
 # Variables of tests/all.sh and the suites that narrow or change what runs
 # (NOIXDEV_INFRA_TEST_HOST: e2e, host and services would share one container
-# name, which entries running at the same time cannot). The selftest checks
-# that every ${NAME:- a suite reads is here or harmless.
-coverage_knobs=(HOST_UBUNTU SERVICES_UBUNTU UBUNTU KEEP STUB_ONLY RC_STUB_ONLY RC_REAL_ONLY ANUBIS_REAL_ONLY ROUNDCUBE_OLD ROUNDCUBE_NEW MAILCOW_TAKEOVER_TAG ANSIBLE_RUN_TAGS ANSIBLE_SKIP_TAGS NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME NOIXDEV_INFRA_SERVICES NOIXDEV_INFRA_N8N_TESTS NOIXDEV_INFRA_PAPERLESS_TESTS NOIXDEV_INFRA_TANDOOR_TESTS BACKREST_UBUNTU VAULTWARDEN_UBUNTU POSTAL_UBUNTU WAF_UBUNTU VARNISH_UBUNTU GRAYLOG_UBUNTU PULSIX_AGENT_UBUNTU NOIXDEV_INFRA_BACKREST_TESTS NOIXDEV_INFRA_GRAYLOG_TESTS NOIXDEV_INFRA_POSTAL_TESTS NOIXDEV_INFRA_PULSIX_AGENT_TESTS NOIXDEV_INFRA_VAULTWARDEN_TESTS NOIXDEV_INFRA_WAF_TESTS NOIXDEV_INFRA_WATCHTOWER_TESTS ANUBIS_SUITE_PART MOUNTS_SURVEY DEPENDS NOIXDEV_INFRA_TEST_HOST)
+# name, which entries running at the same time cannot), besides every
+# NOIXDEV_INFRA_<SUITE>_TESTS and <SUITE>_UBUNTU, which are refused by name.
+# The selftest checks that every ${NAME:- a suite reads is one of them or
+# harmless.
+coverage_knobs=(HOST_UBUNTU SERVICES_UBUNTU UBUNTU KEEP STUB_ONLY RC_STUB_ONLY RC_REAL_ONLY ANUBIS_REAL_ONLY ROUNDCUBE_OLD ROUNDCUBE_NEW MAILCOW_TAKEOVER_TAG ANSIBLE_RUN_TAGS ANSIBLE_SKIP_TAGS NOIXDEV_INFRA_MAILCOW_DOCKER_VOLUME NOIXDEV_INFRA_SERVICES NOIXDEV_INFRA_N8N_TESTS NOIXDEV_INFRA_PAPERLESS_TESTS NOIXDEV_INFRA_TANDOOR_TESTS BACKREST_UBUNTU VAULTWARDEN_UBUNTU POSTAL_UBUNTU WAF_UBUNTU VARNISH_UBUNTU GRAYLOG_UBUNTU PULSIX_AGENT_UBUNTU NOIXDEV_INFRA_BACKREST_TESTS NOIXDEV_INFRA_GRAYLOG_TESTS NOIXDEV_INFRA_POSTAL_TESTS NOIXDEV_INFRA_PULSIX_AGENT_TESTS NOIXDEV_INFRA_VAULTWARDEN_TESTS NOIXDEV_INFRA_WAF_TESTS ANUBIS_SUITE_PART MOUNTS_SURVEY DEPENDS NOIXDEV_INFRA_TEST_HOST)
 
 fail() {
   echo "tests/attest.sh: $*" >&2
@@ -149,6 +151,13 @@ set_knobs=()
 for knob in "${coverage_knobs[@]}"; do
   [ -z "${!knob+set}" ] || set_knobs+=("$knob")
 done
+# And by name, so a new suite needs no line in coverage_knobs: its scenario
+# filter NOIXDEV_INFRA_<SUITE>_TESTS and its release list <SUITE>_UBUNTU.
+while read -r name; do
+  case "$name" in NOIXDEV_INFRA_*_TESTS | *_UBUNTU) ;; *) continue ;; esac
+  case " ${set_knobs[*]-} " in *" $name "*) continue ;; esac
+  set_knobs+=("$name")
+done < <(compgen -v)
 if [ "${#set_knobs[@]}" -gt 0 ]; then
   fail "unset ${set_knobs[*]} first: an attestation runs every suite in full"
 fi

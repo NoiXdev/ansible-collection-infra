@@ -142,8 +142,12 @@ suites whose sections changed, unless `[ignore]` or `[shared]` changed or a sect
 change of `tests/all.sh` that only adds suites at the end of `all_suites` or changes suites'
 `<suite>_releases`, `release_vars`, `long_first` or `ram_gb` items reruns only those suites;
 comments never count (unless the file has a here-document), and any other change of it reruns
-every entry. So adding a suite runs only the new suite. A new suite or role needs a map entry;
-check it with:
+every entry. A change that holds a carriage return, form feed or similar character in either
+file reruns every entry too. So adding a suite runs only the new suite, as long as its own
+variables follow the names `tests/attest.sh` and the selftest know without a list:
+`NOIXDEV_INFRA_<SUITE>_TESTS` and `<SUITE>_UBUNTU` (refused while attesting) and
+`NOIXDEV_INFRA_<SUITE>_TEST_HOST` / `_TEST_OUT` (harmless). A new suite or role needs a map
+entry; check it with:
 
 ```bash
 python3 -I .github/scripts/attest_carry.py check-map --repo . --commit HEAD

@@ -490,6 +490,12 @@ for knob in "${knobs[@]}"; do
   expect "12. $knob set refuses to start" 2 "unset $knob first" -- env "$knob=1" ATTEST_RUNNER="$tmp/runner" "$A"
 done
 expect "12. a knob set to empty refuses too" 2 "unset HOST_UBUNTU first" -- env HOST_UBUNTU= "$A"
+# By name, so a new suite needs no line in tests/attest.sh: its scenario
+# filter NOIXDEV_INFRA_<SUITE>_TESTS and its release list <SUITE>_UBUNTU.
+expect "12. a suite's NOIXDEV_INFRA_<SUITE>_TESTS refuses to start by its name" 2 \
+  "unset NOIXDEV_INFRA_NOIXNEW_TESTS first" -- env NOIXDEV_INFRA_NOIXNEW_TESTS=x ATTEST_RUNNER="$tmp/runner" "$A"
+expect "12. a suite's <SUITE>_UBUNTU refuses to start by its name" 2 \
+  "unset NOIXNEW_UBUNTU first" -- env NOIXNEW_UBUNTU=24.04 ATTEST_RUNNER="$tmp/runner" "$A"
 check "12. the runner never ran" test ! -e "$tmp/runner-ran"
 
 # --- 13. real mode against local bare repositories ------------------------------------------
@@ -1593,11 +1599,23 @@ harmless=(ANSIBLE_COLLECTIONS_PATH CLOUDPANEL_STUB_PORT FAIL_POSTINST MAILCOW_BA
   NOIXDEV_INFRA_ANUBIS_TEST_HOST NOIXDEV_INFRA_CLOUDPANEL_TEST_HOST NOIXDEV_INFRA_HARBOR_TEST_HOST
   NOIXDEV_INFRA_LISTMONK_TEST_HOST NOIXDEV_INFRA_MAILCOW_TEST_HOST NOIXDEV_INFRA_N8N_TEST_HOST
   NOIXDEV_INFRA_PAPERLESS_TEST_HOST NOIXDEV_INFRA_TANDOOR_TEST_HOST NOIXDEV_INFRA_N8N_TEST_OUT
-  NOIXDEV_INFRA_PAPERLESS_TEST_OUT NOIXDEV_INFRA_TANDOOR_TEST_OUT NOIXDEV_INFRA_WATCHTOWER_TEST_HOST)
+  NOIXDEV_INFRA_PAPERLESS_TEST_OUT NOIXDEV_INFRA_TANDOOR_TEST_OUT)
+# By name too: NOIXDEV_INFRA_<SUITE>_TESTS and <SUITE>_UBUNTU are knobs that
+# tests/attest.sh refuses (case 12), and a suite's own container name or
+# output directory, NOIXDEV_INFRA_<suite>_TEST_HOST or _TEST_OUT for a suite of
+# all_suites, is harmless. So a new suite needs no line here.
+read -r -a known_suites <<<"$(sed -nE 's/^all_suites=\(([^)]*)\)$/\1/p' "$src/tests/all.sh")"
 unguarded=
 while read -r v; do
   case " ${knobs[*]} " in *" $v "*) continue ;; esac
   case " ${harmless[*]} " in *" $v "*) continue ;; esac
+  case "$v" in NOIXDEV_INFRA_*_TESTS | *_UBUNTU) continue ;; esac
+  case "$v" in
+    NOIXDEV_INFRA_*_TEST_HOST | NOIXDEV_INFRA_*_TEST_OUT)
+      own="$(printf '%s' "${v#NOIXDEV_INFRA_}" | sed -E 's/_TEST_(HOST|OUT)$//' | tr '[:upper:]' '[:lower:]')"
+      case " ${known_suites[*]} " in *" $own "*) continue ;; esac
+      ;;
+  esac
   unguarded="$unguarded $v"
 done < <(find "$src/tests" -name '*.sh' -not -path "$src/tests/attest/*" -not -path "$src/tests/output/*" \
   -not -path "$src/tests/attest.sh" -not -path "$src/tests/all.sh" -exec grep -ohE '\$\{[A-Z][A-Z0-9_]*:?[-+=?]' {} + |
@@ -1611,7 +1629,7 @@ case " ${knobs[*]} " in
     not_ok "knobs: NOIXDEV_INFRA_TEST_HOST (e2e, host and services share it) is refused"
     ;;
 esac
-unset harmless unguarded v
+unset harmless unguarded v known_suites own
 
 # --- preconditions -----------------------------------------------------------------------
 expect "precondition: a suite argument is refused with the usage" 2 "usage: tests/attest.sh [--all | --plan]" -- tests/attest.sh e2e
