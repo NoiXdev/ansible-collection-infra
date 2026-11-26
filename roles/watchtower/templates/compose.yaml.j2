@@ -1,0 +1,33 @@
+# {{ ansible_managed }}
+{% set watchtower_with_config = watchtower_registry_dir.stat.isdir | default(false) %}
+services:
+  watchtower:
+    image: {{ watchtower_image }}:{{ watchtower_version }}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+{% if watchtower_with_config %}
+      - {{ (watchtower_registry_config_dir ~ ':/config:ro') | to_json }}
+{% endif %}
+    environment:
+      TZ: {{ watchtower_tz | to_json }}
+      WATCHTOWER_SCHEDULE: {{ watchtower_schedule | to_json }}
+      WATCHTOWER_LABEL_ENABLE: "{{ watchtower_label_enable | bool | lower }}"
+      WATCHTOWER_CLEANUP: "{{ watchtower_cleanup | bool | lower }}"
+      WATCHTOWER_INCLUDE_STOPPED: "{{ watchtower_include_stopped | bool | lower }}"
+{% if watchtower_notification_url | length > 0 %}
+      WATCHTOWER_NOTIFICATION_URL: {{ watchtower_notification_url | to_json }}
+{% endif %}
+{% if watchtower_with_config %}
+      DOCKER_CONFIG: /config
+{% endif %}
+{% for key in watchtower_env | sort %}
+      {{ key }}: {{ watchtower_env[key] | string | to_json }}
+{% endfor %}
+    cpus: "{{ watchtower_cpus }}"
+    mem_limit: {{ watchtower_memory }}
+    restart: unless-stopped
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "{{ watchtower_mtu }}"

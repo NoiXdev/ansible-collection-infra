@@ -1,0 +1,44 @@
+---
+# present or absent (absent: compose down, the directory removed)
+watchtower_state: present
+
+watchtower_version: 1.23.2
+# The maintained fork of the archived containrrr/watchtower, with the same
+# labels and environment variables; the archived image speaks a Docker API
+# that Docker 29 refuses.
+watchtower_image: nickfedor/watchtower
+watchtower_dir: /opt/watchtower
+watchtower_project: watchtower
+
+# Cron expression with 6 fields, seconds first (or a descriptor such as
+# @daily), in watchtower_timezone.
+watchtower_schedule: "0 0 5 * * *"
+# IANA zone of the schedule; empty: the host's zone (what the base role
+# sets), else Etc/UTC.
+watchtower_timezone: ""
+
+# Only containers labelled com.centurylinklabs.watchtower.enable=true are
+# updated.
+watchtower_label_enable: true
+# Remove the old image after an update.
+watchtower_cleanup: true
+watchtower_include_stopped: false
+# shoutrrr URL; a secret (keep it in a vault). Empty sends nothing.
+watchtower_notification_url: ""
+
+# Host directory of the Docker config with the registry credentials, mounted
+# read-only as /config (DOCKER_CONFIG) when it exists. Log in (for example
+# with community.docker.docker_login) before this role: a later login is seen
+# at the next update without a restart. A credential helper (credsStore,
+# credHelpers) does not work inside the container; it needs plain auths.
+watchtower_registry_config_dir: /root/.docker
+
+# Further environment variables of the container (WATCHTOWER_SCOPE,
+# WATCHTOWER_HTTP_API_UPDATE, ...); values are written as strings (quote
+# booleans: "true", as YAML's true becomes "True"). May hold
+# secrets (an API token): the compose file is 0600 and never logged.
+watchtower_env: {}
+
+watchtower_mtu: 1500
+watchtower_cpus: "0.5"
+watchtower_memory: 128M

@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: NoiXdev
+  description: Watchtower that updates containers which opt in by label, on a schedule
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble, resolute]
+dependencies: []

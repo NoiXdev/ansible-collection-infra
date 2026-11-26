@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- `watchtower`: new role that runs Watchtower (`watchtower_image`, default
+  `nickfedor/watchtower`, the maintained fork of the archived `containrrr/watchtower`;
+  `watchtower_version`, pinned `X.Y.Z`, default `1.23.2`) as one compose project in
+  `watchtower_dir` (default `/opt/watchtower`). It needs Docker. By default it updates only
+  containers labelled `com.centurylinklabs.watchtower.enable=true` (`watchtower_label_enable`),
+  on `watchtower_schedule` (6 fields, seconds first, default `0 0 5 * * *`) in
+  `watchtower_timezone` (empty: the host's zone, else `Etc/UTC`), and removes the old image
+  (`watchtower_cleanup`). The Docker config directory `watchtower_registry_config_dir` (default
+  `/root/.docker`) is mounted read-only with `DOCKER_CONFIG` when it exists, so a new registry
+  login is seen at the next update without a restart; log in before the role on a new host, or
+  the next run after the login adds the credentials. `watchtower_notification_url` (a secret) and
+  `watchtower_env` (further settings, such as `WATCHTOWER_SCOPE` or the HTTP API) go into a
+  compose file of mode `0600` and are never logged. `watchtower_state: absent` removes the
+  project and its directory. `watchtower_mtu`, `watchtower_cpus` and `watchtower_memory` as in
+  the other container roles. Coming from a role that set `watchtower_image` with a tag: set
+  `watchtower_version` instead. Without `TZ` before, the schedule ran in UTC; it now runs in the
+  host's zone, and `watchtower_timezone: Etc/UTC` keeps the old time.
 - Tests: `tests/all.sh -j N` runs up to N entries at the same time within a RAM budget for the
   Docker VM, and `tests/attest.sh` runs with `ATTEST_JOBS` (default 4). `pulsix_agent`,
   `vaultwarden`, `postal`, `waf`, `varnish` and `graylog` run once per Ubuntu release, as the

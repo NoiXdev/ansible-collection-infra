@@ -23,6 +23,7 @@ are on the documentation site.
 | `traefik` | Standalone Traefik with DNS-01 certificates (optionally an HTTP-01 resolver next to them), a Docker socket proxy and optional error pages |
 | `portainer` | Portainer server or agent; an agent can register itself as an environment on a server through its API (`portainer_agent_register_url`, `portainer_agent_register_api_token`, see the role's argument specs) |
 | `dashy` | Dashy start page from configuration, behind Traefik |
+| `watchtower` | Watchtower that updates containers which opt in by label, on a schedule |
 | `dns` | CoreDNS for internal names on private addresses, forwarding the rest |
 | `harbor` | Harbor registry behind Traefik, with safe upgrades and backup scripts |
 | `cloudpanel` | CloudPanel installed and kept updated: CloudPanel and system updates, reboots when required, health checks, error pages and a maintenance switch |

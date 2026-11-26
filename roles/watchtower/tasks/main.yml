@@ -1,0 +1,58 @@
+---
+# Docker comes from the playbook (the docker role or Docker's own packages),
+# not from a role dependency; fail early and clearly when it is missing.
+- name: Check for Docker
+  ansible.builtin.include_role:
+    name: noixdev.infra.docker_check
+
+- name: Look up the time zone of the schedule
+  ansible.builtin.stat:
+    path: "/usr/share/zoneinfo/{{ watchtower_timezone }}"
+  register: watchtower_zone_file
+  when:
+    - watchtower_timezone is string
+    - watchtower_timezone | length > 0
+
+# The first failing condition stops the check, so the types come first.
+# watchtower_env may hold a token: then nothing of the check is logged.
+- name: Check the Watchtower settings
+  ansible.builtin.assert:
+    that:
+      - watchtower_state in ['present', 'absent']
+      - watchtower_version is string
+      - watchtower_version is match('^\d+\.\d+\.\d+$')
+      - watchtower_schedule is string
+      - watchtower_schedule is match('^@') or watchtower_schedule.split() | length == 6
+      - watchtower_timezone is string
+      - >-
+        watchtower_timezone | length == 0 or
+        (watchtower_timezone is match('^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$')
+         and watchtower_zone_file.stat.exists)
+      - watchtower_env is mapping
+      - watchtower_env.keys() | reject('match', '^[A-Z][A-Z0-9_]*$') | list | length == 0
+      - watchtower_env.keys() | intersect(watchtower_reserved_env) | length == 0
+    fail_msg: >-
+      watchtower_state must be present or absent, watchtower_version must look like
+      X.Y.Z, watchtower_schedule needs 6 fields (seconds first) or an @ descriptor,
+      watchtower_timezone must be empty or a zone under /usr/share/zoneinfo, and
+      watchtower_env must be a mapping whose keys match ^[A-Z][A-Z0-9_]*$ and are
+      none of {{ watchtower_reserved_env | join(', ') }}.
+    quiet: true
+  vars:
+    watchtower_reserved_env:
+      - WATCHTOWER_SCHEDULE
+      - WATCHTOWER_LABEL_ENABLE
+      - WATCHTOWER_CLEANUP
+      - WATCHTOWER_INCLUDE_STOPPED
+      - WATCHTOWER_NOTIFICATION_URL
+      - TZ
+      - DOCKER_CONFIG
+  no_log: "{{ watchtower_env is mapping and watchtower_env | length > 0 }}"
+
+- name: Run Watchtower
+  ansible.builtin.include_tasks: present.yml
+  when: watchtower_state == 'present'
+
+- name: Remove Watchtower
+  ansible.builtin.include_tasks: absent.yml
+  when: watchtower_state == 'absent'

@@ -1,0 +1,53 @@
+---
+- name: Read the host's time zone
+  ansible.builtin.stat:
+    path: /etc/localtime
+    follow: false
+  register: watchtower_localtime
+  when: watchtower_timezone | length == 0
+
+# The zone is the part of /etc/localtime's link target after zoneinfo/; a
+# host without such a link runs the schedule in UTC.
+- name: Settle the time zone of the schedule
+  ansible.builtin.set_fact:
+    watchtower_tz: >-
+      {{ watchtower_timezone if watchtower_timezone | length > 0
+         else (watchtower_localtime.stat.lnk_target | regex_replace('^.*/zoneinfo/', '')
+               if (watchtower_localtime.stat.islnk | default(false))
+                  and '/zoneinfo/' in (watchtower_localtime.stat.lnk_target | default(''))
+               else 'Etc/UTC') }}
+
+- name: Look for the registry credentials
+  ansible.builtin.stat:
+    path: "{{ watchtower_registry_config_dir }}"
+  register: watchtower_registry_dir
+
+- name: Create the Watchtower directory
+  ansible.builtin.file:
+    path: "{{ watchtower_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# 0600: the file may hold the notification URL or a token of watchtower_env.
+# A change (the credentials directory appearing, too) makes compose recreate
+# the container.
+- name: Write the compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ watchtower_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: "{{ watchtower_notification_url | length > 0 or watchtower_env | length > 0 }}"
+
+# Its result echoes the container's environment.
+- name: Start Watchtower
+  community.docker.docker_compose_v2:
+    project_src: "{{ watchtower_dir }}"
+    project_name: "{{ watchtower_project }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+  no_log: true

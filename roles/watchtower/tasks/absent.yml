@@ -1,0 +1,20 @@
+---
+- name: Look for the compose file
+  ansible.builtin.stat:
+    path: "{{ watchtower_dir }}/compose.yaml"
+  register: watchtower_compose_file
+
+# Images stay; only the project goes.
+- name: Stop and remove Watchtower
+  community.docker.docker_compose_v2:
+    project_src: "{{ watchtower_dir }}"
+    project_name: "{{ watchtower_project }}"
+    state: absent
+    remove_orphans: true
+  no_log: true
+  when: watchtower_compose_file.stat.exists
+
+- name: Remove the Watchtower directory
+  ansible.builtin.file:
+    path: "{{ watchtower_dir }}"
+    state: absent

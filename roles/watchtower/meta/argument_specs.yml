@@ -1,0 +1,56 @@
+---
+argument_specs:
+  main:
+    short_description: Watchtower that updates containers which opt in by label, on a schedule
+    options:
+      watchtower_state:
+        type: str
+        choices: [present, absent]
+        description: present runs Watchtower; absent stops it and removes watchtower_dir.
+      watchtower_version:
+        type: str
+        description: Watchtower image tag, such as 1.23.2.
+      watchtower_image:
+        type: str
+        description: Watchtower image without a tag.
+      watchtower_dir:
+        type: path
+        description: Directory of the compose project.
+      watchtower_project:
+        type: str
+        description: Compose project name.
+      watchtower_schedule:
+        type: str
+        description: Cron expression with 6 fields, seconds first, or a descriptor such as @daily, in watchtower_timezone.
+      watchtower_timezone:
+        type: str
+        description: IANA time zone of the schedule; empty uses the host's zone, else Etc/UTC.
+      watchtower_label_enable:
+        type: bool
+        description: Only update containers labelled com.centurylinklabs.watchtower.enable=true.
+      watchtower_cleanup:
+        type: bool
+        description: Remove the old image after an update.
+      watchtower_include_stopped:
+        type: bool
+        description: Also update stopped containers.
+      watchtower_notification_url:
+        type: str
+        no_log: true
+        description: shoutrrr notification URL; empty sends nothing.
+      watchtower_registry_config_dir:
+        type: path
+        description: Host directory of the Docker config, mounted read-only as /config (DOCKER_CONFIG) when it exists.
+      watchtower_env:
+        type: dict
+        no_log: true
+        description: Further environment variables of the container; not one the role sets itself.
+      watchtower_mtu:
+        type: int
+        description: MTU of the compose network.
+      watchtower_cpus:
+        type: str
+        description: CPU limit of the container.
+      watchtower_memory:
+        type: str
+        description: Memory limit of the container, such as 128M.
