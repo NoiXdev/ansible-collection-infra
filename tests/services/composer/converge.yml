@@ -9,10 +9,12 @@
     composer1_enabled: true
     composer_auth:
       - user: deploy
+        # auth is no_log: ansible-core 2.22 masks its values wherever they
+        # appear, so none may be a letter or word the output needs ("u").
         auth:
           http-basic:
             repo.example.test:
-              username: u
+              username: composer-user-a
               password: s3cr3t-$x
   pre_tasks:
     - name: Create the user deploy

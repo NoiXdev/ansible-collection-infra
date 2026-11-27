@@ -57,7 +57,7 @@
           ansible.builtin.assert:
             that:
               - composer_verify_stat.stdout == 'deploy 600'
-              - "composer_verify_parts[0] | from_json == {'http-basic': {'repo.example.test': {'username': 'u', 'password': 's3cr3t-$x'}}}"
+              - "composer_verify_parts[0] | from_json == {'http-basic': {'repo.example.test': {'username': 'composer-user-a', 'password': 's3cr3t-$x'}}}"
               - composer_verify_parts[1] is search('s3cr3t-\$x')
               - composer_verify_parts[2] | trim == 'deploy:deploy 700\ndeploy:deploy 700'
             fail_msg: "deploy's auth file or composer's view of it is wrong"
