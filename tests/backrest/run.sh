@@ -91,7 +91,14 @@ play() {
 }
 # converge [-e ...]: play, which must succeed.
 converge() {
-  play "$@" || { cat "$out/converge.log" >&2; fail "converge failed"; }
+  play "$@" || {
+    cat "$out/converge.log" >&2
+    # Why Backrest did not get as far (it fetches restic itself at its start).
+    h journalctl -u backrest --no-pager -n 200 >"$out/backrest-journal.txt" 2>&1 || true
+    echo "---- the last lines of journalctl -u backrest (all: $out/backrest-journal.txt)" >&2
+    tail -40 "$out/backrest-journal.txt" >&2
+    fail "converge failed"
+  }
 }
 # converge_fails [-e ...]: play, which must fail.
 converge_fails() {
