@@ -1321,10 +1321,12 @@ test_nginx() {
   run_ok nginx-last converge.yml "${nginx_args[@]}"
   unchanged nginx-last
   site a.test /page
-  site_expect "a.test/page at the end (Varnish restarted, the cache empty)" 200 "$(php_answer 5)"
-  # For the record: the cache status in the access logs.
+  # For the record, also when the check below fails: the cache status in the
+  # access logs, and when each request reached a's pool.
   h cat /var/log/nginx/a.access.log >"$out/nginx-a-access-$1.txt"
   h cat /var/log/nginx/p.access.log >"$out/nginx-p-access-$1.txt"
+  h cat /var/log/php/a.log >"$out/php-a-$1.txt"
+  site_expect "a.test/page at the end (Varnish restarted, the cache empty)" 200 "$(php_answer 5)"
   no_key_in_logs
 }
 
