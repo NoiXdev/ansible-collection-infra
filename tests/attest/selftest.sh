@@ -1621,31 +1621,33 @@ case "$1" in noix_*) declare -F "$1" >/dev/null || { echo "no helper $1"; exit 1
   sed 's/^/#exec /' "$tmp/cache/exec.log"
 }
 all_up="noix-test-apt noix-test-hub noix-test-dns"
+# An exported function reaches bash only: the checks below run "bash -c", not
+# "sh -c" (dash on Ubuntu, so CI did not find cache_call).
 export -f cache_call
 export tmp src
 for helper in noix_cache_run_args noix_cache_dind_args noix_cache_play_args "noix_cache_host_setup h1"; do
   # shellcheck disable=SC2086 # the helper and its argument
   check "cache helpers: $helper gives nothing with NOIXDEV_INFRA_TEST_CACHE=0" \
-    sh -c '[ -z "$(FAKE_RUNNING="$1" CACHE_SWITCH=0 "$2" $3)" ]' _ "$all_up" cache_call "$helper"
+    bash -c '[ -z "$(FAKE_RUNNING="$1" CACHE_SWITCH=0 "$2" $3)" ]' _ "$all_up" cache_call "$helper"
   # shellcheck disable=SC2086
   check "cache helpers: $helper gives nothing while noix-test-hub is down" \
-    sh -c '[ -z "$(FAKE_RUNNING="noix-test-apt noix-test-dns" "$1" $2)" ]' _ cache_call "$helper"
+    bash -c '[ -z "$(FAKE_RUNNING="noix-test-apt noix-test-dns" "$1" $2)" ]' _ cache_call "$helper"
 done
 check "cache helpers: noix_cache_run_args gives the logging resolver" \
-  sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_run_args)" = "$(printf "%s\n" --dns 172.17.0.7)" ]' _ "$all_up"
+  bash -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_run_args)" = "$(printf "%s\n" --dns 172.17.0.7)" ]' _ "$all_up"
 check "cache helpers: noix_cache_dind_args gives dockerd the mirror and the resolver" \
-  sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_dind_args)" = "$(printf "%s\n" --registry-mirror=http://172.17.0.6:5000 --insecure-registry=172.17.0.6:5000 --insecure-registry=127.0.0.0/8 --insecure-registry=::1/128 --dns=172.17.0.7)" ]' _ "$all_up"
+  bash -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_dind_args)" = "$(printf "%s\n" --registry-mirror=http://172.17.0.6:5000 --insecure-registry=172.17.0.6:5000 --insecure-registry=127.0.0.0/8 --insecure-registry=::1/128 --dns=172.17.0.7)" ]' _ "$all_up"
 check "cache helpers: noix_cache_host_setup writes the apt proxy into the host" \
-  sh -c 'FAKE_RUNNING="$1" cache_call noix_cache_host_setup h1 | grep -q "^#exec -i h1 .*00noixdev-test-cache.*http://172.17.0.5:3142"' _ "$all_up"
+  bash -c 'FAKE_RUNNING="$1" cache_call noix_cache_host_setup h1 | grep -q "^#exec -i h1 .*00noixdev-test-cache.*http://172.17.0.5:3142"' _ "$all_up"
 check "cache helpers: noix_cache_host_setup keeps https direct (apt would tunnel it through the http proxy)" \
-  sh -c 'FAKE_RUNNING="$1" cache_call noix_cache_host_setup h1 | grep -q "Acquire::https::Proxy \"DIRECT\";"' _ "$all_up"
+  bash -c 'FAKE_RUNNING="$1" cache_call noix_cache_host_setup h1 | grep -q "Acquire::https::Proxy \"DIRECT\";"' _ "$all_up"
 check "cache helpers: noix_cache_play_args points at a vars file" \
-  sh -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_play_args)" = "$(printf "%s\n" -e "@$2/cache/vars/docker-vars.yml")" ]' _ "$all_up" "$tmp"
+  bash -c '[ "$(FAKE_RUNNING="$1" cache_call noix_cache_play_args)" = "$(printf "%s\n" -e "@$2/cache/vars/docker-vars.yml")" ]' _ "$all_up" "$tmp"
 check "cache helpers: the vars file sets the mirror, the insecure registry and the resolver" \
-  sh -c 'f="$1/cache/vars/docker-vars.yml"; grep -q "registry-mirrors: \[\"http://172.17.0.6:5000\"\]" "$f" &&
+  bash -c 'f="$1/cache/vars/docker-vars.yml"; grep -q "registry-mirrors: \[\"http://172.17.0.6:5000\"\]" "$f" &&
     grep -q "insecure-registries: \[\"172.17.0.6:5000\", \"127.0.0.0/8\", \"::1/128\"\]" "$f" && grep -q "dns: \[\"172.17.0.7\"\]" "$f"' _ "$tmp"
 check "cache helpers: noix_cache_array collects a helper's lines into an array" \
-  sh -c '[ "$(FAKE_RUNNING="$1" cache_call bash -c ". \"\$0/tests/lib/suite.sh\"; noix_cache_array a noix_cache_dind_args; echo \${#a[@]} \${a[4]}" "$2")" = "5 --dns=172.17.0.7" ]' _ "$all_up" "$src"
+  bash -c '[ "$(FAKE_RUNNING="$1" cache_call bash -c ". \"\$0/tests/lib/suite.sh\"; noix_cache_array a noix_cache_dind_args; echo \${#a[@]} \${a[4]}" "$2")" = "5 --dns=172.17.0.7" ]' _ "$all_up" "$src"
 unset helper all_up
 # A suite that gives its plays the cache's docker_daemon_extra gives it to
 # every play that runs the docker role: a play without it rewrites daemon.json
