@@ -4,8 +4,11 @@
 // (/var/log/php/<pool>.log), so the suite sees which requests reached PHP.
 // The answer counts the requests for its URL (a file per URL in the site's
 // var/), and shows the client address, HTTPS and whether the front key
-// header reached PHP. It is cacheable for 60 s, for max_age=<n> seconds, or
-// private with private=1; sleep=<n> waits n seconds first.
+// header reached PHP. It is cacheable for an hour, for max_age=<n> seconds,
+// or private with private=1; sleep=<n> waits n seconds first. The hour, not
+// a minute: a page that expires mid-scenario is refreshed in the background
+// on its next (grace) hit, and that extra request breaks the counts when a
+// loaded host is slow between the steps.
 error_log('noix-varnish ' . ($_SERVER['REQUEST_URI'] ?? ''));
 if (isset($_GET['sleep'])) {
     sleep((int) $_GET['sleep']);
@@ -22,7 +25,7 @@ fclose($handle);
 if (isset($_GET['private'])) {
     header('Cache-Control: private');
 } else {
-    header('Cache-Control: public, max-age=' . (int) ($_GET['max_age'] ?? 60));
+    header('Cache-Control: public, max-age=' . (int) ($_GET['max_age'] ?? 3600));
 }
 printf(
     "count=%d remote_addr=%s https=%s front=%s\n",
