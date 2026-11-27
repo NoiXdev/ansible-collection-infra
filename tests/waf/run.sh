@@ -890,9 +890,12 @@ test_plugins() {
   refused_cached plugin-checksum "waf: plugin nextcloud-rule-exclusions: the archive at $nextcloud_url does not have sha256 0000000000000000000000000000000000000000000000000000000000000000" \
     -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\",
          \"sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"}, $noix_test_plugin]}"
-  refused_cached plugin-download 'waf: plugin nextcloud-rule-exclusions: Request failed: HTTP Error 404' \
+  # get_url's wording differs between ansible-core releases (2.22: "Request
+  # failed with msg HTTP Error 404: ..."): the role's prefix, then the status.
+  refused_cached plugin-download 'waf: plugin nextcloud-rule-exclusions: Request failed' \
     -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"https://plugins.test:8443/missing.tar.gz\",
          \"sha256\": \"$nextcloud_sha\"}, $noix_test_plugin]}"
+  expect_in_log plugin-download 'HTTP Error 404'
   refused_cached plugin-no-files 'waf: plugin x: has no x-config.conf, x-before.conf or x-after.conf' \
     -e "{\"waf_plugins\": [{\"name\": \"nextcloud-rule-exclusions\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"},
          {\"name\": \"x\", \"url\": \"$nextcloud_url\", \"sha256\": \"$nextcloud_sha\"}, $noix_test_plugin]}"

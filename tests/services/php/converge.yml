@@ -34,9 +34,11 @@
       version: "{{ php_test_staging_version }}"
       user: "{{ php_test_staging_user }}"
       pm: "{{ php_test_staging_pm }}"
-      # Characters that FPM's config parser treats specially: " ; = $ space
+      # Characters that FPM's config parser treats specially: " ; = $ space.
+      # No value is a word the output needs: ansible-core 2.22 masks a no_log
+      # value wherever it appears (APP_ENV: staging hid every "staging").
       env:
-        APP_ENV: staging
+        APP_ENV: env-of-staging
         NOTE: 'a "b"; c=$d e'
       tmp_dir: "{{ php_test_staging_tmp_dir }}"
       open_basedir: [/srv/staging]

@@ -74,7 +74,7 @@
         that:
           - php_test_staging_report.version is match(php_test_staging_version | regex_escape ~ '\.')
           - php_test_staging_report.user == php_test_staging_user
-          - php_test_staging_report.app_env == 'staging'
+          - php_test_staging_report.app_env == 'env-of-staging'
           - php_test_staging_report.note == 'a "b"; c=$d e'
           - "'/srv/staging' in php_test_staging_report.open_basedir.split(':')"
           - "'/srv/staging/tmp' in php_test_staging_report.open_basedir.split(':')"
