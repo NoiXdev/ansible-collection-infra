@@ -97,6 +97,23 @@ converge() {
     h journalctl -u backrest --no-pager -n 200 >"$out/backrest-journal.txt" 2>&1 || true
     echo "---- the last lines of journalctl -u backrest (all: $out/backrest-journal.txt)" >&2
     tail -40 "$out/backrest-journal.txt" >&2
+    # Backrest runs restic init only when "restic cat config" failed, and it
+    # logs only init's error: the check it starts with, run as it runs it.
+    echo "---- restic cat config and the repository's locks, as Backrest runs them" >&2
+    h python3 -I -c '
+import json, os, subprocess
+repo = json.load(open("/etc/backrest/config.json"))["repos"][0]
+env = dict(os.environ, RESTIC_PASSWORD=repo.get("password", ""), XDG_CACHE_HOME="/var/cache/backrest")
+env.update(item.partition("=")[::2] for item in repo.get("env", []))
+for args in (["cat", "config"], ["list", "locks", "--no-lock"]):
+    try:
+        p = subprocess.run(["/var/lib/backrest/restic", "-r", repo["uri"], *args, "-o", "sftp.args=-oBatchMode=yes"],
+                           env=env, capture_output=True, text=True, timeout=120)
+        print("restic", *args, "-> exit", p.returncode, "| stdout:", p.stdout.strip()[-300:], "| stderr:", p.stderr.strip()[-1500:])
+    except Exception as e:
+        print("restic", *args, "-> could not run:", e)
+' >"$out/backrest-restic-check.txt" 2>&1 || true
+    cat "$out/backrest-restic-check.txt" >&2
     fail "converge failed"
   }
 }
